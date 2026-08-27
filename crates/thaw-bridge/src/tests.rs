@@ -660,6 +660,65 @@ fn rejects_partial_of_non_object_types() {
 }
 
 #[test]
+fn classifies_finite_record_utility_types() {
+    let funcs = parse_dts(
+        r#"export declare function totals(
+                values: Record<"subtotal" | "tax", number>
+            ): Record<"label", string>;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("finite Record keys should expand to a fixed object");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            ("subtotal".into(), HirType::F64),
+            ("tax".into(), HirType::F64),
+        ])]
+    );
+    assert_eq!(
+        signature.ret,
+        HirType::Object(vec![("label".into(), HirType::Str)])
+    );
+}
+
+#[test]
+fn resolves_finite_record_values_after_generic_substitution() {
+    let funcs = parse_dts(
+        r#"export interface Fields<T> {
+                values: Record<"left" | "right", T>;
+            }
+            export declare function inspect(value: Fields<boolean>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("Record values should resolve after generic substitution");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![(
+            "values".into(),
+            HirType::Object(vec![
+                ("left".into(), HirType::Bool),
+                ("right".into(), HirType::Bool),
+            ]),
+        )])]
+    );
+}
+
+#[test]
+fn rejects_dynamic_record_keys_without_a_foreign_dictionary_abi() {
+    let funcs =
+        parse_dts("export declare function inspect(value: Record<string, number>): string;")
+            .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn resolves_pick_and_omit_after_generic_substitution() {
     let funcs = parse_dts(
         r#"export interface Config { host: string; port: number; }
