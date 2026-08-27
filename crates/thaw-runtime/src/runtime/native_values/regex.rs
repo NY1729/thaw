@@ -222,6 +222,60 @@ pub unsafe extern "C" fn thaw_regex_split(
     arena_string_array(parts)
 }
 
+/// Returns the whole match followed by each capture group's text, or an
+/// empty vector when nothing matches. A group that did not participate in
+/// the match (for example one inside an unmatched alternative) is reported
+/// as an empty string rather than `undefined`, since the native array
+/// element type is a plain `string`.
+fn capture_strings(regex: &regex::Regex, value: &str) -> Vec<String> {
+    regex
+        .captures(value)
+        .map(|captures| {
+            (0..captures.len())
+                .map(|index| {
+                    captures
+                        .get(index)
+                        .map(|group| group.as_str().to_string())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+#[no_mangle]
+/// Matches `value` against the regex named by `source`/`flags`, matching
+/// `RegExp.prototype.exec` without `g`/`y` `lastIndex` state -- every call
+/// searches from the start of `value`, matching `RegExp.prototype.test`'s
+/// own simplification. Returns the whole match followed by each capture
+/// group's text (see `capture_strings`), or a null pointer when nothing
+/// matches or `source`/`flags` fails to compile.
+///
+/// # Safety
+/// `source`, `flags` and `value` must be null or point to valid
+/// NUL-terminated UTF-8 strings.
+pub unsafe extern "C" fn thaw_regex_exec(
+    source: *const c_char,
+    flags: *const c_char,
+    value: *const c_char,
+) -> *mut u8 {
+    if source.is_null() || flags.is_null() || value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+    let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let Some(matches) =
+        with_compiled_regex(&source, &flags, |regex| capture_strings(regex, &value))
+    else {
+        return std::ptr::null_mut();
+    };
+    if matches.is_empty() {
+        return std::ptr::null_mut();
+    }
+    arena_string_array(matches)
+}
+
 #[no_mangle]
 /// Matches `value` against the regex named by `source`/`flags`, matching
 /// `String.prototype.match`. Returns every whole match when `flags`
@@ -259,19 +313,7 @@ pub unsafe extern "C" fn thaw_regex_match(
                 .map(|found| found.as_str().to_string())
                 .collect::<Vec<_>>()
         } else {
-            regex
-                .captures(&value)
-                .map(|captures| {
-                    (0..captures.len())
-                        .map(|index| {
-                            captures
-                                .get(index)
-                                .map(|group| group.as_str().to_string())
-                                .unwrap_or_default()
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
+            capture_strings(regex, &value)
         }
     }) else {
         return std::ptr::null_mut();
