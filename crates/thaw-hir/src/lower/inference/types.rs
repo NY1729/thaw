@@ -466,6 +466,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_encode_uri_component" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("encodeURIComponent expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "encodeURIComponent argument")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_to_array" => {
                         let [value] = args.as_slice() else {
                             return Err("string iterator conversion expects one operand".into());

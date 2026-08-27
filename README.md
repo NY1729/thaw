@@ -1453,6 +1453,9 @@ The workspace crates have narrow responsibilities:
   truncated integer, measures in UTF-16 code units, combines a valid leading
   and trailing surrogate pair into one astral code point, and returns a
   tagged `number | undefined` that is absent for an out-of-range index
+- `encodeURIComponent` percent-encodes every UTF-8 byte outside the ASCII
+  unreserved set (letters, digits and `- _ . ! ~ * ' ( )`), accepting an
+  awaited string argument
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
