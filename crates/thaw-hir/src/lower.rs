@@ -2585,7 +2585,9 @@ include!("lower/inference.rs");
 
 impl<'a> FnLowerer<'a> {}
 
-include!("lower/expressions.rs");
+include!("lower/expressions/coercions.rs");
+include!("lower/expressions/lowering.rs");
+include!("lower/expressions/functions.rs");
 
 impl<'a> FnLowerer<'a> {}
 

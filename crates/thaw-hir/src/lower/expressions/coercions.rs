@@ -1,0 +1,612 @@
+impl<'a> FnLowerer<'a> {
+    fn truthiness_expr(&self, value: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+        let false_lit = || HirExpr::Lit(HirLit::Bool(false));
+        match ty {
+            HirType::Bool => Ok(value),
+            HirType::F64 => {
+                let is_zero = HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(value.clone()),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                );
+                let not_nan =
+                    HirExpr::BinOp(BinOp::EqEqEq, Box::new(value.clone()), Box::new(value));
+                Ok(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(is_zero),
+                        Box::new(not_nan),
+                    )),
+                    Box::new(false_lit()),
+                ))
+            }
+            HirType::Str => Ok(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(value),
+                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+                )),
+                Box::new(false_lit()),
+            )),
+            HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
+            HirType::Array(_)
+            | HirType::Tuple(_)
+            | HirType::Object(_)
+            | HirType::Promise(_)
+            | HirType::Function(_, _)
+            | HirType::CallableFunction(..) => Ok(HirExpr::Lit(HirLit::Bool(true))),
+            other => Err(format!(
+                "logical truthiness is not defined for native type {other:?}"
+            )),
+        }
+    }
+
+    fn lower_logical_expr(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        is_and: bool,
+    ) -> Result<HirExpr, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        if lhs_type != rhs_type {
+            return Err(format!(
+                "logical operands have incompatible types {lhs_type:?} and {rhs_type:?}"
+            ));
+        }
+        let name = format!("__thaw_logical_left_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), lhs_type.clone());
+        let left = HirExpr::Var(name.clone());
+        let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
+        let (then_value, else_value) = if is_and { (rhs, left) } else { (left, rhs) };
+        let result = HirExpr::Block(vec![HirStmt::If(
+            condition,
+            vec![HirStmt::Return(Some(then_value))],
+            vec![HirStmt::Return(Some(else_value))],
+        )]);
+        self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
+    fn lower_undefined_default(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        if lhs_type == HirType::Undefined {
+            return Ok(rhs);
+        }
+        if let HirType::Union(elements) = &lhs_type {
+            if !elements.contains(&HirType::Undefined) {
+                return Ok(lhs);
+            }
+            let rhs_type = self.infer_expr_type(&rhs)?;
+            let mut result_members = elements
+                .iter()
+                .filter(|element| element != &&HirType::Undefined)
+                .cloned()
+                .collect::<Vec<_>>();
+            if !result_members.contains(&rhs_type) {
+                result_members.push(rhs_type);
+            }
+            let result_type = match result_members.as_slice() {
+                [member] => member.clone(),
+                members => HirType::Union(members.to_vec()),
+            };
+            let name = format!("__thaw_default_union_left_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), lhs_type.clone());
+            let left = HirExpr::Var(name.clone());
+            let mut body = Vec::new();
+            for (index, element) in elements.iter().enumerate() {
+                let value = if element == &HirType::Undefined {
+                    self.coerce_to_declared(&result_type, rhs.clone())?
+                } else {
+                    self.coerce_to_declared(
+                        &result_type,
+                        HirExpr::UnionValue(Box::new(left.clone()), index, elements.clone()),
+                    )?
+                };
+                if index + 1 == elements.len() {
+                    body.push(HirStmt::Return(Some(value)));
+                } else {
+                    body.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(left.clone()), elements.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
+                        vec![HirStmt::Return(Some(value))],
+                        Vec::new(),
+                    ));
+                }
+            }
+            return self
+                .wrap_call_argument_bindings(HirExpr::Block(body), &[(name, lhs_type, lhs)]);
+        }
+        match lhs_type.clone() {
+            HirType::Optional(payload) => {
+                self.expect_type(payload.as_ref(), &rhs, "destructuring default")?;
+                let name = format!("__thaw_default_left_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), lhs_type.clone());
+                let left = HirExpr::Var(name.clone());
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(left.clone()), payload.as_ref().clone()),
+                    vec![HirStmt::Return(Some(rhs))],
+                    vec![HirStmt::Return(Some(HirExpr::OptionalValue(
+                        Box::new(left),
+                        payload.as_ref().clone(),
+                    )))],
+                )]);
+                self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+            }
+            HirType::Nullish(payload) => {
+                self.expect_type(payload.as_ref(), &rhs, "destructuring default")?;
+                let result_type = HirType::Nullable(payload.clone());
+                let name = format!("__thaw_default_left_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), lhs_type.clone());
+                let left = HirExpr::Var(name.clone());
+                let result = HirExpr::Block(vec![
+                    HirStmt::If(
+                        HirExpr::NullishIsUndefined(
+                            Box::new(left.clone()),
+                            payload.as_ref().clone(),
+                        ),
+                        vec![HirStmt::Return(Some(HirExpr::NullableSome(
+                            Box::new(rhs),
+                            payload.as_ref().clone(),
+                        )))],
+                        Vec::new(),
+                    ),
+                    HirStmt::If(
+                        HirExpr::NullishIsNull(Box::new(left.clone()), payload.as_ref().clone()),
+                        vec![HirStmt::Return(Some(HirExpr::NullableNone(
+                            payload.as_ref().clone(),
+                        )))],
+                        Vec::new(),
+                    ),
+                    HirStmt::Return(Some(HirExpr::NullableSome(
+                        Box::new(HirExpr::NullishValue(
+                            Box::new(left),
+                            payload.as_ref().clone(),
+                        )),
+                        payload.as_ref().clone(),
+                    ))),
+                ]);
+                let result = self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])?;
+                self.expect_type(&result_type, &result, "destructuring default result")?;
+                Ok(result)
+            }
+            _ => Ok(lhs),
+        }
+    }
+
+    fn lower_nullish_coalescing(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        if let HirType::Union(elements) = &lhs_type {
+            if !elements
+                .iter()
+                .any(|element| matches!(element, HirType::Null | HirType::Undefined))
+            {
+                return Ok(lhs);
+            }
+            let rhs_type = self.infer_expr_type(&rhs)?;
+            let mut result_members = elements
+                .iter()
+                .filter(|element| !matches!(element, HirType::Null | HirType::Undefined))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !result_members.contains(&rhs_type) {
+                result_members.push(rhs_type);
+            }
+            let result_type = match result_members.as_slice() {
+                [member] => member.clone(),
+                members => HirType::Union(members.to_vec()),
+            };
+            let name = format!("__thaw_nullish_union_left_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), lhs_type.clone());
+            let left = HirExpr::Var(name.clone());
+            let mut body = Vec::new();
+            for (index, element) in elements.iter().enumerate() {
+                let value = if matches!(element, HirType::Null | HirType::Undefined) {
+                    self.coerce_to_declared(&result_type, rhs.clone())?
+                } else {
+                    self.coerce_to_declared(
+                        &result_type,
+                        HirExpr::UnionValue(Box::new(left.clone()), index, elements.clone()),
+                    )?
+                };
+                if index + 1 == elements.len() {
+                    body.push(HirStmt::Return(Some(value)));
+                } else {
+                    body.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(left.clone()), elements.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
+                        vec![HirStmt::Return(Some(value))],
+                        Vec::new(),
+                    ));
+                }
+            }
+            return self
+                .wrap_call_argument_bindings(HirExpr::Block(body), &[(name, lhs_type, lhs)]);
+        }
+        let (payload, is_none, value) = match lhs_type.clone() {
+            HirType::Optional(payload) => {
+                let is_none = HirExpr::OptionalIsNone(
+                    Box::new(HirExpr::Var(String::new())),
+                    payload.as_ref().clone(),
+                );
+                (payload, is_none, 0)
+            }
+            HirType::Nullable(payload) => {
+                let is_none = HirExpr::NullableIsNone(
+                    Box::new(HirExpr::Var(String::new())),
+                    payload.as_ref().clone(),
+                );
+                (payload, is_none, 1)
+            }
+            HirType::Nullish(payload) => {
+                let is_none = HirExpr::NullishIsNone(
+                    Box::new(HirExpr::Var(String::new())),
+                    payload.as_ref().clone(),
+                );
+                (payload, is_none, 2)
+            }
+            _ => return Ok(lhs),
+        };
+        self.expect_type(payload.as_ref(), &rhs, "nullish fallback")?;
+        let name = format!("__thaw_nullish_left_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), lhs_type.clone());
+        let left = HirExpr::Var(name.clone());
+        let is_none = match is_none {
+            HirExpr::OptionalIsNone(_, payload) => {
+                HirExpr::OptionalIsNone(Box::new(left.clone()), payload)
+            }
+            HirExpr::NullableIsNone(_, payload) => {
+                HirExpr::NullableIsNone(Box::new(left.clone()), payload)
+            }
+            HirExpr::NullishIsNone(_, payload) => {
+                HirExpr::NullishIsNone(Box::new(left.clone()), payload)
+            }
+            _ => unreachable!(),
+        };
+        let present = match value {
+            0 => HirExpr::OptionalValue(Box::new(left), payload.as_ref().clone()),
+            1 => HirExpr::NullableValue(Box::new(left), payload.as_ref().clone()),
+            2 => HirExpr::NullishValue(Box::new(left), payload.as_ref().clone()),
+            _ => unreachable!(),
+        };
+        let result = HirExpr::Block(vec![HirStmt::If(
+            is_none,
+            vec![HirStmt::Return(Some(rhs))],
+            vec![HirStmt::Return(Some(present))],
+        )]);
+        self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
+    fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        match self.infer_expr_type(&value)? {
+            HirType::Str => Ok(value),
+            HirType::Bool => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
+                vec![value],
+            )),
+            HirType::F64 => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
+                vec![value],
+            )),
+            HirType::Object(_) => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_to_string".to_string())),
+                vec![value],
+            )),
+            HirType::Array(element) => {
+                let builtin = match element.as_ref() {
+                    HirType::F64 => "__thaw_number_array_to_string",
+                    HirType::Str => "__thaw_string_array_to_string",
+                    HirType::Bool => "__thaw_bool_array_to_string",
+                    HirType::Object(_) => "__thaw_object_array_to_string",
+                    other => {
+                        return Err(format!(
+                            "array string conversion does not support element type {other:?}"
+                        ))
+                    }
+                };
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var(builtin.to_string())),
+                    vec![value],
+                ))
+            }
+            HirType::Tuple(elements) => {
+                let tuple_type = HirType::Tuple(elements.clone());
+                let (tuple, binding) = if matches!(value, HirExpr::Var(_) | HirExpr::TypedIndex(..))
+                {
+                    (value, None)
+                } else {
+                    let name = format!("__thaw_string_tuple_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), tuple_type.clone());
+                    (
+                        HirExpr::Var(name.clone()),
+                        Some((name, tuple_type.clone(), value)),
+                    )
+                };
+                let mut result = HirExpr::Lit(HirLit::Str(String::new()));
+                for (index, element) in elements.iter().enumerate() {
+                    if index != 0 {
+                        result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![result, HirExpr::Lit(HirLit::Str(",".to_string()))],
+                        );
+                    }
+                    let part = self.coerce_primitive_to_string(HirExpr::TypedIndex(
+                        Box::new(tuple.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        element.clone(),
+                    ))?;
+                    result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                        vec![result, part],
+                    );
+                }
+                match binding {
+                    Some(binding) => self.wrap_call_argument_bindings(result, &[binding]),
+                    None => Ok(result),
+                }
+            }
+            other => Err(format!(
+                "string concatenation cannot convert native type {other:?}"
+            )),
+        }
+    }
+
+    fn join_tuple(
+        &mut self,
+        value: HirExpr,
+        elements: Vec<HirType>,
+        separator: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let tuple_type = HirType::Tuple(elements.clone());
+        let tuple_name = format!("__thaw_join_tuple_{}", self.next_binding);
+        self.next_binding += 1;
+        let separator_name = format!("__thaw_join_separator_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(tuple_name.clone(), tuple_type.clone());
+        self.scope.insert(separator_name.clone(), HirType::Str);
+        let tuple = HirExpr::Var(tuple_name.clone());
+        let separator_var = HirExpr::Var(separator_name.clone());
+        let mut result = HirExpr::Lit(HirLit::Str(String::new()));
+        for (index, element) in elements.into_iter().enumerate() {
+            if index != 0 {
+                result = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                    vec![result, separator_var.clone()],
+                );
+            }
+            let part = self.coerce_primitive_to_string(HirExpr::TypedIndex(
+                Box::new(tuple.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                element,
+            ))?;
+            result = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                vec![result, part],
+            );
+        }
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (tuple_name, tuple_type, value),
+                (separator_name, HirType::Str, separator),
+            ],
+        )
+    }
+
+    fn lower_loose_equality(
+        &mut self,
+        mut lhs: HirExpr,
+        mut rhs: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        if lhs_type == rhs_type {
+            return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
+        }
+        let nullish_check =
+            match (&lhs_type, &rhs_type) {
+                (HirType::Optional(payload), HirType::Null)
+                | (HirType::Optional(payload), HirType::Undefined) => Some(
+                    HirExpr::OptionalIsNone(Box::new(lhs.clone()), payload.as_ref().clone()),
+                ),
+                (HirType::Null, HirType::Optional(payload))
+                | (HirType::Undefined, HirType::Optional(payload)) => Some(
+                    HirExpr::OptionalIsNone(Box::new(rhs.clone()), payload.as_ref().clone()),
+                ),
+                (HirType::Nullable(payload), HirType::Null)
+                | (HirType::Nullable(payload), HirType::Undefined) => Some(
+                    HirExpr::NullableIsNone(Box::new(lhs.clone()), payload.as_ref().clone()),
+                ),
+                (HirType::Null, HirType::Nullable(payload))
+                | (HirType::Undefined, HirType::Nullable(payload)) => Some(
+                    HirExpr::NullableIsNone(Box::new(rhs.clone()), payload.as_ref().clone()),
+                ),
+                (HirType::Nullish(payload), HirType::Null)
+                | (HirType::Nullish(payload), HirType::Undefined) => Some(HirExpr::NullishIsNone(
+                    Box::new(lhs.clone()),
+                    payload.as_ref().clone(),
+                )),
+                (HirType::Null, HirType::Nullish(payload))
+                | (HirType::Undefined, HirType::Nullish(payload)) => Some(HirExpr::NullishIsNone(
+                    Box::new(rhs.clone()),
+                    payload.as_ref().clone(),
+                )),
+                _ => None,
+            };
+        if let Some(check) = nullish_check {
+            return Ok(check);
+        }
+        if matches!(
+            (&lhs_type, &rhs_type),
+            (HirType::Null, HirType::Undefined) | (HirType::Undefined, HirType::Null)
+        ) {
+            let lhs_name = format!("__thaw_loose_nullish_left_{}", self.next_binding);
+            self.next_binding += 1;
+            let rhs_name = format!("__thaw_loose_nullish_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(lhs_name.clone(), lhs_type.clone());
+            self.scope.insert(rhs_name.clone(), rhs_type.clone());
+            return self.wrap_call_argument_bindings(
+                HirExpr::Lit(HirLit::Bool(true)),
+                &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
+            );
+        }
+        lhs = self.coerce_primitive_to_number(lhs)?;
+        rhs = self.coerce_primitive_to_number(rhs)?;
+        Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
+    }
+
+    fn coerce_primitive_to_number(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        match self.infer_expr_type(&value)? {
+            HirType::F64 => Ok(value),
+            HirType::Bool => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
+                vec![value],
+            )),
+            HirType::Str => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                vec![value],
+            )),
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
+                let string = self.coerce_primitive_to_string(value)?;
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                    vec![string],
+                ))
+            }
+            other => Err(format!(
+                "numeric conversion is not defined for native type {other:?}"
+            )),
+        }
+    }
+
+    fn lower_relational(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        op: BinOp,
+    ) -> Result<HirExpr, String> {
+        if self.infer_expr_type(&lhs)? == HirType::Str
+            && self.infer_expr_type(&rhs)? == HirType::Str
+        {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var(
+                    match op {
+                        BinOp::Lt => "__thaw_string_lt",
+                        BinOp::Gt => "__thaw_string_gt",
+                        BinOp::LtEq => "__thaw_string_lte",
+                        BinOp::GtEq => "__thaw_string_gte",
+                        _ => unreachable!(),
+                    }
+                    .to_string(),
+                )),
+                vec![lhs, rhs],
+            ));
+        }
+        Ok(HirExpr::BinOp(
+            op,
+            Box::new(self.coerce_primitive_to_number(lhs)?),
+            Box::new(self.coerce_primitive_to_number(rhs)?),
+        ))
+    }
+
+    fn lower_optional_undefined_equality(
+        &self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        let result =
+            match (&lhs_type, &rhs_type) {
+                (HirType::Optional(payload), HirType::Undefined) => Some(HirExpr::OptionalIsNone(
+                    Box::new(lhs),
+                    payload.as_ref().clone(),
+                )),
+                (HirType::Undefined, HirType::Optional(payload)) => Some(HirExpr::OptionalIsNone(
+                    Box::new(rhs),
+                    payload.as_ref().clone(),
+                )),
+                (HirType::Nullable(payload), HirType::Null) => Some(HirExpr::NullableIsNone(
+                    Box::new(lhs),
+                    payload.as_ref().clone(),
+                )),
+                (HirType::Null, HirType::Nullable(payload)) => Some(HirExpr::NullableIsNone(
+                    Box::new(rhs),
+                    payload.as_ref().clone(),
+                )),
+                (HirType::Nullish(payload), HirType::Null) => Some(HirExpr::NullishIsNull(
+                    Box::new(lhs),
+                    payload.as_ref().clone(),
+                )),
+                (HirType::Null, HirType::Nullish(payload)) => Some(HirExpr::NullishIsNull(
+                    Box::new(rhs),
+                    payload.as_ref().clone(),
+                )),
+                (HirType::Nullish(payload), HirType::Undefined) => Some(
+                    HirExpr::NullishIsUndefined(Box::new(lhs), payload.as_ref().clone()),
+                ),
+                (HirType::Undefined, HirType::Nullish(payload)) => Some(
+                    HirExpr::NullishIsUndefined(Box::new(rhs), payload.as_ref().clone()),
+                ),
+                (HirType::Union(left), HirType::Union(right)) if left == right => Some(
+                    HirExpr::UnionIsEqual(Box::new(lhs), Box::new(rhs), left.clone()),
+                ),
+                (HirType::Union(left), HirType::Union(right))
+                    if equivalent_union_members(left, right) =>
+                {
+                    let rhs = self.coerce_to_declared(&HirType::Union(left.clone()), rhs)?;
+                    Some(HirExpr::UnionIsEqual(
+                        Box::new(lhs),
+                        Box::new(rhs),
+                        left.clone(),
+                    ))
+                }
+                (HirType::Union(elements), member) => elements
+                    .iter()
+                    .position(|element| element == member)
+                    .map(|index| {
+                        HirExpr::UnionMemberIsEqual(
+                            Box::new(lhs),
+                            Box::new(rhs),
+                            index,
+                            elements.clone(),
+                        )
+                    }),
+                (member, HirType::Union(elements)) => elements
+                    .iter()
+                    .position(|element| element == member)
+                    .map(|index| {
+                        HirExpr::UnionMemberIsEqual(
+                            Box::new(rhs),
+                            Box::new(lhs),
+                            index,
+                            elements.clone(),
+                        )
+                    }),
+                (HirType::Null, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(true))),
+                (HirType::Null, _) | (_, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(false))),
+                (HirType::Undefined, HirType::Undefined) => Some(HirExpr::Lit(HirLit::Bool(true))),
+                (HirType::Undefined, _) | (_, HirType::Undefined) => {
+                    Some(HirExpr::Lit(HirLit::Bool(false)))
+                }
+                _ => None,
+            };
+        Ok(result)
+    }
+
+}
