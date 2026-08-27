@@ -2251,11 +2251,15 @@ fn compiles_object_values_for_fixed_objects() {
             console.log(Object.values(await delayed()).join("+"));
             const empty: {} = {};
             console.log(Object.values(empty).length);
+            const jsonValues: Json[] = Object.values(JSON.parse("{\"second\":2,\"first\":\"one\"}"));
+            console.log(Number(jsonValues[0]));
+            console.log(String(jsonValues[1]));
+            console.log(Object.values(JSON.parse("[true,false]")).length);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_values"),
-        "receiver\n1|two|true\n1,2\nawaited\n3+4\n0\n"
+        "receiver\n1|two|true\n1,2\nawaited\n3+4\n0\n2\none\n2\n"
     );
 }
 
@@ -2288,11 +2292,16 @@ fn compiles_object_entries_for_fixed_objects() {
             console.log(awaited[0][1]);
             const empty: {} = {};
             console.log(Object.entries(empty).length);
+            const jsonEntries: [string, Json][] = Object.entries(JSON.parse("{\"second\":2,\"first\":\"one\"}"));
+            console.log(jsonEntries[0][0]);
+            console.log(Number(jsonEntries[0][1]));
+            console.log(jsonEntries[1][0]);
+            console.log(String(jsonEntries[1][1]));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_entries"),
-        "receiver\nfirst\n1\nsecond\ntwo\nenabled\ntrue\nright\n2\nawaited\nleft\n3\n0\n"
+        "receiver\nfirst\n1\nsecond\ntwo\nenabled\ntrue\nright\n2\nawaited\nleft\n3\n0\nsecond\n2\nfirst\none\n"
     );
 }
 
