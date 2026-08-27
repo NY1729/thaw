@@ -201,6 +201,7 @@ fn rewrite_external_class_methods_with_static(
     enum SourceFunctionResult {
         Fixed(thaw_hir::HirType),
         Argument(usize),
+        CommonArguments(Vec<usize>),
     }
 
     fn source_expr_type(
@@ -390,6 +391,20 @@ fn rewrite_external_class_methods_with_static(
                                 )
                             },
                         ),
+                        SourceFunctionResult::CommonArguments(indices) => {
+                            let mut types = indices.iter().map(|index| {
+                                source_expr_type(
+                                    call.args.get(*index)?.expr.as_ref(),
+                                    variables,
+                                    functions,
+                                    named,
+                                )
+                            });
+                            let first = types.next()??;
+                            types
+                                .all(|candidate| candidate.as_ref() == Some(&first))
+                                .then_some(first)
+                        }
                     },
                     _ => None,
                 },
@@ -775,11 +790,60 @@ fn rewrite_external_class_methods_with_static(
             .position(|parameter| matches!(parameter, Pat::Ident(binding) if binding.id.sym == *returned))
     }
 
+    fn common_argument_result(expression: &Expr, parameters: &[Pat]) -> Option<Vec<usize>> {
+        let expressions = match expression {
+            Expr::Cond(conditional) => [&*conditional.cons, &*conditional.alt],
+            Expr::Bin(binary)
+                if matches!(
+                    binary.op,
+                    BinaryOp::LogicalAnd
+                        | BinaryOp::LogicalOr
+                        | BinaryOp::NullishCoalescing
+                ) =>
+            {
+                [&*binary.left, &*binary.right]
+            }
+            _ => return None,
+        };
+        let mut indices = Vec::new();
+        for expression in expressions {
+            let Expr::Ident(identifier) = expression else {
+                return None;
+            };
+            let index = parameters.iter().position(
+                |parameter| matches!(parameter, Pat::Ident(binding) if binding.id.sym == identifier.sym),
+            )?;
+            if !indices.contains(&index) {
+                indices.push(index);
+            }
+        }
+        (indices.len() > 1).then_some(indices)
+    }
+
+    fn function_common_argument_result(function: &Function) -> Option<Vec<usize>> {
+        let parameters = function
+            .params
+            .iter()
+            .map(|parameter| parameter.pat.clone())
+            .collect::<Vec<_>>();
+        common_argument_result(returned_expression(function.body.as_ref()?)?, &parameters)
+    }
+
+    fn arrow_common_argument_result(
+        arrow: &thaw_parser::ast::ArrowExpr,
+    ) -> Option<Vec<usize>> {
+        let expression = match arrow.body.as_ref() {
+            ArrowFunctionBody::Expr(expression) => expression.as_ref(),
+            ArrowFunctionBody::FunctionBody(body) => returned_expression(body)?,
+        };
+        common_argument_result(expression, &arrow.params)
+    }
+
     fn forwarded_argument_result(
         expression: &Expr,
         parameters: &[Pat],
         known: &std::collections::HashMap<String, SourceFunctionResult>,
-    ) -> Option<usize> {
+    ) -> Option<SourceFunctionResult> {
         let Expr::Call(call) = expression else {
             return None;
         };
@@ -789,21 +853,32 @@ fn rewrite_external_class_methods_with_static(
         let Expr::Ident(function) = callee.as_ref() else {
             return None;
         };
-        let SourceFunctionResult::Argument(argument) = known.get(function.sym.as_str())? else {
-            return None;
+        let arguments = match known.get(function.sym.as_str())? {
+            SourceFunctionResult::Argument(argument) => vec![*argument],
+            SourceFunctionResult::CommonArguments(arguments) => arguments.clone(),
+            SourceFunctionResult::Fixed(_) => return None,
         };
-        let Expr::Ident(returned) = call.args.get(*argument)?.expr.as_ref() else {
-            return None;
-        };
-        parameters.iter().position(
-            |parameter| matches!(parameter, Pat::Ident(binding) if binding.id.sym == returned.sym),
-        )
+        let indices = arguments
+            .into_iter()
+            .map(|argument| {
+                let Expr::Ident(returned) = call.args.get(argument)?.expr.as_ref() else {
+                    return None;
+                };
+                parameters.iter().position(
+                    |parameter| matches!(parameter, Pat::Ident(binding) if binding.id.sym == returned.sym),
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        match indices.as_slice() {
+            [index] => Some(SourceFunctionResult::Argument(*index)),
+            _ => Some(SourceFunctionResult::CommonArguments(indices)),
+        }
     }
 
     fn function_forwarded_argument(
         function: &Function,
         known: &std::collections::HashMap<String, SourceFunctionResult>,
-    ) -> Option<usize> {
+    ) -> Option<SourceFunctionResult> {
         let parameters = function
             .params
             .iter()
@@ -815,7 +890,7 @@ fn rewrite_external_class_methods_with_static(
     fn arrow_forwarded_argument(
         arrow: &thaw_parser::ast::ArrowExpr,
         known: &std::collections::HashMap<String, SourceFunctionResult>,
-    ) -> Option<usize> {
+    ) -> Option<SourceFunctionResult> {
         let expression = match arrow.body.as_ref() {
             ArrowFunctionBody::Expr(expression) => expression.as_ref(),
             ArrowFunctionBody::FunctionBody(body) => returned_expression(body)?,
@@ -844,6 +919,13 @@ fn rewrite_external_class_methods_with_static(
                 self.types.insert(
                     declaration.ident.sym.to_string(),
                     SourceFunctionResult::Argument(index),
+                );
+            } else if let Some(indices) =
+                function_common_argument_result(&declaration.function)
+            {
+                self.types.insert(
+                    declaration.ident.sym.to_string(),
+                    SourceFunctionResult::CommonArguments(indices),
                 );
             }
             declaration.visit_children_with(self);
@@ -876,6 +958,20 @@ fn rewrite_external_class_methods_with_static(
                             binding.id.sym.to_string(),
                             SourceFunctionResult::Argument(index),
                         );
+                    } else {
+                        let indices = match initializer.as_ref() {
+                            Expr::Arrow(arrow) => arrow_common_argument_result(arrow),
+                            Expr::Fn(function) => {
+                                function_common_argument_result(&function.function)
+                            }
+                            _ => None,
+                        };
+                        if let Some(indices) = indices {
+                            self.types.insert(
+                                binding.id.sym.to_string(),
+                                SourceFunctionResult::CommonArguments(indices),
+                            );
+                        }
                     }
                 }
             }
@@ -938,13 +1034,11 @@ fn rewrite_external_class_methods_with_static(
     impl Visit for InferredFunctionTypeFinder<'_> {
         fn visit_fn_decl(&mut self, declaration: &FnDecl) {
             if !self.known.contains_key(declaration.ident.sym.as_str()) {
-                if let Some(argument) =
+                if let Some(result) =
                     function_forwarded_argument(&declaration.function, self.known)
                 {
-                    self.additions.insert(
-                        declaration.ident.sym.to_string(),
-                        SourceFunctionResult::Argument(argument),
-                    );
+                    self.additions
+                        .insert(declaration.ident.sym.to_string(), result);
                 } else if let Some(return_type) = declaration.function.body.as_ref().and_then(
                     |body| inferred_block_return_type(body, self.known, self.named),
                 ) {
@@ -961,18 +1055,15 @@ fn rewrite_external_class_methods_with_static(
             if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
             {
                 if !self.known.contains_key(binding.id.sym.as_str()) {
-                    let argument = match initializer.as_ref() {
+                    let forwarded = match initializer.as_ref() {
                         Expr::Arrow(arrow) => arrow_forwarded_argument(arrow, self.known),
                         Expr::Fn(function) => {
                             function_forwarded_argument(&function.function, self.known)
                         }
                         _ => None,
                     };
-                    if let Some(argument) = argument {
-                        self.additions.insert(
-                            binding.id.sym.to_string(),
-                            SourceFunctionResult::Argument(argument),
-                        );
+                    if let Some(result) = forwarded {
+                        self.additions.insert(binding.id.sym.to_string(), result);
                         declaration.visit_children_with(self);
                         return;
                     }
