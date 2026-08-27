@@ -1493,6 +1493,9 @@ The workspace crates have narrow responsibilities:
   empty separator splitting into Unicode scalar values, an omitted separator
   returning the receiver as a single-element array, and a truncating limit,
   returning a dynamically sized native `string[]`
+- `String.prototype.replace`/`replaceAll` support a string search value (not
+  `RegExp`), replacing the first or every occurrence respectively, including
+  the JavaScript empty-search-value insertion behavior
 - `Number.prototype.toPrecision` returns the general native number-to-string
   result when its argument is omitted; otherwise it truncates a coerced
   significant-digit count, throws for values outside `[1, 100]`, returns

@@ -595,6 +595,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, limit, "split limit")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
+                    "__thaw_string_replace" | "__thaw_string_replace_all" => {
+                        let [receiver, search, replacement] = args.as_slice() else {
+                            return Err("string replace expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, receiver, "replace receiver")?;
+                        self.expect_type(&HirType::Str, search, "replace search")?;
+                        self.expect_type(&HirType::Str, replacement, "replace value")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_code_point_at" => {
                         let [value, index] = args.as_slice() else {
                             return Err("string codePointAt expects two operands".into());
