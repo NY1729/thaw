@@ -576,6 +576,65 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("RegExp search returned no value".into());
             }
+            "__thaw_date_now" => {
+                if !args.is_empty() {
+                    return Err("Date.now expects no operands".into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_date_now").unwrap(),
+                        &[],
+                        "date_now",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Date.now returned no value".into());
+            }
+            "__thaw_date_get_full_year"
+            | "__thaw_date_get_month"
+            | "__thaw_date_get_date"
+            | "__thaw_date_get_day"
+            | "__thaw_date_get_hours"
+            | "__thaw_date_get_minutes"
+            | "__thaw_date_get_seconds"
+            | "__thaw_date_get_milliseconds" => {
+                let [timestamp] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let timestamp = self.compile_expr(timestamp)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[timestamp.into()],
+                        "date_get",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Date getter returned no value".into());
+            }
+            "__thaw_date_to_iso_string" => {
+                let [timestamp] = args else {
+                    return Err("Date.toISOString expects one operand".into());
+                };
+                let timestamp = self.compile_expr(timestamp)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_date_to_iso_string").unwrap(),
+                        &[timestamp.into()],
+                        "date_to_iso_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Date.toISOString returned no value".into());
+            }
             "__thaw_regex_exec" => {
                 let [source, flags, value] = args else {
                     return Err("RegExp.exec expects three operands".into());
