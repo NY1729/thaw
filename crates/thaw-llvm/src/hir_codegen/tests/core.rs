@@ -225,6 +225,45 @@ fn console_log_safely_formats_functions_promises_and_dynamic_handles() {
 }
 
 #[test]
+fn top_level_destructuring_supports_nested_defaults_rests_and_runtime_keys() {
+    let source = r#"
+        interface Source {
+            point: { x: number; y: number };
+            label: string | undefined;
+            extra: number;
+        }
+        let calls: number = 0;
+        function objectSource(): Source {
+            calls += 1;
+            return { point: { x: 1, y: 2 }, label: undefined, extra: 3 };
+        }
+        function arraySource(): number[] {
+            calls += 1;
+            return [4, 5, 6, 7];
+        }
+        const {
+            point: { x, y },
+            label = "fallback",
+            ...remaining
+        }: Source = objectSource();
+        const [first, , third = 30, ...tail]: number[] = arraySource();
+        const runtimeKey: string = "chosen";
+        const dictionary: Record<string, number> = { chosen: 8 };
+        const { [runtimeKey]: chosen }: Record<string, number> = dictionary;
+
+        function main(): void {
+            console.log(calls, x, y, label, remaining.extra);
+            console.log(first, third, tail, chosen);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "top_level_destructuring"),
+        "2 1 2 fallback 3\n4 6 [7] 8\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {
