@@ -513,6 +513,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "charCodeAt index")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_string_code_point_at" => {
+                        let [value, index] = args.as_slice() else {
+                            return Err("string codePointAt expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "codePointAt receiver")?;
+                        self.expect_type(&HirType::F64, index, "codePointAt index")?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_json_is_array" => {
                         let [value] = args.as_slice() else {
                             return Err("Array.isArray expects one operand".into());

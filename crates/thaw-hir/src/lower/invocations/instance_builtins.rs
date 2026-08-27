@@ -2,8 +2,8 @@ impl<'a> FnLowerer<'a> {
     fn is_native_instance_builtin(property: &str) -> bool {
         matches!(
             property,
-            "charCodeAt" | "concat" | "trim" | "trimStart" | "trimEnd" | "repeat"
-                | "padStart" | "padEnd" | "toFixed"
+            "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
+                | "repeat" | "padStart" | "padEnd" | "toFixed"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -53,6 +53,104 @@ impl<'a> FnLowerer<'a> {
                         result,
                         &bindings,
                     );
+                }
+                if property.sym == *"codePointAt" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "codePointAt receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.codePointAt")?;
+                    if arguments.len() > 1 {
+                        return Err("native `.codePointAt()` expects zero or one argument".into());
+                    }
+                    let index = if let Some(argument) = arguments.first() {
+                        self.coerce_primitive_to_number(argument.clone())?
+                    } else {
+                        HirExpr::Lit(HirLit::F64(0.0))
+                    };
+                    let receiver_name =
+                        format!("__thaw_code_point_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let index_name = format!("__thaw_code_point_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let normalized_name =
+                        format!("__thaw_code_point_normalized_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let raw_name = format!("__thaw_code_point_raw_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    self.scope.insert(normalized_name.clone(), HirType::F64);
+                    self.scope.insert(raw_name.clone(), HirType::F64);
+                    let number = |value| HirExpr::Lit(HirLit::F64(value));
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let assign = |name: String, value| {
+                        HirStmt::Expr(HirExpr::Assign(name, Box::new(value)))
+                    };
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(normalized_name.clone(), HirType::F64, var(&index_name)),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(var(&normalized_name)),
+                                Box::new(var(&normalized_name)),
+                            ),
+                            Vec::new(),
+                            vec![assign(normalized_name.clone(), number(0.0))],
+                        ),
+                        assign(
+                            normalized_name.clone(),
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                                vec![var(&normalized_name)],
+                            ),
+                        ),
+                        HirStmt::Let(
+                            raw_name.clone(),
+                            HirType::F64,
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_code_point_at".into())),
+                                vec![var(&receiver_name), var(&normalized_name)],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(var(&raw_name)),
+                                Box::new(number(0.0)),
+                            ),
+                            vec![HirStmt::Return(Some(HirExpr::OptionalNone(HirType::F64)))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(HirExpr::OptionalSome(
+                            Box::new(var(&raw_name)),
+                            HirType::F64,
+                        ))),
+                    ]);
+                    let result_type = HirType::Optional(Box::new(HirType::F64));
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            result_type,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((index_name, HirType::F64, index));
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"concat" {
                     let receiver = self.lower_expr(&member.obj)?;

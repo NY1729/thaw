@@ -1199,6 +1199,39 @@ fn compiles_native_number_to_fixed() {
 }
 
 #[test]
+fn compiles_native_string_code_point_at() {
+    let source = r#"
+        function text(): string {
+            console.log("receiver");
+            return "a";
+        }
+        function index(): number {
+            console.log("index");
+            return 0;
+        }
+        async function delayedText(): Promise<string> {
+            console.log("awaited receiver");
+            await sleep(1);
+            return "😀";
+        }
+        async function main(): Promise<void> {
+            console.log("a".codePointAt(0));
+            console.log("a".codePointAt());
+            console.log("😀".codePointAt(0));
+            console.log("😀".codePointAt(1));
+            console.log("a".codePointAt(5));
+            console.log("a".codePointAt(-1));
+            console.log(text().codePointAt(index()));
+            console.log((await delayedText()).codePointAt(0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_code_point_at"),
+        "97\n97\n128512\n56832\nundefined\nundefined\nreceiver\nindex\n97\nawaited receiver\n128512\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {
