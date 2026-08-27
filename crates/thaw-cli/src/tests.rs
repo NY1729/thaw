@@ -751,6 +751,46 @@ fn infers_external_overload_types_from_composed_expressions() {
 }
 
 #[test]
+fn infers_external_overloads_from_deterministic_operators() {
+    let source = r#"const box = new NativeBox(1); const n = 4; const s = "value"; box.set("count=" + n); box.set(n + s); box.set(~n); box.set(n << 2); box.set(n | 1); box.set(typeof n); box.set(s || "fallback"); box.set(n ?? 0);"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into())],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::F64],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Str],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__set_string(box, \"count=\" + n)"));
+    assert!(rewritten.contains("__set_string(box, n + s)"));
+    assert!(rewritten.contains("__set_number(box, ~n)"));
+    assert!(rewritten.contains("__set_number(box, n << 2)"));
+    assert!(rewritten.contains("__set_number(box, n | 1)"));
+    assert!(rewritten.contains("__set_string(box, typeof n)"));
+    assert!(rewritten.contains("__set_string(box, s || \"fallback\")"));
+    assert!(rewritten.contains("__set_number(box, n ?? 0)"));
+}
+
+#[test]
 fn infers_external_overload_types_from_user_function_returns_and_forward_references() {
     let source = r#"const box = new NativeBox(1); const makeText = (): string => "text"; const makeFlag = function(): boolean { return true; }; const inferredFlag = () => true; box.set(makeNumber()); box.set(makeText()); box.set(makeFlag()); box.set(inferredNumber()); box.set(inferredText()); box.set(inferredFlag()); function makeNumber(): number { return 42; } function inferredNumber() { return 40 + 2; } function inferredText() { return forwardText(); } function forwardText() { return "text"; }"#;
     let rewritten = rewrite_external_class_methods(
