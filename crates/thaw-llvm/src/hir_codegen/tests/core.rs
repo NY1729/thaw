@@ -305,6 +305,41 @@ fn local_dictionary_destructuring_supports_computed_keys_and_rest() {
 }
 
 #[test]
+fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest() {
+    let source = r#"
+        let assignmentSourceCalls: number = 0;
+        let assignmentKeyCalls: number = 0;
+        function assignmentSource(): Record<string, number> {
+            assignmentSourceCalls += 1;
+            return { selected: 1, kept: 2 };
+        }
+        function assignmentKey(): string {
+            assignmentKeyCalls += 1;
+            return "selected";
+        }
+        function main(): void {
+            let selected: number = 0;
+            let missing: number = 0;
+            let rest: Record<string, number> = {};
+            ({ [assignmentKey()]: selected, missing = 4, ...rest } = assignmentSource());
+            console.log(
+                assignmentSourceCalls,
+                assignmentKeyCalls,
+                selected,
+                missing,
+                rest
+            );
+            console.log(assignmentSource());
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "dictionary_destructuring_assignment"),
+        "1 1 1 4 {\"kept\":2}\n{\"selected\":1,\"kept\":2}\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {
