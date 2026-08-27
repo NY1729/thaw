@@ -797,6 +797,19 @@ fn apply_partial_or_required(object: DtsType, required: bool) -> DtsType {
     }
 }
 
+fn apply_record(value: DtsType, keys: Result<Vec<String>, String>) -> DtsType {
+    let value = match value {
+        DtsType::Native(value) => value,
+        unsupported => return unsupported,
+    };
+    match keys {
+        Ok(keys) => DtsType::Native(HirType::Object(
+            keys.into_iter().map(|key| (key, value.clone())).collect(),
+        )),
+        Err(reason) => DtsType::Unsupported(reason),
+    }
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -1145,6 +1158,22 @@ fn classify_ts_type(
                     ref_name == "Required",
                 );
             }
+            if ref_name == "Record" {
+                let [keys, value] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return DtsType::Unsupported(
+                        "Record<K, V> requires exactly two type arguments".into(),
+                    );
+                };
+                return apply_record(
+                    classify_ts_type(value, interfaces, generic_interfaces),
+                    utility_keys(keys, interfaces, generic_interfaces),
+                );
+            }
             if matches!(ref_name.as_str(), "Pick" | "Omit") {
                 let [object, keys] = ty_ref
                     .type_params
@@ -1360,6 +1389,33 @@ fn resolve_ts_type_with_substitution(
                     in_progress,
                 );
                 return apply_pick_or_omit(object, keys, ref_name == "Omit");
+            }
+            if ref_name == "Record" {
+                let [keys, value] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return DtsType::Unsupported(
+                        "Record<K, V> requires exactly two type arguments".into(),
+                    );
+                };
+                let value = resolve_ts_type_with_substitution(
+                    value,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+                let keys = substituted_utility_keys(
+                    keys,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+                return apply_record(value, keys);
             }
             if let Some(params) = &ty_ref.type_params {
                 if let [elem] = params.params.as_slice() {
