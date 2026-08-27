@@ -53,32 +53,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let object = self.compile_expr(object)?;
         let key = self.compile_expr(key)?;
         let result = self.compile_expr(value)?;
-        let mut argument = result;
-        let setter = match element {
-            HirType::F64 => "thaw_json_object_set_number",
-            HirType::Str => "thaw_json_object_set_string",
-            HirType::Bool => {
-                argument = self
-                    .builder
-                    .build_int_z_extend(
-                        result.into_int_value(),
-                        self.context.i8_type(),
-                        "dictionary_bool",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .into();
-                "thaw_json_object_set_bool"
-            }
-            HirType::Json | HirType::Dictionary(_) => "thaw_json_object_set_json",
-            other => return Err(format!("unsupported dictionary value type {other:?}")),
-        };
-        self.builder
-            .build_call(
-                self.module.get_function(setter).unwrap(),
-                &[object.into(), key.into(), argument.into()],
-                "dictionary_set",
-            )
-            .map_err(|error| error.to_string())?;
+        self.compile_json_object_set_native(object, key.into_pointer_value(), result, element)?;
         Ok(result)
     }
 
@@ -129,36 +104,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_object_new did not return a value")?;
         for (name, expression) in fields {
-            let mut value = self.compile_expr(expression)?;
-            let setter = match element {
-                HirType::F64 => "thaw_json_object_set_number",
-                HirType::Str => "thaw_json_object_set_string",
-                HirType::Bool => {
-                    value = self
-                        .builder
-                        .build_int_z_extend(
-                            value.into_int_value(),
-                            self.context.i8_type(),
-                            "dictionary_bool",
-                        )
-                        .map_err(|error| error.to_string())?
-                        .into();
-                    "thaw_json_object_set_bool"
-                }
-                HirType::Json | HirType::Dictionary(_) => "thaw_json_object_set_json",
-                other => return Err(format!("unsupported dictionary value type {other:?}")),
-            };
+            let value = self.compile_expr(expression)?;
             let key = self
                 .builder
                 .build_global_string_ptr(name, "dictionary_key")
                 .map_err(|error| error.to_string())?;
-            self.builder
-                .build_call(
-                    self.module.get_function(setter).unwrap(),
-                    &[object.into(), key.as_pointer_value().into(), value.into()],
-                    "dictionary_set",
-                )
-                .map_err(|error| error.to_string())?;
+            self.compile_json_object_set_native(
+                object,
+                key.as_pointer_value(),
+                value,
+                element,
+            )?;
         }
         Ok(object)
     }

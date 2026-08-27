@@ -266,6 +266,10 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonAsNumber(inner) => self.compile_json_as(inner, "thaw_json_as_number"),
             HirExpr::JsonAsString(inner) => self.compile_json_as(inner, "thaw_json_as_string"),
             HirExpr::JsonAsBool(inner) => self.compile_json_as_bool(inner),
+            HirExpr::JsonAsNative(inner, ty) => {
+                let json = self.compile_expr(inner)?;
+                self.compile_json_to_native(json, ty)
+            }
 
             // Real suspension points are extracted by the async frame plan.
             // These arms compile only legacy/direct awaits that remain in an
