@@ -270,6 +270,23 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
     })
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
+    let text = with_context(|ctx| -> Result<String, String> {
+        let value = value_for_handle(&ctx, handle)?;
+        let string: Function = ctx
+            .globals()
+            .get("String")
+            .map_err(|error| error.to_string())?;
+        string.call((value,)).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => error.to_string(),
+        })
+    })
+    .unwrap_or_else(|_| "[invalid JsValue]".to_string());
+    CString::new(text).unwrap_or_default().into_raw()
+}
+
 fn handle_array<'js>(ctx: &Ctx<'js>) -> Result<Array<'js>, String> {
     ctx.globals()
         .get("__thaw_value_handles")
@@ -732,4 +749,3 @@ fn json_escape_string(s: &str) -> String {
     out.push('"');
     out
 }
-
