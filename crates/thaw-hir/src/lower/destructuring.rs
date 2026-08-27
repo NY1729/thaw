@@ -1265,9 +1265,8 @@ impl<'a> FnLowerer<'a> {
                 ObjectPatProp::Assign(property) => {
                     let key = HirExpr::Lit(HirLit::Str(property.key.id.sym.to_string()));
                     used_keys.push(key.clone());
-                    let field_json =
-                        HirExpr::JsonKey(Box::new(value.clone()), Box::new(key.clone()));
-                    let mut field = Self::dictionary_element_from_json(field_json, element)?;
+                    let mut field =
+                        self.typed_dictionary_read(value.clone(), key.clone(), element)?;
                     if let Some(default) = &property.value {
                         let default = self.lower_expr(default)?;
                         let default = self.coerce_to_declared(element, default)?;
@@ -1314,8 +1313,7 @@ impl<'a> FnLowerer<'a> {
                         key
                     };
                     used_keys.push(key.clone());
-                    let field = HirExpr::JsonKey(Box::new(value.clone()), Box::new(key));
-                    let field = Self::dictionary_element_from_json(field, element)?;
+                    let field = self.typed_dictionary_read(value.clone(), key, element)?;
                     self.lower_binding_pattern(
                         &property.value,
                         field,
@@ -1340,24 +1338,6 @@ impl<'a> FnLowerer<'a> {
             }
         }
         Ok(())
-    }
-
-    fn dictionary_element_from_json(
-        value: HirExpr,
-        element: &HirType,
-    ) -> Result<HirExpr, String> {
-        match element {
-            HirType::F64 => Ok(HirExpr::JsonAsNumber(Box::new(value))),
-            HirType::Str => Ok(HirExpr::JsonAsString(Box::new(value))),
-            HirType::Bool => Ok(HirExpr::JsonAsBool(Box::new(value))),
-            HirType::Json => Ok(value),
-            HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_) => {
-                Ok(HirExpr::JsonAsNative(Box::new(value), element.clone()))
-            }
-            other => Err(format!(
-                "dictionary destructuring does not support element type {other:?}"
-            )),
-        }
     }
 
     fn lower_dictionary_default(

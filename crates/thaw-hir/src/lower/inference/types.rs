@@ -654,6 +654,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "Object.hasOwn key")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_is_null" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON null check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "JSON null check operand")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_json_object_is"
                     | "__thaw_json_object_is_number"
                     | "__thaw_json_object_is_string"

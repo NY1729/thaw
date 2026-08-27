@@ -421,6 +421,53 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
 }
 
 #[test]
+fn dictionary_reads_restore_optional_nullable_and_nullish_values() {
+    let source = r#"
+        let keyCalls: number = 0;
+        function key(): string {
+            keyCalls += 1;
+            return "present";
+        }
+        function optionalValues(): Record<string, number | undefined> {
+            return { present: 1, missing: undefined };
+        }
+        function nullableValues(): Record<string, number | null> {
+            return { present: 2, empty: null };
+        }
+        function nullishValues(): Record<string, number | null | undefined> {
+            return { present: 3, empty: null, missing: undefined };
+        }
+        function main(): void {
+            const optional: Record<string, number | undefined> = optionalValues();
+            const nullable: Record<string, number | null> = nullableValues();
+            const nullish: Record<string, number | null | undefined> = nullishValues();
+            console.log(optional[key()], optional.missing, keyCalls);
+            console.log(nullable.present, nullable.empty, nullable.absent);
+            console.log(nullish.present, nullish.empty, nullish.missing);
+            const {
+                present: optionalPresent,
+                missing: optionalMissing
+            }: Record<string, number | undefined> = optionalValues();
+            let nullishPresent: number | null | undefined = undefined;
+            let nullishEmpty: number | null | undefined = undefined;
+            let nullishMissing: number | null | undefined = null;
+            ({
+                present: nullishPresent,
+                empty: nullishEmpty,
+                missing: nullishMissing
+            } = nullishValues());
+            console.log(optionalPresent, optionalMissing);
+            console.log(nullishPresent, nullishEmpty, nullishMissing);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "tagged_dictionary_reads"),
+        "1 undefined 1\n2 null null\n3 null undefined\n1 undefined\n3 null undefined\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {

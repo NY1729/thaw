@@ -311,6 +311,14 @@ pub unsafe extern "C" fn thaw_json_is_array(value: *const Value) -> u8 {
     (!value.is_null() && matches!(unsafe { &*value }, Value::Array(_))).into()
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_is_null(value: *const Value) -> u8 {
+    (!value.is_null() && matches!(unsafe { &*value }, Value::Null)).into()
+}
+
 fn alloc_pointer_array(values: Vec<*mut u8>) -> *mut u8 {
     let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
     if output.is_null() {
