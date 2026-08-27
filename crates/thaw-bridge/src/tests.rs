@@ -396,6 +396,59 @@ fn classifies_readonly_and_parenthesized_native_collections() {
 }
 
 #[test]
+fn classifies_readonly_utility_types_without_changing_the_abi() {
+    let funcs = parse_dts(
+        r#"export interface Config {
+                host: string;
+                port: number;
+            }
+            export declare function inspect(
+                config: Readonly<Config>,
+                names: ReadonlyArray<string>
+            ): Readonly<Config>;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("readonly utility types should preserve their ABI layout");
+    };
+    let config = HirType::Object(vec![
+        ("host".into(), HirType::Str),
+        ("port".into(), HirType::F64),
+    ]);
+    assert_eq!(
+        signature.params,
+        vec![config.clone(), HirType::Array(Box::new(HirType::Str)),]
+    );
+    assert_eq!(signature.ret, config);
+}
+
+#[test]
+fn resolves_readonly_utility_types_inside_generic_interfaces() {
+    let funcs = parse_dts(
+        r#"export interface Config { host: string; }
+            export interface Envelope<T> {
+                value: Readonly<T>;
+                labels: ReadonlyArray<string>;
+            }
+            export declare function inspect(value: Envelope<Config>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("readonly utilities should resolve after generic substitution");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            (
+                "value".into(),
+                HirType::Object(vec![("host".into(), HirType::Str)]),
+            ),
+            ("labels".into(), HirType::Array(Box::new(HirType::Str)),),
+        ])]
+    );
+}
+
+#[test]
 fn classifies_object_keyof_as_a_string_fast_path() {
     let funcs = parse_dts(
         r#"export interface Config {
