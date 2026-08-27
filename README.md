@@ -1988,7 +1988,11 @@ typed N-API constructor calls, and ordinary TypeScript named or namespace
 `new` expressions are rewritten only for those external classes. The sqlite3
 CLI E2E now compiles `import { Database } from "sqlite3"` followed by
 `new Database(":memory:")` and constructs the real in-memory database from the
-standalone executable. Automatic instance-method and callback syntax lowering
+standalone executable. Optional/default constructors generate one typed helper
+per supported arity, all resolving to the same addon export. Declared
+instance/static properties use the getter ABI and, unless `readonly`, the
+setter ABI; explicit accessor declarations take precedence. Automatic
+instance-method and callback syntax lowering
 now covers callback-free methods on variables initialized from an external
 constructor or aliases of a tracked instance; assignments propagate or safely
 invalidate the class fact. A CLI E2E compiles and runs `new NativeBox(42)` followed

@@ -2292,13 +2292,18 @@ fn extracts_quoted_and_numeric_class_property_keys() {
         r#"export class Metadata {
                 "content-type": string;
                 200: boolean;
+                "optional-key"?: number;
             }"#,
     )
     .unwrap();
     assert_eq!(classes.len(), 1);
-    assert_eq!(classes[0].properties.len(), 2);
+    assert_eq!(classes[0].properties.len(), 3);
     assert_eq!(classes[0].properties[0].name, "content-type");
     assert_eq!(classes[0].properties[1].name, "200");
+    assert_eq!(
+        classes[0].properties[2].ty,
+        DtsType::Native(HirType::Optional(Box::new(HirType::F64)))
+    );
 }
 
 #[test]
