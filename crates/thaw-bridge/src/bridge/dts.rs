@@ -211,14 +211,15 @@ fn lower_dts_class(
         .body
         .iter()
         .any(|member| matches!(member, ClassMember::Constructor(_)));
-    let constructible = !has_constructor
-        || class.body.iter().any(|member| {
+    let constructible = !class.is_abstract
+        && (!has_constructor
+            || class.body.iter().any(|member| {
             matches!(
                 member,
                 ClassMember::Constructor(constructor)
                     if is_public_member(constructor.accessibility)
             )
-        });
+        }));
     for member in &class.body {
         match member {
             ClassMember::Constructor(constructor)
