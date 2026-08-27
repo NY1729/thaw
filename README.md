@@ -1531,6 +1531,20 @@ The workspace crates have narrow responsibilities:
   for a non-finite timestamp (for example from `new Date(NaN)`), matching
   the specification, and does not support the extended `+/-YYYYYY` year
   format outside `[0, 9999]`
+- The `setFullYear`/`setMonth`/`setDate`/`setHours`/`setMinutes`/
+  `setSeconds`/`setMilliseconds` family (each `setUTC*` variant is a plain
+  alias) mutates a `Date`'s `timestamp` field in place and returns the new
+  timestamp, matching the specification's field-rollover behavior exactly
+  (`setMonth(12)` on a December date advances into next January,
+  `setDate(0)` moves to the last day of the previous month, `setHours(25)`
+  rolls into the next day) via an inverse of the epoch-days<->civil-date
+  conversion `toISOString` already uses. An omitted trailing argument
+  (for example the `date` in `setFullYear(year, month)`) keeps the
+  receiver's current value for that field, read via the corresponding
+  getter before the new fields are computed. Setting a Date whose current
+  timestamp is non-finite starts from `+0` (1970-01-01T00:00:00.000Z)
+  rather than staying invalid, matching the specification; passing a
+  non-finite argument to a setter does make the result invalid
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`

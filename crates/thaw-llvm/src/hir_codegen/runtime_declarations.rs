@@ -511,6 +511,49 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_date_set_full_year",
+            f64_type.fn_type(
+                &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        let date_set_three_type = f64_type.fn_type(
+            &[f64_type.into(), f64_type.into(), f64_type.into()],
+            false,
+        );
+        for name in ["thaw_date_set_month", "thaw_date_set_seconds"] {
+            self.module
+                .add_function(name, date_set_three_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_date_set_hours",
+            f64_type.fn_type(
+                &[
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_date_set_minutes",
+            f64_type.fn_type(
+                &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        let date_set_two_type = f64_type.fn_type(&[f64_type.into(), f64_type.into()], false);
+        for name in ["thaw_date_set_date", "thaw_date_set_milliseconds"] {
+            self.module
+                .add_function(name, date_set_two_type, Some(Linkage::External));
+        }
+        self.module.add_function(
             "thaw_string_repeat",
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
             Some(Linkage::External),

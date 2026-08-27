@@ -1790,6 +1790,43 @@ fn compiles_date_getters_and_iso_string() {
 }
 
 #[test]
+fn compiles_date_setters() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const d: Date = new Date(1704067200500);
+            console.log(d.setDate(15));
+            console.log(d.toISOString());
+            const e: Date = new Date(1704067200500);
+            e.setMonth(11);
+            console.log(e.toISOString());
+            // Month index 12 (one past December) rolls into next January.
+            e.setMonth(12);
+            console.log(e.toISOString());
+            const f: Date = new Date(1704067200500);
+            f.setFullYear(2000, 5);
+            console.log(f.toISOString());
+            const g: Date = new Date(1704067200500);
+            // Day 0 of the month moves to the last day of the previous one.
+            g.setDate(0);
+            console.log(g.toISOString());
+            const h: Date = new Date(1704067200500);
+            h.setHours(25);
+            console.log(h.toISOString());
+            const j: Date = new Date(1704067200500);
+            j.setSeconds(90);
+            console.log(j.toISOString());
+            const k: Date = new Date(1704067200500);
+            k.setMilliseconds(NaN);
+            console.log(k.getTime());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_setters"),
+        "1.70528e+12\n2024-01-15T00:00:00.500Z\n2024-12-01T00:00:00.500Z\n2025-01-01T00:00:00.500Z\n2000-06-01T00:00:00.500Z\n2023-12-31T00:00:00.500Z\n2024-01-02T01:00:00.500Z\n2024-01-01T00:01:30.500Z\nnan\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {
