@@ -275,7 +275,8 @@ The workspace crates have narrow responsibilities:
   `{ data, length }` shape; boolean arrays use one-byte C elements. Fixed
   optional/nullable parameters expand to a one-byte present tag plus payload;
   nullish parameters use a one-byte three-state tag plus payload, recursively
-  inside fixed objects
+  inside fixed objects. Metadata-selected portable tagged returns use the
+  corresponding C struct and recursively restore their payload
 - Ambient and `.d.ts` Fast-path declarations ending in number, boolean, string,
   `JsValue`, `number[]`, `boolean[]`, `string[]`, `JsValue[]`, or fixed-object array rest parameters lower to
   real C varargs. Scalar extras are passed as `double`, C-promoted `int`,

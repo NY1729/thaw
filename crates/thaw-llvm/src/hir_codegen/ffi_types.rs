@@ -256,6 +256,32 @@ impl<'ctx> HirCompiler<'ctx> {
                     .struct_type(&fields, aggregate_abi == FfiAggregateAbi::Packed)
                     .into())
             }
+            HirType::Optional(payload) | HirType::Nullable(payload)
+                if aggregate_abi != FfiAggregateAbi::Internal =>
+            {
+                let payload = self.ffi_return_type(
+                    payload,
+                    FfiStringAbi::NullTerminated,
+                    aggregate_abi,
+                    aggregate_layout,
+                )?;
+                Ok(self
+                    .context
+                    .struct_type(&[self.context.i8_type().into(), payload], false)
+                    .into())
+            }
+            HirType::Nullish(payload) if aggregate_abi != FfiAggregateAbi::Internal => {
+                let payload = self.ffi_return_type(
+                    payload,
+                    FfiStringAbi::NullTerminated,
+                    aggregate_abi,
+                    aggregate_layout,
+                )?;
+                Ok(self
+                    .context
+                    .struct_type(&[self.context.i8_type().into(), payload], false)
+                    .into())
+            }
             other => self.basic_type(other),
         }
     }
