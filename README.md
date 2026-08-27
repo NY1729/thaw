@@ -247,6 +247,8 @@ The workspace crates have narrow responsibilities:
 - Top-level object and array destructuring supports nesting, defaults, rest
   bindings and runtime-computed dictionary keys, including computed-key exclusion
   from object rest, while evaluating each source and key expression once
+- Function-local `Record<string, T>` destructuring supports runtime-computed
+  keys and non-mutating object rest with the same single-evaluation ordering
 - `throw`, `try/catch` and `finally`, including propagation and rethrow across
   generated Thaw function calls and nested cleanup ordering
 - `process.env`, JSON operations, and both legacy blocking and Promise-based
