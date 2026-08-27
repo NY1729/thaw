@@ -1,4 +1,59 @@
 #[no_mangle]
+/// Splits `value` on `separator` into the native `string[]` array layout,
+/// matching `String.prototype.split` for a string separator (`RegExp`
+/// separators are not supported). An empty separator splits into Unicode
+/// scalar values. `limit` truncates the result and is treated as unlimited
+/// when not finite or negative.
+///
+/// # Safety
+/// `value` and `separator` must be null or point to valid NUL-terminated
+/// UTF-8 strings.
+pub unsafe extern "C" fn thaw_string_split(
+    value: *const c_char,
+    separator: *const c_char,
+    limit: f64,
+) -> *mut u8 {
+    if value.is_null() || separator.is_null() {
+        return std::ptr::null_mut();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
+    let mut parts: Vec<String> = if separator.is_empty() {
+        value.chars().map(|character| character.to_string()).collect()
+    } else {
+        value
+            .split(separator.as_ref())
+            .map(str::to_string)
+            .collect()
+    };
+    let limit = if limit.is_finite() && limit >= 0.0 {
+        limit as usize
+    } else {
+        usize::MAX
+    };
+    parts.truncate(limit);
+    let output = thaw_arena::thaw_arena_alloc((parts.len() + 1) * 8, 8);
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(parts.len() as u64);
+    }
+    for (index, part) in parts.into_iter().enumerate() {
+        let Some(part) = arena_c_string(&part) else {
+            return std::ptr::null_mut();
+        };
+        unsafe {
+            output
+                .add(8 + index * 8)
+                .cast::<*const u8>()
+                .write_unaligned(part);
+        }
+    }
+    output
+}
+
+#[no_mangle]
 /// Converts a UTF-8 string into the native `string[]` array layout, following
 /// JavaScript string-iterator semantics (one Unicode scalar value per slot).
 ///
