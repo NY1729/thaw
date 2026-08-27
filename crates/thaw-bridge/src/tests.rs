@@ -2421,6 +2421,36 @@ fn excludes_inaccessible_external_class_members_and_constructors() {
         .any(|method| method.name == "create" && method.is_static));
 }
 
+#[test]
+fn excludes_abstract_external_class_constructors_but_inherits_members() {
+    let classes = parse_dts_classes(
+        r#"export abstract class Service {
+                constructor(name: string);
+                abstract start(): boolean;
+                stop(): void;
+            }
+            export class ConcreteService extends Service {
+                constructor(name: string);
+                start(): boolean;
+            }"#,
+    )
+    .unwrap();
+    let abstract_class = classes
+        .iter()
+        .find(|class| class.name == "Service")
+        .unwrap();
+    assert!(!abstract_class.constructible);
+    assert_eq!(abstract_class.constructors.len(), 1);
+
+    let concrete = classes
+        .iter()
+        .find(|class| class.name == "ConcreteService")
+        .unwrap();
+    assert!(concrete.constructible);
+    assert!(concrete.methods.iter().any(|method| method.name == "start"));
+    assert!(concrete.methods.iter().any(|method| method.name == "stop"));
+}
+
 /// The actual regression this was validated against: a real date-fns
 /// function (`milliseconds({ years, months, ... }: Duration)`) uses a
 /// destructured parameter, which `parse_dts` used to reject by
