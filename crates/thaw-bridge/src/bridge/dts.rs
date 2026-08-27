@@ -400,7 +400,14 @@ fn resolve_interface(
                 // as a field now (fields are word-sized regardless of
                 // their own type -- see hir_codegen.rs's `basic_type` for
                 // the `HirType::Object` case), including a nested object.
-                DtsType::Native(ty) => fields.push((field_name, ty)),
+                DtsType::Native(ty) => fields.push((
+                    field_name,
+                    if prop.optional {
+                        optional_hir_type(ty)
+                    } else {
+                        ty
+                    },
+                )),
                 DtsType::Unsupported(reason) => {
                     failure = Some(format!("field `{field_name}`: {reason}"));
                     break;
@@ -613,6 +620,14 @@ fn keyword_name(kind: TsKeywordTypeKind) -> &'static str {
         TsKeywordTypeKind::TsNullKeyword => "null",
         TsKeywordTypeKind::TsNeverKeyword => "never",
         TsKeywordTypeKind::TsIntrinsicKeyword => "intrinsic",
+    }
+}
+
+fn optional_hir_type(ty: HirType) -> HirType {
+    match ty {
+        HirType::Optional(_) | HirType::Nullish(_) => ty,
+        HirType::Nullable(payload) => HirType::Nullish(payload),
+        other => HirType::Optional(Box::new(other)),
     }
 }
 
@@ -1026,7 +1041,14 @@ fn classify_ts_type(
                 match field_ty {
                     // See the parallel comment in `resolve_interface`:
                     // any representable type works as a field now.
-                    DtsType::Native(ty) => fields.push((field_name, ty)),
+                    DtsType::Native(ty) => fields.push((
+                        field_name,
+                        if prop.optional {
+                            optional_hir_type(ty)
+                        } else {
+                            ty
+                        },
+                    )),
                     DtsType::Unsupported(reason) => {
                         return DtsType::Unsupported(format!(
                             "object field `{field_name}`: {reason}"
@@ -1219,7 +1241,14 @@ fn resolve_generic_interface(
             None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
         };
         match field_ty {
-            DtsType::Native(ty) => fields.push((field_name, ty)),
+            DtsType::Native(ty) => fields.push((
+                field_name,
+                if prop.optional {
+                    optional_hir_type(ty)
+                } else {
+                    ty
+                },
+            )),
             DtsType::Unsupported(reason) => {
                 failure = Some(format!("field `{field_name}`: {reason}"));
                 break;
@@ -1439,7 +1468,14 @@ fn resolve_ts_type_with_substitution(
                     }
                 };
                 match field_ty {
-                    DtsType::Native(ty) => fields.push((field_name, ty)),
+                    DtsType::Native(ty) => fields.push((
+                        field_name,
+                        if prop.optional {
+                            optional_hir_type(ty)
+                        } else {
+                            ty
+                        },
+                    )),
                     DtsType::Unsupported(reason) => {
                         return DtsType::Unsupported(format!(
                             "object field `{field_name}`: {reason}"
