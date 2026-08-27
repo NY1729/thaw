@@ -198,16 +198,7 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
                 span,
                 expr: Box::new(Expr::Lit(Lit::Str(string.clone()))),
             }),
-            PropName::Computed(computed) => match computed.expr.as_ref() {
-                Expr::Lit(Lit::Str(_)) | Expr::Lit(Lit::Num(_)) => {
-                    MemberProp::Computed(computed.clone())
-                }
-                _ => {
-                    return Err(
-                        "top-level destructuring keys must be static string/number literals".into(),
-                    )
-                }
-            },
+            PropName::Computed(computed) => MemberProp::Computed(computed.clone()),
             _ => return Err("unsupported top-level destructuring property key".into()),
         };
         Ok(Expr::Member(MemberExpr {
@@ -334,6 +325,10 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
         match pattern {
             Pat::Object(object) => {
                 let mut used_keys = Vec::new();
+                let has_rest = object
+                    .props
+                    .iter()
+                    .any(|property| matches!(property, ObjectPatProp::Rest(_)));
                 for property in &object.props {
                     match property {
                         ObjectPatProp::Assign(property) => {
@@ -364,7 +359,9 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
                             )?;
                         }
                         ObjectPatProp::KeyValue(property) => {
-                            used_keys.push(property_name(&property.key)?);
+                            if has_rest {
+                                used_keys.push(property_name(&property.key)?);
+                            }
                             expand_pattern(
                                 &property.value,
                                 member(temporary_expr(), &property.key, span)?,
@@ -554,4 +551,3 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
     normalized.body = body;
     Ok(normalized)
 }
-
