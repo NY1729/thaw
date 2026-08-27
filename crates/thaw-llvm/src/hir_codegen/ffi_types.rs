@@ -74,7 +74,8 @@ impl<'ctx> HirCompiler<'ctx> {
     fn ffi_aggregate_storage_layout(ty: &HirType, aggregate_abi: FfiAggregateAbi) -> (u64, u64) {
         match ty {
             HirType::Array(element)
-                if **element == HirType::F64 && aggregate_abi != FfiAggregateAbi::Internal =>
+                if matches!(element.as_ref(), HirType::F64 | HirType::Str)
+                    && aggregate_abi != FfiAggregateAbi::Internal =>
             {
                 (
                     16,
@@ -217,7 +218,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .into()),
             HirType::Array(element)
-                if **element == HirType::F64 && aggregate_abi != FfiAggregateAbi::Internal =>
+                if matches!(element.as_ref(), HirType::F64 | HirType::Str)
+                    && aggregate_abi != FfiAggregateAbi::Internal =>
             {
                 Ok(self
                     .context
@@ -421,7 +423,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     out.push(self.context.ptr_type(AddressSpace::default()).into());
                     out.push(self.context.i64_type().into());
                 }
-                HirType::Array(elem) if **elem == HirType::F64 => {
+                HirType::Array(elem)
+                    if matches!(elem.as_ref(), HirType::F64 | HirType::Str) =>
+                {
                     out.push(self.context.ptr_type(AddressSpace::default()).into());
                     out.push(self.context.i64_type().into());
                 }

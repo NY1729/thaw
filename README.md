@@ -268,9 +268,11 @@ The workspace crates have narrow responsibilities:
 - Safe console formatting for native function values, pending promises and
   retained QuickJS `JsValue` handles; handles use JavaScript `String(value)`
 - Synchronous lowering of `async` functions and `await`
-- Ambient declarations and C ABI calls; number-array parameters become
-  `(pointer, length)`, object parameters become scalar fields, and metadata-
-  selected portable array/object return structs are copied into the Thaw arena
+- Ambient declarations and C ABI calls; number- and string-array parameters
+  become `(pointer, length)`, object parameters become scalar fields, and
+  metadata-selected portable array/object return structs are copied into the
+  Thaw arena. Borrowed number- and string-array returns use the same portable
+  `{ data, length }` shape
 - Ambient and `.d.ts` Fast-path declarations ending in number, boolean, string,
   `JsValue`, `number[]`, `boolean[]`, `string[]`, `JsValue[]`, or fixed-object array rest parameters lower to
   real C varargs. Scalar extras are passed as `double`, C-promoted `int`,
