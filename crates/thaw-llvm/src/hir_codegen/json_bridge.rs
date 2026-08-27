@@ -714,31 +714,170 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
-            HirType::Array(element)
-                if matches!(**element, HirType::F64 | HirType::Str | HirType::Bool) =>
-            {
-                let converter = match element.as_ref() {
-                    HirType::F64 => "thaw_json_to_number_array",
-                    HirType::Str => "thaw_json_to_string_array",
-                    HirType::Bool => "thaw_json_to_bool_array",
-                    _ => unreachable!(),
-                };
-                self
-                .builder
-                .build_call(
-                    self.module.get_function(converter).unwrap(),
-                    &[json.into()],
-                    "json_native_array",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| format!("{converter} returned no value"))
-            }
+            HirType::Array(element) => self.compile_json_to_native_array(json, element),
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
             other => Err(format!(
                 "JSON-backed dictionary value cannot be restored as {other:?}"
             )),
         }
+    }
+
+    fn compile_json_to_native_array(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let length = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_length").unwrap(),
+                &[json.into()],
+                "json_array_length",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_array_length returned no value")?
+            .into_int_value();
+        let element_bytes = i64_type.const_int(array_element_storage_bytes(element), false);
+        let payload_size = self
+            .builder
+            .build_int_mul(length, element_bytes, "json_array_payload_size")
+            .map_err(|error| error.to_string())?;
+        let allocation_size = self
+            .builder
+            .build_int_add(
+                payload_size,
+                i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                "json_array_allocation_size",
+            )
+            .map_err(|error| error.to_string())?;
+        let array = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    allocation_size.into(),
+                    i64_type
+                        .const_int(array_element_storage_bytes(element).min(8), false)
+                        .into(),
+                ],
+                "json_native_array",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc returned no array")?
+            .into_pointer_value();
+        self.builder
+            .build_store(array, length)
+            .map_err(|error| error.to_string())?;
+
+        let function = self.current_function();
+        let entry = self
+            .builder
+            .get_insert_block()
+            .ok_or("JSON array conversion has no current block")?;
+        let condition = self.context.append_basic_block(function, "json_array_next");
+        let body = self.context.append_basic_block(function, "json_array_element");
+        let done = self.context.append_basic_block(function, "json_array_done");
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(condition);
+        let index = self
+            .builder
+            .build_phi(i64_type, "json_array_index")
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+        let has_element = self
+            .builder
+            .build_int_compare(
+                IntPredicate::ULT,
+                index.as_basic_value().into_int_value(),
+                length,
+                "json_array_has_element",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_element, body, done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(body);
+        let json_index = self
+            .builder
+            .build_signed_int_to_float(
+                index.as_basic_value().into_int_value(),
+                self.context.f64_type(),
+                "json_array_float_index",
+            )
+            .map_err(|error| error.to_string())?;
+        let null_key = self.context.ptr_type(AddressSpace::default()).const_null();
+        let element_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_index").unwrap(),
+                &[json.into(), json_index.into(), null_key.into()],
+                "json_array_element_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_index returned no value")?;
+        let value = match element {
+            HirType::F64 => self.compile_json_as_value(element_json, "thaw_json_as_number")?,
+            HirType::Str => self.compile_json_as_value(element_json, "thaw_json_as_string")?,
+            HirType::Bool => self.compile_json_as_bool_value(element_json)?,
+            HirType::Json | HirType::Dictionary(_) => element_json,
+            HirType::Array(_) | HirType::Object(_) => {
+                self.compile_json_to_native(element_json, element)?
+            }
+            other => return Err(format!("unsupported JSON array element {other:?}")),
+        };
+        let offset = self
+            .builder
+            .build_int_mul(
+                index.as_basic_value().into_int_value(),
+                element_bytes,
+                "json_array_element_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let offset = self
+            .builder
+            .build_int_add(
+                offset,
+                i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                "json_array_payload_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let pointer = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), array, &[offset], "json_array_slot")
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(pointer, value)
+            .map_err(|error| error.to_string())?;
+        let next = self
+            .builder
+            .build_int_add(
+                index.as_basic_value().into_int_value(),
+                i64_type.const_int(1, false),
+                "json_array_increment",
+            )
+            .map_err(|error| error.to_string())?;
+        let body_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("JSON array conversion lost its body block")?;
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&next, body_end)]);
+
+        self.builder.position_at_end(done);
+        Ok(array.into())
     }
 }
