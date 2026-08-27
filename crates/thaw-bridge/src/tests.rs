@@ -396,6 +396,41 @@ fn classifies_readonly_and_parenthesized_native_collections() {
 }
 
 #[test]
+fn classifies_object_keyof_as_a_string_fast_path() {
+    let funcs = parse_dts(
+        r#"export interface Config {
+                host: string;
+                port: number;
+            }
+            export declare function get(config: Config, key: keyof Config): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("keyof a fixed object should use the string ABI");
+    };
+    assert_eq!(
+        signature.params,
+        vec![
+            HirType::Object(vec![
+                ("host".into(), HirType::Str),
+                ("port".into(), HirType::F64),
+            ]),
+            HirType::Str,
+        ]
+    );
+    assert_eq!(signature.ret, HirType::Str);
+}
+
+#[test]
+fn rejects_keyof_collection_from_the_string_fast_path() {
+    let funcs = parse_dts("export declare function get(key: keyof string[]): string;").unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn classifies_typed_callback_parameter_as_fast_path() {
     let funcs = parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
     let Classification::FastPath(signature) = classify(&funcs[0]) else {
