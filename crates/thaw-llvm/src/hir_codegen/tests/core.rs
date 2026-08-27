@@ -103,6 +103,37 @@ fn console_log_serializes_typed_tuples_in_all_tagged_positions() {
 }
 
 #[test]
+fn console_log_serializes_tagged_values_inside_collections() {
+    let source = r#"
+        interface Tagged {
+            optional?: number;
+            nullable: string | null;
+            nullish: boolean | null | undefined;
+        }
+        function main(): void {
+            const optional: (number | undefined)[] = [1, undefined, 3];
+            const nullable: (string | null)[] = ["a", null, "c"];
+            const nullish: (boolean | null | undefined)[] = [true, null, undefined];
+            const tuple: [number | undefined, string | null, boolean | null | undefined] =
+                [undefined, null, undefined];
+            const absent: Tagged = { nullable: null, nullish: undefined };
+            const present: Tagged = { optional: 2, nullable: "x", nullish: null };
+            console.log(optional);
+            console.log(nullable);
+            console.log(nullish);
+            console.log(tuple);
+            console.log(absent);
+            console.log(present);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "tagged_collection_console"),
+        "[1,null,3]\n[\"a\",null,\"c\"]\n[true,null,null]\n[null,null,null]\n{\"nullable\":null}\n{\"optional\":2,\"nullable\":\"x\",\"nullish\":null}\n"
+    );
+}
+
+#[test]
 fn console_methods_use_their_node_compatible_output_streams() {
     let source = r#"
         interface Detail { code: number; }
