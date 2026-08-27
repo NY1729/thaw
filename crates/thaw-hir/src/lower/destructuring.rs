@@ -63,6 +63,14 @@ impl<'a> FnLowerer<'a> {
                 Ok(())
             }
             Pat::Object(pattern) => {
+                if let HirType::Dictionary(element) = ty {
+                    return self.lower_dictionary_object_binding_pattern(
+                        pattern,
+                        value,
+                        element,
+                        statements,
+                    );
+                }
                 if let HirType::Union(elements) = ty {
                     return self
                         .lower_union_object_binding_pattern(pattern, value, elements, statements);
@@ -1238,6 +1246,193 @@ impl<'a> FnLowerer<'a> {
             ),
             result_type,
         ))
+    }
+
+    fn lower_dictionary_object_binding_pattern(
+        &mut self,
+        pattern: &swc_ecma_ast::ObjectPat,
+        value: HirExpr,
+        element: &HirType,
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        let has_rest = pattern
+            .props
+            .iter()
+            .any(|property| matches!(property, ObjectPatProp::Rest(_)));
+        let mut used_keys = Vec::new();
+        for property in &pattern.props {
+            match property {
+                ObjectPatProp::Assign(property) => {
+                    let key = HirExpr::Lit(HirLit::Str(property.key.id.sym.to_string()));
+                    used_keys.push(key.clone());
+                    let field_json =
+                        HirExpr::JsonKey(Box::new(value.clone()), Box::new(key.clone()));
+                    let mut field = Self::dictionary_element_from_json(field_json, element)?;
+                    if let Some(default) = &property.value {
+                        let default = self.lower_expr(default)?;
+                        let default = self.coerce_to_declared(element, default)?;
+                        let present = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_has_own".into())),
+                            vec![value.clone(), key],
+                        );
+                        field = self.lower_dictionary_default(
+                            present,
+                            field,
+                            default,
+                            element,
+                        );
+                    }
+                    self.lower_binding_pattern(
+                        &Pat::Ident(property.key.clone()),
+                        field,
+                        element,
+                        statements,
+                    )?;
+                }
+                ObjectPatProp::KeyValue(property) => {
+                    let key = match &property.key {
+                        PropName::Ident(key) => HirExpr::Lit(HirLit::Str(key.sym.to_string())),
+                        PropName::Str(key) => HirExpr::Lit(HirLit::Str(
+                            key.value.to_string_lossy().into_owned(),
+                        )),
+                        PropName::Num(key) => {
+                            self.coerce_primitive_to_string(HirExpr::Lit(HirLit::F64(key.value)))?
+                        }
+                        PropName::Computed(computed) => {
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.coerce_primitive_to_string(key)?
+                        }
+                        _ => return Err("unsupported dictionary destructuring key".into()),
+                    };
+                    let key = if has_rest {
+                        let name = format!("__thaw_destructure_key_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::Str);
+                        statements.push(HirStmt::Let(name.clone(), HirType::Str, key));
+                        HirExpr::Var(name)
+                    } else {
+                        key
+                    };
+                    used_keys.push(key.clone());
+                    let field = HirExpr::JsonKey(Box::new(value.clone()), Box::new(key));
+                    let field = Self::dictionary_element_from_json(field, element)?;
+                    self.lower_binding_pattern(
+                        &property.value,
+                        field,
+                        element,
+                        statements,
+                    )?;
+                }
+                ObjectPatProp::Rest(rest) => {
+                    let rest_type = HirType::Dictionary(Box::new(element.clone()));
+                    let rest_value = self.lower_dictionary_object_rest(
+                        value.clone(),
+                        &rest_type,
+                        &used_keys,
+                    );
+                    self.lower_binding_pattern(
+                        &rest.arg,
+                        rest_value,
+                        &rest_type,
+                        statements,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn dictionary_element_from_json(
+        value: HirExpr,
+        element: &HirType,
+    ) -> Result<HirExpr, String> {
+        match element {
+            HirType::F64 => Ok(HirExpr::JsonAsNumber(Box::new(value))),
+            HirType::Str => Ok(HirExpr::JsonAsString(Box::new(value))),
+            HirType::Bool => Ok(HirExpr::JsonAsBool(Box::new(value))),
+            HirType::Json => Ok(value),
+            other => Err(format!(
+                "dictionary destructuring does not support element type {other:?}"
+            )),
+        }
+    }
+
+    fn lower_dictionary_default(
+        &self,
+        present: HirExpr,
+        value: HirExpr,
+        default: HirExpr,
+        result_type: &HirType,
+    ) -> HirExpr {
+        let body = HirExpr::Block(vec![HirStmt::If(
+            present,
+            vec![HirStmt::Return(Some(value))],
+            vec![HirStmt::Return(Some(default))],
+        )]);
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&body, &mut referenced);
+        let captures = referenced
+            .into_iter()
+            .filter_map(|name| self.scope.get(&name).cloned().map(|ty| HirParam { name, ty }))
+            .collect();
+        HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                captures,
+                Vec::new(),
+                result_type.clone(),
+                Box::new(body),
+            )),
+            Vec::new(),
+        )
+    }
+
+    fn lower_dictionary_object_rest(
+        &mut self,
+        value: HirExpr,
+        dictionary_type: &HirType,
+        keys: &[HirExpr],
+    ) -> HirExpr {
+        let HirType::Dictionary(element) = dictionary_type else {
+            unreachable!()
+        };
+        let copy = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
+            vec![
+                HirExpr::JsonObjectLit(Vec::new(), element.as_ref().clone()),
+                value,
+            ],
+        );
+        let copy_name = format!("__thaw_object_rest_copy_{}", self.next_binding);
+        self.next_binding += 1;
+        let mut parameters = vec![HirParam {
+            name: copy_name.clone(),
+            ty: dictionary_type.clone(),
+        }];
+        let mut arguments = vec![copy];
+        let mut body = Vec::with_capacity(keys.len() + 1);
+        for key in keys {
+            let key_name = format!("__thaw_object_rest_key_{}", self.next_binding);
+            self.next_binding += 1;
+            parameters.push(HirParam {
+                name: key_name.clone(),
+                ty: HirType::Str,
+            });
+            arguments.push(key.clone());
+            body.push(HirStmt::Expr(HirExpr::JsonDelete(
+                Box::new(HirExpr::Var(copy_name.clone())),
+                Box::new(HirExpr::Var(key_name)),
+            )));
+        }
+        body.push(HirStmt::Return(Some(HirExpr::Var(copy_name))));
+        HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                parameters,
+                dictionary_type.clone(),
+                Box::new(HirExpr::Block(body)),
+            )),
+            arguments,
+        )
     }
 
 }

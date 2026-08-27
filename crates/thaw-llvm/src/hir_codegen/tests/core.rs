@@ -271,6 +271,40 @@ fn top_level_destructuring_supports_nested_defaults_rests_and_runtime_keys() {
 }
 
 #[test]
+fn local_dictionary_destructuring_supports_computed_keys_and_rest() {
+    let source = r#"
+        let sourceCalls: number = 0;
+        let keyCalls: number = 0;
+        function source(): Record<string, number> {
+            sourceCalls += 1;
+            return { selected: 1, first: 2, second: 3 };
+        }
+        function key(): string {
+            keyCalls += 1;
+            return "selected";
+        }
+        function run(): void {
+            const {
+                [key()]: selected,
+                first,
+                missing = 4,
+                ...rest
+            }: Record<string, number> = source();
+            console.log(sourceCalls, keyCalls, selected, first, missing, rest);
+            console.log(source());
+        }
+        function main(): void {
+            run();
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "local_dictionary_destructuring"),
+        "1 1 1 2 4 {\"second\":3}\n{\"selected\":1,\"first\":2,\"second\":3}\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {

@@ -450,7 +450,12 @@ impl<'a> FnLowerer<'a> {
                     if matches!(&decl.name, Pat::Object(_))
                         && elements.iter().all(|element| matches!(element, HirType::Object(_)))
             );
-            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_)) && !destructurable_union {
+            let destructurable_dictionary =
+                matches!((&decl.name, &ty), (Pat::Object(_), HirType::Dictionary(_)));
+            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_))
+                && !destructurable_union
+                && !destructurable_dictionary
+            {
                 return Err(format!(
                     "destructuring requires a fixed-shape object or tuple, got {ty:?}"
                 ));
