@@ -505,11 +505,19 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, date_getter_type, Some(Linkage::External));
         }
-        self.module.add_function(
+        for name in [
             "thaw_date_to_iso_string",
-            i8_ptr.fn_type(&[f64_type.into()], false),
-            Some(Linkage::External),
-        );
+            "thaw_date_to_date_string",
+            "thaw_date_to_time_string",
+            "thaw_date_to_string",
+            "thaw_date_to_utc_string",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[f64_type.into()], false),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_date_set_full_year",
             f64_type.fn_type(

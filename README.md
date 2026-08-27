@@ -1558,6 +1558,13 @@ The workspace crates have narrow responsibilities:
   timestamp is non-finite starts from `+0` (1970-01-01T00:00:00.000Z)
   rather than staying invalid, matching the specification; passing a
   non-finite argument to a setter does make the result invalid
+- `toDateString`/`toTimeString`/`toString`/`toUTCString` format a `Date` as
+  `"Www Mmm dd yyyy"`, `"hh:mm:ss GMT+0000 (Coordinated Universal Time)"`,
+  their concatenation, and the RFC 7231 `"Www, dd Mmm yyyy hh:mm:ss GMT"`
+  respectively -- the offset and zone name are always UTC's, since there
+  is no host timezone database to make another one meaningful. Unlike
+  `toISOString`, all four return the literal string `"Invalid Date"` for
+  a non-finite timestamp instead of throwing, matching the specification
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`
