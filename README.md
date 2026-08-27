@@ -1466,6 +1466,9 @@ The workspace crates have narrow responsibilities:
 - `decodeURI` decodes the same way, except an escape that would decode to
   one of the URI reserved characters is left as its original three-character
   escape rather than being unescaped, preserving whole-URI syntax
+- `String.fromCharCode` converts each coerced, `ToUint16`-normalized argument
+  into its UTF-16 code unit and concatenates the results in order, decoding
+  each unit losslessly or as U+FFFD when it is an unpaired surrogate
 - `Number.prototype.toPrecision` returns the general native number-to-string
   result when its argument is omitted; otherwise it truncates a coerced
   significant-digit count, throws for values outside `[1, 100]`, returns

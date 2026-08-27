@@ -210,6 +210,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_string_from_char_code",
+            number_to_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_number_to_fixed",
             i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
             Some(Linkage::External),

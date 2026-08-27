@@ -7,6 +7,7 @@ impl<'a> FnLowerer<'a> {
                 | ("JSON", "stringify")
                 | ("Reflect", "ownKeys")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
+                | ("String", "fromCharCode")
                 | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
         )
     }
@@ -827,6 +828,26 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Lit(HirLit::Bool(false)),
                             &bindings,
                         );
+                    }
+                    if object.sym == *"String" && property.sym == *"fromCharCode" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "String.fromCharCode")?;
+                        let mut units = Vec::with_capacity(arguments.len());
+                        for argument in &arguments {
+                            units.push(self.coerce_primitive_to_number(argument.clone())?);
+                        }
+                        let mut result = HirExpr::Lit(HirLit::Str(String::new()));
+                        for unit in units {
+                            let unit = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_from_char_code".into())),
+                                vec![unit],
+                            );
+                            result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                                vec![result, unit],
+                            );
+                        }
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
         unreachable!("static builtin dispatch was checked before lowering")
     }
