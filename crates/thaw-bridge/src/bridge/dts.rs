@@ -727,6 +727,26 @@ fn classify_ts_type(
             }
         }
 
+        TsType::TsTupleType(tuple) => {
+            let elements = tuple
+                .elem_types
+                .iter()
+                .enumerate()
+                .map(|(index, element)| {
+                    match classify_ts_type(&element.ty, interfaces, generic_interfaces) {
+                        DtsType::Native(element) => Ok(element),
+                        DtsType::Unsupported(reason) => {
+                            Err(format!("tuple element {index}: {reason}"))
+                        }
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match elements {
+                Ok(elements) => DtsType::Native(HirType::Tuple(elements)),
+                Err(reason) => DtsType::Unsupported(reason),
+            }
+        }
+
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
             if function.type_params.is_some() {
                 return DtsType::Unsupported("generic callback types are not supported".into());
@@ -1101,6 +1121,31 @@ fn resolve_ts_type_with_substitution(
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("array element type: {reason}"))
                 }
+            }
+        }
+        TsType::TsTupleType(tuple) => {
+            let elements = tuple
+                .elem_types
+                .iter()
+                .enumerate()
+                .map(|(index, element)| {
+                    match resolve_ts_type_with_substitution(
+                        &element.ty,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    ) {
+                        DtsType::Native(element) => Ok(element),
+                        DtsType::Unsupported(reason) => {
+                            Err(format!("tuple element {index}: {reason}"))
+                        }
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match elements {
+                Ok(elements) => DtsType::Native(HirType::Tuple(elements)),
+                Err(reason) => DtsType::Unsupported(reason),
             }
         }
         TsType::TsTypeLit(type_lit) => {

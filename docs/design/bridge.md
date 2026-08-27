@@ -131,6 +131,7 @@ namespace 抽出とオブジェクトエクスポートのフックは、お互�
 | `string[]` / `Array<string>` | `Array(Str)` | `(const char **, int64_t)` ABI |
 | `boolean[]` / `Array<boolean>` | `Array(Bool)` | `(const uint8_t *, int64_t)` ABI |
 | `JsValue[]` / `Array<JsValue>` | `Array(JsValue)` | `(const uint64_t *, int64_t)` opaque-handle ABI |
+| `[number, string, boolean]` | `Tuple([F64, Str, Bool])` | 引数は固定要素へ展開、戻り値はportable C struct |
 | `{ x: number; y: number }` | `Object([("x", F64), ("y", F64)])` | フィールドは number のみ |
 | `void` | `Void` | 戻り値のみ |
 
