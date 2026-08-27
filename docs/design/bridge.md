@@ -130,6 +130,7 @@ namespace 抽出とオブジェクトエクスポートのフックは、お互�
 | `number[]` / `Array<number>` | `Array(F64)` | `(const double *, int64_t)` ABI |
 | `string[]` / `Array<string>` | `Array(Str)` | `(const char **, int64_t)` ABI |
 | `boolean[]` / `Array<boolean>` | `Array(Bool)` | `(const uint8_t *, int64_t)` ABI |
+| `JsValue[]` / `Array<JsValue>` | `Array(JsValue)` | `(const uint64_t *, int64_t)` opaque-handle ABI |
 | `{ x: number; y: number }` | `Object([("x", F64), ("y", F64)])` | フィールドは number のみ |
 | `void` | `Void` | 戻り値のみ |
 
@@ -345,9 +346,9 @@ extern "C" fn thaw_dynamic_call(
   自動生成する npm パッケージが実質存在しないため -- registry.md
   18章参照）。Fallback 経路は実物パッケージで広く検証済み。
 - 5章で述べた、外部ライブラリの実際の C ABI 規約（`(ptr, len)` 分割
-  など）に合わせた Marshal アダプタ生成 -- **`number[]`／`string[]`／`boolean[]`
+  など）に合わせた Marshal アダプタ生成 -- **`number[]`／`string[]`／`boolean[]`／`JsValue[]`
   パラメータの`(pointer, int64_t len)`展開と、object パラメータのフィールド
-  単位への展開に加え、3配列型と`Object`のportable struct戻り値、文字列の
+  単位への展開に加え、4配列型と`Object`のportable struct戻り値、文字列の
   `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
