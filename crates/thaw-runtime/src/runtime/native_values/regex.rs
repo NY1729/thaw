@@ -81,6 +81,37 @@ pub unsafe extern "C" fn thaw_regex_test(
     with_compiled_regex(&source, &flags, |regex| regex.is_match(&value)).unwrap_or(false) as u8
 }
 
+#[no_mangle]
+/// Returns the JavaScript UTF-16 code-unit index of the first match of the
+/// regex named by `source`/`flags` in `value`, matching
+/// `String.prototype.search`. Returns `-1` for a null argument, no match, or
+/// a pattern the `regex` crate cannot compile, the same way
+/// `RegExp.prototype.test` cannot distinguish "no match" from "failed to
+/// compile".
+///
+/// # Safety
+/// `value`, `source` and `flags` must be null or point to valid
+/// NUL-terminated UTF-8 strings.
+pub unsafe extern "C" fn thaw_regex_search(
+    value: *const c_char,
+    source: *const c_char,
+    flags: *const c_char,
+) -> f64 {
+    if value.is_null() || source.is_null() || flags.is_null() {
+        return -1.0;
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+    let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
+    with_compiled_regex(&source, &flags, |regex| {
+        regex
+            .find(&value)
+            .map(|found| value[..found.start()].encode_utf16().count() as f64)
+    })
+    .flatten()
+    .unwrap_or(-1.0)
+}
+
 /// # Safety
 /// `value`, `source`, `flags` and `replacement` must be null or point to
 /// valid NUL-terminated UTF-8 strings.

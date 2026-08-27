@@ -622,6 +622,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, value, "RegExp.test value")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_regex_search" => {
+                        let [value, source, flags] = args.as_slice() else {
+                            return Err("String.search expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "search value")?;
+                        self.expect_type(&HirType::Str, source, "search source")?;
+                        self.expect_type(&HirType::Str, flags, "search flags")?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_regex_match" => {
                         let [value, source, flags] = args.as_slice() else {
                             return Err("String.match expects three operands".into());

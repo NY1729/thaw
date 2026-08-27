@@ -1504,6 +1504,10 @@ The workspace crates have narrow responsibilities:
   matched groups' cooked strings when the pattern matches (currently just
   the whole match, since capture groups are not extracted), or `undefined`
   when it does not match or the pattern fails to compile
+- `String.prototype.search(regex)` returns the JavaScript UTF-16 code-unit
+  index of the first match, or `-1` when it does not match or the pattern
+  fails to compile (mirroring `RegExp.prototype.test`'s inability to
+  distinguish those two cases, rather than throwing like `split`/`replace`)
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`
