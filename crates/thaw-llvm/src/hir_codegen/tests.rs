@@ -15,6 +15,10 @@ fn napi_constructor_arity_symbols_share_the_same_export() {
         napi_constructor_export_name("$new$Database$arity2"),
         Some("Database")
     );
+    assert_eq!(
+        napi_constructor_export_name("$new$Database$arity1$overload0"),
+        Some("Database")
+    );
     assert_eq!(napi_constructor_export_name("ordinary"), None);
 }
 

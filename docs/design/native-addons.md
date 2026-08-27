@@ -54,6 +54,8 @@ number配列注釈は`number[]`に加えて`Array<number>`と`ReadonlyArray<numb
 constructor shimを生成せず、公開memberの継承情報だけを具象派生classへ渡す。
 具象派生classがconstructorを省略した場合は、基底classの公開constructor署名を継承し、
 JavaScriptの暗黙constructorと同じ引数転送をtyped shimでも維持する。
+同一arityのconstructor overloadは署名を潰さず個別helperを生成し、methodと共通の
+call-site型追跡で選択する。LLVMではarity／overload suffixを除いた同じclass exportへ接続する。
 parentの上書きは全descendantの追跡を破棄する。static methodはclass export自体を
 N-API receiverにし、instance methodと同じarity、overload、callback、native value
 marshal規則でnamed・namespace callを書き換える。自作addonの`NativeBox.twice(21)`を

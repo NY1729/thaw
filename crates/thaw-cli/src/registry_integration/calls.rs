@@ -32,9 +32,9 @@ fn rewrite_external_class_constructors(
             };
             if let Some((_, _, helpers)) = class {
                 let argument_count = expression.args.as_ref().map_or(0, Vec::len);
-                if let Some((_, helper)) = helpers
+                if let Some((_, helper, _)) = helpers
                     .iter()
-                    .find(|(arity, _)| *arity == argument_count)
+                    .find(|(arity, _, _)| *arity == argument_count)
                 {
                     self.replacements.push((
                         expression.span().lo.0,
