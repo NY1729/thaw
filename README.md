@@ -1475,6 +1475,12 @@ The workspace crates have narrow responsibilities:
   same native null-pointer failure signal `decodeURIComponent` uses
 - `String.prototype.localeCompare` reuses the existing UTF-16 code-unit
   ordering behind `<`/`>` to return a negative, zero or positive number
+- `String.prototype.normalize` defaults its form argument to `"NFC"`,
+  normalizes to `NFC`/`NFD`/`NFKC`/`NFKD` via `icu_normalizer`, and throws
+  for any other form name via the same native null-pointer failure signal
+  `decodeURIComponent` uses. This links Unicode normalization data into
+  every generated binary unconditionally (about 0.6MB stripped), since
+  `thaw-runtime` did not previously depend on `icu_normalizer`
 - `Number.prototype.toPrecision` returns the general native number-to-string
   result when its argument is omitted; otherwise it truncates a coerced
   significant-digit count, throws for values outside `[1, 100]`, returns

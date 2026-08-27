@@ -4,6 +4,7 @@ impl<'a> FnLowerer<'a> {
             property,
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
+                | "normalize"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -80,6 +81,76 @@ impl<'a> FnLowerer<'a> {
                     let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((other_name, HirType::Str, other));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"normalize" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "normalize receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.normalize")?;
+                    if arguments.len() > 1 {
+                        return Err("native `.normalize()` expects zero or one argument".into());
+                    }
+                    let form = match arguments.first() {
+                        Some(argument) => self.coerce_primitive_to_string(argument.clone())?,
+                        None => HirExpr::Lit(HirLit::Str("NFC".into())),
+                    };
+                    let receiver_name =
+                        format!("__thaw_normalize_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let form_name = format!("__thaw_normalize_form_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let raw_name = format!("__thaw_normalize_raw_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(form_name.clone(), HirType::Str);
+                    self.scope.insert(raw_name.clone(), HirType::Str);
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(
+                            raw_name.clone(),
+                            HirType::Str,
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_normalize".into())),
+                                vec![var(&receiver_name), var(&form_name)],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                                vec![var(&raw_name)],
+                            ),
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                "The normalization form should be one of NFC, NFD, NFKC, NFKD."
+                                    .into(),
+                            )))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(var(&raw_name))),
+                    ]);
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            HirType::Str,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((form_name, HirType::Str, form));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"codePointAt" {

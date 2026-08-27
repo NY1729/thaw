@@ -560,3 +560,31 @@ pub extern "C" fn thaw_string_from_code_point(point: f64) -> *const c_char {
     let text = character.encode_utf8(&mut buffer);
     arena_c_string(text).map_or(std::ptr::null(), |value| value.cast())
 }
+
+#[no_mangle]
+/// Normalizes `value` to the Unicode form named by `form` (`"NFC"`,
+/// `"NFD"`, `"NFKC"` or `"NFKD"`), matching `String.prototype.normalize`.
+/// Returns a null pointer for any other form name, letting the caller
+/// detect the failure with `thaw_string_is_null` and throw a `RangeError`
+/// as the specification requires.
+///
+/// # Safety
+/// `value` and `form` must reference valid NUL-terminated UTF-8 strings.
+pub unsafe extern "C" fn thaw_string_normalize(
+    value: *const c_char,
+    form: *const c_char,
+) -> *const c_char {
+    if value.is_null() || form.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let form = unsafe { CStr::from_ptr(form) }.to_string_lossy();
+    let normalized: std::borrow::Cow<str> = match form.as_ref() {
+        "NFC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(&value),
+        "NFD" => icu_normalizer::DecomposingNormalizerBorrowed::new_nfd().normalize(&value),
+        "NFKC" => icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(&value),
+        "NFKD" => icu_normalizer::DecomposingNormalizerBorrowed::new_nfkd().normalize(&value),
+        _ => return std::ptr::null(),
+    };
+    arena_c_string(&normalized).map_or(std::ptr::null(), |value| value.cast())
+}
