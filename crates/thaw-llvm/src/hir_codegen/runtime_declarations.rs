@@ -554,6 +554,27 @@ impl<'ctx> HirCompiler<'ctx> {
                 .add_function(name, date_set_two_type, Some(Linkage::External));
         }
         self.module.add_function(
+            "thaw_date_utc",
+            f64_type.fn_type(
+                &[
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_date_parse",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_string_repeat",
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
             Some(Linkage::External),

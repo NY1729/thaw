@@ -120,6 +120,128 @@ pub extern "C" fn thaw_date_now() -> f64 {
         .unwrap_or(0.0)
 }
 
+#[no_mangle]
+/// `Date.UTC(year, month?, date?, hours?, minutes?, seconds?, ms?)`: the
+/// generated code always supplies every parameter, defaulting an omitted
+/// trailing one to `Date.UTC`'s own spec default (month 0, date 1, and 0
+/// for the rest) rather than reading it from an existing receiver, since
+/// there is none. A two-digit `year` in `[0, 99]` is interpreted as
+/// `1900 + year`, matching the specification's legacy behavior (shared
+/// with the `Date(...)` constructor's numeric-argument form, which isn't
+/// implemented separately since it would just call this).
+pub extern "C" fn thaw_date_utc(
+    year: f64,
+    month: f64,
+    date: f64,
+    hours: f64,
+    minutes: f64,
+    seconds: f64,
+    milliseconds: f64,
+) -> f64 {
+    let year = if year.is_finite() && (0.0..=99.0).contains(&year.trunc()) {
+        year.trunc() + 1900.0
+    } else {
+        year
+    };
+    if !hours.is_finite() || !minutes.is_finite() || !seconds.is_finite() || !milliseconds.is_finite() {
+        return f64::NAN;
+    }
+    make_date(
+        make_day(year, month, date),
+        hours.trunc() * 3_600_000.0
+            + minutes.trunc() * 60_000.0
+            + seconds.trunc() * 1_000.0
+            + milliseconds.trunc(),
+    )
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+/// Parses `text` against the ECMA-262 "Date Time String Format" (a
+/// restricted ISO 8601 profile: `YYYY`, `YYYY-MM`, or `YYYY-MM-DD`,
+/// optionally followed by `THH:mm`, `THH:mm:ss`, or `THH:mm:ss.sss`, and
+/// then an optional `Z` or `+HH:mm`/`-HH:mm` offset), returning the
+/// resulting timestamp, matching `Date.parse` and the `Date(text)`
+/// constructor overload. Other date string formats are implementation-
+/// defined by the specification and are not supported here -- they parse
+/// as `NaN` (`Invalid Date`) rather than being rejected at compile time,
+/// matching a real engine encountering a format it doesn't recognize.
+/// Out-of-range fields (an invalid day for the given month, including
+/// leap years, or an hour/minute/second outside `0-23`/`0-59`) also parse
+/// as `NaN`, since the specification does not roll these over the way
+/// `Date.UTC`/the setters do. A date-only form and a date-time form with
+/// no offset are both interpreted as UTC, since there is no host timezone
+/// database to make "local" time mean anything else.
+///
+/// # Safety
+/// `text` must be null or point to a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_date_parse(text: *const c_char) -> f64 {
+    if text.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{3}))?)?(Z|[+-]\d{2}:\d{2})?)?$",
+        )
+        .unwrap()
+    });
+    let Some(captures) = pattern.captures(&text) else {
+        return f64::NAN;
+    };
+    let field = |index: usize| -> Option<i64> { captures.get(index)?.as_str().parse().ok() };
+    let year = field(1).unwrap();
+    let month = field(2).unwrap_or(1) as u32;
+    let day = field(3).unwrap_or(1) as u32;
+    let hours = field(4).unwrap_or(0);
+    let minutes = field(5).unwrap_or(0);
+    let seconds = field(6).unwrap_or(0);
+    let milliseconds = field(7).unwrap_or(0);
+    if !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month) as i64).contains(&(day as i64))
+        || !(0..=23).contains(&hours)
+        || !(0..=59).contains(&minutes)
+        || !(0..=59).contains(&seconds)
+    {
+        return f64::NAN;
+    }
+    let day_count = days_from_civil(year, month, day) as f64;
+    let mut timestamp = day_count * 86_400_000.0
+        + hours as f64 * 3_600_000.0
+        + minutes as f64 * 60_000.0
+        + seconds as f64 * 1_000.0
+        + milliseconds as f64;
+    if let Some(offset) = captures.get(8) {
+        let offset = offset.as_str();
+        if offset != "Z" {
+            let sign = if offset.starts_with('-') { -1.0 } else { 1.0 };
+            let offset_hours: f64 = offset[1..3].parse().unwrap();
+            let offset_minutes: f64 = offset[4..6].parse().unwrap();
+            timestamp -= sign * (offset_hours * 3_600_000.0 + offset_minutes * 60_000.0);
+        }
+    }
+    timestamp
+}
+
 macro_rules! date_field_getter {
     ($name:ident, $field:ident) => {
         #[no_mangle]
@@ -430,5 +552,63 @@ mod date_native_tests {
             .unwrap();
         assert_eq!(text, "2024-01-01T00:00:00.500Z");
         assert!(thaw_date_to_iso_string(f64::NAN).is_null());
+    }
+
+    fn parse(text: &str) -> f64 {
+        let text = CString::new(text).unwrap();
+        unsafe { thaw_date_parse(text.as_ptr()) }
+    }
+
+    #[test]
+    fn date_utc_matches_known_timestamp() {
+        assert_eq!(
+            thaw_date_utc(2024.0, 0.0, 1.0, 0.0, 0.0, 0.0, 500.0),
+            1_704_067_200_500.0
+        );
+    }
+
+    #[test]
+    fn date_utc_applies_two_digit_year_quirk() {
+        assert_eq!(
+            thaw_date_utc(70.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0),
+            thaw_date_utc(1970.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn parses_full_iso_string_round_trip() {
+        assert_eq!(parse("2024-01-01T00:00:00.500Z"), 1_704_067_200_500.0);
+    }
+
+    #[test]
+    fn parses_date_only_and_partial_forms() {
+        assert_eq!(parse("2024-01-01"), 1_704_067_200_000.0);
+        assert_eq!(parse("2024-01"), 1_704_067_200_000.0);
+        assert_eq!(parse("2024"), 1_704_067_200_000.0);
+        assert_eq!(parse("2024-01-01T00:00"), 1_704_067_200_000.0);
+    }
+
+    #[test]
+    fn parses_timezone_offset() {
+        // +05:00 is 5 hours ahead of UTC, so the UTC instant is 5 hours earlier.
+        assert_eq!(
+            parse("2024-01-01T05:00:00+05:00"),
+            1_704_067_200_000.0
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_calendar_fields_without_rolling_over() {
+        assert!(parse("2024-02-30").is_nan()); // 2024 is a leap year; Feb has 29 days.
+        assert!(parse("2023-02-29").is_nan()); // 2023 is not a leap year.
+        assert!(parse("2024-13-01").is_nan());
+        assert!(parse("2024-01-01T24:00:00").is_nan());
+    }
+
+    #[test]
+    fn rejects_unrecognized_formats() {
+        assert!(parse("not a date").is_nan());
+        assert!(parse("01/01/2024").is_nan());
+        assert!(parse("").is_nan());
     }
 }
