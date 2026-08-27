@@ -672,14 +672,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .unwrap();
             let field = match field_ty {
-                HirType::F64 => self.compile_json_as_value(field_json, "thaw_json_as_number")?,
-                HirType::Str => self.compile_json_as_value(field_json, "thaw_json_as_string")?,
-                HirType::Bool => self.compile_json_as_bool_value(field_json)?,
-                HirType::Json | HirType::Dictionary(_) => field_json,
-                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
-                    self.compile_json_to_native(field_json, field_ty)?
-                }
-                other => return Err(format!("unsupported dynamic result field {other:?}")),
+                HirType::Optional(payload) => self.compile_json_to_optional_field(
+                    json,
+                    key.as_pointer_value(),
+                    field_json,
+                    payload,
+                    false,
+                )?,
+                HirType::Nullable(payload) => self.compile_json_to_nullable_field(
+                    field_json,
+                    payload,
+                )?,
+                HirType::Nullish(payload) => self.compile_json_to_nullish_field(
+                    json,
+                    key.as_pointer_value(),
+                    field_json,
+                    payload,
+                )?,
+                _ => self.compile_json_value_to_native(field_json, field_ty)?,
             };
             let offset = self
                 .context
@@ -710,6 +720,222 @@ impl<'ctx> HirCompiler<'ctx> {
                 "JSON-backed dictionary value cannot be restored as {other:?}"
             )),
         }
+    }
+
+    fn compile_json_value_to_native(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match ty {
+            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
+            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
+            HirType::Bool => self.compile_json_as_bool_value(json),
+            HirType::Json | HirType::Dictionary(_) => Ok(json),
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
+                self.compile_json_to_native(json, ty)
+            }
+            other => Err(format!("unsupported dynamic result value {other:?}")),
+        }
+    }
+
+    fn compile_json_to_optional_field(
+        &mut self,
+        object: BasicValueEnum<'ctx>,
+        key: PointerValue<'ctx>,
+        json: BasicValueEnum<'ctx>,
+        payload: &HirType,
+        nullable: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let present = if nullable {
+            let is_null = self.compile_json_is_null_value(json)?;
+            self.builder
+                .build_not(is_null, "json_nullable_present")
+                .map_err(|error| error.to_string())?
+        } else {
+            let has_own = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_has_own").unwrap(),
+                    &[object.into(), key.into()],
+                    "json_optional_has_own",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_has_own returned no value")?
+                .into_int_value();
+            self.builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    has_own,
+                    self.context.i8_type().const_zero(),
+                    "json_optional_present",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let function = self.current_function();
+        let value_block = self.context.append_basic_block(function, "json_tagged_value");
+        let absent_block = self.context.append_basic_block(function, "json_tagged_absent");
+        let done = self.context.append_basic_block(function, "json_tagged_done");
+        self.builder
+            .build_conditional_branch(present, value_block, absent_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(value_block);
+        let payload_value = self.compile_json_value_to_native(json, payload)?;
+        let value = self.build_optional_value(payload_value, payload, true)?;
+        let value_end = self.builder.get_insert_block().ok_or("lost tagged value block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(absent_block);
+        let zero = self.compile_zero_value(payload)?;
+        let absent = self.build_optional_value(zero, payload, false)?;
+        let absent_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("lost tagged absent block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(done);
+        let tagged_type = self.basic_type(&HirType::Optional(Box::new(payload.clone())))?;
+        let result = self
+            .builder
+            .build_phi(tagged_type, "json_tagged_field")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[(&value, value_end), (&absent, absent_end)]);
+        Ok(result.as_basic_value())
+    }
+
+    fn compile_json_to_nullable_field(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        payload: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_json_to_optional_field(json, json.into_pointer_value(), json, payload, true)
+    }
+
+    fn compile_json_is_null_value(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_is_null").unwrap(),
+                &[json.into()],
+                "json_is_null",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_is_null returned no value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                result,
+                self.context.i8_type().const_zero(),
+                "json_is_null_bool",
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_json_to_nullish_field(
+        &mut self,
+        object: BasicValueEnum<'ctx>,
+        key: PointerValue<'ctx>,
+        json: BasicValueEnum<'ctx>,
+        payload: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let has_own = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_has_own").unwrap(),
+                &[object.into(), key.into()],
+                "json_nullish_has_own",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_has_own returned no value")?
+            .into_int_value();
+        let has_own = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                has_own,
+                self.context.i8_type().const_zero(),
+                "json_nullish_present",
+            )
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let present_block = self.context.append_basic_block(function, "json_nullish_present");
+        let undefined_block = self
+            .context
+            .append_basic_block(function, "json_nullish_undefined");
+        let null_block = self.context.append_basic_block(function, "json_nullish_null");
+        let value_block = self.context.append_basic_block(function, "json_nullish_value");
+        let done = self.context.append_basic_block(function, "json_nullish_done");
+        self.builder
+            .build_conditional_branch(has_own, present_block, undefined_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(undefined_block);
+        let zero = self.compile_zero_value(payload)?;
+        let undefined = self.build_nullish_value(zero, payload, 2)?;
+        let undefined_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("lost nullish undefined block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(present_block);
+        let is_null = self.compile_json_is_null_value(json)?;
+        self.builder
+            .build_conditional_branch(is_null, null_block, value_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(null_block);
+        let zero = self.compile_zero_value(payload)?;
+        let null = self.build_nullish_value(zero, payload, 1)?;
+        let null_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("lost nullish null block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(value_block);
+        let payload_value = self.compile_json_value_to_native(json, payload)?;
+        let value = self.build_nullish_value(payload_value, payload, 0)?;
+        let value_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("lost nullish value block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(done);
+        let tagged_type = self.basic_type(&HirType::Nullish(Box::new(payload.clone())))?;
+        let result = self
+            .builder
+            .build_phi(tagged_type, "json_nullish_field")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[
+            (&undefined, undefined_end),
+            (&null, null_end),
+            (&value, value_end),
+        ]);
+        Ok(result.as_basic_value())
     }
 
     fn compile_json_to_native_array(
