@@ -22,6 +22,23 @@ fn napi_constructor_arity_symbols_share_the_same_export() {
     assert_eq!(napi_constructor_export_name("ordinary"), None);
 }
 
+#[test]
+fn compiles_typed_napi_tuple_arguments_and_results() {
+    let module = thaw_parser::parse_typescript(
+        r#"declare function __thaw_typed_napi_737761705475706c65(value: [number, string]): [string, number];
+           function main(): void {
+               const value: [number, string] = [7, "value"];
+               const swapped: [string, number] = __thaw_typed_napi_737761705475706c65(value);
+               console.log(swapped[0]);
+           }"#,
+    )
+    .unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_napi_tuple");
+    compiler.compile_program(&program).unwrap();
+}
+
 /// Builds the given TS source into a standalone native binary (linking
 /// thaw-arena's staticlib too, since array-using programs call into
 /// it), runs it with the given extra environment variables, and

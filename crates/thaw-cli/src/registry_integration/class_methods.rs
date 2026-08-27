@@ -593,6 +593,12 @@ fn rewrite_external_class_methods_with_static(
                 }
                 _ => None,
             },
+            TsType::TsTupleType(tuple) => tuple
+                .elem_types
+                .iter()
+                .map(|element| source_ts_type(&element.ty, named))
+                .collect::<Option<Vec<_>>>()
+                .map(thaw_hir::HirType::Tuple),
             TsType::TsTypeRef(reference) => {
                 let TsEntityName::Ident(name) = &reference.type_name else {
                     return None;
