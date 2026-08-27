@@ -667,9 +667,8 @@ impl<'a> FnLowerer<'a> {
 
         let mut callee_name = match callee_expr.as_ref() {
             Expr::Ident(ident) => self.resolve_binding(ident.sym.as_ref()),
-            // `console.log` has no dedicated HIR node; it's encoded as a
-            // call to the synthetic name "console.log" and codegen
-            // special-cases it.
+            // Console methods have no dedicated HIR node; they are encoded as
+            // synthetic names such as "console.log" and codegen special-cases them.
             Expr::Member(member) => {
                 let Expr::Ident(obj) = member.obj.as_ref() else {
                     return Err("unsupported member call target".into());
@@ -680,7 +679,7 @@ impl<'a> FnLowerer<'a> {
                 format!("{}.{}", obj.sym, prop.sym)
             }
             _ => return Err(
-                "unsupported call target (only plain identifiers and console.log are supported)"
+                "unsupported call target (only plain identifiers and supported console methods are supported)"
                     .into(),
             ),
         };

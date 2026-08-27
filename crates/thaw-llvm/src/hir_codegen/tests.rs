@@ -15,6 +15,18 @@ fn compile_and_run(source: &str, test_name: &str) -> String {
 }
 
 fn compile_and_run_with_env(source: &str, test_name: &str, envs: &[(&str, &str)]) -> String {
+    compile_and_run_output_with_env(source, test_name, envs).0
+}
+
+fn compile_and_run_output(source: &str, test_name: &str) -> (String, String) {
+    compile_and_run_output_with_env(source, test_name, &[])
+}
+
+fn compile_and_run_output_with_env(
+    source: &str,
+    test_name: &str,
+    envs: &[(&str, &str)],
+) -> (String, String) {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
 
@@ -68,7 +80,10 @@ fn compile_and_run_with_env(source: &str, test_name: &str, envs: &[(&str, &str)]
     );
 
     let _ = std::fs::remove_dir_all(&dir);
-    String::from_utf8_lossy(&output.stdout).into_owned()
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
 }
 
 /// Builds `pkg` as a staticlib (if not already built) and returns the
