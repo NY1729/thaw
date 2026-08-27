@@ -1442,13 +1442,16 @@ fn compiles_fixed_object_in_checks_in_operand_order() {
             console.log(key() in (await object("third")));
             console.log(1 in { "1": true });
             console.log(key() in (await json()));
+            const record: Record<string, number> = { value: 1 };
+            console.log("value" in record);
+            console.log("missing" in record);
             console.log("missing" in JSON.parse("[10,20]"));
             console.log("length" in JSON.parse("[10,20]"));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "fixed_object_in"),
-        "first\ntrue\nsecond\nfalse\nkey\nthird\ntrue\ntrue\nkey\njson\ntrue\nfalse\ntrue\n"
+        "first\ntrue\nsecond\nfalse\nkey\nthird\ntrue\ntrue\nkey\njson\ntrue\ntrue\nfalse\nfalse\ntrue\n"
     );
 }
 
@@ -2223,6 +2226,10 @@ fn compiles_object_keys_for_fixed_objects() {
             console.log(Object.keys(empty).length);
             const jsonObject: Json = JSON.parse("{\"second\":2,\"first\":1}");
             console.log(Object.keys(jsonObject).join(","));
+            const record: Record<string, number> = { ten: 10, two: 2 };
+            console.log(Object.keys(record).join(","));
+            console.log(Object.getOwnPropertyNames(record).join("|"));
+            console.log(Reflect.ownKeys(record).join("+"));
             console.log(Object.getOwnPropertyNames(JSON.parse("[10,20]")).join("|"));
             console.log(Reflect.ownKeys(JSON.parse("true")).length);
             const array: number[] = [10, 20, 30];
@@ -2234,7 +2241,7 @@ fn compiles_object_keys_for_fixed_objects() {
     "#;
     assert_eq!(
         compile_and_run(source, "object_keys"),
-        "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\nsecond,first\n0|1\n0\n0,1,2\n0|1\n0\n"
+        "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\nsecond,first\nten,two\nten|two\nten+two\n0|1\n0\n0,1,2\n0|1\n0\n"
     );
 }
 
@@ -2270,13 +2277,16 @@ fn compiles_object_has_own_for_fixed_objects() {
             const jsonObject: Json = JSON.parse("{\"value\":1}");
             console.log(Object.hasOwn(jsonObject, "value"));
             console.log(Object.hasOwn(jsonObject, "missing"));
+            const record: Record<string, number> = { value: 1 };
+            console.log(Object.hasOwn(record, "value"));
+            console.log(Object.hasOwn(record, "missing"));
             console.log(Object.hasOwn(JSON.parse("[10,20]"), "1"));
             console.log(Object.hasOwn(JSON.parse("[10,20]"), "length"));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_has_own"),
-        "object\nkey\ntrue\nfalse\ntrue\nfalse\nawaited-object\nawaited-key\ntrue\ntrue\nfalse\ntrue\ntrue\n"
+        "object\nkey\ntrue\nfalse\ntrue\nfalse\nawaited-object\nawaited-key\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n"
     );
 }
 

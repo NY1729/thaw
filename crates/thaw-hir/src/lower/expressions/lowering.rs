@@ -287,14 +287,14 @@ impl<'a> FnLowerer<'a> {
                 let value = match bin.op {
                     BinaryOp::In => {
                         let right_type = self.infer_expr_type(&rhs)?;
-                        if right_type == HirType::Json {
+                        if matches!(right_type, HirType::Json | HirType::Dictionary(_)) {
                             let lhs = self.coerce_primitive_to_string(lhs)?;
                             let left_name = format!("__thaw_in_key_{}", self.next_binding);
                             self.next_binding += 1;
                             self.scope.insert(left_name.clone(), HirType::Str);
                             let right_name = format!("__thaw_in_object_{}", self.next_binding);
                             self.next_binding += 1;
-                            self.scope.insert(right_name.clone(), HirType::Json);
+                            self.scope.insert(right_name.clone(), right_type.clone());
                             self.wrap_call_argument_bindings(
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_json_has_own".into())),
@@ -305,7 +305,7 @@ impl<'a> FnLowerer<'a> {
                                 ),
                                 &[
                                     (left_name, HirType::Str, lhs),
-                                    (right_name, HirType::Json, rhs),
+                                    (right_name, right_type, rhs),
                                 ],
                             )?
                         } else {
