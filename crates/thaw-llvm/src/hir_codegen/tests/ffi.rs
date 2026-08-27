@@ -1558,6 +1558,61 @@ fn compiles_string_normalize() {
 }
 
 #[test]
+fn compiles_tagged_template_literals() {
+    let source = r#"
+        function upper(strings: string[], value: number): string {
+            return strings[0] + value + strings[1].toUpperCase();
+        }
+        function greeting(strings: string[]): string {
+            return strings[0].toUpperCase();
+        }
+        function values(strings: string[], a: number, b: number): number {
+            return strings.length + a + b;
+        }
+        function main(): void {
+            console.log(upper`count: ${5} done`);
+            console.log(greeting`hello`);
+            console.log(values`${1}mid${2}`);
+            console.log(String.raw`a\nb${1 + 1}c`);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tagged_template_literals"),
+        "count: 5 DONE\nHELLO\n6\na\\nb2c\n"
+    );
+}
+
+#[test]
+fn compiles_tagged_template_evaluation_order_and_async() {
+    let source = r#"
+        const combine = (strings: string[], a: number, b: number): string => {
+            return strings[0] + a + strings[1] + b + strings[2];
+        };
+        function first(): number {
+            console.log("first");
+            return 1;
+        }
+        function second(): number {
+            console.log("second");
+            return 2;
+        }
+        async function delayed(): Promise<number> {
+            console.log("awaited value");
+            await sleep(1);
+            return 3;
+        }
+        async function main(): Promise<void> {
+            console.log(combine`[${first()}|${second()}]`);
+            console.log(combine`[${await delayed()}|${first()}]`);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "tagged_template_order_and_async"),
+        "first\nsecond\n[1|2]\nawaited value\nfirst\n[3|1]\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {
