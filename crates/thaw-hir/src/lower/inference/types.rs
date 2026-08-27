@@ -1025,6 +1025,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::JsonAsNumber(_) => Ok(HirType::F64),
             HirExpr::JsonAsString(_) => Ok(HirType::Str),
             HirExpr::JsonAsBool(_) => Ok(HirType::Bool),
+            HirExpr::JsonAsNative(_, ty) => Ok(ty.clone()),
             HirExpr::FfiCall(sig, _) => Ok(sig.ret.clone()),
             HirExpr::Await(inner) | HirExpr::AwaitPromise(inner, _) => {
                 match self.infer_expr_type(inner)? {

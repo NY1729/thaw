@@ -340,6 +340,39 @@ fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest(
 }
 
 #[test]
+fn structured_dictionary_values_support_reads_and_destructuring() {
+    let source = r#"
+        interface Item { value: number; label: string; }
+        function items(): Record<string, Item> {
+            return {
+                selected: { value: 1, label: "one" },
+                kept: { value: 2, label: "two" }
+            };
+        }
+        function arrays(): Record<string, number[]> {
+            return { selected: [3, 4], kept: [5] };
+        }
+        function main(): void {
+            const direct: Item = items().selected;
+            const {
+                selected: { value, label },
+                ...itemRest
+            }: Record<string, Item> = items();
+            let selected: number[] = [];
+            let arrayRest: Record<string, number[]> = {};
+            ({ selected, ...arrayRest } = arrays());
+            console.log(direct.value, direct.label, value, label, itemRest);
+            console.log(selected, arrayRest);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "structured_dictionary_destructuring"),
+        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {
