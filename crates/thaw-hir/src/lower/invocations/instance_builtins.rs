@@ -3,7 +3,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             property,
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
-                | "repeat" | "padStart" | "padEnd" | "toFixed"
+                | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -431,6 +431,89 @@ impl<'a> FnLowerer<'a> {
                     let mut bindings = vec![(receiver_name, HirType::F64, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((digits_name, HirType::F64, digits));
+                    return self.wrap_call_argument_bindings(body, &bindings);
+                }
+                if property.sym == *"toPrecision" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::F64, &receiver, "toPrecision receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Number.toPrecision")?;
+                    if arguments.len() > 1 {
+                        return Err("native `.toPrecision()` expects zero or one argument".into());
+                    }
+                    let receiver_name =
+                        format!("__thaw_to_precision_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::F64);
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let Some(argument) = arguments.first() else {
+                        let mut bindings = vec![(receiver_name.clone(), HirType::F64, receiver)];
+                        bindings.extend(spread_bindings);
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                            vec![var(&receiver_name)],
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    };
+                    let precision = self.coerce_primitive_to_number(argument.clone())?;
+                    let precision_name =
+                        format!("__thaw_to_precision_digits_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let normalized_name =
+                        format!("__thaw_to_precision_normalized_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(precision_name.clone(), HirType::F64);
+                    self.scope.insert(normalized_name.clone(), HirType::F64);
+                    let number = |value| HirExpr::Lit(HirLit::F64(value));
+                    let assign = |value| {
+                        HirStmt::Expr(HirExpr::Assign(normalized_name.clone(), Box::new(value)))
+                    };
+                    let range_error = || {
+                        HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                            "toPrecision() argument must be between 1 and 100".into(),
+                        )))
+                    };
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(normalized_name.clone(), HirType::F64, var(&precision_name)),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(var(&normalized_name)),
+                                Box::new(var(&normalized_name)),
+                            ),
+                            Vec::new(),
+                            vec![assign(number(0.0))],
+                        ),
+                        assign(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                            vec![var(&normalized_name)],
+                        )),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(var(&normalized_name)),
+                                Box::new(number(1.0)),
+                            ),
+                            vec![range_error()],
+                            Vec::new(),
+                        ),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::Gt,
+                                Box::new(var(&normalized_name)),
+                                Box::new(number(100.0)),
+                            ),
+                            vec![range_error()],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_number_to_precision".into())),
+                            vec![var(&receiver_name), var(&normalized_name)],
+                        ))),
+                    ]);
+                    let mut bindings = vec![(receiver_name, HirType::F64, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((precision_name, HirType::F64, precision));
                     return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if matches!(property.sym.as_ref(), "toLowerCase" | "toUpperCase") {

@@ -519,6 +519,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, digits, "toFixed digits")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_number_to_precision" => {
+                        let [value, digits] = args.as_slice() else {
+                            return Err("number toPrecision expects two operands".into());
+                        };
+                        self.expect_type(&HirType::F64, value, "toPrecision receiver")?;
+                        self.expect_type(&HirType::F64, digits, "toPrecision digits")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_length" => {
                         let [argument] = args.as_slice() else {
                             return Err("string length expects one operand".into());
