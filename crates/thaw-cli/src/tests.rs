@@ -71,7 +71,7 @@ fn rewrites_external_class_constructors_without_touching_other_new_expressions()
         &[(
             "sqlite3".into(),
             "Database".into(),
-            vec![(1, "Database_ctor".into())],
+            vec![(1, "Database_ctor".into(), vec![])],
         )],
     )
     .unwrap();
@@ -90,9 +90,9 @@ fn rewrites_external_class_constructors_by_argument_count() {
             "sqlite3".into(),
             "Database".into(),
             vec![
-                (0, "Database_ctor0".into()),
-                (1, "Database_ctor1".into()),
-                (2, "Database_ctor2".into()),
+                (0, "Database_ctor0".into(), vec![]),
+                (1, "Database_ctor1".into(), vec![]),
+                (2, "Database_ctor2".into(), vec![]),
             ],
         )],
     )
@@ -129,7 +129,10 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
     let mut shim = String::new();
     let helpers = generate_napi_class_constructors(&class, &mut shim);
     assert_eq!(
-        helpers.iter().map(|(arity, _)| *arity).collect::<Vec<_>>(),
+        helpers
+            .iter()
+            .map(|(arity, _, _)| *arity)
+            .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
     assert!(shim.contains("(): JsValue;"));
@@ -141,7 +144,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
         &[("pkg".into(), "Client".into(), helpers.clone())],
     )
     .unwrap();
-    for (_, helper) in helpers {
+    for (_, helper, _) in helpers {
         assert!(rewritten.contains(&helper));
     }
 
@@ -166,6 +169,60 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
     locked.constructible = false;
     assert!(generate_napi_class_constructors(&locked, &mut locked_shim).is_empty());
     assert!(locked_shim.is_empty());
+}
+
+#[test]
+fn selects_same_arity_napi_constructors_by_argument_type() {
+    let class = thaw_bridge::DtsClass {
+        name: "NativeBox".into(),
+        extends: None,
+        constructible: true,
+        constructors: vec![
+            thaw_bridge::DtsConstructor {
+                params: vec![(
+                    "value".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+                )],
+                required_params: 1,
+                overloaded: true,
+            },
+            thaw_bridge::DtsConstructor {
+                params: vec![(
+                    "value".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+                )],
+                required_params: 1,
+                overloaded: true,
+            },
+        ],
+        methods: vec![],
+        properties: vec![],
+    };
+    let mut shim = String::new();
+    let helpers = generate_napi_class_constructors(&class, &mut shim);
+    assert_eq!(helpers.len(), 2);
+    let string_helper = helpers
+        .iter()
+        .find(|(_, _, types)| types == &[thaw_hir::HirType::Str])
+        .unwrap()
+        .1
+        .clone();
+    let number_helper = helpers
+        .iter()
+        .find(|(_, _, types)| types == &[thaw_hir::HirType::F64])
+        .unwrap()
+        .1
+        .clone();
+    let rewritten = rewrite_external_class_methods(
+        "const n = 42; const s = 'value'; const a = new NativeBox(n); const b = new NativeBox(s); const c = new NativeBox(7); const d = new NativeBox('text');",
+        &[("pkg".into(), "NativeBox".into(), helpers)],
+        &[],
+    )
+    .unwrap();
+    assert!(rewritten.contains(&format!("const a = {number_helper}(n)")));
+    assert!(rewritten.contains(&format!("const b = {string_helper}(s)")));
+    assert!(rewritten.contains(&format!("const c = {number_helper}(7)")));
+    assert!(rewritten.contains(&format!("const d = {string_helper}('text')")));
 }
 
 #[test]
@@ -237,7 +294,7 @@ fn rewrites_inherited_external_class_methods() {
         &[(
             "pkg".into(),
             "Derived".into(),
-            vec![(1, "Derived_ctor".into())],
+            vec![(1, "Derived_ctor".into(), vec![])],
         )],
         &[(
             "Derived".into(),
@@ -260,7 +317,7 @@ fn rewrites_methods_on_values_created_from_external_classes() {
         &[(
             "sqlite3".into(),
             "Database".into(),
-            vec![(1, "Database_ctor".into())],
+            vec![(1, "Database_ctor".into(), vec![])],
         )],
         &[(
             "Database".into(),
@@ -274,7 +331,7 @@ fn rewrites_methods_on_values_created_from_external_classes() {
     .unwrap();
     assert_eq!(
             rewritten,
-            "const db = new Database(\":memory:\"); __thaw_configure(db, \"busyTimeout\", 1000); const local = new LocalBox(1); local.configure(2);"
+            "const db = Database_ctor(\":memory:\"); __thaw_configure(db, \"busyTimeout\", 1000); const local = new LocalBox(1); local.configure(2);"
         );
 }
 
@@ -325,7 +382,7 @@ fn rewrites_typed_napi_instance_getters() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[],
         &[],
@@ -341,7 +398,7 @@ fn rewrites_typed_napi_instance_getters() {
     .unwrap();
     assert_eq!(
         rewritten,
-        "const box = new NativeBox(42); console.log(__thaw_get_value(box));"
+        "const box = NativeBox_ctor(42); console.log(__thaw_get_value(box));"
     );
 }
 
@@ -353,7 +410,7 @@ fn rewrites_typed_napi_instance_setters_and_preserves_expression_values() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[],
         &[],
@@ -370,7 +427,7 @@ fn rewrites_typed_napi_instance_setters_and_preserves_expression_values() {
     .unwrap();
     assert_eq!(
         rewritten,
-        "const box = new NativeBox(42); const assigned: number = __thaw_set_value(box, 7);"
+        "const box = NativeBox_ctor(42); const assigned: number = __thaw_set_value(box, 7);"
     );
 }
 
@@ -448,7 +505,7 @@ fn rewrites_zero_argument_external_class_methods() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[(
             "NativeBox".into(),
@@ -462,7 +519,7 @@ fn rewrites_zero_argument_external_class_methods() {
     .unwrap();
     assert_eq!(
         rewritten,
-        "const box = new NativeBox(42); const value = __thaw_get(box);"
+        "const box = NativeBox_ctor(42); const value = __thaw_get(box);"
     );
 }
 
@@ -474,7 +531,7 @@ fn tracks_external_class_instance_aliases_and_invalidates_reassignments() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[(
             "NativeBox".into(),
@@ -488,7 +545,7 @@ fn tracks_external_class_instance_aliases_and_invalidates_reassignments() {
     .unwrap();
     assert_eq!(
             rewritten,
-            "const box = new NativeBox(42); const alias = box; __thaw_get(alias); let assigned = alias; __thaw_get(assigned); assigned = box; __thaw_get(assigned); assigned = unknown; assigned.get();"
+            "const box = NativeBox_ctor(42); const alias = box; __thaw_get(alias); let assigned = alias; __thaw_get(assigned); assigned = box; __thaw_get(assigned); assigned = unknown; assigned.get();"
         );
 }
 
@@ -500,7 +557,7 @@ fn tracks_external_class_instances_through_object_properties() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[(
             "NativeBox".into(),
@@ -514,7 +571,7 @@ fn tracks_external_class_instances_through_object_properties() {
     .unwrap();
     assert_eq!(
             rewritten,
-            "const box = new NativeBox(42); const holder = { box }; __thaw_get(holder.box); __thaw_get(holder[\"box\"]); const nested = { inner: { value: new NativeBox(7) } }; __thaw_get(nested.inner.value); holder.box = box; __thaw_get(holder.box); holder.box = unknown; holder.box.get();"
+            "const box = NativeBox_ctor(42); const holder = { box }; __thaw_get(holder.box); __thaw_get(holder[\"box\"]); const nested = { inner: { value: NativeBox_ctor(7) } }; __thaw_get(nested.inner.value); holder.box = box; __thaw_get(holder.box); holder.box = unknown; holder.box.get();"
         );
 }
 
@@ -526,7 +583,7 @@ fn joins_object_property_instance_facts_across_branches() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[(
             "NativeBox".into(),
@@ -540,7 +597,7 @@ fn joins_object_property_instance_facts_across_branches() {
     .unwrap();
     assert_eq!(
             rewritten,
-            "const box = new NativeBox(42); let holder = { box }; if (flag) { holder.box = box; } else { holder.box = box; } __thaw_get(holder.box); if (flag) { holder.box = box; } else { holder.box = unknown; } holder.box.get(); holder = unknown; holder.box.get();"
+            "const box = NativeBox_ctor(42); let holder = { box }; if (flag) { holder.box = box; } else { holder.box = box; } __thaw_get(holder.box); if (flag) { holder.box = box; } else { holder.box = unknown; } holder.box.get(); holder = unknown; holder.box.get();"
         );
 }
 
@@ -552,7 +609,7 @@ fn selects_external_method_overloads_by_arity_and_callback_shape() {
         &[(
             "sqlite3".into(),
             "Database".into(),
-            vec![(1, "Database_ctor".into())],
+            vec![(1, "Database_ctor".into(), vec![])],
         )],
         &[
             (
@@ -582,7 +639,7 @@ fn selects_external_method_overloads_by_arity_and_callback_shape() {
     .unwrap();
     assert_eq!(
             rewritten,
-            "const db = new Database(\":memory:\"); const done = (error: Json): void => {}; __run_sync(db, \"select 1\"); __run_callback(db, \"select 1\", done);"
+            "const db = Database_ctor(\":memory:\"); const done = (error: Json): void => {}; __run_sync(db, \"select 1\"); __run_callback(db, \"select 1\", done);"
         );
 }
 
@@ -594,7 +651,7 @@ fn selects_same_arity_external_method_overloads_by_argument_type() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -618,7 +675,7 @@ fn selects_same_arity_external_method_overloads_by_argument_type() {
     .unwrap();
     assert_eq!(
             rewritten,
-            "const box = new NativeBox(1); const n = 42; const s = \"hello\"; __set_number(box, n); __set_string(box, s); __set_number(box, 7); __set_string(box, \"world\");"
+            "const box = NativeBox_ctor(1); const n = 42; const s = \"hello\"; __set_number(box, n); __set_string(box, s); __set_number(box, 7); __set_string(box, \"world\");"
         );
 }
 
@@ -630,7 +687,7 @@ fn selects_external_overloads_from_annotations_and_assertions() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -674,7 +731,7 @@ fn selects_number_array_overloads_from_generic_array_annotations() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -708,7 +765,7 @@ fn infers_external_overload_types_from_composed_expressions() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -758,7 +815,7 @@ fn infers_external_overloads_from_deterministic_operators() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -798,7 +855,7 @@ fn infers_external_overload_types_from_user_function_returns_and_forward_referen
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -844,7 +901,7 @@ fn selects_object_overloads_from_structural_property_types() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -893,7 +950,7 @@ fn selects_object_overloads_from_explicit_object_types() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -934,7 +991,7 @@ fn selects_object_overloads_through_named_types_and_forward_references() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -975,7 +1032,7 @@ fn tracks_assignment_flow_for_variables_and_nested_object_properties() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -1011,7 +1068,7 @@ fn joins_if_branch_types_and_discards_conflicting_facts() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -1056,7 +1113,7 @@ fn joins_switch_fallthrough_break_and_no_match_paths() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -1123,7 +1180,7 @@ fn joins_while_and_for_types_against_the_zero_iteration_path() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (
@@ -1170,7 +1227,7 @@ fn joins_try_catch_paths_and_applies_finally_to_every_exit() {
         &[(
             "addon".into(),
             "NativeBox".into(),
-            vec![(1, "NativeBox_ctor".into())],
+            vec![(1, "NativeBox_ctor".into(), vec![])],
         )],
         &[
             (

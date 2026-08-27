@@ -1989,7 +1989,9 @@ typed N-API constructor calls, and ordinary TypeScript named or namespace
 CLI E2E now compiles `import { Database } from "sqlite3"` followed by
 `new Database(":memory:")` and constructs the real in-memory database from the
 standalone executable. Optional/default constructors generate one typed helper
-per supported arity, all resolving to the same addon export. Declared
+per supported arity. Same-arity overloads retain distinct helpers and select
+number, string, boolean, number-array and object arguments through the same
+call-site type flow used by methods; all helpers resolve to the same addon export. Declared
 instance/static properties use the getter ABI and, unless `readonly`, the
 setter ABI; explicit accessor declarations take precedence. External-class
 metadata includes inherited public methods and properties,
