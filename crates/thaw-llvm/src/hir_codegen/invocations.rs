@@ -71,6 +71,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     "String.fromCharCode",
                 )
             }
+            "__thaw_string_from_code_point" => {
+                return self.compile_single_arg_call(
+                    "thaw_string_from_code_point",
+                    args,
+                    "String.fromCodePoint",
+                )
+            }
             "__thaw_bool_to_string" => return self.compile_bool_to_string(args),
             "__thaw_number_to_string" => {
                 return self.compile_single_arg_call(
