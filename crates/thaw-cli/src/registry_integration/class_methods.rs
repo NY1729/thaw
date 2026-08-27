@@ -204,6 +204,23 @@ fn rewrite_external_class_methods_with_static(
         CommonArguments(Vec<usize>),
     }
 
+    fn source_collection_element_supported(ty: &thaw_hir::HirType) -> bool {
+        match ty {
+            thaw_hir::HirType::F64
+            | thaw_hir::HirType::Str
+            | thaw_hir::HirType::Bool
+            | thaw_hir::HirType::Json => true,
+            thaw_hir::HirType::Array(element) => source_collection_element_supported(element),
+            thaw_hir::HirType::Tuple(elements) => {
+                elements.iter().all(source_collection_element_supported)
+            }
+            thaw_hir::HirType::Object(fields) => fields
+                .iter()
+                .all(|(_, field)| source_collection_element_supported(field)),
+            _ => false,
+        }
+    }
+
     fn source_expr_type(
         expression: &Expr,
         variables: &std::collections::HashMap<String, thaw_hir::HirType>,
@@ -224,10 +241,8 @@ fn rewrite_external_class_methods_with_static(
                     )
                 });
                 let first = elements.next().unwrap_or(Some(thaw_hir::HirType::F64))?;
-                (matches!(
-                    first,
-                    thaw_hir::HirType::F64 | thaw_hir::HirType::Str | thaw_hir::HirType::Bool
-                ) && elements.all(|candidate| candidate.as_ref() == Some(&first)))
+                (source_collection_element_supported(&first)
+                    && elements.all(|candidate| candidate.as_ref() == Some(&first)))
                 .then_some(thaw_hir::HirType::Array(Box::new(first)))
             }
             Expr::Object(object) => {
@@ -595,11 +610,8 @@ fn rewrite_external_class_methods_with_static(
             }
             TsType::TsArrayType(array) => {
                 let element = source_ts_type(&array.elem_type, named)?;
-                matches!(
-                    element,
-                    thaw_hir::HirType::F64 | thaw_hir::HirType::Str | thaw_hir::HirType::Bool
-                )
-                .then_some(thaw_hir::HirType::Array(Box::new(element)))
+                source_collection_element_supported(&element)
+                    .then_some(thaw_hir::HirType::Array(Box::new(element)))
             }
             TsType::TsTupleType(tuple) => tuple
                 .elem_types
@@ -619,13 +631,8 @@ fn rewrite_external_class_methods_with_static(
                 match (name.sym.as_str(), parameters) {
                     ("Array" | "ReadonlyArray", [element]) => {
                         let element = source_ts_type(element, named)?;
-                        matches!(
-                            element,
-                            thaw_hir::HirType::F64
-                                | thaw_hir::HirType::Str
-                                | thaw_hir::HirType::Bool
-                        )
-                        .then_some(thaw_hir::HirType::Array(Box::new(element)))
+                        source_collection_element_supported(&element)
+                            .then_some(thaw_hir::HirType::Array(Box::new(element)))
                     }
                     ("Readonly", [inner]) => source_ts_type(inner, named),
                     ("Partial", [inner]) => {

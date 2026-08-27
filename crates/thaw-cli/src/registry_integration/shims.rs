@@ -59,6 +59,23 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
     }
 }
 
+fn supported_json_collection_element(ty: &thaw_hir::HirType) -> bool {
+    match ty {
+        thaw_hir::HirType::F64
+        | thaw_hir::HirType::Str
+        | thaw_hir::HirType::Bool
+        | thaw_hir::HirType::Json => true,
+        thaw_hir::HirType::Array(element) => supported_json_collection_element(element),
+        thaw_hir::HirType::Tuple(elements) => {
+            elements.iter().all(supported_json_collection_element)
+        }
+        thaw_hir::HirType::Object(fields) => fields
+            .iter()
+            .all(|(_, field)| supported_json_collection_element(field)),
+        _ => false,
+    }
+}
+
 fn typed_dynamic_declaration(
     package: &str,
     function: &thaw_bridge::DtsFunction,
@@ -143,7 +160,7 @@ fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: us
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-            if matches!(**element, thaw_hir::HirType::F64 | thaw_hir::HirType::Str | thaw_hir::HirType::Bool)
+            if supported_json_collection_element(element)
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Tuple(elements))
@@ -172,7 +189,7 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-            if matches!(**element, thaw_hir::HirType::F64 | thaw_hir::HirType::Str | thaw_hir::HirType::Bool)
+            if supported_json_collection_element(element)
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Tuple(elements))

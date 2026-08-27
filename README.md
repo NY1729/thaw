@@ -2079,8 +2079,8 @@ Registry class shims now retain every supported overload under a distinct
 internal symbol. Calls select an overload by exact argument count and whether
 the final argument is an inline or locally-bound callback. Non-callback
 overloads with the same arity are also selected from number, string, boolean,
-primitive-array (including `number[]`, `string[]`, `boolean[]`, and their
-`Array<T>` / `ReadonlyArray<T>` forms), fixed tuples, and object literals,
+JSON-marshallable arrays (including primitive, nested, and fixed-object arrays,
+with `T[]`, `Array<T>`, and `ReadonlyArray<T>` forms), fixed tuples, and object literals,
 explicitly annotated local variables, or
 locals initialized from those values. The local inference also follows arithmetic,
 mixed-primitive string concatenation, bitwise and same-typed logical operators,

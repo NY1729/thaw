@@ -7,6 +7,20 @@ fn napi_constructor_export_name(symbol: &str) -> Option<&str> {
     )
 }
 
+fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
+    match ty {
+        HirType::F64 | HirType::Str | HirType::Bool | HirType::Json => true,
+        HirType::Array(element) => dynamic_json_collection_element_supported(element),
+        HirType::Tuple(elements) => elements
+            .iter()
+            .all(dynamic_json_collection_element_supported),
+        HirType::Object(fields) => fields
+            .iter()
+            .all(|(_, field)| dynamic_json_collection_element_supported(field)),
+        _ => false,
+    }
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     /// `loadScript(source): boolean`, via thaw-quickjs's `thaw_js_load`.
     /// Same `i8` -> `i1` conversion as `compile_json_as_bool` and for the
@@ -572,8 +586,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .unwrap();
                     "thaw_json_array_push_json"
                 }
-                HirType::Array(element)
-                    if matches!(**element, HirType::Str | HirType::Bool) =>
+                HirType::Array(element) if dynamic_json_collection_element_supported(element) =>
                 {
                     value = self.compile_native_array_to_json(
                         value.into_pointer_value(),
@@ -745,7 +758,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
-            HirType::Array(ref element) if matches!(**element, HirType::Str | HirType::Bool) => {
+            HirType::Array(ref element) if dynamic_json_collection_element_supported(element) => {
                 self.compile_json_to_native_array(json, element)
             }
             HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
@@ -844,7 +857,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .unwrap();
                 "thaw_json_array_push_json"
             }
-            HirType::Array(element) if matches!(**element, HirType::Str | HirType::Bool) => {
+            HirType::Array(element) if dynamic_json_collection_element_supported(element) => {
                 assigned_value = self.compile_native_array_to_json(
                     assigned_value.into_pointer_value(),
                     element,
@@ -953,7 +966,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
-            HirType::Array(ref element) if matches!(**element, HirType::Str | HirType::Bool) => {
+            HirType::Array(ref element) if dynamic_json_collection_element_supported(element) => {
                 self.compile_json_to_native_array(json, element)
             }
             HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
@@ -1063,7 +1076,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
-            HirType::Array(ref element) if matches!(**element, HirType::Str | HirType::Bool) => {
+            HirType::Array(ref element) if dynamic_json_collection_element_supported(element) => {
                 self.compile_json_to_native_array(json, element)
             }
             HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
@@ -1169,8 +1182,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .unwrap();
                     "thaw_json_array_push_json"
                 }
-                HirType::Array(element)
-                    if matches!(**element, HirType::Str | HirType::Bool) =>
+                HirType::Array(element) if dynamic_json_collection_element_supported(element) =>
                 {
                     value = self.compile_native_array_to_json(
                         value.into_pointer_value(),
@@ -1288,7 +1300,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
-            HirType::Array(ref element) if matches!(**element, HirType::Str | HirType::Bool) => {
+            HirType::Array(ref element) if dynamic_json_collection_element_supported(element) => {
                 self.compile_json_to_native_array(json, element)
             }
             HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
