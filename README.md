@@ -1314,8 +1314,9 @@ The workspace crates have narrow responsibilities:
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
 - `Object.keys` returns an arena-owned string array for fixed-layout objects
-  and runtime JSON objects/arrays, preserving declaration, parsed insertion or
-  numeric-index order and evaluating synchronous or awaited receivers exactly once;
+  plus native arrays/tuples and runtime JSON objects/arrays, preserving
+  declaration, parsed insertion or numeric-index order and evaluating
+  synchronous or awaited receivers exactly once;
   `Object.getOwnPropertyNames` and `Reflect.ownKeys` share this result because
   these native/JSON models have only string-named own fields
 - `Object.values` returns fixed-object field values or dynamic JSON values in
