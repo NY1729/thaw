@@ -1440,6 +1440,10 @@ The workspace crates have narrow responsibilities:
   predicates accept statically sized tuple spreads in source order
 - Native string/array `concat`, string `repeat`, and string/array search methods
   accept statically sized tuple spreads without changing receiver-first evaluation
+- `String.prototype.padStart`/`padEnd` measure and pad to a target length in
+  UTF-16 code units, default to a single space when the pad string is omitted,
+  coerce a non-string pad argument, and return the receiver unchanged when
+  already long enough or when the pad string is empty
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements

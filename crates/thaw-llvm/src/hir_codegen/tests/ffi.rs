@@ -1117,6 +1117,45 @@ fn compiles_native_string_repeat() {
 }
 
 #[test]
+fn compiles_native_string_pad_start_and_pad_end() {
+    let source = r#"
+        function text(): string {
+            console.log("receiver");
+            return "5";
+        }
+        function length(): number {
+            console.log("length");
+            return 3;
+        }
+        function pad(): string {
+            console.log("pad");
+            return "0";
+        }
+        async function delayedText(): Promise<string> {
+            console.log("awaited receiver");
+            await sleep(1);
+            return "😀";
+        }
+        async function main(): Promise<void> {
+            console.log("5".padStart(3, "0"));
+            console.log("5".padEnd(3, "0"));
+            console.log("abc".padStart(2, "0"));
+            console.log("5".padStart(3));
+            console.log("1".padStart(5, "ab"));
+            console.log("x".padStart(5, ""));
+            console.log("5".padStart(3, 0));
+            console.log("😀".padStart(3, "x"));
+            console.log(text().padStart(length(), pad()));
+            console.log((await delayedText()).padStart(3, "x"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_pad_start_and_end"),
+        "005\n500\nabc\n  5\nabab1\nx\n005\nx😀\nreceiver\nlength\npad\n005\nawaited receiver\nx😀\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

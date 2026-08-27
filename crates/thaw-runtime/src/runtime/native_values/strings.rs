@@ -61,6 +61,74 @@ pub unsafe extern "C" fn thaw_string_repeat(value: *const c_char, count: f64) ->
     arena_c_string(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
+/// # Safety
+/// `value` and `pad` must point to valid NUL-terminated UTF-8 strings.
+unsafe fn thaw_string_pad(
+    value: *const c_char,
+    pad: *const c_char,
+    target_length: f64,
+    at_start: bool,
+) -> *const c_char {
+    if value.is_null() || pad.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let pad = unsafe { CStr::from_ptr(pad) }.to_string_lossy();
+    let units: Vec<u16> = value.encode_utf16().collect();
+    let target_length = if target_length.is_finite() && target_length > 0.0 {
+        target_length as usize
+    } else {
+        0
+    };
+    let pad_units: Vec<u16> = pad.encode_utf16().collect();
+    if target_length <= units.len() || pad_units.is_empty() {
+        return arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast());
+    }
+    let needed = target_length - units.len();
+    let mut filler = Vec::with_capacity(needed);
+    while filler.len() < needed {
+        filler.extend_from_slice(&pad_units);
+    }
+    filler.truncate(needed);
+    let combined: Vec<u16> = if at_start {
+        filler.into_iter().chain(units).collect()
+    } else {
+        units.into_iter().chain(filler).collect()
+    };
+    let combined = String::from_utf16_lossy(&combined);
+    arena_c_string(&combined).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// Left-pads `value` with `pad` to `target_length` UTF-16 code units,
+/// matching `String.prototype.padStart`.
+///
+/// # Safety
+/// `value` and `pad` must point to valid NUL-terminated UTF-8 strings.
+/// `target_length` must already be normalized to a number.
+pub unsafe extern "C" fn thaw_string_pad_start(
+    value: *const c_char,
+    pad: *const c_char,
+    target_length: f64,
+) -> *const c_char {
+    unsafe { thaw_string_pad(value, pad, target_length, true) }
+}
+
+#[no_mangle]
+/// Right-pads `value` with `pad` to `target_length` UTF-16 code units,
+/// matching `String.prototype.padEnd`.
+///
+/// # Safety
+/// `value` and `pad` must point to valid NUL-terminated UTF-8 strings.
+/// `target_length` must already be normalized to a number.
+pub unsafe extern "C" fn thaw_string_pad_end(
+    value: *const c_char,
+    pad: *const c_char,
+    target_length: f64,
+) -> *const c_char {
+    unsafe { thaw_string_pad(value, pad, target_length, false) }
+}
+
 unsafe fn native_array_length(array: *const u8) -> Option<usize> {
     (!array.is_null()).then(|| unsafe { array.cast::<u64>().read() as usize })
 }

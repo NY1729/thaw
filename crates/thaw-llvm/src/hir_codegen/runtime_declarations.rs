@@ -413,6 +413,12 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
             Some(Linkage::External),
         );
+        let string_pad_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false);
+        for name in ["thaw_string_pad_start", "thaw_string_pad_end"] {
+            self.module
+                .add_function(name, string_pad_type, Some(Linkage::External));
+        }
         let string_length_type = f64_type.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
             "thaw_string_length",
@@ -710,12 +716,22 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_call_typed_result",
+            js_call_result_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_get_export",
             self.context.i64_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
             "thaw_napi_construct_handle_result",
+            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_construct_handle_typed_result",
             handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
@@ -728,12 +744,33 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_call_method_typed_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_get_property_result",
             result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_get_property_typed_result",
+            result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_set_property_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_set_property_typed_result",
             result_type.fn_type(
                 &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
                 false,
