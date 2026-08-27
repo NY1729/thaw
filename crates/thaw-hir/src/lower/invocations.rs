@@ -1058,7 +1058,7 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
-        let args = lowered_arguments
+        let mut args = lowered_arguments
             .into_iter()
             .enumerate()
             .map(|(i, value)| {
@@ -1081,6 +1081,21 @@ impl<'a> FnLowerer<'a> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        if callee_name == "console.assert" {
+            if args.is_empty() {
+                args.push(HirExpr::Lit(HirLit::Bool(false)));
+            } else {
+                let condition_value = args.remove(0);
+                let ty = self.infer_expr_type(&condition_value)?;
+                let name = format!("__thaw_console_assert_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let condition = self.truthiness_expr(HirExpr::Var(name.clone()), &ty)?;
+                argument_bindings.push((name, ty, condition_value));
+                args.insert(0, condition);
+            }
+        }
 
         let generic_types = if let Some(signature) = signature
             .as_ref()

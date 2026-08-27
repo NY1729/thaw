@@ -62,6 +62,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_console_log(args, false)
             }
             "console.warn" | "console.error" => return self.compile_console_log(args, true),
+            "console.assert" => return self.compile_console_assert(args),
             "__thaw_string_concat" => return self.compile_string_concat(args),
             "__thaw_bool_to_string" => return self.compile_bool_to_string(args),
             "__thaw_number_to_string" => {
