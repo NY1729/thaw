@@ -1,18 +1,23 @@
 impl<'ctx> HirCompiler<'ctx> {
-    fn compile_console_log(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+    fn compile_console_log(
+        &mut self,
+        args: &[HirExpr],
+        stderr: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let descriptor = if stderr { 2 } else { 1 };
         if args.is_empty() {
             let empty = self
                 .builder
                 .build_global_string_ptr("", "console_empty")
                 .map_err(|error| error.to_string())?;
-            self.compile_console_text(empty.as_pointer_value(), true, "console_empty")?;
+            self.compile_console_text(empty.as_pointer_value(), true, "console_empty", descriptor)?;
         }
         let values = args
             .iter()
             .map(|arg| Ok((self.expr_hir_type(arg), self.compile_expr(arg)?)))
             .collect::<Result<Vec<_>, String>>()?;
         for (index, (hir_type, value)) in values.into_iter().enumerate() {
-            self.compile_console_arg(hir_type, value, index + 1 == args.len())?;
+            self.compile_console_arg(hir_type, value, index + 1 == args.len(), descriptor)?;
             if index + 1 != args.len() {
                 let separator = self
                     .builder
@@ -22,6 +27,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     separator.as_pointer_value(),
                     false,
                     "console_separator",
+                    descriptor,
                 )?;
             }
         }
@@ -39,15 +45,16 @@ impl<'ctx> HirCompiler<'ctx> {
         hir_type: Option<HirType>,
         value: BasicValueEnum<'ctx>,
         newline: bool,
+        descriptor: u64,
     ) -> Result<(), String> {
         if let Some(HirType::Optional(payload)) = hir_type {
-            self.compile_console_tagged(value.into_struct_value(), &payload, "undefined", newline)?;
+            self.compile_console_tagged(value.into_struct_value(), &payload, "undefined", newline, descriptor)?;
         } else if let Some(HirType::Nullable(payload)) = hir_type {
-            self.compile_console_tagged(value.into_struct_value(), &payload, "null", newline)?;
+            self.compile_console_tagged(value.into_struct_value(), &payload, "null", newline, descriptor)?;
         } else if let Some(HirType::Nullish(payload)) = hir_type {
-            self.compile_console_nullish(value.into_struct_value(), &payload, newline)?;
+            self.compile_console_nullish(value.into_struct_value(), &payload, newline, descriptor)?;
         } else if let Some(HirType::Union(elements)) = hir_type {
-            self.compile_console_union(value.into_struct_value(), &elements, newline)?;
+            self.compile_console_union(value.into_struct_value(), &elements, newline, descriptor)?;
         } else if let Some(
             ty @ (HirType::Json
             | HirType::Dictionary(_)
@@ -55,26 +62,26 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirType::Object(_)),
         ) = hir_type
         {
-            self.compile_console_structured(value.into_pointer_value(), &ty, newline)?;
+            self.compile_console_structured(value.into_pointer_value(), &ty, newline, descriptor)?;
         } else if hir_type == Some(HirType::Undefined) {
             let undefined = self
                 .builder
                 .build_global_string_ptr("undefined", "undefined_value")
                 .map_err(|error| error.to_string())?;
-            self.compile_console_text(undefined.as_pointer_value(), newline, "undefined_value")?;
+            self.compile_console_text(undefined.as_pointer_value(), newline, "undefined_value", descriptor)?;
         } else if hir_type == Some(HirType::Null) {
             let null = self
                 .builder
                 .build_global_string_ptr("null", "null_value")
                 .map_err(|error| error.to_string())?;
-            self.compile_console_text(null.as_pointer_value(), newline, "null_value")?;
+            self.compile_console_text(null.as_pointer_value(), newline, "null_value", descriptor)?;
         } else {
             match value {
                 BasicValueEnum::PointerValue(ptr) => {
-                    self.compile_console_text(ptr, newline, "console_pointer")?;
+                    self.compile_console_text(ptr, newline, "console_pointer", descriptor)?;
                 }
                 BasicValueEnum::FloatValue(f) => {
-                    self.compile_console_number(f, newline, "console_number")?;
+                    self.compile_console_number(f, newline, "console_number", descriptor)?;
                 }
                 // Our only first-class `IntValue` is `i1` (`HirType::Bool`) --
                 // nothing else reaches console.log as a raw `IntValue`.
@@ -100,6 +107,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         selected.into_pointer_value(),
                         newline,
                         "console_bool",
+                        descriptor,
                     )?;
                 }
                 other => {
@@ -118,17 +126,29 @@ impl<'ctx> HirCompiler<'ctx> {
         value: PointerValue<'ctx>,
         newline: bool,
         name: &str,
+        descriptor: u64,
     ) -> Result<(), String> {
         let format = self
             .builder
             .build_global_string_ptr(if newline { "%s\n" } else { "%s" }, &format!("{name}_fmt"))
             .map_err(|error| error.to_string())?;
-        self.builder
-            .build_call(
+        let (function, arguments) = if descriptor == 1 {
+            (
                 self.module.get_function("printf").unwrap(),
-                &[format.as_pointer_value().into(), value.into()],
-                name,
+                vec![format.as_pointer_value().into(), value.into()],
             )
+        } else {
+            (
+                self.module.get_function("dprintf").unwrap(),
+                vec![
+                    self.context.i32_type().const_int(descriptor, false).into(),
+                    format.as_pointer_value().into(),
+                    value.into(),
+                ],
+            )
+        };
+        self.builder
+            .build_call(function, &arguments, name)
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -138,17 +158,29 @@ impl<'ctx> HirCompiler<'ctx> {
         value: FloatValue<'ctx>,
         newline: bool,
         name: &str,
+        descriptor: u64,
     ) -> Result<(), String> {
         let format = self
             .builder
             .build_global_string_ptr(if newline { "%g\n" } else { "%g" }, &format!("{name}_fmt"))
             .map_err(|error| error.to_string())?;
-        self.builder
-            .build_call(
+        let (function, arguments) = if descriptor == 1 {
+            (
                 self.module.get_function("printf").unwrap(),
-                &[format.as_pointer_value().into(), value.into()],
-                name,
+                vec![format.as_pointer_value().into(), value.into()],
             )
+        } else {
+            (
+                self.module.get_function("dprintf").unwrap(),
+                vec![
+                    self.context.i32_type().const_int(descriptor, false).into(),
+                    format.as_pointer_value().into(),
+                    value.into(),
+                ],
+            )
+        };
+        self.builder
+            .build_call(function, &arguments, name)
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -158,6 +190,7 @@ impl<'ctx> HirCompiler<'ctx> {
         value: PointerValue<'ctx>,
         ty: &HirType,
         newline: bool,
+        descriptor: u64,
     ) -> Result<(), String> {
         let json = match ty {
             HirType::Json | HirType::Dictionary(_) => value.into(),
@@ -177,7 +210,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_stringify returned no value")?
             .into_pointer_value();
-        self.compile_console_text(text, newline, "console_structured")
+        self.compile_console_text(text, newline, "console_structured", descriptor)
     }
 
     fn compile_console_union(
@@ -185,6 +218,7 @@ impl<'ctx> HirCompiler<'ctx> {
         value: StructValue<'ctx>,
         elements: &[HirType],
         newline: bool,
+        descriptor: u64,
     ) -> Result<(), String> {
         if elements.is_empty() {
             return Err("console.log cannot print an empty union".into());
@@ -229,7 +263,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             self.builder.position_at_end(matched);
             let member_value = self.unpack_union_payload(payload, member)?;
-            self.compile_console_union_member(member_value, member, newline)?;
+            self.compile_console_union_member(member_value, member, newline, descriptor)?;
             self.builder
                 .build_unconditional_branch(merge)
                 .map_err(|error| error.to_string())?;
@@ -249,6 +283,7 @@ impl<'ctx> HirCompiler<'ctx> {
         value: BasicValueEnum<'ctx>,
         member: &HirType,
         newline: bool,
+        descriptor: u64,
     ) -> Result<(), String> {
         match member {
             HirType::F64 => {
@@ -256,6 +291,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     value.into_float_value(),
                     newline,
                     "console_union_number",
+                    descriptor,
                 )?;
             }
             HirType::Bool => {
@@ -280,6 +316,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     selected.into_pointer_value(),
                     newline,
                     "console_union_bool",
+                    descriptor,
                 )?;
             }
             HirType::Str => {
@@ -287,6 +324,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     value.into_pointer_value(),
                     newline,
                     "console_union_string",
+                    descriptor,
                 )?;
             }
             HirType::Undefined => {
@@ -298,6 +336,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     undefined.as_pointer_value(),
                     newline,
                     "console_union_undefined",
+                    descriptor,
                 )?;
             }
             HirType::Null => {
@@ -309,13 +348,19 @@ impl<'ctx> HirCompiler<'ctx> {
                     null.as_pointer_value(),
                     newline,
                     "console_union_null",
+                    descriptor,
                 )?;
             }
             HirType::Object(_)
             | HirType::Json
             | HirType::Dictionary(_)
             | HirType::Array(_) => {
-                self.compile_console_structured(value.into_pointer_value(), member, newline)?;
+                self.compile_console_structured(
+                    value.into_pointer_value(),
+                    member,
+                    newline,
+                    descriptor,
+                )?;
             }
             HirType::Function(_, _) => {
                 let object = self
@@ -326,6 +371,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     object.as_pointer_value(),
                     newline,
                     "console_union_object",
+                    descriptor,
                 )?;
             }
             other => return Err(format!("console.log cannot print union member {other:?}")),
@@ -339,6 +385,7 @@ impl<'ctx> HirCompiler<'ctx> {
         payload_type: &HirType,
         absent_text: &str,
         newline: bool,
+        descriptor: u64,
     ) -> Result<(), String> {
         let present = self
             .builder
@@ -366,7 +413,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_global_string_ptr(absent_text, "tagged_absent_string")
             .map_err(|error| error.to_string())?;
-        self.compile_console_text(absent.as_pointer_value(), newline, "console_tagged_absent")?;
+        self.compile_console_text(
+            absent.as_pointer_value(),
+            newline,
+            "console_tagged_absent",
+            descriptor,
+        )?;
         self.builder
             .build_unconditional_branch(merge_block)
             .map_err(|error| error.to_string())?;
@@ -378,6 +430,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     payload.into_float_value(),
                     newline,
                     "console_optional_number",
+                    descriptor,
                 )?;
             }
             HirType::Bool => {
@@ -402,6 +455,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     selected.into_pointer_value(),
                     newline,
                     "console_optional_bool",
+                    descriptor,
                 )?;
             }
             HirType::Str => {
@@ -409,6 +463,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     payload.into_pointer_value(),
                     newline,
                     "console_optional_string",
+                    descriptor,
                 )?;
             }
             HirType::Optional(inner) => {
@@ -417,10 +472,17 @@ impl<'ctx> HirCompiler<'ctx> {
                     inner,
                     "undefined",
                     newline,
+                    descriptor,
                 )?;
             }
             HirType::Nullable(inner) => {
-                self.compile_console_tagged(payload.into_struct_value(), inner, "null", newline)?;
+                self.compile_console_tagged(
+                    payload.into_struct_value(),
+                    inner,
+                    "null",
+                    newline,
+                    descriptor,
+                )?;
             }
             HirType::Object(_)
             | HirType::Json
@@ -430,6 +492,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     payload.into_pointer_value(),
                     payload_type,
                     newline,
+                    descriptor,
                 )?;
             }
             other => {
@@ -450,6 +513,7 @@ impl<'ctx> HirCompiler<'ctx> {
         value: StructValue<'ctx>,
         payload_type: &HirType,
         newline: bool,
+        descriptor: u64,
     ) -> Result<(), String> {
         let tag = self
             .builder
@@ -490,6 +554,7 @@ impl<'ctx> HirCompiler<'ctx> {
             undefined.as_pointer_value(),
             newline,
             "console_nullish_undefined",
+            descriptor,
         )?;
         self.builder
             .build_unconditional_branch(merge_block)
@@ -518,7 +583,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_insert_value(tagged, payload, 1, "nullish_console_payload")
             .map_err(|error| error.to_string())?
             .into_struct_value();
-        self.compile_console_tagged(tagged, payload_type, "null", newline)?;
+        self.compile_console_tagged(tagged, payload_type, "null", newline, descriptor)?;
         self.builder
             .build_unconditional_branch(merge_block)
             .map_err(|error| error.to_string())?;

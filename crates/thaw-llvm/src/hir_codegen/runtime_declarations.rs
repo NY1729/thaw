@@ -14,6 +14,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let printf_type = i32_type.fn_type(&[i8_ptr.into()], true);
         self.module
             .add_function("printf", printf_type, Some(Linkage::External));
+        let dprintf_type = i32_type.fn_type(&[i32_type.into(), i8_ptr.into()], true);
+        self.module
+            .add_function("dprintf", dprintf_type, Some(Linkage::External));
         let pow_type = self.context.f64_type().fn_type(
             &[
                 self.context.f64_type().into(),

@@ -77,6 +77,28 @@ fn console_log_serializes_arrays_objects_and_json_values() {
 }
 
 #[test]
+fn console_methods_use_their_node_compatible_output_streams() {
+    let source = r#"
+        interface Detail { code: number; }
+        function value(): string {
+            console.log("evaluated");
+            return "A";
+        }
+        function main(): void {
+            const detail: Detail = { code: 7 };
+            console.info("info", 1);
+            console.debug("debug", true);
+            console.warn(value(), "warning");
+            console.error("error", detail);
+        }
+    "#;
+
+    let (stdout, stderr) = compile_and_run_output(source, "console_output_streams");
+    assert_eq!(stdout, "info 1\ndebug true\nevaluated\n");
+    assert_eq!(stderr, "A warning\nerror {\"code\":7}\n");
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {
