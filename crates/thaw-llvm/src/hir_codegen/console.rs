@@ -5,20 +5,80 @@ impl<'ctx> HirCompiler<'ctx> {
         stderr: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let descriptor = if stderr { 2 } else { 1 };
-        if args.is_empty() {
+        let values = args
+            .iter()
+            .map(|arg| Ok((self.expr_hir_type(arg), self.compile_expr(arg)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        self.compile_console_values(values, descriptor)?;
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    fn compile_console_assert(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let mut values = args
+            .iter()
+            .map(|arg| Ok((self.expr_hir_type(arg), self.compile_expr(arg)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let condition = if values.is_empty() {
+            self.context.bool_type().const_zero()
+        } else {
+            values.remove(0).1.into_int_value()
+        };
+        let function = self.current_function();
+        let failed = self.context.append_basic_block(function, "console_assert_failed");
+        let done = self.context.append_basic_block(function, "console_assert_done");
+        self.builder
+            .build_conditional_branch(condition, done, failed)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(failed);
+        let prefix = self
+            .builder
+            .build_global_string_ptr(
+                if values.is_empty() {
+                    "Assertion failed"
+                } else {
+                    "Assertion failed: "
+                },
+                "console_assert_prefix",
+            )
+            .map_err(|error| error.to_string())?;
+        self.compile_console_text(
+            prefix.as_pointer_value(),
+            values.is_empty(),
+            "console_assert_prefix",
+            2,
+        )?;
+        if !values.is_empty() {
+            self.compile_console_values(values, 2)?;
+        } else {
+            self.flush_console()?;
+        }
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    fn compile_console_values(
+        &mut self,
+        values: Vec<(Option<HirType>, BasicValueEnum<'ctx>)>,
+        descriptor: u64,
+    ) -> Result<(), String> {
+        if values.is_empty() {
             let empty = self
                 .builder
                 .build_global_string_ptr("", "console_empty")
                 .map_err(|error| error.to_string())?;
             self.compile_console_text(empty.as_pointer_value(), true, "console_empty", descriptor)?;
         }
-        let values = args
-            .iter()
-            .map(|arg| Ok((self.expr_hir_type(arg), self.compile_expr(arg)?)))
-            .collect::<Result<Vec<_>, String>>()?;
+        let value_count = values.len();
         for (index, (hir_type, value)) in values.into_iter().enumerate() {
-            self.compile_console_arg(hir_type, value, index + 1 == args.len(), descriptor)?;
-            if index + 1 != args.len() {
+            self.compile_console_arg(hir_type, value, index + 1 == value_count, descriptor)?;
+            if index + 1 != value_count {
                 let separator = self
                     .builder
                     .build_global_string_ptr(" ", "console_separator")
@@ -32,12 +92,16 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
 
+        self.flush_console()
+    }
+
+    fn flush_console(&mut self) -> Result<(), String> {
         let fflush_fn = self.module.get_function("fflush").unwrap();
         let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
         self.builder
             .build_call(fflush_fn, &[null_ptr.into()], "fflush_call")
             .map_err(|error| error.to_string())?;
-        Ok(self.context.i32_type().const_int(0, false).into())
+        Ok(())
     }
 
     fn compile_console_arg(

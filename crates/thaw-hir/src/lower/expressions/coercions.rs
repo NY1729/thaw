@@ -31,9 +31,11 @@ impl<'a> FnLowerer<'a> {
                 Box::new(false_lit()),
             )),
             HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
+            HirType::Null | HirType::Undefined => Ok(false_lit()),
             HirType::Array(_)
             | HirType::Tuple(_)
             | HirType::Object(_)
+            | HirType::Dictionary(_)
             | HirType::Promise(_)
             | HirType::Function(_, _)
             | HirType::CallableFunction(..) => Ok(HirExpr::Lit(HirLit::Bool(true))),

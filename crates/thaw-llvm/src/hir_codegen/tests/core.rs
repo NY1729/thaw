@@ -99,6 +99,44 @@ fn console_methods_use_their_node_compatible_output_streams() {
 }
 
 #[test]
+fn console_assert_evaluates_all_arguments_and_only_reports_falsy_conditions() {
+    let source = r#"
+        interface Detail { code: number; }
+        function condition(value: boolean): boolean {
+            console.log("condition", value);
+            return value;
+        }
+        function message(value: string): string {
+            console.log("message", value);
+            return value;
+        }
+        function main(): void {
+            const detail: Detail = { code: 7 };
+            console.assert(condition(true), message("ignored"));
+            console.assert(false);
+            console.assert(condition(false), message("failed"), 2, detail);
+            console.assert(0, "zero");
+            console.assert(1, "one");
+            console.assert("", "empty");
+            console.assert("value", "string");
+            console.assert(JSON.parse("false"), "json");
+            console.assert(detail, "object");
+            console.assert();
+        }
+    "#;
+
+    let (stdout, stderr) = compile_and_run_output(source, "console_assert");
+    assert_eq!(
+        stdout,
+        "condition true\nmessage ignored\ncondition false\nmessage failed\n"
+    );
+    assert_eq!(
+        stderr,
+        "Assertion failed\nAssertion failed: failed 2 {\"code\":7}\nAssertion failed: zero\nAssertion failed: empty\nAssertion failed: json\nAssertion failed\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {
