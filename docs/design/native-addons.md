@@ -47,6 +47,8 @@ propertyだけから成る場合は再帰分類し、local・assertion・functio
 同一native layoutのliteral unionと`readonly` type operatorもprimitive／array型へ
 正規化し、named typeやfunction戻り値からのoverload選択に利用する。
 object intersectionは同型fieldを共有しながら統合し、field型が衝突すれば未解決にする。
+解決済みobjectへの`keyof`はstring、string／number literalのindexed accessは対応field型へ
+解決し、function戻り値を含むoverload選択へ渡す。
 number配列注釈は`number[]`に加えて`Array<number>`と`ReadonlyArray<number>`も
 同じnative array型へ正規化する。
 式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、

@@ -458,6 +458,32 @@ fn rewrite_external_class_methods_with_static(
             TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::ReadOnly => {
                 source_ts_type(&operator.type_ann, named)
             }
+            TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::KeyOf => {
+                matches!(
+                    source_ts_type(&operator.type_ann, named),
+                    Some(thaw_hir::HirType::Object(_))
+                )
+                .then_some(thaw_hir::HirType::Str)
+            }
+            TsType::TsIndexedAccessType(indexed) => {
+                let thaw_hir::HirType::Object(fields) =
+                    source_ts_type(&indexed.obj_type, named)?
+                else {
+                    return None;
+                };
+                let name = match indexed.index_type.as_ref() {
+                    TsType::TsLitType(literal) => match &literal.lit {
+                        TsLit::Str(value) => value.value.to_string_lossy().into_owned(),
+                        TsLit::Number(value) => value.value.to_string(),
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                fields
+                    .into_iter()
+                    .find(|(field, _)| field == &name)
+                    .map(|(_, ty)| ty)
+            }
             TsType::TsArrayType(array) => match source_ts_type(&array.elem_type, named) {
                 Some(thaw_hir::HirType::F64) => {
                     Some(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)))

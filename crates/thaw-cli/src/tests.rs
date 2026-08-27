@@ -1124,6 +1124,48 @@ fn selects_object_overloads_through_intersection_aliases() {
 }
 
 #[test]
+fn selects_overloads_through_keyof_and_indexed_access_types() {
+    let source = r#"type Config = { value: number; label: string }; function key(): keyof Config { return unknown; } function value(): Config["value"] { return unknown; } const box = new NativeBox(1); box.set(key()); box.set(value());"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into(), vec![])],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_boolean".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Bool],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Str],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::F64],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__set_string(box, key())"));
+    assert!(rewritten.contains("__set_number(box, value())"));
+}
+
+#[test]
 fn tracks_assignment_flow_for_variables_and_nested_object_properties() {
     let source = r#"const box = new NativeBox(1); let value = 42; box.set(value); value = "text"; box.set(value); const config = { nested: { value: 1 }, direct: true }; config.nested.value = "nested"; config["direct"] = 7; box.set(config.nested.value); box.set(config.direct);"#;
     let rewritten = rewrite_external_class_methods(
