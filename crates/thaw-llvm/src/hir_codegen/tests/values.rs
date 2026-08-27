@@ -1408,6 +1408,8 @@ fn compiles_fixed_object_in_checks_in_operand_order() {
         async function main(): Promise<void> {
             console.log("value" in (await object("first")));
             console.log("missing" in (await object("second")));
+            console.log(key() in (await object("third")));
+            console.log(1 in { "1": true });
             console.log(key() in (await json()));
             console.log("missing" in JSON.parse("[10,20]"));
             console.log("length" in JSON.parse("[10,20]"));
@@ -1415,7 +1417,7 @@ fn compiles_fixed_object_in_checks_in_operand_order() {
     "#;
     assert_eq!(
         compile_and_run(source, "fixed_object_in"),
-        "first\ntrue\nsecond\nfalse\nkey\njson\ntrue\nfalse\ntrue\n"
+        "first\ntrue\nsecond\nfalse\nkey\nthird\ntrue\ntrue\nkey\njson\ntrue\nfalse\ntrue\n"
     );
 }
 

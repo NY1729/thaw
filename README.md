@@ -1325,9 +1325,9 @@ The workspace crates have narrow responsibilities:
   `[string, Json][]` entries in the same key order
 - `Object.hasOwn` checks fixed-object fields and runtime JSON object/array own
   properties, including array indices and `length`
-- The `in` operator checks runtime JSON own properties with left-before-right
-  single evaluation, and `for...in` iterates JSON object keys or array indices
-  in JavaScript key order
+- The `in` operator accepts dynamic primitive keys for fixed objects and checks
+  runtime JSON own properties with left-before-right single evaluation;
+  `for...in` iterates JSON object keys or array indices in JavaScript key order
 - `for...of` iterates runtime JSON arrays as `Json` values alongside typed
   native arrays. Strings are iterated by Unicode code point in both
   `for...of` and `for await...of`
