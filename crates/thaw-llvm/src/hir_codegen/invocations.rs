@@ -741,6 +741,17 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_json_object_is"
+            | "__thaw_json_object_is_number"
+            | "__thaw_json_object_is_string"
+            | "__thaw_json_object_is_bool" => {
+                let runtime = name.trim_start_matches("__thaw_");
+                return self.compile_i8_predicate_call(
+                    &format!("thaw_{runtime}"),
+                    args,
+                    "json_object_is",
+                );
+            }
             "loadScript" => return self.compile_load_script(args),
             "callDynamic" => return self.compile_call_dynamic(args),
             "getDynamicValue" => return self.compile_get_dynamic_value(args),

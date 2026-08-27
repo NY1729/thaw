@@ -1135,6 +1135,12 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "Object.hasOwn key")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_object_is"
+                    | "__thaw_json_object_is_number"
+                    | "__thaw_json_object_is_string"
+                    | "__thaw_json_object_is_bool" => {
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_number_is_nan"
                     | "__thaw_number_is_finite"
                     | "__thaw_number_is_integer"
