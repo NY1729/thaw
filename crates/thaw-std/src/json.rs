@@ -87,24 +87,71 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
-    let text = serde_json::to_string(&ordered_json(value)).unwrap_or_else(|_| "null".to_string());
-    CString::new(text).unwrap_or_default().into_raw() as *const c_char
+    stringify_value(&ordered_json(value), &[])
 }
 
-fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
+fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
     if indent.is_empty() {
-        return thaw_json_stringify(value);
+        let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+        return CString::new(text).unwrap_or_default().into_raw();
     }
-    let value = unsafe { &*value };
     let mut output = Vec::new();
     let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
     let mut serializer = serde_json::Serializer::with_formatter(&mut output, formatter);
-    let text = if ordered_json(value).serialize(&mut serializer).is_ok() {
+    let text = if value.serialize(&mut serializer).is_ok() {
         String::from_utf8(output).unwrap_or_else(|_| "null".to_string())
     } else {
         "null".to_string()
     };
     CString::new(text).unwrap_or_default().into_raw()
+}
+
+fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
+    let value = unsafe { &*value };
+    stringify_value(&ordered_json(value), indent)
+}
+
+fn string_array(array: *const u8) -> Vec<String> {
+    if array.is_null() {
+        return Vec::new();
+    }
+    let length = unsafe { (array as *const i64).read() }.max(0) as usize;
+    let mut keys = Vec::new();
+    for index in 0..length {
+        let key = unsafe { (array.add(8 + index * 8) as *const *const c_char).read() };
+        let key = to_str(key);
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+fn filtered_json(value: &Value, keys: &[String]) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            keys.iter()
+                .filter_map(|key| {
+                    fields
+                        .get(key)
+                        .map(|value| (key.clone(), filtered_json(value, keys)))
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|value| filtered_json(value, keys))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn stringify_with_keys(value: *mut Value, keys: *const u8, indent: &[u8]) -> *const c_char {
+    let value = unsafe { &*value };
+    let keys = string_array(keys);
+    stringify_value(&filtered_json(value, &keys), indent)
 }
 
 #[no_mangle]
@@ -124,6 +171,35 @@ pub extern "C" fn thaw_json_stringify_string_space(
 ) -> *const c_char {
     let indent = to_str(space).chars().take(10).collect::<String>();
     stringify_with_indent(value, indent.as_bytes())
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_keys(value: *mut Value, keys: *const u8) -> *const c_char {
+    stringify_with_keys(value, keys, &[])
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_keys_number_space(
+    value: *mut Value,
+    keys: *const u8,
+    space: f64,
+) -> *const c_char {
+    let width = if space.is_finite() {
+        space.trunc().clamp(0.0, 10.0) as usize
+    } else {
+        0
+    };
+    stringify_with_keys(value, keys, &vec![b' '; width])
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_keys_string_space(
+    value: *mut Value,
+    keys: *const u8,
+    space: *const c_char,
+) -> *const c_char {
+    let indent = to_str(space).chars().take(10).collect::<String>();
+    stringify_with_keys(value, keys, indent.as_bytes())
 }
 
 #[no_mangle]

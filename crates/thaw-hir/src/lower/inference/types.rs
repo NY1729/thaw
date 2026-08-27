@@ -787,6 +787,49 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, space, "JSON.stringify space")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_json_stringify_keys" => {
+                        let [value, keys] = args.as_slice() else {
+                            return Err("JSON.stringify expects value and replacer keys".into());
+                        };
+                        let value_type = self.infer_expr_type(value)?;
+                        if !matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!(
+                                "JSON.stringify expected JSON or dictionary, got {value_type:?}"
+                            ));
+                        }
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::Str)),
+                            keys,
+                            "JSON.stringify replacer",
+                        )?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_json_stringify_keys_number_space"
+                    | "__thaw_json_stringify_keys_string_space" => {
+                        let [value, keys, space] = args.as_slice() else {
+                            return Err(
+                                "JSON.stringify expects value, replacer keys and space".into()
+                            );
+                        };
+                        let value_type = self.infer_expr_type(value)?;
+                        if !matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!(
+                                "JSON.stringify expected JSON or dictionary, got {value_type:?}"
+                            ));
+                        }
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::Str)),
+                            keys,
+                            "JSON.stringify replacer",
+                        )?;
+                        let space_type = if name.ends_with("number_space") {
+                            HirType::F64
+                        } else {
+                            HirType::Str
+                        };
+                        self.expect_type(&space_type, space, "JSON.stringify space")?;
+                        return Ok(HirType::Str);
+                    }
                     // QuickJS-NG fallback path (docs/design/bridge.md
                     // section 7): `loadScript` evaluates JS source into
                     // the global engine context; `callDynamic` calls a

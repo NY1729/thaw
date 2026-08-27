@@ -1350,6 +1350,10 @@ The workspace crates have narrow responsibilities:
   `null`/`undefined` replacer and number/string `space`; numeric indentation is
   truncated and clamped to ten spaces, string indentation to ten characters,
   with left-to-right awaited argument evaluation
+- A typed `string[]` stringify replacer filters object properties recursively,
+  preserves first-occurrence whitelist order, ignores duplicates, leaves array
+  positions intact and composes with awaited replacers and `space`; function
+  replacers remain an explicit compilation error
 - Computed `Record<string, T>` keys use JavaScript primitive-to-string
   conversion for reads, writes, deletion and optional chaining; numeric JSON
   keys address array indices or numeric object-property names by runtime kind
