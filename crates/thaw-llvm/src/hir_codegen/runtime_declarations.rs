@@ -436,6 +436,11 @@ impl<'ctx> HirCompiler<'ctx> {
             string_char_code_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_string_code_point_at",
+            string_char_code_type,
+            Some(Linkage::External),
+        );
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(

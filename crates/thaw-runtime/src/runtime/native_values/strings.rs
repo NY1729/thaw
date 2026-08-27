@@ -354,3 +354,38 @@ pub unsafe extern "C" fn thaw_string_char_code_at(value: *const c_char, index: f
         .nth(index as usize)
         .map_or(f64::NAN, f64::from)
 }
+
+#[no_mangle]
+/// Returns the Unicode code point at `index` (measured in UTF-16 code
+/// units), combining a leading surrogate with a following trailing
+/// surrogate into one astral code point. Returns `-1.0` when `index` is out
+/// of bounds, letting the caller report `undefined` as
+/// `String.prototype.codePointAt` requires; code points are otherwise never
+/// negative.
+///
+/// # Safety
+/// `value` must point to a valid NUL-terminated UTF-8 string. `index` must
+/// already be normalized to an integer.
+pub unsafe extern "C" fn thaw_string_code_point_at(value: *const c_char, index: f64) -> f64 {
+    if value.is_null() || !index.is_finite() || index < 0.0 || index > usize::MAX as f64 {
+        return -1.0;
+    }
+    let units: Vec<u16> = unsafe { CStr::from_ptr(value) }
+        .to_string_lossy()
+        .encode_utf16()
+        .collect();
+    let index = index as usize;
+    let Some(&unit) = units.get(index) else {
+        return -1.0;
+    };
+    if (0xD800..=0xDBFF).contains(&unit) {
+        if let Some(&low) = units.get(index + 1) {
+            if (0xDC00..=0xDFFF).contains(&low) {
+                let code_point =
+                    (unit as u32 - 0xD800) * 0x400 + (low as u32 - 0xDC00) + 0x10000;
+                return code_point as f64;
+            }
+        }
+    }
+    unit as f64
+}

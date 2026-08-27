@@ -553,6 +553,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("charCodeAt returned no value".to_string());
             }
+            "__thaw_string_code_point_at" => {
+                let [value, index] = args else {
+                    return Err("string codePointAt expects two operands".to_string());
+                };
+                let value = self.compile_expr(value)?;
+                let index = self.compile_expr(index)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_string_code_point_at")
+                            .unwrap(),
+                        &[value.into(), index.into()],
+                        "string_code_point_at",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("codePointAt returned no value".to_string());
+            }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
