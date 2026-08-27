@@ -241,6 +241,75 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(result.into())
     }
 
+    fn marshal_ffi_tagged_return(
+        &mut self,
+        native: StructValue<'ctx>,
+        ty: &HirType,
+        payload: &HirType,
+        ownership: &FfiOwnership,
+        aggregate_abi: FfiAggregateAbi,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let tag = self
+            .builder
+            .build_extract_value(native, 0, "ffi_tagged_return_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let mut value = self
+            .builder
+            .build_extract_value(native, 1, "ffi_tagged_return_payload")
+            .map_err(|error| error.to_string())?;
+        value = match payload {
+            HirType::Str if *ownership != FfiOwnership::Borrowed => self
+                .apply_ffi_string_ownership(
+                    value.into_pointer_value(),
+                    ownership,
+                    "ffi_tagged_return_string",
+                )?
+                .into(),
+            HirType::Array(_)
+            | HirType::Object(_)
+            | HirType::Optional(_)
+            | HirType::Nullable(_)
+            | HirType::Nullish(_)
+                if value.is_struct_value() => self.marshal_ffi_return(
+                value,
+                payload,
+                FfiStringAbi::NullTerminated,
+                ownership,
+                aggregate_abi,
+                None,
+            )?,
+            _ => value,
+        };
+        if matches!(ty, HirType::Nullish(_)) {
+            return self.build_nullish_tagged_value(value, payload, tag);
+        }
+        let present = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                tag,
+                tag.get_type().const_zero(),
+                "ffi_tagged_return_present",
+            )
+            .map_err(|error| error.to_string())?;
+        let tagged_type = self.basic_type(ty)?.into_struct_type();
+        let tagged = self
+            .builder
+            .build_insert_value(
+                tagged_type.get_undef(),
+                present,
+                0,
+                "ffi_tagged_return_with_tag",
+            )
+            .map_err(|error| error.to_string())?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(tagged, value, 1, "ffi_tagged_return_with_payload")
+            .map(|value| value.into_struct_value().into())
+            .map_err(|error| error.to_string())
+    }
+
     fn marshal_ffi_return(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -402,6 +471,28 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?;
                 }
                 Ok(result.into())
+            }
+            HirType::Optional(payload) | HirType::Nullable(payload)
+                if value.is_struct_value() && aggregate_abi != FfiAggregateAbi::Internal =>
+            {
+                self.marshal_ffi_tagged_return(
+                    value.into_struct_value(),
+                    ty,
+                    payload,
+                    ownership,
+                    aggregate_abi,
+                )
+            }
+            HirType::Nullish(payload)
+                if value.is_struct_value() && aggregate_abi != FfiAggregateAbi::Internal =>
+            {
+                self.marshal_ffi_tagged_return(
+                    value.into_struct_value(),
+                    ty,
+                    payload,
+                    ownership,
+                    aggregate_abi,
+                )
             }
             HirType::Object(fields)
                 if value.is_struct_value() && aggregate_abi != FfiAggregateAbi::Internal =>
