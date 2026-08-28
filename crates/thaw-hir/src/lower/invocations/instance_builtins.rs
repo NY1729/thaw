@@ -2,6 +2,7 @@ fn regex_object_type() -> HirType {
     HirType::Object(vec![
         ("source".to_string(), HirType::Str),
         ("flags".to_string(), HirType::Str),
+        ("lastIndex".to_string(), HirType::F64),
     ])
 }
 
@@ -755,12 +756,9 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     let value_name = format!("__thaw_regex_exec_value_{}", self.next_binding);
                     self.next_binding += 1;
-                    let raw_name = format!("__thaw_regex_exec_raw_{}", self.next_binding);
-                    self.next_binding += 1;
                     self.scope.insert(receiver_name.clone(), regex_type.clone());
                     self.scope.insert(value_name.clone(), HirType::Str);
                     let array_type = HirType::Array(Box::new(HirType::Str));
-                    self.scope.insert(raw_name.clone(), array_type.clone());
                     let var = |name: &str| HirExpr::Var(name.into());
                     let source = HirExpr::PropAccess(
                         Box::new(var(&receiver_name)),
@@ -772,19 +770,118 @@ impl<'a> FnLowerer<'a> {
                         regex_type.clone(),
                         "flags".to_string(),
                     );
-                    let body = HirExpr::Block(vec![
+                    let last_index = HirExpr::PropAccess(
+                        Box::new(var(&receiver_name)),
+                        regex_type.clone(),
+                        "lastIndex".to_string(),
+                    );
+                    let set_last_index = |value: HirExpr| {
+                        HirStmt::Expr(HirExpr::PropAssign(
+                            Box::new(var(&receiver_name)),
+                            regex_type.clone(),
+                            "lastIndex".to_string(),
+                            Box::new(value),
+                        ))
+                    };
+                    let is_global = HirExpr::Call(
+                        Box::new(var("__thaw_string_includes")),
+                        vec![
+                            flags.clone(),
+                            HirExpr::Lit(HirLit::Str("g".to_string())),
+                            HirExpr::Lit(HirLit::F64(0.0)),
+                        ],
+                    );
+                    let is_sticky = HirExpr::Call(
+                        Box::new(var("__thaw_string_includes")),
+                        vec![
+                            flags.clone(),
+                            HirExpr::Lit(HirLit::Str("y".to_string())),
+                            HirExpr::Lit(HirLit::F64(0.0)),
+                        ],
+                    );
+                    // `exec` only threads `lastIndex` state for a global or
+                    // sticky pattern (matching the specification's
+                    // `RegExpBuiltinExec`) -- otherwise it always searches
+                    // from the start and leaves `lastIndex` untouched, same
+                    // as `RegExp.prototype.test`'s own simplification.
+                    let raw_name = format!("__thaw_regex_exec_raw_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(raw_name.clone(), array_type.clone());
+                    let start_name = format!("__thaw_regex_exec_start_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(start_name.clone(), HirType::F64);
+                    let next_name = format!("__thaw_regex_exec_next_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(next_name.clone(), HirType::F64);
+                    let stateful_branch = vec![
+                        HirStmt::Let(start_name.clone(), HirType::F64, last_index.clone()),
                         HirStmt::Let(
                             raw_name.clone(),
                             array_type.clone(),
                             HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_regex_exec".into())),
-                                vec![source, flags, var(&value_name)],
+                                Box::new(var("__thaw_regex_exec")),
+                                vec![
+                                    source.clone(),
+                                    flags.clone(),
+                                    var(&value_name),
+                                    var(&start_name),
+                                ],
                             ),
                         ),
                         HirStmt::If(
                             HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_array_is_null".into())),
+                                Box::new(var("__thaw_array_is_null")),
                                 vec![var(&raw_name)],
+                            ),
+                            vec![
+                                set_last_index(HirExpr::Lit(HirLit::F64(0.0))),
+                                HirStmt::Return(Some(HirExpr::OptionalNone(array_type.clone()))),
+                            ],
+                            vec![
+                                HirStmt::Let(
+                                    next_name.clone(),
+                                    HirType::F64,
+                                    HirExpr::Call(
+                                        Box::new(var("__thaw_regex_exec_advance")),
+                                        vec![
+                                            var(&value_name),
+                                            source.clone(),
+                                            flags.clone(),
+                                            var(&start_name),
+                                        ],
+                                    ),
+                                ),
+                                set_last_index(var(&next_name)),
+                                HirStmt::Return(Some(HirExpr::OptionalSome(
+                                    Box::new(var(&raw_name)),
+                                    array_type.clone(),
+                                ))),
+                            ],
+                        ),
+                    ];
+                    let non_stateful_raw_name =
+                        format!("__thaw_regex_exec_raw_ns_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(non_stateful_raw_name.clone(), array_type.clone());
+                    let non_stateful_branch = vec![
+                        HirStmt::Let(
+                            non_stateful_raw_name.clone(),
+                            array_type.clone(),
+                            HirExpr::Call(
+                                Box::new(var("__thaw_regex_exec")),
+                                vec![
+                                    source.clone(),
+                                    flags.clone(),
+                                    var(&value_name),
+                                    HirExpr::Lit(HirLit::F64(0.0)),
+                                ],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(var("__thaw_array_is_null")),
+                                vec![var(&non_stateful_raw_name)],
                             ),
                             vec![HirStmt::Return(Some(HirExpr::OptionalNone(
                                 array_type.clone(),
@@ -792,10 +889,15 @@ impl<'a> FnLowerer<'a> {
                             Vec::new(),
                         ),
                         HirStmt::Return(Some(HirExpr::OptionalSome(
-                            Box::new(var(&raw_name)),
+                            Box::new(var(&non_stateful_raw_name)),
                             array_type.clone(),
                         ))),
-                    ]);
+                    ];
+                    let body = HirExpr::Block(vec![HirStmt::If(
+                        is_global,
+                        stateful_branch.clone(),
+                        vec![HirStmt::If(is_sticky, stateful_branch, non_stateful_branch)],
+                    )]);
                     let result_type = HirType::Optional(Box::new(array_type));
                     let mut referenced = BTreeSet::new();
                     collect_referenced_bindings(&body, &mut referenced);

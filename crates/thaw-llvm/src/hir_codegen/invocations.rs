@@ -850,23 +850,44 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(map);
             }
             "__thaw_regex_exec" => {
-                let [source, flags, value] = args else {
-                    return Err("RegExp.exec expects three operands".into());
+                let [source, flags, value, last_index] = args else {
+                    return Err("RegExp.exec expects four operands".into());
                 };
                 let source = self.compile_expr(source)?;
                 let flags = self.compile_expr(flags)?;
                 let value = self.compile_expr(value)?;
+                let last_index = self.compile_expr(last_index)?;
                 return self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_regex_exec").unwrap(),
-                        &[source.into(), flags.into(), value.into()],
+                        &[source.into(), flags.into(), value.into(), last_index.into()],
                         "regex_exec",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
                     .ok_or("RegExp.exec returned no value".into());
+            }
+            "__thaw_regex_exec_advance" => {
+                let [value, source, flags, last_index] = args else {
+                    return Err("RegExp.exec lastIndex advance expects four operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let source = self.compile_expr(source)?;
+                let flags = self.compile_expr(flags)?;
+                let last_index = self.compile_expr(last_index)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_regex_exec_advance").unwrap(),
+                        &[value.into(), source.into(), flags.into(), last_index.into()],
+                        "regex_exec_advance",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("RegExp.exec lastIndex advance returned no value".into());
             }
             "__thaw_regex_match" | "__thaw_regex_match_all" => {
                 let [value, source, flags] = args else {

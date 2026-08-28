@@ -9,9 +9,11 @@ thread_local! {
 /// backreferences and lookaround) or an unsupported flag combination.
 ///
 /// Only the `i` (case-insensitive), `m` (multiline) and `s` (dot-all) flags
-/// are honored; `g`/`y` sticky/global `lastIndex` state and the `u`/`v`
-/// unicode-mode flags are not tracked, so every call matches as if searching
-/// from the start of the string.
+/// are honored; the `u`/`v` unicode-mode flags are not tracked. `g`/`y`
+/// `lastIndex` state is tracked by `RegExp.prototype.exec` alone (see
+/// `thaw_regex_exec`/`thaw_regex_exec_advance`) -- `test`, `match`,
+/// `matchAll`, `replace`/`replaceAll` and `split` all still match as if
+/// searching from the start of the string every call.
 fn with_compiled_regex<T>(
     source: &str,
     flags: &str,
@@ -255,13 +257,60 @@ fn capture_strings(regex: &regex::Regex, value: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Converts a JavaScript `lastIndex` value (`ToLength` semantics: `NaN` and
+/// negative values clamp to `0`) into a UTF-16 code-unit count, matching how
+/// `thaw_regex_search` already reports match positions in UTF-16 units for
+/// JS compatibility.
+fn last_index_to_length(last_index: f64) -> usize {
+    if last_index.is_nan() || last_index <= 0.0 {
+        0
+    } else if last_index >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        last_index.trunc() as usize
+    }
+}
+
+/// Converts a UTF-16 code-unit index into a byte offset into `value`'s UTF-8
+/// representation. Returns `None` when the index falls past the end of
+/// `value` or lands inside a UTF-16 surrogate pair split off by an earlier
+/// lossy conversion -- both treated as "no match" by callers, the same way
+/// an out-of-range `lastIndex` resets to `0` without matching in the
+/// specification.
+fn utf16_index_to_byte_offset(value: &str, utf16_index: usize) -> Option<usize> {
+    if utf16_index == 0 {
+        return Some(0);
+    }
+    let mut utf16_count = 0usize;
+    for (byte_index, ch) in value.char_indices() {
+        if utf16_count == utf16_index {
+            return Some(byte_index);
+        }
+        utf16_count += ch.len_utf16();
+    }
+    (utf16_count == utf16_index).then_some(value.len())
+}
+
+fn capture_strings_from(captures: &regex::Captures) -> Vec<String> {
+    (0..captures.len())
+        .map(|index| {
+            captures
+                .get(index)
+                .map(|group| group.as_str().to_string())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 #[no_mangle]
-/// Matches `value` against the regex named by `source`/`flags`, matching
-/// `RegExp.prototype.exec` without `g`/`y` `lastIndex` state -- every call
-/// searches from the start of `value`, matching `RegExp.prototype.test`'s
-/// own simplification. Returns the whole match followed by each capture
-/// group's text (see `capture_strings`), or a null pointer when nothing
-/// matches or `source`/`flags` fails to compile.
+/// Matches `value` against the regex named by `source`/`flags`, starting the
+/// search at the UTF-16 code-unit index `last_index` -- `RegExp.prototype
+/// .exec`'s caller passes `0` for a non-global, non-sticky pattern (matching
+/// `RegExp.prototype.test`'s own simplification of always searching from the
+/// start), and its own `lastIndex` property otherwise. Returns the whole
+/// match followed by each capture group's text (see `capture_strings_from`),
+/// or a null pointer when nothing matches, `last_index` is out of range, or
+/// `source`/`flags` fails to compile.
 ///
 /// # Safety
 /// `source`, `flags` and `value` must be null or point to valid
@@ -270,6 +319,7 @@ pub unsafe extern "C" fn thaw_regex_exec(
     source: *const c_char,
     flags: *const c_char,
     value: *const c_char,
+    last_index: f64,
 ) -> *mut u8 {
     if source.is_null() || flags.is_null() || value.is_null() {
         return std::ptr::null_mut();
@@ -277,15 +327,68 @@ pub unsafe extern "C" fn thaw_regex_exec(
     let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
     let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
-    let Some(matches) =
-        with_compiled_regex(&source, &flags, |regex| capture_strings(regex, &value))
+    let Some(byte_start) = utf16_index_to_byte_offset(&value, last_index_to_length(last_index))
     else {
+        return std::ptr::null_mut();
+    };
+    let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
+        regex
+            .captures_at(&value, byte_start)
+            .map(|captures| capture_strings_from(&captures))
+    })
+    .flatten() else {
         return std::ptr::null_mut();
     };
     if matches.is_empty() {
         return std::ptr::null_mut();
     }
     arena_string_array(matches)
+}
+
+#[no_mangle]
+/// Computes the `lastIndex` a stateful (`g` or `y` flagged) `RegExp` should
+/// hold after a successful `exec`/`test` call that searched `value` starting
+/// at the UTF-16 code-unit index `last_index`, matching the specification's
+/// `AdvanceStringIndex` (a zero-length match advances by one code unit
+/// rather than looping forever) and its sticky-flag requirement that the
+/// match start exactly at `last_index`. Returns `-1` when there is no such
+/// match, `last_index` is out of range, or `source`/`flags` fails to
+/// compile -- the caller resets `lastIndex` to `0` in that case.
+///
+/// # Safety
+/// `value`, `source` and `flags` must be null or point to valid
+/// NUL-terminated UTF-8 strings.
+pub unsafe extern "C" fn thaw_regex_exec_advance(
+    value: *const c_char,
+    source: *const c_char,
+    flags: *const c_char,
+    last_index: f64,
+) -> f64 {
+    if value.is_null() || source.is_null() || flags.is_null() {
+        return -1.0;
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+    let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
+    let sticky = flags.contains('y');
+    let Some(byte_start) = utf16_index_to_byte_offset(&value, last_index_to_length(last_index))
+    else {
+        return -1.0;
+    };
+    with_compiled_regex(&source, &flags, |regex| {
+        let Some(found) = regex.find_at(&value, byte_start) else {
+            return -1.0;
+        };
+        if sticky && found.start() != byte_start {
+            return -1.0;
+        }
+        let mut end = value[..found.end()].encode_utf16().count();
+        if found.start() == found.end() {
+            end += 1;
+        }
+        end as f64
+    })
+    .unwrap_or(-1.0)
 }
 
 #[no_mangle]

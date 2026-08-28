@@ -1531,8 +1531,18 @@ The workspace crates have narrow responsibilities:
   whole match followed by each capture group's text (same shape and
   empty-string-for-non-participating-group behavior as non-global
   `.match()`), or `undefined` when it does not match or the pattern fails
-  to compile. Like `.test()`, it ignores `g`/`y` and always searches from
-  the start of `value` -- there is no `lastIndex` state to advance
+  to compile. A `g`- or `y`-flagged pattern is stateful, matching the
+  specification: `lastIndex` (a real, readable/writable field on the
+  `RegExp` object now, alongside `source`/`flags`) seeds where the next
+  call starts searching, advances to just past the match on success (by
+  one code unit past the match start for a zero-length match, so a
+  `while ((m = re.exec(s)) !== undefined)` loop over `/x*/g` terminates
+  instead of looping forever), resets to `0` on failure, and for `y`
+  additionally rejects a match that does not start exactly at
+  `lastIndex`. A non-global, non-sticky pattern ignores and never writes
+  `lastIndex`, always searching from the start of `value`, matching
+  `.test()`'s own simplification (which still does not consult or update
+  `lastIndex` -- only `.exec()` does)
 - `String.prototype.matchAll(regex)` returns `Array(Array(Str))`: one
   match-info array per match found (same shape as non-global `.match()` --
   the whole match followed by each capture group's text), unlike
