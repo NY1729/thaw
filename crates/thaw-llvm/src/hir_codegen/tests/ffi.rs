@@ -1785,7 +1785,7 @@ fn compiles_date_getters_and_iso_string() {
     "#;
     assert_eq!(
         compile_and_run(source, "date_getters"),
-        "1.70407e+12\n1.70407e+12\n2024\n0\n1\n1\n0\n0\n0\n500\n2024\n2024-01-01T00:00:00.500Z\nfixed\n2024-01-01T00:00:00.500Z\n1970-01-01T00:00:00.000Z\ntrue\nInvalid time value\n"
+        "1704067200500\n1704067200500\n2024\n0\n1\n1\n0\n0\n0\n500\n2024\n2024-01-01T00:00:00.500Z\nfixed\n2024-01-01T00:00:00.500Z\n1970-01-01T00:00:00.000Z\ntrue\nInvalid time value\n"
     );
 }
 
@@ -1822,7 +1822,7 @@ fn compiles_date_setters() {
     "#;
     assert_eq!(
         compile_and_run(source, "date_setters"),
-        "1.70528e+12\n2024-01-15T00:00:00.500Z\n2024-12-01T00:00:00.500Z\n2025-01-01T00:00:00.500Z\n2000-06-01T00:00:00.500Z\n2023-12-31T00:00:00.500Z\n2024-01-02T01:00:00.500Z\n2024-01-01T00:01:30.500Z\nnan\n"
+        "1705276800500\n2024-01-15T00:00:00.500Z\n2024-12-01T00:00:00.500Z\n2025-01-01T00:00:00.500Z\n2000-06-01T00:00:00.500Z\n2023-12-31T00:00:00.500Z\n2024-01-02T01:00:00.500Z\n2024-01-01T00:01:30.500Z\nNaN\n"
     );
 }
 
@@ -1848,7 +1848,7 @@ fn compiles_date_utc_and_parse() {
     "#;
     assert_eq!(
         compile_and_run(source, "date_utc_parse"),
-        "1.70407e+12\n1.70407e+12\n0\n1.70407e+12\n1.70407e+12\nnan\n2024-01-01T00:00:00.500Z\nisoText\n1.70407e+12\n"
+        "1704067200500\n1704067200000\n0\n1704067200500\n1704067200000\nNaN\n2024-01-01T00:00:00.500Z\nisoText\n1704067200500\n"
     );
 }
 
@@ -2724,10 +2724,12 @@ fn compiles_ambient_declaration_and_links_a_real_native_function() {
     assert!(cc_status.success(), "compiling native.c failed");
 
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     let link_status = Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -3028,10 +3030,12 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -3103,10 +3107,12 @@ fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -3199,10 +3205,12 @@ fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -3292,10 +3300,12 @@ fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -3402,10 +3412,12 @@ fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -3495,10 +3507,12 @@ fn ffi_call_marshals_object_returns_from_packed_c_structs() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -3858,10 +3872,12 @@ fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -3968,10 +3984,12 @@ fn ffi_object_return_copies_and_destroys_owned_string_fields() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4087,10 +4105,12 @@ fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4157,10 +4177,12 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4242,10 +4264,12 @@ fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
     assert!(cc_status.success(), "compiling native.c failed");
 
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     let link_status = Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4317,10 +4341,12 @@ fn ffi_call_marshals_string_arrays_in_both_directions() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4387,10 +4413,12 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4472,10 +4500,12 @@ double flag_destroy_count(void) { return destroyed; }
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4544,10 +4574,12 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4620,10 +4652,12 @@ fn ffi_call_recursively_marshals_array_fields_in_object_parameters() {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4711,10 +4745,12 @@ double native_tagged(
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4790,10 +4826,12 @@ TaggedNumber native_nullish(double state) {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4865,10 +4903,12 @@ NativeTuple native_tuple(double number, const char *text, bool flag) {
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -4954,10 +4994,12 @@ double tuple_destroy_count(void) { return destroyed; }
         .unwrap()
         .success());
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     assert!(Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -5018,10 +5060,12 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
     assert!(cc_status.success(), "compiling native.c failed");
 
     let arena_lib = build_staticlib("thaw-arena");
+    let runtime_lib = build_staticlib("thaw-runtime");
     let link_status = Command::new("cc")
         .arg(&obj_path)
         .arg(&native_obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(&exe_path)
         .status()

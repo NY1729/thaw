@@ -270,6 +270,23 @@ The workspace crates have narrow responsibilities:
   dictionaries and JSON values. Tagged collection elements serialize missing
   array/tuple entries as `null`; object `undefined` fields are omitted while
   nullable fields remain explicit `null`
+- `console.log(number)` formats through `thaw_number_to_string` (the same
+  shortest-round-trip conversion `String(number)`/template literals/`+`
+  already use), not a raw C `printf("%g", ...)` -- the previous `%g` call
+  truncated to C's default six significant digits and picked exponential
+  notation by C's own rules, so it silently misprinted e.g.
+  `Number.MAX_SAFE_INTEGER` as `9.0072e+15` and hid `0.1 + 0.2`'s
+  imprecision by rounding the result to `0.3`. A number nested inside a
+  console.log'd array/object/tuple was never affected -- it already went
+  through the same JSON-stringify-based path, which was already correct
+- An inline object literal or an arithmetic/comparison expression passed
+  directly as a `console.log` argument (not first assigned to a variable)
+  now prints correctly: `expr_hir_type`, the codegen-time function that
+  picks how to print an argument from its `HirExpr` shape, had no case for
+  `ObjectLit` or `BinOp` and fell back to guessing from the compiled LLVM
+  value's shape alone -- a non-string pointer (the object) got misread as
+  a C string and printed raw memory, and a float landed back in the same
+  `%g`-formatting bug just described
 - `console.info` and `console.debug` on standard output plus `console.warn` and
   `console.error` on standard error, sharing the same variadic value formatting
 - `console.assert` with JavaScript truthiness, eager left-to-right argument

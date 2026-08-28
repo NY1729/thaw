@@ -1430,7 +1430,7 @@ fn compiles_parse_float_and_parse_int() {
     "#;
     assert_eq!(
         compile_and_run(source, "parse_float_int"),
-        "-12.5\n1\nnan\n32\n3\n15\ntrue\ntrue\nawaited-parse\n5\n3.5\n255\n2.5\nparse-spread\n255\ntrue\ntrue\n"
+        "-12.5\n1\nNaN\n32\n3\n15\ntrue\ntrue\nawaited-parse\n5\n3.5\n255\n2.5\nparse-spread\n255\ntrue\ntrue\n"
     );
 }
 
