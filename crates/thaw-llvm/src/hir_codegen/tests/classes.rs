@@ -347,6 +347,39 @@ fn compiles_and_runs_native_class_constructor_fields() {
 }
 
 #[test]
+fn compiles_class_fields_with_types_inferred_from_literal_initializers() {
+    let source = r#"
+        class Widget {
+            name = "widget";
+            active = true;
+            count = 0;
+            static #instances = 0;
+            static label = "static-widget";
+            constructor() {
+                Widget.#instances++;
+            }
+            describe(): string {
+                return this.name + " " + this.active + " " + this.count;
+            }
+            static instanceCount(): number {
+                return Widget.#instances;
+            }
+        }
+        function main(): void {
+            const w = new Widget();
+            console.log(w.describe());
+            new Widget();
+            console.log(Widget.instanceCount());
+            console.log(Widget.label);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "class_fields_inferred_from_literals"),
+        "widget true 0\n2\nstatic-widget\n"
+    );
+}
+
+#[test]
 fn compiles_and_runs_native_class_implements() {
     let source = r#"
         interface NamedValue<N, V> { name: N; value: V; }

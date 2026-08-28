@@ -882,11 +882,21 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     ));
                 }
             }
-            let annotation = property.type_ann.as_ref().ok_or_else(|| {
-                format!("class `{class_name}` static field `{field}` needs a type annotation")
-            })?;
             let symbol = class_static_field_symbol(class_name, &field);
-            let mut ty = lower_ts_type(&annotation.type_ann, &interfaces, &generic_interfaces)?;
+            let mut ty = match &property.type_ann {
+                Some(annotation) => {
+                    lower_ts_type(&annotation.type_ann, &interfaces, &generic_interfaces)?
+                }
+                None => property
+                    .value
+                    .as_deref()
+                    .and_then(infer_class_field_literal_type)
+                    .ok_or_else(|| {
+                        format!(
+                            "class `{class_name}` static field `{field}` needs a type annotation"
+                        )
+                    })?,
+            };
             if property.is_optional {
                 ty = optional_parameter_type(ty);
             }
