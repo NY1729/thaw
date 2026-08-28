@@ -2295,6 +2295,42 @@ fn compiles_number_to_string_with_radix() {
 }
 
 #[test]
+fn compiles_weak_map_and_weak_set() {
+    let source = r#"
+        type Session = { userId: number };
+        function printString(value: string | undefined): void {
+            if (value !== undefined) {
+                console.log(value);
+            } else {
+                console.log("undefined");
+            }
+        }
+        async function main(): Promise<void> {
+            const cache: WeakMap<Session, string> = new WeakMap<Session, string>();
+            const s1: Session = { userId: 1 };
+            const s2: Session = { userId: 1 };
+            cache.set(s1, "alice");
+            printString(cache.get(s1));
+            printString(cache.get(s2));
+            console.log(cache.has(s1));
+            cache.delete(s1);
+            console.log(cache.has(s1));
+
+            const seen: WeakSet<Session> = new WeakSet<Session>();
+            seen.add(s1).add(s2);
+            console.log(seen.has(s1));
+            console.log(seen.has(s2));
+            seen.delete(s2);
+            console.log(seen.has(s2));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "weak_map_and_weak_set"),
+        "alice\nundefined\ntrue\nfalse\ntrue\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {
