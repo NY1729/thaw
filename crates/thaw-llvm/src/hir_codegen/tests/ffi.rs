@@ -2219,6 +2219,32 @@ fn compiles_regex_flag_properties() {
 }
 
 #[test]
+fn compiles_string_at() {
+    let source = r#"
+        function printChar(value: string | undefined): void {
+            if (value !== undefined) {
+                console.log(value);
+            } else {
+                console.log("undefined");
+            }
+        }
+        async function main(): Promise<void> {
+            printChar("abcde".at(0));
+            printChar("abcde".at(4));
+            printChar("abcde".at(-1));
+            printChar("abcde".at(-5));
+            printChar("abcde".at(5));
+            printChar("abcde".at(-6));
+            printChar("".at(0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_at"),
+        "a\ne\ne\na\nundefined\nundefined\nundefined\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {

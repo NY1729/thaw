@@ -547,6 +547,35 @@ pub unsafe extern "C" fn thaw_string_char_code_at(value: *const c_char, index: f
 }
 
 #[no_mangle]
+/// `String.prototype.at`: the single UTF-16 code unit at `index` (already
+/// normalized by the generated code to an in-bounds, non-negative integer,
+/// mirroring `Array.prototype.at`'s own negative-index wraparound),
+/// returned as a one-code-unit string. A lone surrogate (half of a
+/// surrogate pair split by `index`) becomes U+FFFD, the same lossy
+/// fallback `String::from_utf16_lossy` uses elsewhere in this codebase --
+/// full WTF-16 fidelity for an isolated surrogate isn't supported. Returns
+/// a null pointer for a null argument or an index at or past the string's
+/// length; the generated code wraps this as `undefined`, the same
+/// convention `codePointAt` already uses.
+///
+/// # Safety
+/// `value` must be null or point to a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_string_at(value: *const c_char, index: f64) -> *const c_char {
+    if value.is_null() || index < 0.0 {
+        return std::ptr::null();
+    }
+    let units: Vec<u16> = unsafe { CStr::from_ptr(value) }
+        .to_string_lossy()
+        .encode_utf16()
+        .collect();
+    let Some(&unit) = units.get(index as usize) else {
+        return std::ptr::null();
+    };
+    let text = String::from_utf16_lossy(&[unit]);
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
 /// Returns the Unicode code point at `index` (measured in UTF-16 code
 /// units), combining a leading surrogate with a following trailing
 /// surrogate into one astral code point. Returns `-1.0` when `index` is out
