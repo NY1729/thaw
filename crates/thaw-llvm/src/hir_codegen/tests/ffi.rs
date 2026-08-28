@@ -1982,6 +1982,101 @@ fn compiles_map_object_value() {
 }
 
 #[test]
+fn compiles_map_keys_values_entries() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const m: Map<string, number> = new Map<string, number>();
+            m.set("a", 1).set("b", 2).set("c", 3);
+            m.delete("b");
+            for (const key of m.keys()) {
+                console.log(key);
+            }
+            for (const value of m.values()) {
+                console.log(value);
+            }
+            for (const entry of m.entries()) {
+                console.log(entry[0] + "=" + entry[1]);
+            }
+            for (const [key, value] of m.entries()) {
+                console.log(key + ":" + value);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_keys_values_entries"),
+        "a\nc\n1\n3\na=1\nc=3\na:1\nc:3\n"
+    );
+}
+
+#[test]
+fn compiles_set_keys_values_entries() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const s: Set<string> = new Set<string>();
+            s.add("x").add("y").add("z");
+            s.delete("y");
+            for (const key of s.keys()) {
+                console.log(key);
+            }
+            for (const value of s.values()) {
+                console.log(value);
+            }
+            for (const [a, b] of s.entries()) {
+                console.log(a + b);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_keys_values_entries"),
+        "x\nz\nx\nz\nxx\nzz\n"
+    );
+}
+
+#[test]
+fn compiles_map_set_for_each() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const m: Map<string, number> = new Map<string, number>();
+            m.set("a", 1).set("b", 2);
+            m.forEach((value: number, key: string) => {
+                console.log(key + "=" + value);
+            });
+            const s: Set<string> = new Set<string>();
+            s.add("p").add("q");
+            s.forEach((value: string, key: string) => {
+                console.log(value + key);
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_set_for_each"),
+        "a=1\nb=2\npp\nqq\n"
+    );
+}
+
+#[test]
+fn compiles_direct_for_of_over_map_and_set() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const m: Map<string, number> = new Map<string, number>();
+            m.set("a", 1).set("b", 2);
+            for (const [key, value] of m) {
+                console.log(key + "=" + value);
+            }
+            const s: Set<string> = new Set<string>();
+            s.add("x").add("y");
+            for (const value of s) {
+                console.log(value);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "direct_for_of_map_set"),
+        "a=1\nb=2\nx\ny\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {

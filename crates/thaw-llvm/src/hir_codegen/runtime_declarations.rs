@@ -587,6 +587,18 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
         );
+        for name in [
+            "thaw_map_snapshot_keys",
+            "thaw_map_snapshot_values",
+            "thaw_map_snapshot_entries",
+            "thaw_set_snapshot_entries",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_map_size",
             f64_type.fn_type(&[i8_ptr.into()], false),

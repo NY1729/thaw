@@ -357,6 +357,107 @@ pub unsafe extern "C" fn thaw_map_clear(map: *mut u8) {
     header.buckets_len = 0;
 }
 
+/// Builds a native array (`[i64 length][word0][word1]...]`, the same
+/// layout `HirExpr::ArrayLit` itself produces) of one raw 64-bit word per
+/// live entry, in insertion order, via `extract`. Reused for key
+/// snapshots, value snapshots, and (with `extract` returning a small
+/// arena-allocated 2-word tuple's address) entry-pair snapshots -- the
+/// words are never reinterpreted here, so this same helper works
+/// regardless of whether the caller means them as `f64` bits, a pointer,
+/// or a packed boolean; the array's `HirType::Array(_)` element type
+/// (known at HIR lowering time, not here) tells codegen how to read each
+/// slot back.
+fn map_snapshot(map: *const u8, extract: impl Fn(&MapEntry) -> u64) -> *mut u8 {
+    let live = if map.is_null() {
+        0
+    } else {
+        unsafe { &*map.cast::<MapHeader>() }.live
+    };
+    let output = thaw_arena::thaw_arena_alloc((live as usize + 1) * 8, 8);
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { output.cast::<i64>().write(live as i64) };
+    if map.is_null() {
+        return output;
+    }
+    let header = unsafe { &*map.cast::<MapHeader>() };
+    let mut written = 0u64;
+    for index in 0..header.entries_len {
+        let entry = unsafe { *header.entries.add(index as usize) };
+        if entry.state != ENTRY_LIVE {
+            continue;
+        }
+        unsafe {
+            output
+                .add(8 + written as usize * 8)
+                .cast::<u64>()
+                .write_unaligned(extract(&entry));
+        }
+        written += 1;
+    }
+    output
+}
+
+#[no_mangle]
+/// `Map.prototype.keys`/`Set.prototype.keys`/`Set.prototype.values`
+/// (`Set` has no separate key from its element, so both read this): the
+/// live keys/elements in insertion order as a native array whose element
+/// type the generated code already knows statically.
+///
+/// # Safety
+/// `map` must be null or a pointer returned by `thaw_map_new`.
+pub unsafe extern "C" fn thaw_map_snapshot_keys(map: *const u8) -> *mut u8 {
+    map_snapshot(map, |entry| entry.key)
+}
+
+#[no_mangle]
+/// `Map.prototype.values`: the live values in insertion order.
+///
+/// # Safety
+/// `map` must be null or a pointer returned by `thaw_map_new`.
+pub unsafe extern "C" fn thaw_map_snapshot_values(map: *const u8) -> *mut u8 {
+    map_snapshot(map, |entry| entry.value)
+}
+
+/// Allocates a native 2-tuple (`[i64 length=2][first][second]`, the same
+/// layout an `HirExpr::ArrayLit` of two elements produces) and returns its
+/// address as a `u64`, or `0` only on arena allocation failure.
+fn arena_pair(first: u64, second: u64) -> u64 {
+    let pair = thaw_arena::thaw_arena_alloc(24, 8);
+    if pair.is_null() {
+        return 0;
+    }
+    unsafe {
+        pair.cast::<i64>().write(2);
+        pair.add(8).cast::<u64>().write_unaligned(first);
+        pair.add(16).cast::<u64>().write_unaligned(second);
+    }
+    pair as u64
+}
+
+#[no_mangle]
+/// `Map.prototype.entries`: a native array of `[key, value]` 2-tuples, one
+/// per live entry in insertion order. Returns a null pointer only on
+/// arena allocation failure.
+///
+/// # Safety
+/// `map` must be null or a pointer returned by `thaw_map_new`.
+pub unsafe extern "C" fn thaw_map_snapshot_entries(map: *const u8) -> *mut u8 {
+    map_snapshot(map, |entry| arena_pair(entry.key, entry.value))
+}
+
+#[no_mangle]
+/// `Set.prototype.entries`: a native array of `[value, value]` 2-tuples,
+/// matching the specification (a `Set` has no separate key from its
+/// element, so both tuple slots repeat it).
+///
+/// # Safety
+/// `map` must be null or a pointer returned by `thaw_map_new`.
+pub unsafe extern "C" fn thaw_set_snapshot_entries(map: *const u8) -> *mut u8 {
+    map_snapshot(map, |entry| arena_pair(entry.key, entry.key))
+}
+
 fn encode_num_key(key: f64) -> u64 {
     canonical_num_key(key)
 }
@@ -568,5 +669,53 @@ mod map_native_tests {
             live_count += 1;
         }
         assert_eq!(live_count, header.live);
+    }
+
+    unsafe fn read_word_array(array: *mut u8) -> Vec<u64> {
+        let length = unsafe { array.cast::<i64>().read() };
+        (0..length)
+            .map(|index| unsafe { array.add(8 + index as usize * 8).cast::<u64>().read_unaligned() })
+            .collect()
+    }
+
+    #[test]
+    fn snapshots_reflect_insertion_order_and_skip_deletions() {
+        let map = unsafe { thaw_map_new() };
+        for (key, value_bits) in [(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)] {
+            unsafe { thaw_map_num_set(map, key, value(value_bits)) };
+        }
+        unsafe { thaw_map_num_delete(map, 2.0) };
+
+        let keys = unsafe { read_word_array(thaw_map_snapshot_keys(map)) };
+        assert_eq!(
+            keys.into_iter().map(f64::from_bits).collect::<Vec<_>>(),
+            vec![1.0, 3.0]
+        );
+
+        let values = unsafe { read_word_array(thaw_map_snapshot_values(map)) };
+        assert_eq!(
+            values.into_iter().map(f64::from_bits).collect::<Vec<_>>(),
+            vec![10.0, 30.0]
+        );
+
+        let entries = unsafe { read_word_array(thaw_map_snapshot_entries(map)) };
+        assert_eq!(entries.len(), 2);
+        let pairs: Vec<(f64, f64)> = entries
+            .iter()
+            .map(|&pointer| {
+                let pair = pointer as *mut u8;
+                let key = f64::from_bits(unsafe { pair.add(8).cast::<u64>().read() });
+                let value = f64::from_bits(unsafe { pair.add(16).cast::<u64>().read() });
+                (key, value)
+            })
+            .collect();
+        assert_eq!(pairs, vec![(1.0, 10.0), (3.0, 30.0)]);
+    }
+
+    #[test]
+    fn snapshots_of_null_or_empty_map_are_empty_arrays() {
+        assert_eq!(unsafe { read_word_array(thaw_map_snapshot_keys(std::ptr::null())) }, Vec::<u64>::new());
+        let map = unsafe { thaw_map_new() };
+        assert_eq!(unsafe { read_word_array(thaw_map_snapshot_values(map)) }, Vec::<u64>::new());
     }
 }
