@@ -2167,6 +2167,36 @@ fn compiles_map_and_set_constructors_with_initial_data() {
 }
 
 #[test]
+fn compiles_regex_match_all() {
+    let source = r#"
+        function printMatches(matches: string[][]): void {
+            console.log(matches.length);
+            for (const match of matches) {
+                console.log(match.join(","));
+            }
+        }
+        async function main(): Promise<void> {
+            printMatches("a1b2c3".matchAll(/(\w)(\d)/g));
+            printMatches("no digits here".matchAll(/\d+/g));
+            try {
+                "a1b2c3".matchAll(/\d/);
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                "abc".matchAll(/(?=x)/g);
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_match_all"),
+        "3\na1,a,1\nb2,b,2\nc3,c,3\n0\nString.prototype.matchAll must be called with a global RegExp\nString.prototype.matchAll must be called with a global RegExp\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {

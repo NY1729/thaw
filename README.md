@@ -1517,6 +1517,18 @@ The workspace crates have narrow responsibilities:
   `.match()`), or `undefined` when it does not match or the pattern fails
   to compile. Like `.test()`, it ignores `g`/`y` and always searches from
   the start of `value` -- there is no `lastIndex` state to advance
+- `String.prototype.matchAll(regex)` returns `Array(Array(Str))`: one
+  match-info array per match found (same shape as non-global `.match()` --
+  the whole match followed by each capture group's text), unlike
+  `.match()` with `g`, which strips capture groups. Throws
+  `String.prototype.matchAll must be called with a global RegExp` both
+  when `flags` lacks `g` (matching the specification) and when the
+  pattern fails to compile (which the specification doesn't need to
+  handle here, since a real engine would have already thrown when the
+  invalid `RegExp` was constructed) -- both return the same null-pointer
+  failure signal from the native side, so the generated code can't tell
+  them apart, the same simplification `replaceAll`'s error message
+  already makes for its own two failure cases
 - `Date` (construction, the `Date` type annotation, and `Date.now()`) and
   instance methods `getTime`/`valueOf`/`setTime`, `toISOString`, and the
   `getFullYear`/`getMonth`/`getDate`/`getDay`/`getHours`/`getMinutes`/

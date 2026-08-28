@@ -761,6 +761,17 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, flags, "match flags")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
+                    "__thaw_regex_match_all" => {
+                        let [value, source, flags] = args.as_slice() else {
+                            return Err("String.matchAll expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "matchAll receiver")?;
+                        self.expect_type(&HirType::Str, source, "matchAll source")?;
+                        self.expect_type(&HirType::Str, flags, "matchAll flags")?;
+                        return Ok(HirType::Array(Box::new(HirType::Array(Box::new(
+                            HirType::Str,
+                        )))));
+                    }
                     "__thaw_regex_replace" | "__thaw_regex_replace_all" => {
                         let [value, source, flags, replacement] = args.as_slice() else {
                             return Err("RegExp replace expects four operands".into());

@@ -868,29 +868,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("RegExp.exec returned no value".into());
             }
-            "__thaw_regex_match" | "__thaw_regex_split" => {
+            "__thaw_regex_match" | "__thaw_regex_split" | "__thaw_regex_match_all" => {
                 let [value, source, flags] = args else {
-                    return Err("regex match/split expects three operands".into());
+                    return Err(format!("{name} expects three operands"));
                 };
                 let value = self.compile_expr(value)?;
                 let source = self.compile_expr(source)?;
                 let flags = self.compile_expr(flags)?;
-                let runtime = if name == "__thaw_regex_match" {
-                    "thaw_regex_match"
-                } else {
-                    "thaw_regex_split"
-                };
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
                 return self
                     .builder
                     .build_call(
-                        self.module.get_function(runtime).unwrap(),
+                        self.module.get_function(&runtime).unwrap(),
                         &[value.into(), source.into(), flags.into()],
                         "regex_call",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("regex match/split returned no value".into());
+                    .ok_or_else(|| format!("{name} returned no value"));
             }
             "__thaw_regex_replace" | "__thaw_regex_replace_all" => {
                 let [value, source, flags, replacement] = args else {

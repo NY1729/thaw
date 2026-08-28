@@ -323,3 +323,85 @@ pub unsafe extern "C" fn thaw_regex_match(
     }
     arena_string_array(matches)
 }
+
+/// Writes `pointers` into a fresh arena-allocated array of raw pointers
+/// (length prefix, then one pointer-sized slot per element), returning
+/// null on allocation failure. Unlike `arena_string_array`, the pointers
+/// are written as-is rather than built from owned strings -- used for an
+/// array whose elements are themselves other arena-allocated arrays.
+fn arena_pointer_array(pointers: Vec<*mut u8>) -> *mut u8 {
+    let output = thaw_arena::thaw_arena_alloc((pointers.len() + 1) * 8, 8);
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(pointers.len() as u64);
+    }
+    for (index, pointer) in pointers.into_iter().enumerate() {
+        unsafe {
+            output
+                .add(8 + index * 8)
+                .cast::<*mut u8>()
+                .write_unaligned(pointer);
+        }
+    }
+    output
+}
+
+#[no_mangle]
+/// `String.prototype.matchAll`: an array of match-info arrays (the whole
+/// match followed by each capture group's text, same shape and
+/// empty-string-for-non-participating-group behavior as non-global
+/// `.match()`), one per match found, in order. Unlike `.match()`, capture
+/// groups are always included here even though every match is found (that
+/// is the entire point of `matchAll` over a global `.match()`). Returns a
+/// null pointer for a null argument, a pattern the `regex` crate cannot
+/// compile, or a `flags` that lacks `g` -- the generated code always
+/// checks for `g` itself first and throws a specific message for that
+/// case, so this only needs to return *some* failure signal for it, not
+/// distinguish it from a compile failure.
+///
+/// # Safety
+/// `value`, `source` and `flags` must be null or point to valid
+/// NUL-terminated UTF-8 strings.
+pub unsafe extern "C" fn thaw_regex_match_all(
+    value: *const c_char,
+    source: *const c_char,
+    flags: *const c_char,
+) -> *mut u8 {
+    if value.is_null() || source.is_null() || flags.is_null() {
+        return std::ptr::null_mut();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
+    let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
+    if !flags.contains('g') {
+        return std::ptr::null_mut();
+    }
+    let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
+        regex
+            .captures_iter(&value)
+            .map(|captures| {
+                (0..captures.len())
+                    .map(|index| {
+                        captures
+                            .get(index)
+                            .map(|group| group.as_str().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    }) else {
+        return std::ptr::null_mut();
+    };
+    let mut inner_arrays = Vec::with_capacity(matches.len());
+    for captures in matches {
+        let inner = arena_string_array(captures);
+        if inner.is_null() {
+            return std::ptr::null_mut();
+        }
+        inner_arrays.push(inner);
+    }
+    arena_pointer_array(inner_arrays)
+}
