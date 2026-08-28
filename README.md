@@ -1447,6 +1447,11 @@ The workspace crates have narrow responsibilities:
   wraparound. A lone surrogate split off by `index` becomes U+FFFD, the
   same lossy fallback used elsewhere in this runtime -- full WTF-16
   fidelity for an isolated surrogate isn't supported
+- `String.prototype.charAt(index)` shares `.at()`'s underlying single-code-
+  unit lookup, but with the legacy method's own semantics instead:
+  `index` defaults to `0`, never wraps from the end for a negative value,
+  and any out-of-range index (negative, `NaN`, or at/past the string's
+  length) returns an empty string rather than `undefined`
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
