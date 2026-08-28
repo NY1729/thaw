@@ -1987,6 +1987,177 @@ impl<'a> FnLowerer<'a> {
                         this_arg,
                     );
                 }
+                if property.sym == *"forEach" && self.receiver_is_map_or_set(&member.obj) {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let (key_type, value_type, keys_double_as_values) = match &receiver_type {
+                        HirType::Map(key_type, value_type) => {
+                            (key_type.as_ref().clone(), value_type.as_ref().clone(), false)
+                        }
+                        HirType::Set(element_type) => {
+                            let element_type = element_type.as_ref().clone();
+                            (element_type.clone(), element_type, true)
+                        }
+                        _ => unreachable!("receiver_is_map_or_set confirmed this above"),
+                    };
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err(
+                            "native `.forEach()` does not support spread arguments on a Map/Set"
+                                .into(),
+                        );
+                    }
+                    let [argument] = call.args.as_slice() else {
+                        return Err("native `.forEach()` expects exactly one argument".into());
+                    };
+                    let arity = match argument.expr.as_ref() {
+                        Expr::Arrow(arrow) => arrow.params.len(),
+                        Expr::Fn(function) => function.function.params.len(),
+                        Expr::Ident(ident) => {
+                            let name = self.resolve_binding(ident.sym.as_ref());
+                            let HirType::Function(params, _) = self
+                                .scope
+                                .get(&name)
+                                .ok_or_else(|| format!("unknown Map/Set forEach callback `{name}`"))?
+                            else {
+                                return Err(format!(
+                                    "Map/Set forEach callback `{name}` is not a function value"
+                                ));
+                            };
+                            params.len()
+                        }
+                        _ => {
+                            return Err(
+                                "Map/Set forEach callback must be an arrow or function value"
+                                    .into(),
+                            )
+                        }
+                    };
+                    if arity > 3 {
+                        return Err(format!(
+                            "Map/Set forEach callback accepts at most three parameters, got {arity}"
+                        ));
+                    }
+                    let available = [value_type.clone(), key_type.clone(), receiver_type.clone()];
+                    let callback = self.lower_promise_callback(
+                        &argument.expr,
+                        &available[..arity],
+                        Some(&HirType::Void),
+                    )?;
+                    let callback_type = self.infer_expr_type(&callback)?;
+                    let HirType::Function(params, _) = &callback_type else {
+                        unreachable!("Map/Set forEach callback was validated as a function")
+                    };
+                    let receiver_name = format!("__thaw_map_for_each_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let callback_name = format!("__thaw_map_for_each_callback_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let keys_name = format!("__thaw_map_for_each_keys_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let values_name = format!("__thaw_map_for_each_values_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let length_name = format!("__thaw_map_for_each_length_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let index_name = format!("__thaw_map_for_each_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let key_var_name = format!("__thaw_map_for_each_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let value_var_name = format!("__thaw_map_for_each_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let keys_array_type = HirType::Array(Box::new(key_type.clone()));
+                    let values_array_type = HirType::Array(Box::new(value_type.clone()));
+                    self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                    self.scope.insert(callback_name.clone(), callback_type.clone());
+                    self.scope.insert(keys_name.clone(), keys_array_type.clone());
+                    self.scope.insert(values_name.clone(), values_array_type.clone());
+                    self.scope.insert(length_name.clone(), HirType::F64);
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    self.scope.insert(key_var_name.clone(), key_type.clone());
+                    self.scope.insert(value_var_name.clone(), value_type.clone());
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let available_vars = [
+                        var(&value_var_name),
+                        var(&key_var_name),
+                        var(&receiver_name),
+                    ];
+                    let callback_call = HirExpr::Call(
+                        Box::new(var(&callback_name)),
+                        available_vars[..params.len()].to_vec(),
+                    );
+                    let values_source_name = if keys_double_as_values {
+                        keys_name.clone()
+                    } else {
+                        values_name.clone()
+                    };
+                    let mut body_stmts = vec![HirStmt::Let(
+                        keys_name.clone(),
+                        keys_array_type,
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_map_snapshot_keys".to_string())),
+                            vec![var(&receiver_name)],
+                        ),
+                    )];
+                    if !keys_double_as_values {
+                        body_stmts.push(HirStmt::Let(
+                            values_name,
+                            values_array_type,
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_map_snapshot_values".to_string())),
+                                vec![var(&receiver_name)],
+                            ),
+                        ));
+                    }
+                    body_stmts.extend([
+                        HirStmt::Let(
+                            length_name.clone(),
+                            HirType::F64,
+                            HirExpr::ArrayLen(Box::new(var(&keys_name))),
+                        ),
+                        HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+                        HirStmt::While(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(var(&index_name)),
+                                Box::new(var(&length_name)),
+                            ),
+                            vec![
+                                HirStmt::Let(
+                                    key_var_name,
+                                    key_type.clone(),
+                                    HirExpr::TypedIndex(
+                                        Box::new(var(&keys_name)),
+                                        Box::new(var(&index_name)),
+                                        key_type,
+                                    ),
+                                ),
+                                HirStmt::Let(
+                                    value_var_name,
+                                    value_type.clone(),
+                                    HirExpr::TypedIndex(
+                                        Box::new(var(&values_source_name)),
+                                        Box::new(var(&index_name)),
+                                        value_type,
+                                    ),
+                                ),
+                                HirStmt::Expr(callback_call),
+                                HirStmt::Expr(HirExpr::Assign(
+                                    index_name.clone(),
+                                    Box::new(HirExpr::BinOp(
+                                        BinOp::Add,
+                                        Box::new(var(&index_name)),
+                                        Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                                    )),
+                                )),
+                            ],
+                        ),
+                        HirStmt::Return(None),
+                    ]);
+                    let body = HirExpr::Block(body_stmts);
+                    let bindings = vec![
+                        (receiver_name, receiver_type, receiver),
+                        (callback_name, callback_type, callback),
+                    ];
+                    return self.wrap_call_argument_bindings(body, &bindings);
+                }
                 if property.sym == *"forEach" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
@@ -2901,6 +3072,87 @@ impl<'a> FnLowerer<'a> {
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_map_clear".to_string())),
                         vec![receiver],
+                    ));
+                }
+                if property.sym == *"keys" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let key_type = match &receiver_type {
+                        HirType::Map(key_type, _) => key_type.as_ref().clone(),
+                        HirType::Set(element_type) => element_type.as_ref().clone(),
+                        other => {
+                            return Err(format!(
+                                "native `.keys()` requires a Map or Set receiver, got {other:?}"
+                            ))
+                        }
+                    };
+                    if !call.args.is_empty() {
+                        return Err("native `.keys()` expects no arguments".into());
+                    }
+                    return Ok(HirExpr::TypedClosure(
+                        HirType::Array(Box::new(key_type)),
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_map_snapshot_keys".to_string())),
+                            vec![receiver],
+                        )),
+                    ));
+                }
+                if property.sym == *"values" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let (value_type, intrinsic) = match &receiver_type {
+                        HirType::Map(_, value_type) => {
+                            (value_type.as_ref().clone(), "__thaw_map_snapshot_values")
+                        }
+                        // A Set's elements ARE its "values" -- it has no
+                        // separate value to snapshot.
+                        HirType::Set(element_type) => {
+                            (element_type.as_ref().clone(), "__thaw_map_snapshot_keys")
+                        }
+                        other => {
+                            return Err(format!(
+                                "native `.values()` requires a Map or Set receiver, got {other:?}"
+                            ))
+                        }
+                    };
+                    if !call.args.is_empty() {
+                        return Err("native `.values()` expects no arguments".into());
+                    }
+                    return Ok(HirExpr::TypedClosure(
+                        HirType::Array(Box::new(value_type)),
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var(intrinsic.to_string())),
+                            vec![receiver],
+                        )),
+                    ));
+                }
+                if property.sym == *"entries" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let (pair_type, intrinsic) = match &receiver_type {
+                        HirType::Map(key_type, value_type) => (
+                            HirType::Tuple(vec![key_type.as_ref().clone(), value_type.as_ref().clone()]),
+                            "__thaw_map_snapshot_entries",
+                        ),
+                        HirType::Set(element_type) => (
+                            HirType::Tuple(vec![element_type.as_ref().clone(), element_type.as_ref().clone()]),
+                            "__thaw_set_snapshot_entries",
+                        ),
+                        other => {
+                            return Err(format!(
+                                "native `.entries()` requires a Map or Set receiver, got {other:?}"
+                            ))
+                        }
+                    };
+                    if !call.args.is_empty() {
+                        return Err("native `.entries()` expects no arguments".into());
+                    }
+                    return Ok(HirExpr::TypedClosure(
+                        HirType::Array(Box::new(pair_type)),
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var(intrinsic.to_string())),
+                            vec![receiver],
+                        )),
                     ));
                 }
                 if property.sym == *"toJSON" {
