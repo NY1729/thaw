@@ -1052,6 +1052,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("number toPrecision returned no value".into());
             }
+            "__thaw_number_to_radix_string" => {
+                let [value, radix] = args else {
+                    return Err("number toString radix expects two operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let radix = self.compile_expr(radix)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_number_to_radix_string").unwrap(),
+                        &[value.into(), radix.into()],
+                        "number_to_radix_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("number toString radix returned no value".into());
+            }
             "__thaw_string_length" => {
                 return self.compile_single_arg_call("thaw_string_length", args, "string length")
             }
