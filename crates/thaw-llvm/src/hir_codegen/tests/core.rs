@@ -1476,6 +1476,28 @@ fn compiles_tuple_spreads_for_math_and_number_builtins() {
 }
 
 #[test]
+fn compiles_math_min_max_of_a_runtime_length_array_spread() {
+    let source = r#"
+        function build(): number[] {
+            return [5, 3, 8, 1];
+        }
+        function main(): void {
+            console.log(Math.min(...build()));
+            console.log(Math.max(...build()));
+            const empty: number[] = [];
+            console.log(Math.min(...empty));
+            console.log(Math.max(...empty));
+            console.log(Math.min(5, 3, 8, 1));
+            console.log(Math.min(...[9, 2, 7]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "math_extreme_runtime_array_spread"),
+        "1\n8\nInfinity\n-Infinity\n1\n2\n"
+    );
+}
+
+#[test]
 fn compiles_tuple_spreads_for_string_and_search_builtins() {
     let source = r#"
         function main(): void {
