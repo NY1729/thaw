@@ -684,6 +684,144 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date.parse returned no value".into());
             }
+            "__thaw_map_new" => {
+                if !args.is_empty() {
+                    return Err("Map/Set construction expects no operands".into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_map_new").unwrap(),
+                        &[],
+                        "map_new",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Map/Set construction returned no value".into());
+            }
+            "__thaw_map_size" => {
+                let [map] = args else {
+                    return Err("Map/Set size expects one operand".into());
+                };
+                let map = self.compile_expr(map)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_map_size").unwrap(),
+                        &[map.into()],
+                        "map_size",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Map/Set size returned no value".into());
+            }
+            "__thaw_map_clear" => {
+                let [map] = args else {
+                    return Err("Map/Set clear expects one operand".into());
+                };
+                let map = self.compile_expr(map)?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_map_clear").unwrap(),
+                        &[map.into()],
+                        "map_clear",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.f64_type().const_zero().into());
+            }
+            "__thaw_map_num_has"
+            | "__thaw_map_num_delete"
+            | "__thaw_map_str_has"
+            | "__thaw_map_str_delete" => {
+                let [map, key] = args else {
+                    return Err(format!("{name} expects two operands"));
+                };
+                let map = self.compile_expr(map)?;
+                let key = self.compile_expr(key)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[map.into(), key.into()],
+                        "map_bool_op",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("{name} returned no value"))?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        result,
+                        self.context.i8_type().const_zero(),
+                        "map_bool_result",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_map_num_get_f64"
+            | "__thaw_map_num_get_bool"
+            | "__thaw_map_num_get_ptr"
+            | "__thaw_map_str_get_f64"
+            | "__thaw_map_str_get_bool"
+            | "__thaw_map_str_get_ptr" => {
+                let [map, key] = args else {
+                    return Err(format!("{name} expects two operands"));
+                };
+                let map = self.compile_expr(map)?;
+                let key = self.compile_expr(key)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[map.into(), key.into()],
+                        "map_get",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("{name} returned no value"))?;
+                if name.ends_with("_get_bool") {
+                    return self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            result.into_int_value(),
+                            self.context.i8_type().const_zero(),
+                            "map_get_bool_result",
+                        )
+                        .map(Into::into)
+                        .map_err(|error| error.to_string());
+                }
+                return Ok(result);
+            }
+            "__thaw_map_num_set" | "__thaw_map_str_set" => {
+                let [map, key, value] = args else {
+                    return Err(format!("{name} expects three operands"));
+                };
+                let map = self.compile_expr(map)?;
+                let key = self.compile_expr(key)?;
+                let value = self.compile_expr(value)?;
+                let word = self.encode_word(value)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                self.builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[map.into(), key.into(), word.into()],
+                        "map_set",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(map);
+            }
             "__thaw_regex_exec" => {
                 let [source, flags, value] = args else {
                     return Err("RegExp.exec expects three operands".into());

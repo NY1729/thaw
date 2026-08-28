@@ -128,6 +128,14 @@ pub enum HirType {
     JsValue,
     Promise(Box<HirType>),
     Array(Box<HirType>),
+    /// A native hash-table-backed `Map<K, V>`. `K` must be `F64` or `Str`
+    /// (SameValueZero-equal numbers or content-equal strings) -- there is
+    /// no reference-identity hashing for object/array keys, since nothing
+    /// in the runtime gives heap values a stable identity token to hash.
+    Map(Box<HirType>, Box<HirType>),
+    /// A native hash-table-backed `Set<T>`, sharing the same `K`
+    /// restriction as `Map` (`F64` or `Str`).
+    Set(Box<HirType>),
     Tuple(Vec<HirType>),
     Object(Vec<(Symbol, HirType)>),
     Function(Vec<HirType>, Box<HirType>),

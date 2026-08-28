@@ -57,6 +57,35 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    /// Packs an arbitrary compiled value into a 64-bit word, the same
+    /// physical representation `Map`/`Set` values use -- an `f64`'s bits,
+    /// a zero-extended `i1`/`i8` boolean, an `i64`/`JsValue` passed
+    /// through, or a pointer's integer value. Unlike `build_union_value`,
+    /// this needs no static `HirType` to disambiguate, since the LLVM
+    /// value's own variant/width already says which case applies; the
+    /// receiving native function decodes the word back with a type it
+    /// already knows statically (chosen at HIR lowering time), so there's
+    /// no tag to attach here.
+    fn encode_word(&mut self, value: BasicValueEnum<'ctx>) -> Result<IntValue<'ctx>, String> {
+        match value {
+            BasicValueEnum::FloatValue(value) => self
+                .builder
+                .build_bit_cast(value, self.context.i64_type(), "word_float_bits")
+                .map(|value| value.into_int_value())
+                .map_err(|error| error.to_string()),
+            BasicValueEnum::IntValue(value) if value.get_type().get_bit_width() < 64 => self
+                .builder
+                .build_int_z_extend(value, self.context.i64_type(), "word_int_bits")
+                .map_err(|error| error.to_string()),
+            BasicValueEnum::IntValue(value) => Ok(value),
+            BasicValueEnum::PointerValue(value) => self
+                .builder
+                .build_ptr_to_int(value, self.context.i64_type(), "word_pointer_bits")
+                .map_err(|error| error.to_string()),
+            other => Err(format!("cannot pack {other:?} into a native word")),
+        }
+    }
+
     fn unpack_union_payload(
         &mut self,
         payload: IntValue<'ctx>,

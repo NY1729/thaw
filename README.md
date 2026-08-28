@@ -1573,6 +1573,34 @@ The workspace crates have narrow responsibilities:
   or `null` for a non-finite timestamp -- the specification has `toJSON`
   return `null` rather than throwing in that case, unlike `toISOString`
   itself
+- `Map<K, V>`/`Set<T>` in the native compilation path (thaw-hir/thaw-llvm;
+  the QuickJS-interpreted fallback already had them via
+  `structuredClone`), backed by a from-scratch arena-allocated,
+  insertion-order-preserving open-addressing hash table (`thaw-runtime`'s
+  `native_values/maps.rs`) rather than a new dependency -- growth
+  reallocates and compacts out deleted entries the same way `bumpalo`'s
+  bump allocator already forces every other growable native value to.
+  `K`/`T` must be `number` or `string` (`SameValueZero`-equal numbers,
+  content-equal strings); reference-identity keys (objects, arrays) are a
+  compile-time error, since nothing in the runtime gives a heap value a
+  stable identity token to hash by. `new Map()`/`new Set()` require
+  explicit type arguments (`new Map<string, number>()`) -- this compiler
+  has no contextual/expected-type inference to recover them from an
+  assignment target the way TypeScript itself does -- and constructing
+  with initial entries (`new Map(entries)`) isn't supported yet; construct
+  empty and call `.set()`/`.add()` instead. `.get`/`.set`/`.has`/`.delete`/
+  `.clear`/`.size` and `.add` (`Set` only) are implemented; `.set`/`.add`
+  return the receiver for chaining, matching the specification.
+  Iteration -- `.keys()`/`.values()`/`.entries()`/`.forEach()`, and
+  `for...of` directly over a `Map`/`Set` -- is not implemented yet.
+  Because `get`/`set`/`has`/`delete`/`add`/`clear` are plausible names for
+  a user's own class/object methods too (unlike e.g. `charCodeAt`), they
+  are only dispatched as `Map`/`Set` builtins when the receiver's type is
+  already known to be a `Map`/`Set` through existing scope/interface data
+  with no additional lowering -- a `Map`/`Set` local variable, `this.field`,
+  a `.set()`/`.add()` chain, or a nested `a.b.c` member access all resolve,
+  but a receiver that is itself a function call (`getMap().get(x)`) falls
+  through to ordinary method-call handling instead
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`

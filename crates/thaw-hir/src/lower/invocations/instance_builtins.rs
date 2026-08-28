@@ -14,7 +14,108 @@ fn date_object_type() -> HirType {
     HirType::Object(vec![("timestamp".to_string(), HirType::F64)])
 }
 
+/// `Map`/`Set`'s key/element type selects which family of native
+/// `__thaw_map_*` intrinsics to call -- `"num"` or `"str"`. Any other key
+/// type is rejected at `Map<K, V>`/`Set<T>` resolution time
+/// (`type_resolution.rs`) and at `new Map<K, V>()`/`new Set<T>()`
+/// construction time, so this should never actually fail once a `Map`/
+/// `Set` value exists, but a lowering bug elsewhere producing one anyway
+/// shouldn't panic.
+fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> {
+    match key_type {
+        HirType::F64 => Ok("num"),
+        HirType::Str => Ok("str"),
+        other => Err(format!(
+            "Map/Set keys must be `number` or `string`, got {other:?}"
+        )),
+    }
+}
+
+/// Chooses which `__thaw_map_{num,str}_get_*` variant decodes a `Map`
+/// value of `value_type` correctly, and whether the raw call result needs
+/// wrapping in `HirExpr::TypedClosure` to recover a pointer-shaped type
+/// the intrinsic name alone can't carry (unlike `F64`/`Bool`, where the
+/// result type is always the same regardless of context).
+fn map_value_get_suffix(value_type: &HirType) -> Result<(&'static str, bool), String> {
+    match value_type {
+        HirType::F64 => Ok(("f64", false)),
+        HirType::Bool | HirType::Undefined | HirType::Null => Ok(("bool", false)),
+        HirType::I64 | HirType::JsValue => Err(format!(
+            "Map/Set values of type {value_type:?} are not supported"
+        )),
+        _ => Ok(("ptr", true)),
+    }
+}
+
 impl<'a> FnLowerer<'a> {
+    /// `get`/`set`/`has`/`delete`/`add`/`clear` are common enough method
+    /// names that a user's own class/object could plausibly define them
+    /// too (unlike e.g. `charCodeAt`), so unlike every other native
+    /// instance builtin, these can't be claimed by property name alone --
+    /// `is_native_instance_builtin` doesn't see the receiver. This reads
+    /// the receiver's type via already-established scope/interface data
+    /// with no lowering (and so no risk of double-evaluating a
+    /// side-effecting receiver expression like a function call), so a
+    /// `Map`/`Set` variable, `this.field`, or a nested `a.b.c` member
+    /// chain is recognized; anything else (for example a receiver that is
+    /// itself a call, like `getMap().get(x)`) safely falls through to
+    /// ordinary property/method-call handling instead.
+    fn peek_type_without_lowering(&self, expr: &Expr) -> Option<HirType> {
+        match expr {
+            Expr::Ident(ident) => {
+                let resolved = self.resolve_binding(ident.sym.as_ref());
+                self.scope.get(&resolved).cloned()
+            }
+            Expr::This(_) => {
+                let resolved = self.resolve_binding("this");
+                self.scope.get(&resolved).cloned()
+            }
+            Expr::Member(member) => {
+                let MemberProp::Ident(field) = &member.prop else {
+                    return None;
+                };
+                let HirType::Object(fields) = self.peek_type_without_lowering(&member.obj)?
+                else {
+                    return None;
+                };
+                fields
+                    .into_iter()
+                    .find(|(name, _)| name == field.sym.as_ref())
+                    .map(|(_, ty)| ty)
+            }
+            // `map.set(k, v).set(k2, v2)`/`set.add(a).add(b)`: `set`/`add`
+            // return the receiver itself for chaining, so a call to either
+            // one has the same type as ITS OWN receiver -- recurse without
+            // looking at the call's arguments (irrelevant to the type, and
+            // this must stay lowering-free).
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else {
+                    return None;
+                };
+                let Expr::Member(member) = callee.as_ref() else {
+                    return None;
+                };
+                let MemberProp::Ident(property) = &member.prop else {
+                    return None;
+                };
+                if !matches!(property.sym.as_ref(), "set" | "add") {
+                    return None;
+                }
+                let receiver_type = self.peek_type_without_lowering(&member.obj)?;
+                matches!(receiver_type, HirType::Map(_, _) | HirType::Set(_))
+                    .then_some(receiver_type)
+            }
+            _ => None,
+        }
+    }
+
+    fn receiver_is_map_or_set(&self, expr: &Expr) -> bool {
+        matches!(
+            self.peek_type_without_lowering(expr),
+            Some(HirType::Map(_, _) | HirType::Set(_))
+        )
+    }
+
     fn is_native_instance_builtin(property: &str) -> bool {
         matches!(
             property,
@@ -2566,6 +2667,241 @@ impl<'a> FnLowerer<'a> {
                     );
                     let bindings = vec![(receiver_name, date_type, receiver)];
                     return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"get" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Map(key_type, value_type) = &receiver_type else {
+                        return Err(format!(
+                            "native `.get()` requires a Map receiver, got {receiver_type:?}"
+                        ));
+                    };
+                    let key_type = key_type.as_ref().clone();
+                    let value_type = value_type.as_ref().clone();
+                    let key_suffix = map_key_intrinsic_suffix(&key_type)?;
+                    let (value_suffix, needs_type_wrap) = map_value_get_suffix(&value_type)?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Map.get")?;
+                    let [key] = arguments.as_slice() else {
+                        return Err("native `.get()` expects exactly one argument".into());
+                    };
+                    let key = if key_type == HirType::F64 {
+                        self.coerce_primitive_to_number(key.clone())?
+                    } else {
+                        self.coerce_primitive_to_string(key.clone())?
+                    };
+                    let receiver_name = format!("__thaw_map_get_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let key_name = format!("__thaw_map_get_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                    self.scope.insert(key_name.clone(), key_type.clone());
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let has_intrinsic = format!("__thaw_map_{key_suffix}_has");
+                    let get_intrinsic = format!("__thaw_map_{key_suffix}_get_{value_suffix}");
+                    let raw_get = HirExpr::Call(
+                        Box::new(HirExpr::Var(get_intrinsic)),
+                        vec![var(&receiver_name), var(&key_name)],
+                    );
+                    let decoded = if needs_type_wrap {
+                        HirExpr::TypedClosure(value_type.clone(), Box::new(raw_get))
+                    } else {
+                        raw_get
+                    };
+                    let body = HirExpr::Block(vec![
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var(has_intrinsic)),
+                                vec![var(&receiver_name), var(&key_name)],
+                            ),
+                            Vec::new(),
+                            vec![HirStmt::Return(Some(HirExpr::OptionalNone(
+                                value_type.clone(),
+                            )))],
+                        ),
+                        HirStmt::Return(Some(HirExpr::OptionalSome(
+                            Box::new(decoded),
+                            value_type.clone(),
+                        ))),
+                    ]);
+                    let result_type = HirType::Optional(Box::new(value_type));
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            result_type,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((key_name, key_type, key));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"set" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Map(key_type, value_type) = &receiver_type else {
+                        return Err(format!(
+                            "native `.set()` requires a Map receiver, got {receiver_type:?}"
+                        ));
+                    };
+                    let key_type = key_type.as_ref().clone();
+                    let value_type = value_type.as_ref().clone();
+                    let key_suffix = map_key_intrinsic_suffix(&key_type)?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Map.set")?;
+                    let [key, value] = arguments.as_slice() else {
+                        return Err("native `.set()` expects exactly two arguments".into());
+                    };
+                    let key = if key_type == HirType::F64 {
+                        self.coerce_primitive_to_number(key.clone())?
+                    } else {
+                        self.coerce_primitive_to_string(key.clone())?
+                    };
+                    self.expect_type(&value_type, value, "Map.set value")?;
+                    let receiver_name = format!("__thaw_map_set_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let key_name = format!("__thaw_map_set_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let value_name = format!("__thaw_map_set_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                    self.scope.insert(key_name.clone(), key_type.clone());
+                    self.scope.insert(value_name.clone(), value_type.clone());
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(key_name.clone()),
+                            HirExpr::Var(value_name.clone()),
+                        ],
+                    );
+                    let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((key_name, key_type, key));
+                    bindings.push((value_name, value_type, value.clone()));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"add" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Set(element_type) = &receiver_type else {
+                        return Err(format!(
+                            "native `.add()` requires a Set receiver, got {receiver_type:?}"
+                        ));
+                    };
+                    let element_type = element_type.as_ref().clone();
+                    let key_suffix = map_key_intrinsic_suffix(&element_type)?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Set.add")?;
+                    let [element] = arguments.as_slice() else {
+                        return Err("native `.add()` expects exactly one argument".into());
+                    };
+                    let element = if element_type == HirType::F64 {
+                        self.coerce_primitive_to_number(element.clone())?
+                    } else {
+                        self.coerce_primitive_to_string(element.clone())?
+                    };
+                    let receiver_name = format!("__thaw_set_add_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let element_name = format!("__thaw_set_add_element_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                    self.scope.insert(element_name.clone(), element_type.clone());
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(element_name.clone()),
+                            HirExpr::Lit(HirLit::F64(0.0)),
+                        ],
+                    );
+                    let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((element_name, element_type, element));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if matches!(property.sym.as_ref(), "has" | "delete") {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let key_type = match &receiver_type {
+                        HirType::Map(key_type, _) => key_type.as_ref().clone(),
+                        HirType::Set(element_type) => element_type.as_ref().clone(),
+                        other => {
+                            return Err(format!(
+                                "native `.{}()` requires a Map or Set receiver, got {other:?}",
+                                property.sym
+                            ))
+                        }
+                    };
+                    let key_suffix = map_key_intrinsic_suffix(&key_type)?;
+                    let (arguments, spread_bindings) = self.lower_native_spread_values(
+                        &call.args,
+                        &format!("Map/Set.{}", property.sym),
+                    )?;
+                    let [key] = arguments.as_slice() else {
+                        return Err(format!(
+                            "native `.{}()` expects exactly one argument",
+                            property.sym
+                        ));
+                    };
+                    let key = if key_type == HirType::F64 {
+                        self.coerce_primitive_to_number(key.clone())?
+                    } else {
+                        self.coerce_primitive_to_string(key.clone())?
+                    };
+                    let intrinsic = if property.sym == *"has" {
+                        format!("__thaw_map_{key_suffix}_has")
+                    } else {
+                        format!("__thaw_map_{key_suffix}_delete")
+                    };
+                    let receiver_name =
+                        format!("__thaw_map_set_query_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let key_name = format!("__thaw_map_set_query_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), receiver_type.clone());
+                    self.scope.insert(key_name.clone(), key_type.clone());
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var(intrinsic)),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(key_name.clone()),
+                        ],
+                    );
+                    let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((key_name, key_type, key));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"clear" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if !matches!(receiver_type, HirType::Map(_, _) | HirType::Set(_)) {
+                        return Err(format!(
+                            "native `.clear()` requires a Map or Set receiver, got {receiver_type:?}"
+                        ));
+                    }
+                    if !call.args.is_empty() {
+                        return Err("native `.clear()` expects no arguments".into());
+                    }
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_map_clear".to_string())),
+                        vec![receiver],
+                    ));
                 }
                 if property.sym == *"toJSON" {
                     if !call.args.is_empty() {

@@ -1875,6 +1875,113 @@ fn compiles_date_multi_arg_constructor() {
 }
 
 #[test]
+fn compiles_map_string_key_numeric_value() {
+    let source = r#"
+        function printNumber(value: number | undefined): void {
+            if (value !== undefined) {
+                console.log(value);
+            } else {
+                console.log("undefined");
+            }
+        }
+        async function main(): Promise<void> {
+            const m: Map<string, number> = new Map<string, number>();
+            console.log(m.size);
+            printNumber(m.get("a"));
+            m.set("a", 1).set("b", 2);
+            console.log(m.size);
+            printNumber(m.get("a"));
+            printNumber(m.get("b"));
+            console.log(m.has("a"));
+            console.log(m.has("z"));
+            m.set("a", 10);
+            printNumber(m.get("a"));
+            console.log(m.size);
+            console.log(m.delete("a"));
+            console.log(m.delete("a"));
+            console.log(m.size);
+            m.clear();
+            console.log(m.size);
+            console.log(m.has("b"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_string_key_numeric_value"),
+        "0\nundefined\n2\n1\n2\ntrue\nfalse\n10\n2\ntrue\nfalse\n1\n0\nfalse\n"
+    );
+}
+
+#[test]
+fn compiles_map_numeric_key_string_value() {
+    let source = r#"
+        function printString(value: string | undefined): void {
+            if (value !== undefined) {
+                console.log(value);
+            } else {
+                console.log("undefined");
+            }
+        }
+        async function main(): Promise<void> {
+            const m: Map<number, string> = new Map<number, string>();
+            m.set(1, "one");
+            m.set(2, "two");
+            printString(m.get(1));
+            printString(m.get(3));
+            console.log(m.size);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_numeric_key_string_value"),
+        "one\nundefined\n2\n"
+    );
+}
+
+#[test]
+fn compiles_set_string() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const s: Set<string> = new Set<string>();
+            console.log(s.size);
+            console.log(s.has("a"));
+            s.add("a").add("b").add("a");
+            console.log(s.size);
+            console.log(s.has("a"));
+            console.log(s.delete("a"));
+            console.log(s.delete("a"));
+            console.log(s.size);
+            s.clear();
+            console.log(s.size);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_string"),
+        "0\nfalse\n2\ntrue\ntrue\nfalse\n1\n0\n"
+    );
+}
+
+#[test]
+fn compiles_map_object_value() {
+    let source = r#"
+        type Point = { x: number, y: number };
+        function printPoint(value: Point | undefined): void {
+            if (value !== undefined) {
+                console.log(value.x + value.y);
+            } else {
+                console.log("undefined");
+            }
+        }
+        async function main(): Promise<void> {
+            const m: Map<string, Point> = new Map<string, Point>();
+            m.set("origin", { x: 0, y: 0 });
+            m.set("unit", { x: 1, y: 1 });
+            printPoint(m.get("unit"));
+            printPoint(m.get("missing"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "map_object_value"), "2\nundefined\n");
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {
