@@ -79,6 +79,75 @@ pub extern "C" fn thaw_number_to_string(value: f64) -> *const c_char {
     destination.cast()
 }
 
+const RADIX_DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// Formats `value` in `radix` (already normalized to an integer in
+/// `[2, 36]`), matching `Number.prototype.toString`'s non-decimal case
+/// (`radix` `10` should go through the ordinary decimal path instead --
+/// this doesn't special-case it). Uses plain `f64` arithmetic throughout
+/// rather than converting to a fixed-width integer, so it never overflows
+/// regardless of `value`'s magnitude, at the cost of the same precision
+/// `f64` itself already has past 2^53 -- a faithful reflection of what the
+/// JavaScript number actually represents, not a shortcut. The fractional
+/// part is capped at 100 digits (ordinary engines make a similar practical
+/// cutoff instead of chasing exact bit-for-bit fidelity).
+fn number_to_radix_string(value: f64, radix: u32) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let negative = value < 0.0;
+    let value = value.abs();
+    let radix_f = radix as f64;
+
+    let mut integer_digits = Vec::new();
+    let mut whole = value.trunc();
+    if whole == 0.0 {
+        integer_digits.push(b'0');
+    }
+    while whole > 0.0 {
+        let digit = (whole % radix_f) as usize;
+        integer_digits.push(RADIX_DIGITS[digit]);
+        whole = (whole / radix_f).trunc();
+    }
+    integer_digits.reverse();
+
+    let mut text = String::with_capacity(integer_digits.len() + 8);
+    if negative {
+        text.push('-');
+    }
+    text.push_str(&String::from_utf8(integer_digits).expect("radix digits are ASCII"));
+
+    let mut fraction = value.fract();
+    if fraction > 0.0 {
+        text.push('.');
+        for _ in 0..100 {
+            fraction *= radix_f;
+            let digit = fraction.trunc() as usize;
+            text.push(RADIX_DIGITS[digit] as char);
+            fraction -= digit as f64;
+            if fraction <= 0.0 {
+                break;
+            }
+        }
+    }
+    text
+}
+
+#[no_mangle]
+/// `Number.prototype.toString`'s non-decimal case: `radix` must already be
+/// normalized to an integer in `[2, 36]` (the generated code range-checks
+/// it and throws before ever calling this, matching the specification).
+pub extern "C" fn thaw_number_to_radix_string(value: f64, radix: f64) -> *const c_char {
+    let text = number_to_radix_string(value, radix as u32);
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
 #[no_mangle]
 /// Formats `value` with exactly `digits` fractional digits, matching
 /// `Number.prototype.toFixed`. `digits` must already be normalized to an
@@ -437,4 +506,33 @@ pub extern "C" fn thaw_number_object_is(left: f64, right: f64) -> u8 {
         return (left.is_sign_negative() == right.is_sign_negative()).into();
     }
     (left == right).into()
+}
+
+#[cfg(test)]
+mod radix_string_tests {
+    use super::*;
+
+    #[test]
+    fn matches_known_conversions() {
+        assert_eq!(number_to_radix_string(255.0, 16), "ff");
+        assert_eq!(number_to_radix_string(8.0, 2), "1000");
+        assert_eq!(number_to_radix_string(35.0, 36), "z");
+        assert_eq!(number_to_radix_string(0.0, 16), "0");
+        assert_eq!(number_to_radix_string(-255.0, 16), "-ff");
+        assert_eq!(number_to_radix_string(10.0, 10), "10");
+    }
+
+    #[test]
+    fn handles_fractional_values() {
+        assert_eq!(number_to_radix_string(0.5, 2), "0.1");
+        assert_eq!(number_to_radix_string(1.5, 2), "1.1");
+        assert_eq!(number_to_radix_string(-0.5, 2), "-0.1");
+    }
+
+    #[test]
+    fn handles_non_finite_values() {
+        assert_eq!(number_to_radix_string(f64::NAN, 16), "NaN");
+        assert_eq!(number_to_radix_string(f64::INFINITY, 16), "Infinity");
+        assert_eq!(number_to_radix_string(f64::NEG_INFINITY, 16), "-Infinity");
+    }
 }

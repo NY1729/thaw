@@ -2265,6 +2265,36 @@ fn compiles_string_char_at() {
 }
 
 #[test]
+fn compiles_number_to_string_with_radix() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log((255).toString(16));
+            console.log((8).toString(2));
+            console.log((35).toString(36));
+            console.log((255).toString(10));
+            console.log((255).toString());
+            console.log((-255).toString(16));
+            console.log((0.5).toString(2));
+            console.log((3.14159).toString());
+            try {
+                (1).toString(1);
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                (1).toString(37);
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_to_string_radix"),
+        "ff\n1000\nz\n255\n255\n-ff\n0.1\n3.14159\ntoString() radix argument must be between 2 and 36\ntoString() radix argument must be between 2 and 36\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {
