@@ -888,15 +888,38 @@ impl<'a> FnLowerer<'a> {
                         if !pending.is_empty() {
                             parts.push(HirExpr::ArrayLit(std::mem::take(&mut pending)));
                         }
-                        // A string spread source (`[...str]`) iterates its
-                        // Unicode scalar values, matching `Array.from(str)`
-                        // -- reuse the same `__thaw_string_to_array`
-                        // conversion that path already does rather than
-                        // requiring a typed array up front.
-                        if self.infer_expr_type(&value)? == HirType::Str {
+                        // A string/`Map`/`Set` spread source iterates the
+                        // same way `for...of` already does for each --
+                        // snapshot to an array up front via the exact same
+                        // conversions that path uses, rather than requiring
+                        // a typed array up front.
+                        let spread_source_type = self.infer_expr_type(&value)?;
+                        if spread_source_type == HirType::Str {
                             value = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),
                                 vec![value],
+                            );
+                        } else if let HirType::Map(key_type, value_type) = &spread_source_type {
+                            let pair_type = HirType::Tuple(vec![
+                                key_type.as_ref().clone(),
+                                value_type.as_ref().clone(),
+                            ]);
+                            let array_type = HirType::Array(Box::new(pair_type));
+                            value = HirExpr::TypedClosure(
+                                array_type,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_map_snapshot_entries".into())),
+                                    vec![value],
+                                )),
+                            );
+                        } else if let HirType::Set(element_type) = &spread_source_type {
+                            let array_type = HirType::Array(element_type.clone());
+                            value = HirExpr::TypedClosure(
+                                array_type,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_map_snapshot_keys".into())),
+                                    vec![value],
+                                )),
                             );
                         }
                         let HirType::Array(spread_element) = self.infer_expr_type(&value)? else {

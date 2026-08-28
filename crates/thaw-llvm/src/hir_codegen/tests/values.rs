@@ -158,6 +158,31 @@ fn compiles_string_spreads_into_array_literals() {
 }
 
 #[test]
+fn compiles_map_and_set_spreads_into_array_literals() {
+    let source = r#"
+        function main(): void {
+            const map = new Map<string, number>();
+            map.set("a", 1).set("b", 2);
+            const pairs = [...map];
+            console.log(pairs.length);
+            console.log(pairs[0][0], pairs[0][1]);
+            console.log(pairs[1][0], pairs[1][1]);
+
+            const set = new Set<number>([1, 2, 3]);
+            const values = [0, ...set, 4];
+            console.log(values.length);
+            for (const value of values) {
+                console.log(value);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_set_spreads_into_array_literals"),
+        "2\na 1\nb 2\n5\n0\n1\n2\n3\n4\n"
+    );
+}
+
+#[test]
 fn strict_equality_supports_strings_booleans_and_object_identity() {
     let source = r#"
         interface Box { value: number; }

@@ -241,10 +241,15 @@ The workspace crates have narrow responsibilities:
   after direct or nested awaited spread sources. A `string` spread source
   (`[..."abc"]`) is also accepted, iterating Unicode scalar values into a
   `string[]` the same way `Array.from("abc")` already does (reusing the
-  same `__thaw_string_to_array` conversion) -- this is specific to array
-  *literal* spreads; spreading a string (or any non-tuple-typed value)
-  into a function call's arguments still requires a statically known
-  length, which a runtime string can't provide
+  same `__thaw_string_to_array` conversion). A `Map`/`Set` spread source
+  is accepted the same way, snapshotting to an array via the exact same
+  `__thaw_map_snapshot_entries`/`__thaw_map_snapshot_keys` conversions
+  `for...of` already uses for each -- `[...map]` yields `[key, value]`
+  pairs and `[...set]` yields elements (the classic `[...new
+  Set(values)]` dedup idiom now works). All of this is specific to array
+  *literal* spreads; spreading a string/`Map`/`Set` into a function
+  call's arguments still requires a statically known length, which none
+  of these can provide
 - `Promise.all`, `allSettled`, `race`, and `any` accept homogeneous array
   literal spreads while retaining dynamic `Promise<T>[]` sources and order
 - Named function calls support fixed-length argument spreads from array
