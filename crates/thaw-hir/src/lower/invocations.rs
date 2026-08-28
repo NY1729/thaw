@@ -768,6 +768,39 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
+        if callee_name == "structuredClone" {
+            let (arguments, bindings) =
+                self.lower_native_spread_values(&call.args, "structuredClone")?;
+            let [value] = arguments.as_slice() else {
+                return Err("`structuredClone` expects exactly one argument".into());
+            };
+            let value = value.clone();
+            let value_type = self.infer_expr_type(&value)?;
+            let result = match &value_type {
+                // Scalars are already copied by value; no cloning needed.
+                HirType::F64 | HirType::Str | HirType::Bool => value,
+                // Array/Tuple/Object round-trip through a `Json` value and
+                // back (`wrap_native_value_as_json` then `JsonAsNative`,
+                // the same pair `JSON.stringify` reuses for a native
+                // value), which is both a real deep copy and reuses
+                // thaw-llvm's existing native<->Json codegen instead of a
+                // new one. Nested optional/nullable/nullish fields within
+                // an object are handled by that codegen already; a
+                // top-level `Function`/`Promise`/`Map`/`Set`/`Json`/
+                // `Union`/optional value has no such round-trip and is
+                // rejected, unlike the specification (which does support
+                // cloning some of those, `Map`/`Set` included).
+                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
+                    let json = self.wrap_native_value_as_json(value, value_type.clone())?;
+                    HirExpr::JsonAsNative(Box::new(json), value_type.clone())
+                }
+                other => {
+                    return Err(format!("`structuredClone` does not support {other:?}"));
+                }
+            };
+            return self.wrap_call_argument_bindings(result, &bindings);
+        }
+
         if matches!(callee_name.as_str(), "encodeURIComponent" | "encodeURI") {
             let (arguments, bindings) =
                 self.lower_native_spread_values(&call.args, &callee_name)?;
