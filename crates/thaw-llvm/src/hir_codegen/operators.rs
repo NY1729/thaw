@@ -182,7 +182,12 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Call(callee, arguments) => {
                 if let HirExpr::Var(name) = callee.as_ref() {
                     match name.as_str() {
-                        "JSON.parse" => return Some(HirType::Json),
+                        "JSON.parse"
+                        | "__thaw_json_object_from_number_entries"
+                        | "__thaw_json_object_from_string_entries"
+                        | "__thaw_json_object_from_bool_entries"
+                        | "__thaw_json_object_from_json_entries"
+                        | "__thaw_json_object_assign" => return Some(HirType::Json),
                         "JSON.stringify"
                         | "__thaw_json_stringify_number_space"
                         | "__thaw_json_stringify_string_space"
