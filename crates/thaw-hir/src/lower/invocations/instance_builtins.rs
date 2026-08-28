@@ -457,21 +457,25 @@ impl<'a> FnLowerer<'a> {
                     }
                     let regex_type = regex_object_type();
                     if self.infer_expr_type(&arguments[0])? == regex_type {
-                        if arguments.len() > 1 {
-                            return Err(
-                                "native `.split()` does not support a limit with a RegExp separator"
-                                    .into(),
-                            );
-                        }
                         let pattern = arguments[0].clone();
+                        let limit = match arguments.get(1) {
+                            Some(argument) => {
+                                self.coerce_primitive_to_number(argument.clone())?
+                            }
+                            None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                        };
                         let receiver_name =
                             format!("__thaw_regex_split_receiver_{}", self.next_binding);
                         self.next_binding += 1;
                         let pattern_name =
                             format!("__thaw_regex_split_pattern_{}", self.next_binding);
                         self.next_binding += 1;
+                        let limit_name =
+                            format!("__thaw_regex_split_limit_{}", self.next_binding);
+                        self.next_binding += 1;
                         self.scope.insert(receiver_name.clone(), HirType::Str);
                         self.scope.insert(pattern_name.clone(), regex_type.clone());
+                        self.scope.insert(limit_name.clone(), HirType::F64);
                         let source = HirExpr::PropAccess(
                             Box::new(HirExpr::Var(pattern_name.clone())),
                             regex_type.clone(),
@@ -492,7 +496,12 @@ impl<'a> FnLowerer<'a> {
                                 array_type.clone(),
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_regex_split".to_string())),
-                                    vec![HirExpr::Var(receiver_name.clone()), source, flags],
+                                    vec![
+                                        HirExpr::Var(receiver_name.clone()),
+                                        source,
+                                        flags,
+                                        HirExpr::Var(limit_name.clone()),
+                                    ],
                                 ),
                             ),
                             HirStmt::If(
@@ -530,6 +539,7 @@ impl<'a> FnLowerer<'a> {
                         let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
                         bindings.extend(spread_bindings);
                         bindings.push((pattern_name, regex_type, pattern));
+                        bindings.push((limit_name, HirType::F64, limit));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     let separator = self.coerce_primitive_to_string(arguments[0].clone())?;
