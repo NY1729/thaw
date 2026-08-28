@@ -77,6 +77,25 @@ fn console_log_serializes_arrays_objects_and_json_values() {
 }
 
 #[test]
+fn console_log_formats_numbers_precisely_and_inline_expressions_correctly() {
+    let source = r#"
+        function main(): void {
+            console.log(Number.MAX_SAFE_INTEGER);
+            console.log(0.1 + 0.2);
+            console.log(1000000);
+            console.log(NaN);
+            console.log({ a: 1 + 2, b: !false, c: `text${1}`, d: [1, 2].length });
+            console.log({ big: 9007199254740991, neg: -5, cmp: 1 < 2 });
+            console.log([{ x: 1 }, { x: 2 }]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "console_log_numbers_and_inline_exprs"),
+        "9007199254740991\n0.30000000000000004\n1000000\nNaN\n{\"a\":3,\"b\":true,\"c\":\"text1\",\"d\":2}\n{\"big\":9007199254740991,\"neg\":-5,\"cmp\":true}\n[{\"x\":1},{\"x\":2}]\n"
+    );
+}
+
+#[test]
 fn console_log_serializes_typed_tuples_in_all_tagged_positions() {
     let source = r#"
         interface Point { x: number; label: string; }

@@ -279,14 +279,22 @@ The workspace crates have narrow responsibilities:
   imprecision by rounding the result to `0.3`. A number nested inside a
   console.log'd array/object/tuple was never affected -- it already went
   through the same JSON-stringify-based path, which was already correct
-- An inline object literal or an arithmetic/comparison expression passed
-  directly as a `console.log` argument (not first assigned to a variable)
-  now prints correctly: `expr_hir_type`, the codegen-time function that
-  picks how to print an argument from its `HirExpr` shape, had no case for
-  `ObjectLit` or `BinOp` and fell back to guessing from the compiled LLVM
-  value's shape alone -- a non-string pointer (the object) got misread as
-  a C string and printed raw memory, and a float landed back in the same
-  `%g`-formatting bug just described
+- An inline object literal passed directly as a `console.log` argument (not
+  first assigned to a variable) now prints correctly, including a field
+  whose own value is an arithmetic/comparison expression, a template
+  literal, an array `.length`, or a nested object/array literal:
+  `expr_hir_type`, the codegen-time function that picks how to print an
+  argument from its `HirExpr` shape (recursing into each field for an
+  `ObjectLit`), had no case for `BinOp`, `ArrayLen`, or the
+  `__thaw_string_concat`/`__thaw_string_length` intrinsics template
+  literals and `.length` lower to -- so resolving the object's type failed
+  and fell back to guessing from the compiled LLVM value's shape alone,
+  misreading the object's pointer as a C string and printing raw memory
+  (or a float landing back in the same `%g`-formatting bug just
+  described). `expr_hir_type`'s coverage is still best-effort, not
+  exhaustive, matching its existing `ArrayLit` case (which also only
+  inspects one element): an object literal field whose value is some
+  other still-uncovered `HirExpr` shape can still hit this fallback
 - `console.info` and `console.debug` on standard output plus `console.warn` and
   `console.error` on standard error, sharing the same variadic value formatting
 - `console.assert` with JavaScript truthiness, eager left-to-right argument
