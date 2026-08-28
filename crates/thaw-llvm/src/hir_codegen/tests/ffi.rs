@@ -2137,6 +2137,36 @@ fn compiles_map_keyed_map() {
 }
 
 #[test]
+fn compiles_map_and_set_constructors_with_initial_data() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const entries: [string, number][] = [["a", 1], ["b", 2], ["a", 3]];
+            const m: Map<string, number> = new Map<string, number>(entries);
+            console.log(m.size);
+            console.log(m.get("a"));
+            console.log(m.get("b"));
+            for (const [key, value] of m) {
+                console.log(key + "=" + value);
+            }
+
+            const values: string[] = ["x", "y", "x", "z"];
+            const s: Set<string> = new Set<string>(values);
+            console.log(s.size);
+            for (const value of s) {
+                console.log(value);
+            }
+
+            const empty: Map<string, number> = new Map<string, number>();
+            console.log(empty.size);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_set_constructors_with_initial_data"),
+        "2\n3\n2\na=3\nb=2\n3\nx\ny\nz\n0\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {

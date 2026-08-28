@@ -1594,12 +1594,14 @@ The workspace crates have narrow responsibilities:
   compiler (confirmed empirically -- `f === f` is observably `false`
   here), so there is no stable identity to key by even though the value
   is pointer-shaped; both are a compile-time error as a `Map`/`Set` key
-  type. `new Map()`/`new Set()` require
-  explicit type arguments (`new Map<string, number>()`) -- this compiler
-  has no contextual/expected-type inference to recover them from an
-  assignment target the way TypeScript itself does -- and constructing
-  with initial entries (`new Map(entries)`) isn't supported yet; construct
-  empty and call `.set()`/`.add()` instead. `.get`/`.set`/`.has`/`.delete`/
+  type. `new Map()`/`new Set()` require explicit type arguments
+  (`new Map<string, number>()`) -- this compiler has no contextual/
+  expected-type inference to recover them from an assignment target the
+  way TypeScript itself does. `new Map<K, V>(entries)`/`new Set<T>(values)`
+  also accept an initial native array (a real array, not an arbitrary
+  iterable) -- `entries` is `[K, V][]`, matching the specification, and a
+  duplicate key keeps its last value, also matching the specification.
+  `.get`/`.set`/`.has`/`.delete`/
   `.clear`/`.size` and `.add` (`Set` only) are implemented; `.set`/`.add`
   return the receiver for chaining, matching the specification.
   `.keys()`/`.values()`/`.entries()` return a real, eagerly-snapshotted
