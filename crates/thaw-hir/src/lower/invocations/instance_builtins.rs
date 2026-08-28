@@ -50,6 +50,20 @@ fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> 
     }
 }
 
+/// `WeakMap`/`WeakSet` reuse `map_key_intrinsic_suffix`'s own type
+/// classification, but only the `"ref"` family is a valid key for them --
+/// matching the specification, which requires a `WeakMap`/`WeakSet`
+/// key/element to be an object (or similar reference type), never a
+/// `number` or `string`.
+fn weak_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> {
+    match map_key_intrinsic_suffix(key_type) {
+        Ok("ref") => Ok("ref"),
+        _ => Err(format!(
+            "WeakMap/WeakSet keys must be a reference type (object, array, ...), got {key_type:?}"
+        )),
+    }
+}
+
 /// Chooses which `__thaw_map_{num,str}_get_*` variant decodes a `Map`
 /// value of `value_type` correctly, and whether the raw call result needs
 /// wrapping in `HirExpr::TypedClosure` to recover a pointer-shaped type
