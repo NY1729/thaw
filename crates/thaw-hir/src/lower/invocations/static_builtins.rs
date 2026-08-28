@@ -23,6 +23,83 @@ fn json_convertible_native_type(ty: &HirType) -> bool {
 }
 
 impl<'a> FnLowerer<'a> {
+    /// `Math.min(...values)`/`Math.max(...values)` for a runtime-length
+    /// `number[]` spread source: folds pairwise through
+    /// `__thaw_math_min`/`__thaw_math_max` in a runtime loop, seeded with
+    /// `Infinity`/`-Infinity` so an empty array produces the same result
+    /// the fixed-arity zero-argument form already does.
+    fn lower_math_extreme_of_array(
+        &mut self,
+        source: HirExpr,
+        is_min: bool,
+    ) -> Result<HirExpr, String> {
+        let array_type = HirType::Array(Box::new(HirType::F64));
+        let source_name = format!("__thaw_math_extreme_source_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), array_type.clone());
+        let acc_name = format!("__thaw_math_extreme_acc_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(acc_name.clone(), HirType::F64);
+        let index_name = format!("__thaw_math_extreme_index_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(index_name.clone(), HirType::F64);
+        let var = |name: &str| HirExpr::Var(name.into());
+        let intrinsic = if is_min { "__thaw_math_min" } else { "__thaw_math_max" };
+        let seed = if is_min { f64::INFINITY } else { f64::NEG_INFINITY };
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(acc_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(seed))),
+            HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&index_name)),
+                    Box::new(HirExpr::ArrayLen(Box::new(var(&source_name)))),
+                ),
+                vec![
+                    HirStmt::Expr(HirExpr::Assign(
+                        acc_name.clone(),
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var(intrinsic.to_string())),
+                            vec![
+                                var(&acc_name),
+                                HirExpr::TypedIndex(
+                                    Box::new(var(&source_name)),
+                                    Box::new(var(&index_name)),
+                                    HirType::F64,
+                                ),
+                            ],
+                        )),
+                    )),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(var(&index_name)),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(var(&acc_name))),
+        ]);
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&body, &mut referenced);
+        let captures = referenced
+            .into_iter()
+            .filter_map(|captured| {
+                self.scope
+                    .get(&captured)
+                    .cloned()
+                    .map(|ty| HirParam { name: captured, ty })
+            })
+            .collect();
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Lambda(captures, Vec::new(), HirType::F64, Box::new(body))),
+            Vec::new(),
+        );
+        self.wrap_call_argument_bindings(result, &[(source_name, array_type, source)])
+    }
+
     /// Converts a statically-typed native value (anything
     /// `json_convertible_native_type` accepts) into a `Json` value, so
     /// `JSON.stringify` can serialize a plain object/array/tuple literal or
@@ -909,6 +986,33 @@ impl<'a> FnLowerer<'a> {
                             vec![value],
                         );
                         return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Math" && matches!(property.sym.as_ref(), "min" | "max") {
+                        if let [argument] = call.args.as_slice() {
+                            if argument.spread.is_some() {
+                                let source = self.lower_expr(&argument.expr)?;
+                                // A single spread of a runtime-length
+                                // `number[]` (not an array literal or
+                                // tuple, both already handled below by
+                                // `lower_native_spread_values` unrolling
+                                // them into individual arguments at
+                                // compile time -- there's no fixed N of
+                                // those to unroll here) folds pairwise
+                                // through the same `__thaw_math_min`/`_max`
+                                // intrinsic the fixed-arity form already
+                                // calls, via a runtime loop instead of a
+                                // compile-time-unrolled argument list.
+                                if self.infer_expr_type(&source)?
+                                    == HirType::Array(Box::new(HirType::F64))
+                                    && !matches!(source, HirExpr::ArrayLit(_))
+                                {
+                                    return self.lower_math_extreme_of_array(
+                                        source,
+                                        property.sym == *"min",
+                                    );
+                                }
+                            }
+                        }
                     }
                     if object.sym == *"Math"
                         && matches!(
