@@ -252,7 +252,16 @@ The workspace crates have narrow responsibilities:
 - Dictionary destructuring assignments support computed keys, missing-property
   defaults and rest assignment without mutating the right-hand-side object
 - `throw`, `try/catch` and `finally`, including propagation and rethrow across
-  generated Thaw function calls and nested cleanup ordering
+  generated Thaw function calls and nested cleanup ordering. `throw` only
+  ever unwinds a plain string and `catch` only ever binds one (there is no
+  `Error` object, stack trace, or `.name`/`.message` field, and no support
+  for a class extending a built-in error) -- `new Error(message)`/
+  `new TypeError(message)`/`new RangeError(message)`/`new SyntaxError`/
+  `new ReferenceError`/`new EvalError`/`new URIError` (message optional,
+  defaulting to `""`) all just lower to `message` itself, so
+  `throw new Error("x")` works exactly like the already-supported
+  `throw "x"`. `instanceof Error` (and the other built-in error classes)
+  is accordingly not a known class and fails to compile
 - `process.env`, JSON operations, and both legacy blocking and Promise-based
   non-blocking HTTP GET
 - `console.log` with zero or multiple arguments, left-to-right argument
