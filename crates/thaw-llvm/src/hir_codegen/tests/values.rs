@@ -137,6 +137,27 @@ fn compiles_array_spreads_for_all_native_element_shapes() {
 }
 
 #[test]
+fn compiles_string_spreads_into_array_literals() {
+    let source = r#"
+        function main(): void {
+            printAll(["x", ..."ab", "y"]);
+            printAll([..."abc", ..."def"]);
+            printAll([...""]);
+            console.log([...""].length);
+        }
+        function printAll(parts: string[]): void {
+            for (const part of parts) {
+                console.log(part);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_spreads_into_array_literals"),
+        "x\na\nb\ny\na\nb\nc\nd\ne\nf\n0\n"
+    );
+}
+
+#[test]
 fn strict_equality_supports_strings_booleans_and_object_identity() {
     let source = r#"
         interface Box { value: number; }
