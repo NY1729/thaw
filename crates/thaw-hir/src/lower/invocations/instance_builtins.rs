@@ -155,7 +155,7 @@ impl<'a> FnLowerer<'a> {
     fn is_native_instance_builtin(property: &str) -> bool {
         matches!(
             property,
-            "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
+            "charAt" | "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
                 | "normalize" | "split" | "replace" | "replaceAll" | "test" | "match" | "search"
                 | "matchAll"
@@ -186,6 +186,108 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+                if property.sym == *"charAt" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "charAt receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.charAt")?;
+                    if arguments.len() > 1 {
+                        return Err("native `.charAt()` expects zero or one argument".into());
+                    }
+                    let index = if let Some(argument) = arguments.first() {
+                        self.coerce_primitive_to_number(argument.clone())?
+                    } else {
+                        HirExpr::Lit(HirLit::F64(0.0))
+                    };
+                    let receiver_name = format!("__thaw_char_at_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let index_name = format!("__thaw_char_at_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let normalized_name =
+                        format!("__thaw_char_at_normalized_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let raw_name = format!("__thaw_char_at_raw_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    self.scope.insert(normalized_name.clone(), HirType::F64);
+                    self.scope.insert(raw_name.clone(), HirType::Str);
+                    let number = |value| HirExpr::Lit(HirLit::F64(value));
+                    let empty = || HirExpr::Lit(HirLit::Str(String::new()));
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let assign = |name: String, value| {
+                        HirStmt::Expr(HirExpr::Assign(name, Box::new(value)))
+                    };
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(normalized_name.clone(), HirType::F64, var(&index_name)),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(var(&normalized_name)),
+                                Box::new(var(&normalized_name)),
+                            ),
+                            Vec::new(),
+                            vec![assign(normalized_name.clone(), number(0.0))],
+                        ),
+                        assign(
+                            normalized_name.clone(),
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                                vec![var(&normalized_name)],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(var(&normalized_name)),
+                                Box::new(number(0.0)),
+                            ),
+                            vec![HirStmt::Return(Some(empty()))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Let(
+                            raw_name.clone(),
+                            HirType::Str,
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_at".into())),
+                                vec![var(&receiver_name), var(&normalized_name)],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                                vec![var(&raw_name)],
+                            ),
+                            vec![HirStmt::Return(Some(empty()))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(var(&raw_name))),
+                    ]);
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            HirType::Str,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((index_name, HirType::F64, index));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
                 if property.sym == *"charCodeAt" {
                     let receiver = self.lower_expr(&member.obj)?;
                     self.expect_type(&HirType::Str, &receiver, "charCodeAt receiver")?;
