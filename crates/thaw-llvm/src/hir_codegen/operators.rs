@@ -148,6 +148,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonIndexSet(_, _, _) => Some(HirType::Json),
             HirExpr::JsonDelete(_, _) => Some(HirType::Bool),
             HirExpr::EnumReverseLookup(_, _) => Some(HirType::Optional(Box::new(HirType::Str))),
+            HirExpr::ArrayLen(_) => Some(HirType::F64),
             HirExpr::BinOp(op, _, _) => Some(match op {
                 BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::EqEqEq => HirType::Bool,
                 _ => HirType::F64,
@@ -188,7 +189,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_stringify_keys"
                         | "__thaw_json_stringify_keys_number_space"
                         | "__thaw_json_stringify_keys_string_space"
-                        | "fetch" => return Some(HirType::Str),
+                        | "fetch"
+                        | "__thaw_string_concat" => return Some(HirType::Str),
+                        "__thaw_string_length" => return Some(HirType::F64),
                         _ => {}
                     }
                     if name == "__thaw_string_to_array" {
