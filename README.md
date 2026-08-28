@@ -1505,7 +1505,11 @@ The workspace crates have narrow responsibilities:
   splitting into Unicode scalar values, an omitted separator returning the
   receiver as a single-element array, and a truncating limit, returning a
   dynamically sized native `string[]`. A `RegExp` separator is also
-  supported (without a limit); it throws if the pattern fails to compile
+  supported, including a limit; it throws if the pattern fails to compile.
+  Like the string-separator path, the limit truncates the fully computed
+  split result rather than bounding how many splits the `regex` crate
+  performs -- the crate's own `splitn` keeps the unsplit remainder in its
+  last piece, which is not what JavaScript's `split(separator, limit)` does
 - `String.prototype.replace`/`replaceAll` support a string search value,
   replacing the first or every occurrence respectively, including the
   JavaScript empty-search-value insertion behavior. A `RegExp` search value
