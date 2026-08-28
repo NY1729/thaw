@@ -196,6 +196,33 @@ fn compiles_try_catch_within_a_single_function() {
 }
 
 #[test]
+fn compiles_throw_new_error_constructors() {
+    let source = r#"
+        function main(): void {
+            try {
+                throw new Error("boom");
+            } catch (e) {
+                console.log(e);
+            }
+            try {
+                throw new TypeError("wrong type");
+            } catch (e) {
+                console.log(e);
+            }
+            try {
+                throw new Error();
+            } catch (e) {
+                console.log("[" + e + "]");
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "throw_new_error"),
+        "boom\nwrong type\n[]\n"
+    );
+}
+
+#[test]
 fn propagates_throw_across_function_calls() {
     let source = r#"
         function deepest(): string {
