@@ -2437,6 +2437,55 @@ fn compiles_regex_exec() {
 }
 
 #[test]
+fn compiles_regex_exec_last_index_state() {
+    let source = r#"
+        function printMatch(result: string[] | undefined): void {
+            if (result !== undefined) {
+                console.log(result[0]);
+            } else {
+                console.log("no match");
+            }
+        }
+        async function main(): Promise<void> {
+            const global = /\d+/g;
+            const text = "12 34 56";
+            printMatch(global.exec(text));
+            printMatch(global.exec(text));
+            printMatch(global.exec(text));
+            printMatch(global.exec(text));
+            console.log(global.lastIndex);
+
+            const sticky = /\d+/y;
+            console.log(sticky.exec("12abc") !== undefined);
+            console.log(sticky.exec("12abc") !== undefined);
+            sticky.lastIndex = 0;
+            console.log(sticky.exec("12abc") !== undefined);
+
+            const plain = /\d+/;
+            plain.lastIndex = 5;
+            plain.exec("12");
+            console.log(plain.lastIndex);
+
+            const empty = /x*/g;
+            let count = 0;
+            let current = empty.exec("abc");
+            while (current !== undefined) {
+                count++;
+                if (count > 10) {
+                    break;
+                }
+                current = empty.exec("abc");
+            }
+            console.log(count);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_exec_last_index_state"),
+        "12\n34\n56\nno match\n0\ntrue\nfalse\ntrue\n5\n4\n"
+    );
+}
+
+#[test]
 fn compiles_string_match() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {
