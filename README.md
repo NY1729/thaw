@@ -1672,6 +1672,16 @@ The workspace crates have narrow responsibilities:
   `"NaN"` for `NaN` receivers, and otherwise chooses fixed or exponential
   notation and digit placement by the same rules as the specification's
   correctly-rounded digit sequence
+- `Number.prototype.toString(radix)`: a coerced, truncated `radix` outside
+  `[2, 36]` throws (`NaN` normalizes to `0` first, so it throws too); `10`
+  (the value omitted defaults to, unaffected) goes through the ordinary
+  decimal path. Any other radix converts using plain `f64` arithmetic
+  throughout rather than a fixed-width integer, so it never overflows
+  regardless of magnitude, at the cost of the same precision `f64` itself
+  already has past 2^53 -- a faithful reflection of what the number
+  actually represents, not a shortcut. A fractional part is rendered up to
+  100 radix digits, a practical cutoff rather than chasing exact
+  bit-for-bit fidelity (ordinary engines make a similar cutoff)
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements

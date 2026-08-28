@@ -572,6 +572,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, digits, "toPrecision digits")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_number_to_radix_string" => {
+                        let [value, radix] = args.as_slice() else {
+                            return Err("number toString radix expects two operands".into());
+                        };
+                        self.expect_type(&HirType::F64, value, "toString receiver")?;
+                        self.expect_type(&HirType::F64, radix, "toString radix")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_length" => {
                         let [argument] = args.as_slice() else {
                             return Err("string length expects one operand".into());
