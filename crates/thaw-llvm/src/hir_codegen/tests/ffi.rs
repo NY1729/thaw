@@ -2404,6 +2404,31 @@ fn compiles_date_string_formatting() {
 }
 
 #[test]
+fn compiles_regex_test_last_index_state() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const global = /\d/g;
+            const text = "1a2";
+            console.log(global.test(text));
+            console.log(global.lastIndex);
+            console.log(global.test(text));
+            console.log(global.lastIndex);
+            console.log(global.test(text));
+            console.log(global.lastIndex);
+
+            const plain = /\d/;
+            plain.lastIndex = 9;
+            console.log(plain.test(text));
+            console.log(plain.lastIndex);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_test_last_index_state"),
+        "true\n1\ntrue\n3\nfalse\n0\ntrue\n9\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {
