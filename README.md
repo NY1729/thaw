@@ -1540,9 +1540,11 @@ The workspace crates have narrow responsibilities:
   instead of looping forever), resets to `0` on failure, and for `y`
   additionally rejects a match that does not start exactly at
   `lastIndex`. A non-global, non-sticky pattern ignores and never writes
-  `lastIndex`, always searching from the start of `value`, matching
-  `.test()`'s own simplification (which still does not consult or update
-  `lastIndex` -- only `.exec()` does)
+  `lastIndex`, always searching from the start of `value`. `.test()`
+  shares this same `lastIndex` handling (it delegates to the same
+  `RegExpExec` algorithm in the specification, just discarding the match
+  array for a boolean); every other regex method still always searches
+  from the start and never touches `lastIndex`
 - `String.prototype.matchAll(regex)` returns `Array(Array(Str))`: one
   match-info array per match found (same shape as non-global `.match()` --
   the whole match followed by each capture group's text), unlike
@@ -1691,14 +1693,17 @@ The workspace crates have narrow responsibilities:
   every allocation lives until the whole arena resets at the next Lambda
   invocation regardless
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
-  flags?)` construct a fixed native object with `source`/`flags` string
-  fields (also the `RegExp` type annotation), backed by the Rust `regex`
-  crate. `RegExp.prototype.test` supports the `i`/`m`/`s` flags, compiling
-  and caching each distinct source/flags pair once. The `regex` crate's
-  syntax lacks backreferences and lookaround, and `g`/`y` `lastIndex` state
-  is not tracked, so every call searches from the start of the string. This
-  links a regex engine into every generated binary unconditionally (about
-  1.9MB stripped), since `thaw-runtime` did not previously depend on `regex`
+  flags?)` construct a fixed native object with `source`/`flags`/
+  `lastIndex` fields (also the `RegExp` type annotation), backed by the
+  Rust `regex` crate. `i`/`m`/`s` flags are supported, compiling and
+  caching each distinct source/flags pair once; the `regex` crate's syntax
+  lacks backreferences and lookaround. `RegExp.prototype.test` and
+  `.exec()` both track `lastIndex` for a `g`/`y` pattern (see the `.exec()`
+  entry above); every other method (`match`, `matchAll`, `replace`/
+  `replaceAll`, `split`) still always searches from the start of the
+  string, never consulting or updating `lastIndex`. This links a regex
+  engine into every generated binary unconditionally (about 1.9MB
+  stripped), since `thaw-runtime` did not previously depend on `regex`
 - `RegExp.prototype.global`/`.ignoreCase`/`.multiline`/`.dotAll`/`.sticky`/
   `.unicode`/`.unicodeSets` each just check whether `.flags` contains that
   accessor's one character, matching the specification's own definition
