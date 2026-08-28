@@ -238,7 +238,13 @@ The workspace crates have narrow responsibilities:
   once before evaluating the right-hand side, including awaited components
 - Typed array literals support multiple spreads and ordinary elements with
   single, left-to-right evaluation, including synchronous elements before and
-  after direct or nested awaited spread sources
+  after direct or nested awaited spread sources. A `string` spread source
+  (`[..."abc"]`) is also accepted, iterating Unicode scalar values into a
+  `string[]` the same way `Array.from("abc")` already does (reusing the
+  same `__thaw_string_to_array` conversion) -- this is specific to array
+  *literal* spreads; spreading a string (or any non-tuple-typed value)
+  into a function call's arguments still requires a statically known
+  length, which a runtime string can't provide
 - `Promise.all`, `allSettled`, `race`, and `any` accept homogeneous array
   literal spreads while retaining dynamic `Promise<T>[]` sources and order
 - Named function calls support fixed-length argument spreads from array
