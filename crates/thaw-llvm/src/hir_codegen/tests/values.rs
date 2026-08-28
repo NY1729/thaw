@@ -654,6 +654,38 @@ fn stringifies_native_typed_values() {
 }
 
 #[test]
+fn compiles_structured_clone_of_native_values() {
+    let source = r#"
+        interface Point { x: number; y: number; }
+        interface Shape { name: string; points: Point[]; }
+        async function main(): Promise<void> {
+            const original: Point = { x: 1, y: 2 };
+            const clone = structuredClone(original);
+            clone.x = 999;
+            console.log(original.x, clone.x);
+
+            const arr = [1, 2, 3];
+            const arrClone = structuredClone(arr);
+            arrClone[0] = 100;
+            console.log(arr[0], arrClone[0]);
+
+            console.log(structuredClone(42));
+            console.log(structuredClone("hi"));
+            console.log(structuredClone(true));
+
+            const shape: Shape = { name: "s", points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] };
+            const shapeClone = structuredClone(shape);
+            shapeClone.points[0].x = 500;
+            console.log(shape.points[0].x, shapeClone.points[0].x);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structured_clone_native_values"),
+        "1 999\n1 100\n42\nhi\ntrue\n0 500\n"
+    );
+}
+
+#[test]
 fn rejects_json_stringify_function_replacers() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {
