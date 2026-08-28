@@ -2077,6 +2077,66 @@ fn compiles_direct_for_of_over_map_and_set() {
 }
 
 #[test]
+fn compiles_object_keyed_map() {
+    let source = r#"
+        type Point = { x: number, y: number };
+        function printNumber(value: number | undefined): void {
+            if (value !== undefined) {
+                console.log(value);
+            } else {
+                console.log("undefined");
+            }
+        }
+        async function main(): Promise<void> {
+            const m: Map<Point, string> = new Map<Point, string>();
+            const a: Point = { x: 0, y: 0 };
+            const b: Point = { x: 0, y: 0 };
+            m.set(a, "origin-a");
+            m.set(b, "origin-b");
+            console.log(m.size);
+            console.log(m.get(a));
+            console.log(m.get(b));
+            console.log(m.has(a));
+            m.delete(a);
+            console.log(m.size);
+            console.log(m.has(a));
+
+            const counts: Map<number[], number> = new Map<number[], number>();
+            const key1: number[] = [1, 2, 3];
+            const key2: number[] = [1, 2, 3];
+            counts.set(key1, 10);
+            counts.set(key2, 20);
+            console.log(counts.size);
+            printNumber(counts.get(key1));
+            printNumber(counts.get(key2));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_keyed_map"),
+        "2\norigin-a\norigin-b\ntrue\n1\nfalse\n2\n10\n20\n"
+    );
+}
+
+#[test]
+fn compiles_map_keyed_map() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const inner: Map<string, number> = new Map<string, number>();
+            const registry: Map<Map<string, number>, string> = new Map<Map<string, number>, string>();
+            registry.set(inner, "the inner map");
+            console.log(registry.get(inner));
+            console.log(registry.has(inner));
+            const other: Map<string, number> = new Map<string, number>();
+            console.log(registry.has(other));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_keyed_map"),
+        "the inner map\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {
