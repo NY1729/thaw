@@ -760,13 +760,24 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::F64);
                     }
                     "__thaw_regex_exec" => {
-                        let [source, flags, value] = args.as_slice() else {
-                            return Err("RegExp.exec expects three operands".into());
+                        let [source, flags, value, last_index] = args.as_slice() else {
+                            return Err("RegExp.exec expects four operands".into());
                         };
                         self.expect_type(&HirType::Str, source, "RegExp.exec source")?;
                         self.expect_type(&HirType::Str, flags, "RegExp.exec flags")?;
                         self.expect_type(&HirType::Str, value, "RegExp.exec value")?;
+                        self.expect_type(&HirType::F64, last_index, "RegExp.exec lastIndex")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
+                    "__thaw_regex_exec_advance" => {
+                        let [value, source, flags, last_index] = args.as_slice() else {
+                            return Err("RegExp.exec lastIndex advance expects four operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "RegExp.exec lastIndex value")?;
+                        self.expect_type(&HirType::Str, source, "RegExp.exec lastIndex source")?;
+                        self.expect_type(&HirType::Str, flags, "RegExp.exec lastIndex flags")?;
+                        self.expect_type(&HirType::F64, last_index, "RegExp.exec lastIndex")?;
+                        return Ok(HirType::F64);
                     }
                     "__thaw_regex_match" => {
                         let [value, source, flags] = args.as_slice() else {

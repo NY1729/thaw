@@ -13,6 +13,7 @@ impl<'a> FnLowerer<'a> {
                     "flags".to_string(),
                     HirExpr::Lit(HirLit::Str(regex.flags.to_string())),
                 ),
+                ("lastIndex".to_string(), HirExpr::Lit(HirLit::F64(0.0))),
             ])),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
@@ -1029,6 +1030,7 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirExpr::ObjectLit(vec![
                             ("source".to_string(), source),
                             ("flags".to_string(), flags),
+                            ("lastIndex".to_string(), HirExpr::Lit(HirLit::F64(0.0))),
                         ]));
                     }
                     if matches!(class.sym.as_ref(), "Map" | "Set" | "WeakMap" | "WeakSet") {
