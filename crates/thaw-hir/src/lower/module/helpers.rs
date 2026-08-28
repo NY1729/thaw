@@ -22,6 +22,24 @@ fn class_property_name(name: &PropName) -> Result<Symbol, String> {
     }
 }
 
+/// Infers a class field's type from a simple literal initializer
+/// (`count = 0`, `label = "x"`, `active = false`) when it has no explicit
+/// type annotation, mirroring how a local `let`/`const` already infers from
+/// its initializer without one. Deliberately limited to number/string/bool
+/// literals: this runs in the pre-pass that computes a class's field
+/// layout, before the rest of the class (and its own field types) has been
+/// resolved, so anything that could depend on that -- a method call, a
+/// reference to another field, an array/object literal -- still requires
+/// an explicit annotation rather than risking a lowering-order cycle.
+fn infer_class_field_literal_type(expr: &Expr) -> Option<HirType> {
+    match expr {
+        Expr::Lit(Lit::Num(_)) => Some(HirType::F64),
+        Expr::Lit(Lit::Str(_)) => Some(HirType::Str),
+        Expr::Lit(Lit::Bool(_)) => Some(HirType::Bool),
+        _ => None,
+    }
+}
+
 fn member_property_name(name: &MemberProp) -> Option<Symbol> {
     match name {
         MemberProp::Ident(name) => Some(name.sym.to_string()),

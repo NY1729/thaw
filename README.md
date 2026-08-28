@@ -1879,6 +1879,13 @@ The workspace crates have narrow responsibilities:
   reflection and heterogeneous enums remain outside the native constant
   subset. Compatible declarations merge in source order, with duplicate
   member names and mixed native layouts rejected
+- An instance or static field (including a private `#field`) without an
+  explicit type annotation infers its type from a simple number/string/
+  boolean literal initializer (`count = 0`, `name = "x"`, `active = true`),
+  matching how a local `let`/`const` already infers from its initializer.
+  This only covers a literal: anything that could depend on the rest of
+  the class not yet resolved at this point (a method call, another
+  field, an array/object literal) still requires an explicit annotation
 - The typed AOT class subset supports constructors, parameter properties,
   instance fields and methods, accessors, initialized typed static fields and
   static methods, inherited static-field reads/writes with shared base storage,

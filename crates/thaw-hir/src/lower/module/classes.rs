@@ -74,11 +74,18 @@ fn collect_native_classes<'a>(
                 ));
             }
             let field_name = class_property_name(&property.key)?;
-            let annotation = property.type_ann.as_ref().ok_or_else(|| {
-                format!("class `{name}` field `{field_name}` needs a type annotation")
-            })?;
-            let mut field_type =
-                lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+            let mut field_type = match &property.type_ann {
+                Some(annotation) => {
+                    lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?
+                }
+                None => property
+                    .value
+                    .as_deref()
+                    .and_then(infer_class_field_literal_type)
+                    .ok_or_else(|| {
+                        format!("class `{name}` field `{field_name}` needs a type annotation")
+                    })?,
+            };
             if property.is_optional {
                 field_type = optional_parameter_type(field_type);
             }
