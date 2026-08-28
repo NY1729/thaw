@@ -158,6 +158,7 @@ impl<'a> FnLowerer<'a> {
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
                 | "normalize" | "split" | "replace" | "replaceAll" | "test" | "match" | "search"
+                | "matchAll"
                 | "exec"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
@@ -769,6 +770,87 @@ impl<'a> FnLowerer<'a> {
                             captures,
                             Vec::new(),
                             result_type,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((pattern_name, regex_type, pattern));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"matchAll" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "matchAll receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.matchAll")?;
+                    let [pattern] = arguments.as_slice() else {
+                        return Err("native `.matchAll()` expects exactly one argument".into());
+                    };
+                    let regex_type = regex_object_type();
+                    if self.infer_expr_type(pattern)? != regex_type {
+                        return Err("native `.matchAll()` requires a RegExp argument".into());
+                    }
+                    let pattern = pattern.clone();
+                    let receiver_name = format!("__thaw_match_all_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let pattern_name = format!("__thaw_match_all_pattern_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let raw_name = format!("__thaw_match_all_raw_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(pattern_name.clone(), regex_type.clone());
+                    let matches_type = HirType::Array(Box::new(HirType::Array(Box::new(HirType::Str))));
+                    self.scope.insert(raw_name.clone(), matches_type.clone());
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let source = HirExpr::PropAccess(
+                        Box::new(var(&pattern_name)),
+                        regex_type.clone(),
+                        "source".to_string(),
+                    );
+                    let flags = HirExpr::PropAccess(
+                        Box::new(var(&pattern_name)),
+                        regex_type.clone(),
+                        "flags".to_string(),
+                    );
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(
+                            raw_name.clone(),
+                            matches_type.clone(),
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_regex_match_all".into())),
+                                vec![var(&receiver_name), source, flags],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_is_null".into())),
+                                vec![var(&raw_name)],
+                            ),
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                "String.prototype.matchAll must be called with a global RegExp"
+                                    .into(),
+                            )))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(var(&raw_name))),
+                    ]);
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            matches_type,
                             Box::new(body),
                         )),
                         Vec::new(),
