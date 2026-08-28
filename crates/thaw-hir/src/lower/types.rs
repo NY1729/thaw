@@ -394,6 +394,10 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
                     .collect::<Vec<_>>()
                     .join("_")
             ),
+            HirType::Map(key, value) => {
+                format!("map_{}_{}", fingerprint(key), fingerprint(value))
+            }
+            HirType::Set(element) => format!("set_{}", fingerprint(element)),
             other => panic!("unsupported generic specialization type: {other:?}"),
         }
     }

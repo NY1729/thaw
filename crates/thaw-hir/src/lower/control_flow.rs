@@ -662,6 +662,8 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         | HirType::Object(_)
         | HirType::Json
         | HirType::Dictionary(_)
+        | HirType::Map(_, _)
+        | HirType::Set(_)
         | HirType::Promise(_) => Some("object"),
         HirType::Union(elements) => {
             let first = elements.first().and_then(native_typeof_name)?;

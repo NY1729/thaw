@@ -335,6 +335,43 @@ fn lower_ts_type(
                         .collect(),
                 ));
             }
+            if ref_name == Some("Map") {
+                let [key, value] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err("Map<K, V> requires exactly two type arguments".into());
+                };
+                let key = lower_ts_type(key, interfaces, generic_interfaces)?;
+                if !matches!(key, HirType::F64 | HirType::Str) {
+                    return Err(format!(
+                        "Map keys must be `number` or `string`, got {key:?} -- \
+                         reference-identity keys (objects, arrays) aren't supported"
+                    ));
+                }
+                let value = lower_ts_type(value, interfaces, generic_interfaces)?;
+                return Ok(HirType::Map(Box::new(key), Box::new(value)));
+            }
+            if ref_name == Some("Set") {
+                let [element] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err("Set<T> requires exactly one type argument".into());
+                };
+                let element = lower_ts_type(element, interfaces, generic_interfaces)?;
+                if !matches!(element, HirType::F64 | HirType::Str) {
+                    return Err(format!(
+                        "Set elements must be `number` or `string`, got {element:?} -- \
+                         reference-identity elements (objects, arrays) aren't supported"
+                    ));
+                }
+                return Ok(HirType::Set(Box::new(element)));
+            }
             if matches!(ref_name, Some("Pick" | "Omit")) {
                 let [object, keys] = ty_ref
                     .type_params

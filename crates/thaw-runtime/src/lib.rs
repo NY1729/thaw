@@ -35,6 +35,7 @@ include!("runtime/native_values/strings.rs");
 include!("runtime/native_values/arrays.rs");
 include!("runtime/native_values/regex.rs");
 include!("runtime/native_values/date.rs");
+include!("runtime/native_values/maps.rs");
 include!("runtime/abi.rs");
 
 #[derive(Clone, Copy)]

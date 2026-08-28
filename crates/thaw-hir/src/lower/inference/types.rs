@@ -677,6 +677,52 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, text, "Date.parse argument")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_map_size" => {
+                        let [map] = args.as_slice() else {
+                            return Err("Map/Set size expects one operand".into());
+                        };
+                        if !matches!(self.infer_expr_type(map)?, HirType::Map(_, _) | HirType::Set(_)) {
+                            return Err("Map/Set size requires a Map or Set receiver".into());
+                        }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_map_clear" => {
+                        let [map] = args.as_slice() else {
+                            return Err("Map/Set clear expects one operand".into());
+                        };
+                        if !matches!(self.infer_expr_type(map)?, HirType::Map(_, _) | HirType::Set(_)) {
+                            return Err("Map/Set clear requires a Map or Set receiver".into());
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_map_num_has" | "__thaw_map_num_delete" => {
+                        let [map, key] = args.as_slice() else {
+                            return Err(format!("{name} expects two operands"));
+                        };
+                        self.infer_expr_type(map)?;
+                        self.expect_type(&HirType::F64, key, "map/set numeric key")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_map_str_has" | "__thaw_map_str_delete" => {
+                        let [map, key] = args.as_slice() else {
+                            return Err(format!("{name} expects two operands"));
+                        };
+                        self.infer_expr_type(map)?;
+                        self.expect_type(&HirType::Str, key, "map/set string key")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_map_num_get_f64" | "__thaw_map_str_get_f64" => {
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_map_num_get_bool" | "__thaw_map_str_get_bool" => {
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_map_num_set" | "__thaw_map_str_set" => {
+                        let [map, ..] = args.as_slice() else {
+                            return Err(format!("{name} expects three operands"));
+                        };
+                        return self.infer_expr_type(map);
+                    }
                     "__thaw_regex_search" => {
                         let [value, source, flags] = args.as_slice() else {
                             return Err("String.search expects three operands".into());

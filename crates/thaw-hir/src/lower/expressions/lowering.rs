@@ -1031,6 +1031,67 @@ impl<'a> FnLowerer<'a> {
                             ("flags".to_string(), flags),
                         ]));
                     }
+                    if class.sym == *"Map" || class.sym == *"Set" {
+                        // `new Map()`/`new Set()` are ambiguous on their
+                        // own -- unlike `RegExp`/`Date`, `Map<K, V>`/
+                        // `Set<T>` are genuinely generic, and this
+                        // compiler has no contextual (expected-type)
+                        // inference to recover `K`/`V` from an
+                        // assignment target the way TypeScript itself
+                        // does. Explicit type arguments are required.
+                        let args = new_expr.args.clone().unwrap_or_default();
+                        if !args.is_empty() {
+                            return Err(format!(
+                                "`new {}(...)` with initial entries is not supported yet; \
+                                 construct empty and call `.{}()` instead",
+                                class.sym,
+                                if class.sym == *"Map" { "set" } else { "add" }
+                            ));
+                        }
+                        let params = new_expr
+                            .type_args
+                            .as_ref()
+                            .map(|type_args| type_args.params.as_slice())
+                            .unwrap_or_default();
+                        let value_type = if class.sym == *"Map" {
+                            let [key, value] = params else {
+                                return Err(
+                                    "`new Map<K, V>()` requires explicit type arguments".into(),
+                                );
+                            };
+                            let key_type =
+                                lower_ts_type(key, self.interfaces, self.generic_interfaces)?;
+                            if !matches!(key_type, HirType::F64 | HirType::Str) {
+                                return Err(format!(
+                                    "Map keys must be `number` or `string`, got {key_type:?}"
+                                ));
+                            }
+                            let value_type =
+                                lower_ts_type(value, self.interfaces, self.generic_interfaces)?;
+                            HirType::Map(Box::new(key_type), Box::new(value_type))
+                        } else {
+                            let [element] = params else {
+                                return Err(
+                                    "`new Set<T>()` requires an explicit type argument".into(),
+                                );
+                            };
+                            let element_type =
+                                lower_ts_type(element, self.interfaces, self.generic_interfaces)?;
+                            if !matches!(element_type, HirType::F64 | HirType::Str) {
+                                return Err(format!(
+                                    "Set elements must be `number` or `string`, got {element_type:?}"
+                                ));
+                            }
+                            HirType::Set(Box::new(element_type))
+                        };
+                        return Ok(HirExpr::TypedClosure(
+                            value_type,
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_map_new".to_string())),
+                                Vec::new(),
+                            )),
+                        ));
+                    }
                     if class.sym == *"Date" {
                         let args = new_expr.args.clone().unwrap_or_default();
                         if args.iter().any(|argument| argument.spread.is_some()) {
