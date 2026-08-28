@@ -1546,6 +1546,22 @@ fn compiles_plain_function_rest_parameters() {
 }
 
 #[test]
+fn console_log_prints_inline_number_conversions_inside_object_literals() {
+    let source = r#"
+        function main(): void {
+            console.log({ n: Number("42") });
+            console.log({ p: parseInt("42") });
+            console.log({ f: parseFloat("3.14") });
+            console.log({ b: Number(true) });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "console_log_inline_number_conversions"),
+        "{\"n\":42}\n{\"p\":42}\n{\"f\":3.14}\n{\"b\":1}\n"
+    );
+}
+
+#[test]
 fn nested_finally_blocks_run_inside_out() {
     let source = r#"
         function nested(): string {
