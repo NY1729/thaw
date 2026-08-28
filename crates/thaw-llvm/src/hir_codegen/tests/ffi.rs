@@ -2331,6 +2331,34 @@ fn compiles_weak_map_and_weak_set() {
 }
 
 #[test]
+fn compiles_array_keys_values_entries() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const letters: string[] = ["a", "b", "c"];
+            for (const index of letters.keys()) {
+                console.log(index);
+            }
+            for (const value of letters.values()) {
+                console.log(value);
+            }
+            for (const [index, value] of letters.entries()) {
+                console.log(index + ":" + value);
+            }
+            const empty: number[] = [];
+            console.log(empty.keys().length);
+            // Chaining onto another array method's result.
+            for (const [index, value] of letters.filter((s: string) => s !== "b").entries()) {
+                console.log(index + "=" + value);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_keys_values_entries"),
+        "0\n1\n2\na\nb\nc\n0:a\n1:b\n2:c\n0\n0=a\n1=c\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {

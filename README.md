@@ -1642,15 +1642,28 @@ The workspace crates have narrow responsibilities:
   equally idiomatic. Because a snapshot is taken once per call, mutating
   the `Map`/`Set` mid-loop does not affect an iteration already in
   progress, unlike the specification's live iterators.
-  Because `get`/`set`/`has`/`delete`/`add`/`clear`/`keys`/`values`/
-  `entries` are plausible names for a user's own class/object methods too
-  (unlike e.g. `charCodeAt`), they are only dispatched as `Map`/`Set`
-  builtins when the receiver's type is
+  Because `get`/`set`/`has`/`delete`/`add`/`clear` are plausible names for
+  a user's own class/object methods too (unlike e.g. `charCodeAt`), they
+  are only dispatched as `Map`/`Set` builtins when the receiver's type is
   already known to be a `Map`/`Set` through existing scope/interface data
   with no additional lowering -- a `Map`/`Set` local variable, `this.field`,
   a `.set()`/`.add()` chain, or a nested `a.b.c` member access all resolve,
   but a receiver that is itself a function call (`getMap().get(x)`) falls
-  through to ordinary method-call handling instead
+  through to ordinary method-call handling instead. `.keys()`/`.values()`/
+  `.entries()` are claimed unconditionally instead (like every other
+  built-in method that isn't `get`/`set`/`has`/`delete`/`add`/`clear`),
+  since they're collection-flavored enough that a real collision seems
+  unlikely, and unlike those six, chaining onto a fresh method-call result
+  (`arr.filter(...).entries()`) is common enough that requiring
+  already-known receiver type information would break the common case
+- `Array.prototype.keys()`/`.values()`/`.entries()` -- previously only
+  `Map`/`Set` had these -- return a real, eagerly-built array the same
+  way (`0..length` indices, the array itself since it's already iterable,
+  and `[index, value]` pairs respectively), built via a small loop
+  (`ArrayAlloc`/`TypedIndex`/`IndexAssign`, the same primitives
+  `Array.prototype.map`'s own lowering already uses) rather than a new
+  native function assuming a fixed per-element byte stride, which would
+  have silently misread a wider element type like `T | undefined`
 - `WeakMap<K, V>`/`WeakSet<T>` reuse `HirType::Map`/`Set` outright (the
   same "avoid a new exhaustive-match blast radius" tradeoff `RegExp`/
   `Date` already made by reusing `Object`) with no new runtime code --
