@@ -888,6 +888,17 @@ impl<'a> FnLowerer<'a> {
                         if !pending.is_empty() {
                             parts.push(HirExpr::ArrayLit(std::mem::take(&mut pending)));
                         }
+                        // A string spread source (`[...str]`) iterates its
+                        // Unicode scalar values, matching `Array.from(str)`
+                        // -- reuse the same `__thaw_string_to_array`
+                        // conversion that path already does rather than
+                        // requiring a typed array up front.
+                        if self.infer_expr_type(&value)? == HirType::Str {
+                            value = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),
+                                vec![value],
+                            );
+                        }
                         let HirType::Array(spread_element) = self.infer_expr_type(&value)? else {
                             return Err("array spread source must be a typed array".into());
                         };
