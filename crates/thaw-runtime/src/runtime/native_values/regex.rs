@@ -207,6 +207,7 @@ pub unsafe extern "C" fn thaw_regex_split(
     value: *const c_char,
     source: *const c_char,
     flags: *const c_char,
+    limit: f64,
 ) -> *mut u8 {
     if value.is_null() || source.is_null() || flags.is_null() {
         return std::ptr::null_mut();
@@ -214,11 +215,22 @@ pub unsafe extern "C" fn thaw_regex_split(
     let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     let source = unsafe { CStr::from_ptr(source) }.to_string_lossy();
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    let Some(parts) = with_compiled_regex(&source, &flags, |regex| {
+    let Some(mut parts) = with_compiled_regex(&source, &flags, |regex| {
         regex.split(&value).map(str::to_string).collect::<Vec<_>>()
     }) else {
         return std::ptr::null_mut();
     };
+    // Truncated after computing the full split, not via the regex crate's
+    // own `splitn` (which keeps the unsplit remainder in its last piece
+    // instead) -- matching thaw_string_split's own limit handling, and
+    // JavaScript's own `String.prototype.split(separator, limit)`, which
+    // truncates the result rather than limiting how many splits happen.
+    let limit = if limit.is_finite() && limit >= 0.0 {
+        limit as usize
+    } else {
+        usize::MAX
+    };
+    parts.truncate(limit);
     arena_string_array(parts)
 }
 

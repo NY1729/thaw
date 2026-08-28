@@ -799,12 +799,13 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Str);
                     }
                     "__thaw_regex_split" => {
-                        let [value, source, flags] = args.as_slice() else {
-                            return Err("String.split expects three operands".into());
+                        let [value, source, flags, limit] = args.as_slice() else {
+                            return Err("String.split expects four operands".into());
                         };
                         self.expect_type(&HirType::Str, value, "split receiver")?;
                         self.expect_type(&HirType::Str, source, "split source")?;
                         self.expect_type(&HirType::Str, flags, "split flags")?;
+                        self.expect_type(&HirType::F64, limit, "split limit")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
                     "__thaw_string_code_point_at" => {

@@ -2511,6 +2511,26 @@ fn compiles_regex_split_and_replace() {
 }
 
 #[test]
+fn compiles_regex_split_with_limit() {
+    let source = r#"
+        function printAll(parts: string[]): void {
+            for (const part of parts) {
+                console.log(part);
+            }
+        }
+        async function main(): Promise<void> {
+            printAll("a,b,c,d".split(/,/, 2));
+            printAll("a,b,c,d".split(/,/, 0));
+            printAll("a,b,c,d".split(/,/, 100));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_split_with_limit"),
+        "a\nb\na\nb\nc\nd\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {
