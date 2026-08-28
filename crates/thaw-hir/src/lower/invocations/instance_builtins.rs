@@ -1737,7 +1737,126 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"at" {
                     let receiver = self.lower_expr(&member.obj)?;
-                    let array_type = self.infer_expr_type(&receiver)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if receiver_type == HirType::Str {
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "String.at")?;
+                        let [index] = arguments.as_slice() else {
+                            return Err("native `.at()` expects exactly one index".into());
+                        };
+                        let index = self.coerce_primitive_to_number(index.clone())?;
+                        let receiver_name =
+                            format!("__thaw_string_at_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let index_name = format!("__thaw_string_at_index_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let length_name = format!("__thaw_string_at_length_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let actual_index_name =
+                            format!("__thaw_string_at_actual_index_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Str);
+                        self.scope.insert(index_name.clone(), HirType::F64);
+                        self.scope.insert(length_name.clone(), HirType::F64);
+                        self.scope.insert(actual_index_name.clone(), HirType::F64);
+                        let number = |value| HirExpr::Lit(HirLit::F64(value));
+                        let var = |name: &str| HirExpr::Var(name.into());
+                        let assign = |value| {
+                            HirStmt::Expr(HirExpr::Assign(actual_index_name.clone(), Box::new(value)))
+                        };
+                        let none = || HirStmt::Return(Some(HirExpr::OptionalNone(HirType::Str)));
+                        let body = HirExpr::Block(vec![
+                            HirStmt::Let(
+                                length_name.clone(),
+                                HirType::F64,
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_length".into())),
+                                    vec![var(&receiver_name)],
+                                ),
+                            ),
+                            HirStmt::Let(
+                                actual_index_name.clone(),
+                                HirType::F64,
+                                var(&index_name),
+                            ),
+                            HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(var(&actual_index_name)),
+                                    Box::new(var(&actual_index_name)),
+                                ),
+                                Vec::new(),
+                                vec![assign(number(0.0))],
+                            ),
+                            assign(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                                vec![var(&actual_index_name)],
+                            )),
+                            HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::Lt,
+                                    Box::new(var(&actual_index_name)),
+                                    Box::new(number(0.0)),
+                                ),
+                                vec![assign(HirExpr::BinOp(
+                                    BinOp::Add,
+                                    Box::new(var(&length_name)),
+                                    Box::new(var(&actual_index_name)),
+                                ))],
+                                Vec::new(),
+                            ),
+                            HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::Lt,
+                                    Box::new(var(&actual_index_name)),
+                                    Box::new(number(0.0)),
+                                ),
+                                vec![none()],
+                                Vec::new(),
+                            ),
+                            HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::GtEq,
+                                    Box::new(var(&actual_index_name)),
+                                    Box::new(var(&length_name)),
+                                ),
+                                vec![none()],
+                                Vec::new(),
+                            ),
+                            HirStmt::Return(Some(HirExpr::OptionalSome(
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_at".into())),
+                                    vec![var(&receiver_name), var(&actual_index_name)],
+                                )),
+                                HirType::Str,
+                            ))),
+                        ]);
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_bindings(&body, &mut referenced);
+                        let captures = referenced
+                            .into_iter()
+                            .filter_map(|captured| {
+                                self.scope
+                                    .get(&captured)
+                                    .cloned()
+                                    .map(|ty| HirParam { name: captured, ty })
+                            })
+                            .collect();
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Lambda(
+                                captures,
+                                Vec::new(),
+                                HirType::Optional(Box::new(HirType::Str)),
+                                Box::new(body),
+                            )),
+                            Vec::new(),
+                        );
+                        let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((index_name, HirType::F64, index));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    let array_type = receiver_type;
                     let HirType::Array(element) = &array_type else {
                         return Err(format!(
                             "array `.at()` requires a homogeneous array, got {array_type:?}"
