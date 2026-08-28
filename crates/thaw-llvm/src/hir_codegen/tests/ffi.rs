@@ -2245,6 +2245,26 @@ fn compiles_string_at() {
 }
 
 #[test]
+fn compiles_string_char_at() {
+    let source = r#"
+        async function main(): Promise<void> {
+            console.log("abcde".charAt(0));
+            console.log("abcde".charAt(4));
+            console.log("abcde".charAt(-1));
+            console.log("abcde".charAt(5));
+            console.log("abcde".charAt(NaN));
+            console.log("abcde".charAt());
+            console.log("".charAt(0));
+            console.log("[" + "abcde".charAt(-1) + "]");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_char_at"),
+        "a\ne\n\n\na\na\n\n[]\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {
