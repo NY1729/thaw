@@ -239,29 +239,27 @@ impl<'ctx> HirCompiler<'ctx> {
         name: &str,
         descriptor: u64,
     ) -> Result<(), String> {
-        let format = self
+        // `%g` truncates to C's default six significant digits and picks
+        // fixed/exponential notation by C's own rules, not JavaScript's --
+        // it silently mis-prints e.g. `Number.MAX_SAFE_INTEGER` as
+        // `9.0072e+15` and hides `0.1 + 0.2`'s imprecision by rounding it
+        // to `0.3`. `thaw_number_to_string` already implements the correct
+        // shortest-round-trip conversion (the same one `String(number)`,
+        // template literals and `+` concatenation already use), so printing
+        // through it as a string keeps `console.log` consistent with them.
+        let text = self
             .builder
-            .build_global_string_ptr(if newline { "%g\n" } else { "%g" }, &format!("{name}_fmt"))
-            .map_err(|error| error.to_string())?;
-        let (function, arguments) = if descriptor == 1 {
-            (
-                self.module.get_function("printf").unwrap(),
-                vec![format.as_pointer_value().into(), value.into()],
+            .build_call(
+                self.module.get_function("thaw_number_to_string").unwrap(),
+                &[value.into()],
+                &format!("{name}_text"),
             )
-        } else {
-            (
-                self.module.get_function("dprintf").unwrap(),
-                vec![
-                    self.context.i32_type().const_int(descriptor, false).into(),
-                    format.as_pointer_value().into(),
-                    value.into(),
-                ],
-            )
-        };
-        self.builder
-            .build_call(function, &arguments, name)
-            .map_err(|error| error.to_string())?;
-        Ok(())
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_number_to_string returned no value")?
+            .into_pointer_value();
+        self.compile_console_text(text, newline, name, descriptor)
     }
 
     fn compile_console_structured(

@@ -148,6 +148,15 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonIndexSet(_, _, _) => Some(HirType::Json),
             HirExpr::JsonDelete(_, _) => Some(HirType::Bool),
             HirExpr::EnumReverseLookup(_, _) => Some(HirType::Optional(Box::new(HirType::Str))),
+            HirExpr::BinOp(op, _, _) => Some(match op {
+                BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::EqEqEq => HirType::Bool,
+                _ => HirType::F64,
+            }),
+            HirExpr::ObjectLit(fields) => fields
+                .iter()
+                .map(|(name, value)| self.expr_hir_type(value).map(|ty| (name.clone(), ty)))
+                .collect::<Option<Vec<_>>>()
+                .map(HirType::Object),
             HirExpr::ArrayLit(elements) => Some(HirType::Array(Box::new(
                 elements
                     .first()
@@ -184,6 +193,47 @@ impl<'ctx> HirCompiler<'ctx> {
                     }
                     if name == "__thaw_string_to_array" {
                         return Some(HirType::Array(Box::new(HirType::Str)));
+                    }
+                    if matches!(
+                        name.as_str(),
+                        "__thaw_number_neg"
+                            | "__thaw_math_abs"
+                            | "__thaw_math_floor"
+                            | "__thaw_math_ceil"
+                            | "__thaw_math_trunc"
+                            | "__thaw_math_sqrt"
+                            | "__thaw_math_sign"
+                            | "__thaw_math_round"
+                            | "__thaw_math_exp"
+                            | "__thaw_math_log"
+                            | "__thaw_math_log2"
+                            | "__thaw_math_log10"
+                            | "__thaw_math_sin"
+                            | "__thaw_math_cos"
+                            | "__thaw_math_tan"
+                            | "__thaw_math_asin"
+                            | "__thaw_math_acos"
+                            | "__thaw_math_atan"
+                            | "__thaw_math_sinh"
+                            | "__thaw_math_cosh"
+                            | "__thaw_math_tanh"
+                            | "__thaw_math_cbrt"
+                            | "__thaw_math_acosh"
+                            | "__thaw_math_asinh"
+                            | "__thaw_math_atanh"
+                            | "__thaw_math_expm1"
+                            | "__thaw_math_log1p"
+                            | "__thaw_math_fround"
+                            | "__thaw_math_clz32"
+                            | "__thaw_math_random"
+                            | "__thaw_math_pow"
+                            | "__thaw_math_min"
+                            | "__thaw_math_max"
+                            | "__thaw_math_atan2"
+                            | "__thaw_math_hypot"
+                            | "__thaw_math_imul"
+                    ) {
+                        return Some(HirType::F64);
                     }
                     if matches!(
                         name.as_str(),
