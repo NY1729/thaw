@@ -1648,6 +1648,12 @@ The workspace crates have narrow responsibilities:
   is not tracked, so every call searches from the start of the string. This
   links a regex engine into every generated binary unconditionally (about
   1.9MB stripped), since `thaw-runtime` did not previously depend on `regex`
+- `RegExp.prototype.global`/`.ignoreCase`/`.multiline`/`.dotAll`/`.sticky`/
+  `.unicode`/`.unicodeSets` each just check whether `.flags` contains that
+  accessor's one character, matching the specification's own definition
+  (these aren't stored fields -- the native object only has `source`/
+  `flags` -- so they're a property-read special case, the same way
+  `.length` is for `string`/`Array`, rather than ordinary object fields)
 - `Number.prototype.toPrecision` returns the general native number-to-string
   result when its argument is omitted; otherwise it truncates a coerced
   significant-digit count, throws for values outside `[1, 100]`, returns
