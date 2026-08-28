@@ -1394,6 +1394,16 @@ The workspace crates have narrow responsibilities:
   `null`/`undefined` replacer and number/string `space`; numeric indentation is
   truncated and clamped to ten spaces, string indentation to ten characters,
   with left-to-right awaited argument evaluation
+- `JSON.stringify` also accepts a plain statically-typed value -- a number,
+  string, boolean, array, tuple, or object/interface literal, including
+  ones nested arbitrarily inside each other -- not just an already-dynamic
+  `Json`/`Dictionary` value. This reuses thaw-llvm's existing native-to-
+  `Json` codegen (the same one `console.log`'s structured-value printing
+  already relies on for the same types) rather than duplicating it: the
+  value is set as the one field of a throwaway `Json` object and read
+  right back out, so the object-field-set codegen's own per-type dispatch
+  does the conversion. A type with no such encoding (`Function`, `Promise`,
+  `Map`/`Set`, `Union`, ...) is still rejected as before
 - A typed `string[]` stringify replacer filters object properties recursively,
   preserves first-occurrence whitelist order, ignores duplicates, leaves array
   positions intact and composes with awaited replacers and `space`; function
