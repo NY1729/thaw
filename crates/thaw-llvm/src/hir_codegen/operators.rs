@@ -196,7 +196,11 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_stringify_keys_string_space"
                         | "fetch"
                         | "__thaw_string_concat" => return Some(HirType::Str),
-                        "__thaw_string_length" => return Some(HirType::F64),
+                        "__thaw_string_length"
+                        | "__thaw_string_to_number"
+                        | "__thaw_bool_to_number"
+                        | "__thaw_parse_int"
+                        | "__thaw_parse_float" => return Some(HirType::F64),
                         _ => {}
                     }
                     if name == "__thaw_string_to_array" {
