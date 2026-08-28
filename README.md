@@ -1078,6 +1078,18 @@ The workspace crates have narrow responsibilities:
   prepended to invocation-time values. The same closure ABI carries synchronous
   and async results, and `.d.ts` fast-path callback classification recognizes a
   trailing typed rest parameter
+- A plain (non-ambient, non-generic) top-level `function` declaration's
+  trailing `...rest: T[]` parameter now packs excess call-site arguments
+  into a native array, matching the specification, instead of requiring
+  exactly one array argument in that slot -- `function sum(...nums:
+  number[])` now accepts `sum(1, 2, 3)` and `sum(...values)` (a literal or
+  statically-sized-tuple spread) directly, the same way a native class
+  constructor/method rest parameter already did, by reusing that same
+  `native_rest` mechanism (every call site that already packs trailing
+  arguments for a class needs no changes to also do it here). A generic
+  function's rest parameter, and calling a rest-parameter function through
+  a variable holding it as a plain value (`const f = sum; f(1, 2, 3)`),
+  are not covered by this and still require exactly one array argument
 - Ordinary top-level functions now share the native class callable adapters for
   omitted trailing defaults, optional parameters and explicit `undefined` at
   any omittable position. Default expressions run in declaration order with
