@@ -310,7 +310,10 @@ The workspace crates have narrow responsibilities:
   (`__thaw_json_object_from_*_entries`/`__thaw_json_object_assign`) are
   covered too, so passing either directly to `console.log` (not first
   through a variable) also prints correctly rather than hitting the same
-  fallback
+  fallback. So are `Number(string)`/`Number(boolean)`, `parseInt`, and
+  `parseFloat` (`__thaw_string_to_number`/`__thaw_bool_to_number`/
+  `__thaw_parse_int`/`__thaw_parse_float`) -- `{ n: Number("42") }` passed
+  straight to `console.log` printed nothing rather than `{"n":42}`
 - `console.info` and `console.debug` on standard output plus `console.warn` and
   `console.error` on standard error, sharing the same variadic value formatting
 - `console.assert` with JavaScript truthiness, eager left-to-right argument
