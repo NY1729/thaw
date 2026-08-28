@@ -1031,7 +1031,7 @@ impl<'a> FnLowerer<'a> {
                             ("flags".to_string(), flags),
                         ]));
                     }
-                    if class.sym == *"Map" || class.sym == *"Set" {
+                    if matches!(class.sym.as_ref(), "Map" | "Set" | "WeakMap" | "WeakSet") {
                         // `new Map()`/`new Set()` are ambiguous on their
                         // own -- unlike `RegExp`/`Date`, `Map<K, V>`/
                         // `Set<T>` are genuinely generic, and this
@@ -1039,6 +1039,32 @@ impl<'a> FnLowerer<'a> {
                         // inference to recover `K`/`V` from an
                         // assignment target the way TypeScript itself
                         // does. Explicit type arguments are required.
+                        //
+                        // `WeakMap`/`WeakSet` reuse `HirType::Map`/`Set`
+                        // outright rather than introducing distinct types
+                        // (the same "avoid a new exhaustive-match blast
+                        // radius" tradeoff `RegExp`/`Date` already made by
+                        // reusing `Object`) -- the only real difference is
+                        // that their key/element type must be a reference
+                        // type (`weak_key_intrinsic_suffix` rejects
+                        // `number`/`string`, matching the specification).
+                        // Two things this does NOT enforce, unlike the
+                        // specification: `.size`/`.keys()`/`.values()`/
+                        // `.entries()`/`.forEach()`/`for...of` all still
+                        // work (a real `WeakMap`/`WeakSet` isn't
+                        // enumerable at all), and a key's entry is never
+                        // actually reclaimed early just because it became
+                        // otherwise unreachable -- this runtime has no
+                        // fine-grained GC to do that with; every
+                        // allocation lives until the whole arena resets at
+                        // the next Lambda invocation regardless.
+                        let is_weak = matches!(class.sym.as_ref(), "WeakMap" | "WeakSet");
+                        let key_validator: fn(&HirType) -> Result<&'static str, String> =
+                            if is_weak {
+                                weak_key_intrinsic_suffix
+                            } else {
+                                map_key_intrinsic_suffix
+                            };
                         let args = new_expr.args.clone().unwrap_or_default();
                         if args.iter().any(|argument| argument.spread.is_some()) {
                             return Err(format!(
@@ -1057,15 +1083,16 @@ impl<'a> FnLowerer<'a> {
                             .as_ref()
                             .map(|type_args| type_args.params.as_slice())
                             .unwrap_or_default();
-                        if class.sym == *"Map" {
+                        if matches!(class.sym.as_ref(), "Map" | "WeakMap") {
                             let [key, value] = params else {
-                                return Err(
-                                    "`new Map<K, V>()` requires explicit type arguments".into(),
-                                );
+                                return Err(format!(
+                                    "`new {}<K, V>()` requires explicit type arguments",
+                                    class.sym
+                                ));
                             };
                             let key_type =
                                 lower_ts_type(key, self.interfaces, self.generic_interfaces)?;
-                            map_key_intrinsic_suffix(&key_type)?;
+                            key_validator(&key_type)?;
                             let value_type =
                                 lower_ts_type(value, self.interfaces, self.generic_interfaces)?;
                             let map_type =
@@ -1083,22 +1110,29 @@ impl<'a> FnLowerer<'a> {
                             let pair_type =
                                 HirType::Tuple(vec![key_type.clone(), value_type.clone()]);
                             let entries_type = HirType::Array(Box::new(pair_type.clone()));
-                            self.expect_type(&entries_type, &entries, "Map constructor entries")?;
+                            self.expect_type(
+                                &entries_type,
+                                &entries,
+                                &format!("{} constructor entries", class.sym),
+                            )?;
                             return self.lower_map_or_set_from_iterable(
                                 entries,
                                 entries_type,
                                 map_type,
-                                map_key_intrinsic_suffix(&key_type)?,
+                                key_validator(&key_type)?,
                                 key_type,
                                 Some((value_type, pair_type)),
                             );
                         }
                         let [element] = params else {
-                            return Err("`new Set<T>()` requires an explicit type argument".into());
+                            return Err(format!(
+                                "`new {}<T>()` requires an explicit type argument",
+                                class.sym
+                            ));
                         };
                         let element_type =
                             lower_ts_type(element, self.interfaces, self.generic_interfaces)?;
-                        map_key_intrinsic_suffix(&element_type)?;
+                        key_validator(&element_type)?;
                         let set_type = HirType::Set(Box::new(element_type.clone()));
                         let Some(argument) = args.first() else {
                             return Ok(HirExpr::TypedClosure(
@@ -1111,12 +1145,16 @@ impl<'a> FnLowerer<'a> {
                         };
                         let iterable = self.lower_expr(&argument.expr)?;
                         let iterable_type = HirType::Array(Box::new(element_type.clone()));
-                        self.expect_type(&iterable_type, &iterable, "Set constructor iterable")?;
+                        self.expect_type(
+                            &iterable_type,
+                            &iterable,
+                            &format!("{} constructor iterable", class.sym),
+                        )?;
                         return self.lower_map_or_set_from_iterable(
                             iterable,
                             iterable_type,
                             set_type,
-                            map_key_intrinsic_suffix(&element_type)?,
+                            key_validator(&element_type)?,
                             element_type,
                             None,
                         );

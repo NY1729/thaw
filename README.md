@@ -1651,6 +1651,18 @@ The workspace crates have narrow responsibilities:
   a `.set()`/`.add()` chain, or a nested `a.b.c` member access all resolve,
   but a receiver that is itself a function call (`getMap().get(x)`) falls
   through to ordinary method-call handling instead
+- `WeakMap<K, V>`/`WeakSet<T>` reuse `HirType::Map`/`Set` outright (the
+  same "avoid a new exhaustive-match blast radius" tradeoff `RegExp`/
+  `Date` already made by reusing `Object`) with no new runtime code --
+  `K`/`T` must be a reference type (`number`/`string` are a compile-time
+  error, matching the specification), enforced the same way `Map`/`Set`'s
+  own key restriction is. Unlike the specification, `.size`/`.keys()`/
+  `.values()`/`.entries()`/`.forEach()`/`for...of` all still work (a real
+  `WeakMap`/`WeakSet` isn't enumerable at all), and an entry is never
+  actually reclaimed early just because its key became otherwise
+  unreachable -- this runtime has no fine-grained GC to do that with,
+  every allocation lives until the whole arena resets at the next Lambda
+  invocation regardless
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`

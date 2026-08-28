@@ -1126,3 +1126,26 @@ fn map_accepts_object_and_array_keys_but_rejects_function_keys() {
     let error = lower_module(&module).unwrap_err();
     assert!(error.contains("Map/Set keys must be"), "{error}");
 }
+
+#[test]
+fn weak_map_accepts_object_keys_but_rejects_primitive_keys() {
+    let program = lower(
+        r#"function main(): void {
+            const cache: WeakMap<{ x: number }, string> = new WeakMap<{ x: number }, string>();
+            console.log(cache.size);
+        }"#,
+    );
+    assert!(matches!(
+        program.functions[0].body[0],
+        HirStmt::Let(_, HirType::Map(_, _), _)
+    ));
+
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const byString: WeakMap<string, number> = new WeakMap<string, number>();
+        }"#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("WeakMap/WeakSet keys must be"), "{error}");
+}

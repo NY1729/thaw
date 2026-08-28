@@ -335,31 +335,41 @@ fn lower_ts_type(
                         .collect(),
                 ));
             }
-            if ref_name == Some("Map") {
+            if matches!(ref_name, Some("Map" | "WeakMap")) {
+                let name = ref_name.unwrap();
                 let [key, value] = ty_ref
                     .type_params
                     .as_ref()
                     .map(|params| params.params.as_slice())
                     .unwrap_or_default()
                 else {
-                    return Err("Map<K, V> requires exactly two type arguments".into());
+                    return Err(format!("{name}<K, V> requires exactly two type arguments"));
                 };
                 let key = lower_ts_type(key, interfaces, generic_interfaces)?;
-                map_key_intrinsic_suffix(&key)?;
+                if name == "WeakMap" {
+                    weak_key_intrinsic_suffix(&key)?;
+                } else {
+                    map_key_intrinsic_suffix(&key)?;
+                }
                 let value = lower_ts_type(value, interfaces, generic_interfaces)?;
                 return Ok(HirType::Map(Box::new(key), Box::new(value)));
             }
-            if ref_name == Some("Set") {
+            if matches!(ref_name, Some("Set" | "WeakSet")) {
+                let name = ref_name.unwrap();
                 let [element] = ty_ref
                     .type_params
                     .as_ref()
                     .map(|params| params.params.as_slice())
                     .unwrap_or_default()
                 else {
-                    return Err("Set<T> requires exactly one type argument".into());
+                    return Err(format!("{name}<T> requires exactly one type argument"));
                 };
                 let element = lower_ts_type(element, interfaces, generic_interfaces)?;
-                map_key_intrinsic_suffix(&element)?;
+                if name == "WeakSet" {
+                    weak_key_intrinsic_suffix(&element)?;
+                } else {
+                    map_key_intrinsic_suffix(&element)?;
+                }
                 return Ok(HirType::Set(Box::new(element)));
             }
             if matches!(ref_name, Some("Pick" | "Omit")) {
