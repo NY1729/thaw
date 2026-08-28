@@ -739,23 +739,56 @@ impl<'a> FnLowerer<'a> {
                             return Err("`Object.assign` expects at least one argument".into());
                         };
                         let target_type = self.infer_expr_type(target)?;
-                        if !matches!(target_type, HirType::Json | HirType::Dictionary(_)) {
-                            return Err(format!(
-                                "`Object.assign` requires a JSON or dictionary target, got {target_type:?}"
-                            ));
-                        }
+                        let source_types = sources
+                            .iter()
+                            .map(|source| self.infer_expr_type(source))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        // When every operand is *already* the exact same
+                        // `Json`/`Dictionary` type, keep the original
+                        // behavior byte-for-byte: the result stays that
+                        // same type (so e.g. assigning it to a declared
+                        // `Record<string, number>` still coerces), instead
+                        // of normalizing to plain `Json` and losing that.
+                        // Otherwise (a plain object/interface literal target
+                        // or source, or a type mismatch between operands),
+                        // normalize everything to `Json` via
+                        // `wrap_native_value_as_json` -- the same
+                        // native-value support `JSON.stringify` already
+                        // has -- and let `__thaw_json_object_assign`'s
+                        // matching-operand check enforce the rest.
+                        let uniform_existing = matches!(target_type, HirType::Json | HirType::Dictionary(_))
+                            && source_types.iter().all(|source_type| *source_type == target_type);
                         let mut result = target.clone();
-                        for source in sources {
-                            let source_type = self.infer_expr_type(source)?;
-                            if source_type != target_type {
-                                return Err(format!(
-                                    "`Object.assign` source type {source_type:?} does not match target {target_type:?}"
-                                ));
+                        if uniform_existing {
+                            for source in sources {
+                                result = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
+                                    vec![result, source.clone()],
+                                );
                             }
-                            result = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
-                                vec![result, source.clone()],
-                            );
+                        } else {
+                            let normalize = |lowerer: &mut Self,
+                                              value: HirExpr,
+                                              value_type: HirType|
+                             -> Result<HirExpr, String> {
+                                if value_type == HirType::Json {
+                                    Ok(value)
+                                } else if json_convertible_native_type(&value_type) {
+                                    lowerer.wrap_native_value_as_json(value, value_type)
+                                } else {
+                                    Err(format!(
+                                        "`Object.assign` requires a JSON-convertible value, got {value_type:?}"
+                                    ))
+                                }
+                            };
+                            result = normalize(self, result, target_type)?;
+                            for (source, source_type) in sources.iter().zip(source_types) {
+                                let source = normalize(self, source.clone(), source_type)?;
+                                result = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
+                                    vec![result, source],
+                                );
+                            }
                         }
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }

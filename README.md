@@ -305,7 +305,12 @@ The workspace crates have narrow responsibilities:
   described). `expr_hir_type`'s coverage is still best-effort, not
   exhaustive, matching its existing `ArrayLit` case (which also only
   inspects one element): an object literal field whose value is some
-  other still-uncovered `HirExpr` shape can still hit this fallback
+  other still-uncovered `HirExpr` shape can still hit this fallback.
+  `Object.fromEntries`/`Object.assign`'s own result intrinsics
+  (`__thaw_json_object_from_*_entries`/`__thaw_json_object_assign`) are
+  covered too, so passing either directly to `console.log` (not first
+  through a variable) also prints correctly rather than hitting the same
+  fallback
 - `console.info` and `console.debug` on standard output plus `console.warn` and
   `console.error` on standard error, sharing the same variadic value formatting
 - `console.assert` with JavaScript truthiness, eager left-to-right argument
@@ -1439,7 +1444,13 @@ The workspace crates have narrow responsibilities:
   keys use the last entry and awaited entry arrays are evaluated once
 - `Object.assign` mutates and returns a runtime-keyed `Record` or JSON target,
   applies matching sources left-to-right, and preserves source evaluation order
-  across awaited expressions
+  across awaited expressions. When every operand is *already* the exact same
+  `Record`/JSON type this is unchanged (the result stays that type, so
+  assigning it to a declared `Record<string, T>` still coerces); otherwise
+  (a plain object/interface literal target or source, or a type mismatch)
+  every operand is normalized to `Json` via the same native-value support
+  `JSON.stringify` has, so `Object.assign({}, a, b)` works for ordinary
+  typed objects too, not just an already-dynamic `Record`/`Json` value
 - `Object.hasOwn` checks fixed-object, runtime-keyed `Record`, and runtime JSON
   object/array own properties, including array indices and `length`
 - The `in` operator accepts dynamic primitive keys for fixed objects and checks
