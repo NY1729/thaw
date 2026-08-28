@@ -1476,6 +1476,35 @@ fn compiles_tuple_spreads_for_string_and_search_builtins() {
 }
 
 #[test]
+fn compiles_plain_function_rest_parameters() {
+    let source = r#"
+        function sum(...nums: number[]): number {
+            let total = 0;
+            for (const n of nums) {
+                total += n;
+            }
+            return total;
+        }
+        function label(prefix: string, ...parts: string[]): string {
+            return prefix + ":" + parts.join(",");
+        }
+        function main(): void {
+            console.log(sum());
+            console.log(sum(1));
+            console.log(sum(1, 2, 3));
+            console.log(sum(...[4, 5, 6]));
+            console.log(label("x"));
+            console.log(label("x", "a", "b"));
+            console.log(label("x", ...["p", "q"]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "plain_function_rest_parameters"),
+        "0\n1\n6\n15\nx:\nx:a,b\nx:p,q\n"
+    );
+}
+
+#[test]
 fn nested_finally_blocks_run_inside_out() {
     let source = r#"
         function nested(): string {
