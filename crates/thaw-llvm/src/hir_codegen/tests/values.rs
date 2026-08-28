@@ -620,6 +620,40 @@ fn stringifies_json_with_number_and_string_spacing() {
 }
 
 #[test]
+fn stringifies_native_typed_values() {
+    let source = r#"
+        interface Point { x: number; y: number; }
+        interface Shape { name: string; points: Point[]; }
+        async function main(): Promise<void> {
+            const shape: Shape = {
+                name: "triangle",
+                points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }],
+            };
+            console.log(JSON.stringify(shape));
+            const tuple: [number, string] = [42, "hi"];
+            console.log(JSON.stringify(tuple));
+            console.log(JSON.stringify([1, 2, 3]));
+            console.log(JSON.stringify(42));
+            console.log(JSON.stringify("hi"));
+            console.log(JSON.stringify(true));
+            console.log(JSON.stringify(shape, null, 2));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_native_values"),
+        concat!(
+            "{\"name\":\"triangle\",\"points\":[{\"x\":0,\"y\":0},{\"x\":1,\"y\":0},{\"x\":0,\"y\":1}]}\n",
+            "[42,\"hi\"]\n",
+            "[1,2,3]\n",
+            "42\n",
+            "\"hi\"\n",
+            "true\n",
+            "{\n  \"name\": \"triangle\",\n  \"points\": [\n    {\n      \"x\": 0,\n      \"y\": 0\n    },\n    {\n      \"x\": 1,\n      \"y\": 0\n    },\n    {\n      \"x\": 0,\n      \"y\": 1\n    }\n  ]\n}\n",
+        )
+    );
+}
+
+#[test]
 fn rejects_json_stringify_function_replacers() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {

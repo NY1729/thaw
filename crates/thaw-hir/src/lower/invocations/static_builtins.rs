@@ -1,4 +1,96 @@
+/// Types the native-to-`Json` conversion in `compile_json_object_set_native`
+/// (thaw-llvm's `json_bridge.rs`, reached below through `HirExpr::JsonSet`)
+/// already knows how to encode as an object field, and so can also encode
+/// as a `JSON.stringify` argument via `wrap_native_value_as_json`. Anything
+/// else (`Function`, `Promise`, `Map`/`Set`, `Union`, ...) has no such
+/// encoding and is rejected exactly as before.
+fn json_convertible_native_type(ty: &HirType) -> bool {
+    matches!(
+        ty,
+        HirType::F64
+            | HirType::Str
+            | HirType::Bool
+            | HirType::Null
+            | HirType::Json
+            | HirType::Dictionary(_)
+            | HirType::Array(_)
+            | HirType::Tuple(_)
+            | HirType::Object(_)
+            | HirType::Optional(_)
+            | HirType::Nullable(_)
+            | HirType::Nullish(_)
+    )
+}
+
 impl<'a> FnLowerer<'a> {
+    /// Converts a statically-typed native value (anything
+    /// `json_convertible_native_type` accepts) into a `Json` value, so
+    /// `JSON.stringify` can serialize a plain object/array/tuple literal or
+    /// variable, not just an already-dynamic `Json`/`Dictionary` value.
+    ///
+    /// Rather than walking `value_type` itself and re-deriving thaw-llvm's
+    /// own native-to-`Json` codegen (`compile_native_object_to_json` and
+    /// friends, which already recurse through nested arrays/objects/tuples
+    /// correctly), this reuses that existing codegen indirectly: it sets
+    /// `value` as the one field of a fresh `Json` object via `JsonSet`
+    /// (whose codegen already dispatches on the embedded field type for
+    /// every case `json_convertible_native_type` allows, including nested
+    /// ones), then reads that field straight back out with `JsonGet`. The
+    /// round trip costs one throwaway object-field write per call, but adds
+    /// no new codegen and cannot drift from what `console.log`'s own
+    /// structured-value printing already does for the same types.
+    fn wrap_native_value_as_json(
+        &mut self,
+        value: HirExpr,
+        value_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let value_name = format!("__thaw_json_wrap_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(value_name.clone(), value_type.clone());
+        let obj_name = format!("__thaw_json_wrap_obj_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(obj_name.clone(), HirType::Json);
+        let var = |name: &str| HirExpr::Var(name.into());
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                obj_name.clone(),
+                HirType::Json,
+                HirExpr::JsonObjectLit(Vec::new(), HirType::Json),
+            ),
+            HirStmt::Expr(HirExpr::JsonSet(
+                Box::new(var(&obj_name)),
+                Box::new(HirExpr::Lit(HirLit::Str("value".to_string()))),
+                Box::new(var(&value_name)),
+                value_type.clone(),
+            )),
+            HirStmt::Return(Some(HirExpr::JsonGet(
+                Box::new(var(&obj_name)),
+                "value".to_string(),
+            ))),
+        ]);
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&body, &mut referenced);
+        let captures = referenced
+            .into_iter()
+            .filter_map(|captured| {
+                self.scope
+                    .get(&captured)
+                    .cloned()
+                    .map(|ty| HirParam { name: captured, ty })
+            })
+            .collect();
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                captures,
+                Vec::new(),
+                HirType::Json,
+                Box::new(body),
+            )),
+            Vec::new(),
+        );
+        self.wrap_call_argument_bindings(result, &[(value_name, value_type, value)])
+    }
+
     fn is_static_builtin_call(object: &str, property: &str) -> bool {
         matches!(
             (object, property),
@@ -27,11 +119,16 @@ impl<'a> FnLowerer<'a> {
                         }
                         let value = arguments[0].clone();
                         let value_type = self.infer_expr_type(&value)?;
-                        if !matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
+                        let value = if matches!(value_type, HirType::Json | HirType::Dictionary(_))
+                        {
+                            value
+                        } else if json_convertible_native_type(&value_type) {
+                            self.wrap_native_value_as_json(value, value_type.clone())?
+                        } else {
                             return Err(format!(
                                 "`JSON.stringify` requires a JSON or dictionary value, got {value_type:?}"
                             ));
-                        }
+                        };
                         let mut replacer_array = None;
                         if let Some(replacer) = arguments.get(1) {
                             let replacer_type = self.infer_expr_type(replacer)?;
