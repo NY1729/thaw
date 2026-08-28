@@ -1210,6 +1210,48 @@ impl<'a> FnLowerer<'a> {
                             timestamp,
                         )]));
                     }
+                    if matches!(
+                        class.sym.as_ref(),
+                        "Error"
+                            | "TypeError"
+                            | "RangeError"
+                            | "SyntaxError"
+                            | "ReferenceError"
+                            | "EvalError"
+                            | "URIError"
+                    ) {
+                        // `throw` already only ever unwinds a plain string
+                        // (`catch` binds it as `HirType::Str`, see
+                        // `lower/statements/lowering.rs`) -- there is no
+                        // `Error` object, stack trace, or `.name`/`.message`
+                        // field, and no support for a class extending one of
+                        // these. `new Error(message)`/`new TypeError(...)`/
+                        // etc. all just become `message` itself (defaulting
+                        // to `""` when omitted), so `throw new Error("x")`
+                        // works exactly like the already-supported
+                        // `throw "x"`, without a new exception
+                        // representation to plumb through every catch site.
+                        let args = new_expr.args.clone().unwrap_or_default();
+                        if args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err(format!(
+                                "`new {}()` does not support spread arguments",
+                                class.sym
+                            ));
+                        }
+                        if args.len() > 1 {
+                            return Err(format!(
+                                "`new {}()` expects zero or one message argument",
+                                class.sym
+                            ));
+                        }
+                        return match args.first() {
+                            Some(argument) => {
+                                let message = self.lower_expr(&argument.expr)?;
+                                self.coerce_primitive_to_string(message)
+                            }
+                            None => Ok(HirExpr::Lit(HirLit::Str(String::new()))),
+                        };
+                    }
                     let constructor = class_constructor_symbol(class.sym.as_ref());
                     if let Some(signature) = self.signatures.get(&constructor) {
                         if signature.abstract_class_constructor {
