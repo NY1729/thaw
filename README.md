@@ -1591,11 +1591,24 @@ The workspace crates have narrow responsibilities:
   empty and call `.set()`/`.add()` instead. `.get`/`.set`/`.has`/`.delete`/
   `.clear`/`.size` and `.add` (`Set` only) are implemented; `.set`/`.add`
   return the receiver for chaining, matching the specification.
-  Iteration -- `.keys()`/`.values()`/`.entries()`/`.forEach()`, and
-  `for...of` directly over a `Map`/`Set` -- is not implemented yet.
-  Because `get`/`set`/`has`/`delete`/`add`/`clear` are plausible names for
-  a user's own class/object methods too (unlike e.g. `charCodeAt`), they
-  are only dispatched as `Map`/`Set` builtins when the receiver's type is
+  `.keys()`/`.values()`/`.entries()` return a real, eagerly-snapshotted
+  (at call time) native array in insertion order -- `Set.prototype.values`
+  reads the same snapshot as `.keys()` (a `Set` has no separate value from
+  its element), and `.entries()` pairs are `[key, value]` for a `Map`,
+  `[value, value]` for a `Set`, matching the specification either way.
+  `.forEach(callback)` snapshots the same way and loops over it, calling
+  `callback(value, key, container)` (`key`/`container`'s value/`Set`'s
+  element mirror `.entries()`). `for...of` directly over a `Map`/`Set`
+  snapshots to its default iterator's shape the same way -- entries for a
+  `Map`, values for a `Set` -- so it, `.keys()`, and `.entries()` (with
+  `[key, value]` array-destructured directly in the loop binding) are all
+  equally idiomatic. Because a snapshot is taken once per call, mutating
+  the `Map`/`Set` mid-loop does not affect an iteration already in
+  progress, unlike the specification's live iterators.
+  Because `get`/`set`/`has`/`delete`/`add`/`clear`/`keys`/`values`/
+  `entries` are plausible names for a user's own class/object methods too
+  (unlike e.g. `charCodeAt`), they are only dispatched as `Map`/`Set`
+  builtins when the receiver's type is
   already known to be a `Map`/`Set` through existing scope/interface data
   with no additional lowering -- a `Map`/`Set` local variable, `this.field`,
   a `.set()`/`.add()` chain, or a nested `a.b.c` member access all resolve,

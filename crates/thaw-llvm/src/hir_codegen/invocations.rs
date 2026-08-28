@@ -700,6 +700,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Map/Set construction returned no value".into());
             }
+            "__thaw_map_snapshot_keys"
+            | "__thaw_map_snapshot_values"
+            | "__thaw_map_snapshot_entries"
+            | "__thaw_set_snapshot_entries" => {
+                let [map] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let map = self.compile_expr(map)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[map.into()],
+                        "map_snapshot",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("{name} returned no value"));
+            }
             "__thaw_map_size" => {
                 let [map] = args else {
                     return Err("Map/Set size expects one operand".into());
