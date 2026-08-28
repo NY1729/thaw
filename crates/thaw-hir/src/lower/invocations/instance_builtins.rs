@@ -191,6 +191,7 @@ impl<'a> FnLowerer<'a> {
                 | "setUTCFullYear" | "setUTCMonth" | "setUTCDate" | "setUTCHours"
                 | "setUTCMinutes" | "setUTCSeconds" | "setUTCMilliseconds"
                 | "toDateString" | "toTimeString" | "toUTCString" | "toJSON"
+                | "keys" | "values" | "entries"
         )
     }
 
@@ -3414,18 +3415,21 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"keys" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    if !call.args.is_empty() {
+                        return Err("native `.keys()` expects no arguments".into());
+                    }
+                    if let HirType::Array(_) = &receiver_type {
+                        return self.lower_array_keys(receiver, receiver_type);
+                    }
                     let key_type = match &receiver_type {
                         HirType::Map(key_type, _) => key_type.as_ref().clone(),
                         HirType::Set(element_type) => element_type.as_ref().clone(),
                         other => {
                             return Err(format!(
-                                "native `.keys()` requires a Map or Set receiver, got {other:?}"
+                                "native `.keys()` requires a Map, Set, or Array receiver, got {other:?}"
                             ))
                         }
                     };
-                    if !call.args.is_empty() {
-                        return Err("native `.keys()` expects no arguments".into());
-                    }
                     return Ok(HirExpr::TypedClosure(
                         HirType::Array(Box::new(key_type)),
                         Box::new(HirExpr::Call(
@@ -3437,6 +3441,18 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"values" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    if !call.args.is_empty() {
+                        return Err("native `.values()` expects no arguments".into());
+                    }
+                    if let HirType::Array(_) = &receiver_type {
+                        // The specification returns a fresh iterator, but
+                        // the receiver is already a real `Array(_)` value
+                        // -- already iterable, so this is just identity,
+                        // the same simplification `Map`/`Set` methods here
+                        // already make by eagerly snapshotting instead of
+                        // returning a lazy iterator.
+                        return Ok(receiver);
+                    }
                     let (value_type, intrinsic) = match &receiver_type {
                         HirType::Map(_, value_type) => {
                             (value_type.as_ref().clone(), "__thaw_map_snapshot_values")
@@ -3448,13 +3464,10 @@ impl<'a> FnLowerer<'a> {
                         }
                         other => {
                             return Err(format!(
-                                "native `.values()` requires a Map or Set receiver, got {other:?}"
+                                "native `.values()` requires a Map, Set, or Array receiver, got {other:?}"
                             ))
                         }
                     };
-                    if !call.args.is_empty() {
-                        return Err("native `.values()` expects no arguments".into());
-                    }
                     return Ok(HirExpr::TypedClosure(
                         HirType::Array(Box::new(value_type)),
                         Box::new(HirExpr::Call(
@@ -3466,6 +3479,13 @@ impl<'a> FnLowerer<'a> {
                 if property.sym == *"entries" {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    if !call.args.is_empty() {
+                        return Err("native `.entries()` expects no arguments".into());
+                    }
+                    if let HirType::Array(element_type) = &receiver_type {
+                        let element_type = element_type.as_ref().clone();
+                        return self.lower_array_entries(receiver, receiver_type, element_type);
+                    }
                     let (pair_type, intrinsic) = match &receiver_type {
                         HirType::Map(key_type, value_type) => (
                             HirType::Tuple(vec![key_type.as_ref().clone(), value_type.as_ref().clone()]),
@@ -3477,13 +3497,10 @@ impl<'a> FnLowerer<'a> {
                         ),
                         other => {
                             return Err(format!(
-                                "native `.entries()` requires a Map or Set receiver, got {other:?}"
+                                "native `.entries()` requires a Map, Set, or Array receiver, got {other:?}"
                             ))
                         }
                     };
-                    if !call.args.is_empty() {
-                        return Err("native `.entries()` expects no arguments".into());
-                    }
                     return Ok(HirExpr::TypedClosure(
                         HirType::Array(Box::new(pair_type)),
                         Box::new(HirExpr::Call(

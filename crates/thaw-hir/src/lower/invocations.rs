@@ -584,8 +584,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 if matches!(
                     property.sym.as_ref(),
-                    "get" | "set" | "has" | "delete" | "add" | "clear" | "keys" | "values"
-                        | "entries"
+                    "get" | "set" | "has" | "delete" | "add" | "clear"
                 ) && self.receiver_is_map_or_set(&member.obj)
                 {
                     return self.lower_native_instance_builtin(member, property, call);
