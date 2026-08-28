@@ -167,12 +167,36 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     )?
                 };
                 let generates_call_wrappers = !is_extern && generic_type_params.is_empty();
+                // A plain (non-ambient, non-generic) function's trailing
+                // `...rest: T[]` parameter reuses the exact same
+                // `native_rest` mechanism a native class constructor's
+                // rest parameter already does -- `params` here still holds
+                // it as a regular `Array(T)`-typed last entry (unlike the
+                // ambient/FFI `variadic` mechanism above, which excludes it
+                // from `params` for a real C variadic ABI), so every call
+                // site that already packs trailing arguments into that
+                // slot for a constructor needs no changes to also do it
+                // here. Ambient and generic functions are excluded: the
+                // former already has its own FFI-specific `variadic`
+                // handling, and the latter would need `native_rest`
+                // reconstructed per monomorphization in `generic_calls.rs`,
+                // which still hardcodes `None`.
+                let native_rest = if is_extern || !generic_type_params.is_empty() {
+                    None
+                } else {
+                    let patterns = func
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.pat.clone())
+                        .collect::<Vec<_>>();
+                    native_rest_element(&patterns, &params)?
+                };
                 signatures.insert(
                     name.clone(),
                     FnSignature {
                         params,
                         variadic,
-                        native_rest: None,
+                        native_rest,
                         abstract_class_constructor: false,
                         ret,
                         is_async: func.is_async,
