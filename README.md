@@ -1282,6 +1282,13 @@ The workspace crates have narrow responsibilities:
   left-to-right numeric coercion. Empty extrema return signed infinity, `NaN`
   propagates, zero ties retain JavaScript's sign ordering, and unary negation
   preserves negative zero
+- `Math.min`/`Math.max` also accept a single spread of a runtime-length
+  `number[]` (`Math.min(...values)`, not just a fixed argument list or an
+  array-literal/tuple spread, both of which already unroll into individual
+  arguments at compile time): it folds pairwise through the same native
+  `__thaw_math_min`/`__thaw_math_max` intrinsic via a runtime loop instead,
+  seeded with `Infinity`/`-Infinity` so an empty array matches the
+  zero-argument form's result
 - `Math.round` implements JavaScript's ties-toward-positive-infinity rule,
   including negative-zero results between `-0.5` and zero, numeric coercion,
   non-finite values, single evaluation and awaited arguments
