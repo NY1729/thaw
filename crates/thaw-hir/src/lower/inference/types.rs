@@ -711,13 +711,24 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "map/set string key")?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_map_num_get_f64" | "__thaw_map_str_get_f64" => {
-                        return Ok(HirType::F64);
-                    }
-                    "__thaw_map_num_get_bool" | "__thaw_map_str_get_bool" => {
+                    "__thaw_map_ref_has" | "__thaw_map_ref_delete" => {
+                        let [map, key] = args.as_slice() else {
+                            return Err(format!("{name} expects two operands"));
+                        };
+                        self.infer_expr_type(map)?;
+                        // Any pointer-representable key type is valid here
+                        // (identity is hashed, never dereferenced) --
+                        // the lowering site already validated eligibility.
+                        self.infer_expr_type(key)?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_map_num_set" | "__thaw_map_str_set" => {
+                    "__thaw_map_num_get_f64" | "__thaw_map_str_get_f64" | "__thaw_map_ref_get_f64" => {
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_map_num_get_bool" | "__thaw_map_str_get_bool" | "__thaw_map_ref_get_bool" => {
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_map_num_set" | "__thaw_map_str_set" | "__thaw_map_ref_set" => {
                         let [map, ..] = args.as_slice() else {
                             return Err(format!("{name} expects three operands"));
                         };

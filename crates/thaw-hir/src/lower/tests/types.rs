@@ -1102,3 +1102,27 @@ fn records_arrow_capture_names_and_types() {
         }]
     );
 }
+
+#[test]
+fn map_accepts_object_and_array_keys_but_rejects_function_keys() {
+    let program = lower(
+        r#"function main(): void {
+            const byPoint: Map<{ x: number }, string> = new Map<{ x: number }, string>();
+            const byRow: Map<number[], string> = new Map<number[], string>();
+            console.log(byPoint.size + byRow.size);
+        }"#,
+    );
+    assert!(matches!(
+        program.functions[0].body[0],
+        HirStmt::Let(_, HirType::Map(_, _), _)
+    ));
+
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const byCallback: Map<() => void, string> = new Map<() => void, string>();
+        }"#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("Map/Set keys must be"), "{error}");
+}

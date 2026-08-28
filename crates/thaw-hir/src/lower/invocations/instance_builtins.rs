@@ -15,18 +15,37 @@ fn date_object_type() -> HirType {
 }
 
 /// `Map`/`Set`'s key/element type selects which family of native
-/// `__thaw_map_*` intrinsics to call -- `"num"` or `"str"`. Any other key
-/// type is rejected at `Map<K, V>`/`Set<T>` resolution time
-/// (`type_resolution.rs`) and at `new Map<K, V>()`/`new Set<T>()`
-/// construction time, so this should never actually fail once a `Map`/
-/// `Set` value exists, but a lowering bug elsewhere producing one anyway
-/// shouldn't panic.
+/// `__thaw_map_*` intrinsics to call -- `"num"` (`SameValueZero`-equal
+/// numbers), `"str"` (content-hashed strings), or `"ref"` (hashed and
+/// compared by its own pointer value -- reference identity, exactly like
+/// JavaScript's `SameValueZero` degenerates to `===` for non-primitive
+/// keys). `Optional`/`Nullable`/`Nullish`/`Union` don't fit `"ref"`:
+/// they're inline tagged structs, not a single pointer, so there's no
+/// stable identity word to hash. `Function`/`CallableFunction` don't
+/// either, for a different reason: referencing the same top-level named
+/// function as a value builds a fresh closure-ABI wrapper each time
+/// (confirmed empirically -- `f === f` is observably `false` here), so
+/// there is no stable identity to key by even though the value is
+/// pointer-shaped. Any other key type is rejected at `Map<K, V>`/
+/// `Set<T>` resolution time (`type_resolution.rs`) and at
+/// `new Map<K, V>()`/`new Set<T>()` construction time, so this should
+/// never actually fail once a `Map`/`Set` value exists, but a lowering
+/// bug elsewhere producing one anyway shouldn't panic.
 fn map_key_intrinsic_suffix(key_type: &HirType) -> Result<&'static str, String> {
     match key_type {
         HirType::F64 => Ok("num"),
         HirType::Str => Ok("str"),
+        HirType::Array(_)
+        | HirType::Tuple(_)
+        | HirType::Object(_)
+        | HirType::Json
+        | HirType::Dictionary(_)
+        | HirType::Promise(_)
+        | HirType::Map(_, _)
+        | HirType::Set(_) => Ok("ref"),
         other => Err(format!(
-            "Map/Set keys must be `number` or `string`, got {other:?}"
+            "Map/Set keys must be `number`, `string`, or a reference type \
+             (object, array, ...), got {other:?}"
         )),
     }
 }
@@ -114,6 +133,23 @@ impl<'a> FnLowerer<'a> {
             self.peek_type_without_lowering(expr),
             Some(HirType::Map(_, _) | HirType::Set(_))
         )
+    }
+
+    /// Prepares a `Map`/`Set` key/element value for the native intrinsic
+    /// `map_key_intrinsic_suffix` selected: `number`/`string` keys coerce
+    /// the way every other native method's arguments do, but a reference
+    /// key (an object, array, function, ...) is never coerced -- only
+    /// exact-type-matched, since coercing would silently change *which*
+    /// object the key names.
+    fn coerce_map_key(&mut self, key_type: &HirType, key: HirExpr) -> Result<HirExpr, String> {
+        match key_type {
+            HirType::F64 => self.coerce_primitive_to_number(key),
+            HirType::Str => self.coerce_primitive_to_string(key),
+            _ => {
+                self.expect_type(key_type, &key, "Map/Set key")?;
+                Ok(key)
+            }
+        }
     }
 
     fn is_native_instance_builtin(property: &str) -> bool {
@@ -2856,11 +2892,7 @@ impl<'a> FnLowerer<'a> {
                     let [key] = arguments.as_slice() else {
                         return Err("native `.get()` expects exactly one argument".into());
                     };
-                    let key = if key_type == HirType::F64 {
-                        self.coerce_primitive_to_number(key.clone())?
-                    } else {
-                        self.coerce_primitive_to_string(key.clone())?
-                    };
+                    let key = self.coerce_map_key(&key_type, key.clone())?;
                     let receiver_name = format!("__thaw_map_get_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     let key_name = format!("__thaw_map_get_key_{}", self.next_binding);
@@ -2937,11 +2969,7 @@ impl<'a> FnLowerer<'a> {
                     let [key, value] = arguments.as_slice() else {
                         return Err("native `.set()` expects exactly two arguments".into());
                     };
-                    let key = if key_type == HirType::F64 {
-                        self.coerce_primitive_to_number(key.clone())?
-                    } else {
-                        self.coerce_primitive_to_string(key.clone())?
-                    };
+                    let key = self.coerce_map_key(&key_type, key.clone())?;
                     self.expect_type(&value_type, value, "Map.set value")?;
                     let receiver_name = format!("__thaw_map_set_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -2981,11 +3009,7 @@ impl<'a> FnLowerer<'a> {
                     let [element] = arguments.as_slice() else {
                         return Err("native `.add()` expects exactly one argument".into());
                     };
-                    let element = if element_type == HirType::F64 {
-                        self.coerce_primitive_to_number(element.clone())?
-                    } else {
-                        self.coerce_primitive_to_string(element.clone())?
-                    };
+                    let element = self.coerce_map_key(&element_type, element.clone())?;
                     let receiver_name = format!("__thaw_set_add_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     let element_name = format!("__thaw_set_add_element_{}", self.next_binding);
@@ -3029,11 +3053,7 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     };
-                    let key = if key_type == HirType::F64 {
-                        self.coerce_primitive_to_number(key.clone())?
-                    } else {
-                        self.coerce_primitive_to_string(key.clone())?
-                    };
+                    let key = self.coerce_map_key(&key_type, key.clone())?;
                     let intrinsic = if property.sym == *"has" {
                         format!("__thaw_map_{key_suffix}_has")
                     } else {

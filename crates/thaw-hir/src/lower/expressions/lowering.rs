@@ -1061,11 +1061,7 @@ impl<'a> FnLowerer<'a> {
                             };
                             let key_type =
                                 lower_ts_type(key, self.interfaces, self.generic_interfaces)?;
-                            if !matches!(key_type, HirType::F64 | HirType::Str) {
-                                return Err(format!(
-                                    "Map keys must be `number` or `string`, got {key_type:?}"
-                                ));
-                            }
+                            map_key_intrinsic_suffix(&key_type)?;
                             let value_type =
                                 lower_ts_type(value, self.interfaces, self.generic_interfaces)?;
                             HirType::Map(Box::new(key_type), Box::new(value_type))
@@ -1077,11 +1073,7 @@ impl<'a> FnLowerer<'a> {
                             };
                             let element_type =
                                 lower_ts_type(element, self.interfaces, self.generic_interfaces)?;
-                            if !matches!(element_type, HirType::F64 | HirType::Str) {
-                                return Err(format!(
-                                    "Set elements must be `number` or `string`, got {element_type:?}"
-                                ));
-                            }
+                            map_key_intrinsic_suffix(&element_type)?;
                             HirType::Set(Box::new(element_type))
                         };
                         return Ok(HirExpr::TypedClosure(

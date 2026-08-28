@@ -2,10 +2,14 @@
 // backing both `Map` and `Set`. A `Set` is just this table with every
 // value fixed at `0`.
 //
-// Only `F64` (`SameValueZero`) and `Str` (content-hashed) keys are
-// supported -- there is no reference-identity hashing for object/array
-// keys, since nothing else in the runtime gives a heap value a stable
-// identity token to hash by. The table's own arena pointer is its stable
+// Three key kinds are supported: `F64` (`SameValueZero`-equal numbers),
+// `Str` (content-hashed), and every other representable type (`Object`,
+// `Array`, `Function`, `Map`, `Set`, ...), hashed and compared by
+// reference identity -- their own pointer value, which is already a
+// stable identity token for as long as the pointed-to allocation lives,
+// exactly matching how JavaScript's own `SameValueZero` degenerates to
+// `===` reference equality for non-primitive keys. The table's own arena
+// pointer is its stable
 // identity: growth reallocates the backing entries/buckets arrays and
 // rewrites the header in place, exactly like a `Date`'s `timestamp` field
 // mutates in place, so every reference to a `Map`/`Set` value keeps
@@ -468,6 +472,15 @@ fn encode_str_key(key: *const c_char) -> u64 {
     key as u64
 }
 
+// A reference-identity key (`Object`, `Array`, `Function`, `Map`, `Set`,
+// ...) is just its own pointer bits, hashed and compared directly with no
+// dereference -- `NumKey`'s hash/eq (a `mix64` scramble plus equality on
+// the raw word) are exactly what that needs, since it never canonicalizes
+// its input the way `encode_num_key` does for `SameValueZero`.
+fn encode_ref_key(key: *const u8) -> u64 {
+    key as u64
+}
+
 macro_rules! key_kind_functions {
     ($kind:ty, $key_ty:ty, $encode:ident, $has:ident, $set:ident, $delete:ident, $get_f64:ident, $get_bool:ident, $get_ptr:ident) => {
         #[no_mangle]
@@ -558,6 +571,18 @@ key_kind_functions!(
     thaw_map_str_get_ptr
 );
 
+key_kind_functions!(
+    NumKey,
+    *const u8,
+    encode_ref_key,
+    thaw_map_ref_has,
+    thaw_map_ref_set,
+    thaw_map_ref_delete,
+    thaw_map_ref_get_f64,
+    thaw_map_ref_get_bool,
+    thaw_map_ref_get_ptr
+);
+
 #[cfg(test)]
 mod map_native_tests {
     use super::*;
@@ -615,6 +640,25 @@ mod map_native_tests {
         let a_again = std::ffi::CString::new("alpha").unwrap();
         assert_eq!(unsafe { thaw_map_str_has(map, a_again.as_ptr()) }, 1);
         assert_eq!(unsafe { thaw_map_str_delete(map, a_again.as_ptr()) }, 1);
+        assert_eq!(unsafe { thaw_map_size(map) }, 1.0);
+    }
+
+    #[test]
+    fn ref_keyed_uses_pointer_identity_not_content() {
+        let map = unsafe { thaw_map_new() };
+        // Two distinct allocations that happen to hold identical bytes are
+        // still two different keys -- unlike `Str`, this is by reference.
+        let a = std::ffi::CString::new("same bytes").unwrap();
+        let b = std::ffi::CString::new("same bytes").unwrap();
+        assert_ne!(a.as_ptr(), b.as_ptr());
+        unsafe { thaw_map_ref_set(map, a.as_ptr().cast::<u8>(), value(1.0)) };
+        unsafe { thaw_map_ref_set(map, b.as_ptr().cast::<u8>(), value(2.0)) };
+        assert_eq!(unsafe { thaw_map_size(map) }, 2.0);
+        assert_eq!(unsafe { thaw_map_ref_get_f64(map, a.as_ptr().cast::<u8>()) }, 1.0);
+        assert_eq!(unsafe { thaw_map_ref_get_f64(map, b.as_ptr().cast::<u8>()) }, 2.0);
+        // The SAME pointer is of course still the same key.
+        assert_eq!(unsafe { thaw_map_ref_has(map, a.as_ptr().cast::<u8>()) }, 1);
+        assert_eq!(unsafe { thaw_map_ref_delete(map, a.as_ptr().cast::<u8>()) }, 1);
         assert_eq!(unsafe { thaw_map_size(map) }, 1.0);
     }
 
