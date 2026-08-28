@@ -756,7 +756,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_map_num_has"
             | "__thaw_map_num_delete"
             | "__thaw_map_str_has"
-            | "__thaw_map_str_delete" => {
+            | "__thaw_map_str_delete"
+            | "__thaw_map_ref_has"
+            | "__thaw_map_ref_delete" => {
                 let [map, key] = args else {
                     return Err(format!("{name} expects two operands"));
                 };
@@ -792,7 +794,10 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_map_num_get_ptr"
             | "__thaw_map_str_get_f64"
             | "__thaw_map_str_get_bool"
-            | "__thaw_map_str_get_ptr" => {
+            | "__thaw_map_str_get_ptr"
+            | "__thaw_map_ref_get_f64"
+            | "__thaw_map_ref_get_bool"
+            | "__thaw_map_ref_get_ptr" => {
                 let [map, key] = args else {
                     return Err(format!("{name} expects two operands"));
                 };
@@ -825,7 +830,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return Ok(result);
             }
-            "__thaw_map_num_set" | "__thaw_map_str_set" => {
+            "__thaw_map_num_set" | "__thaw_map_str_set" | "__thaw_map_ref_set" => {
                 let [map, key, value] = args else {
                     return Err(format!("{name} expects three operands"));
                 };

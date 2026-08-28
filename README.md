@@ -1580,10 +1580,21 @@ The workspace crates have narrow responsibilities:
   `native_values/maps.rs`) rather than a new dependency -- growth
   reallocates and compacts out deleted entries the same way `bumpalo`'s
   bump allocator already forces every other growable native value to.
-  `K`/`T` must be `number` or `string` (`SameValueZero`-equal numbers,
-  content-equal strings); reference-identity keys (objects, arrays) are a
-  compile-time error, since nothing in the runtime gives a heap value a
-  stable identity token to hash by. `new Map()`/`new Set()` require
+  `K`/`T` may be `number` or `string` (`SameValueZero`-equal numbers,
+  content-equal strings) or a reference type -- an object, array, tuple,
+  `Json`/`Dictionary` value, `Promise`, or nested `Map`/`Set` -- hashed and
+  compared by its own pointer value (reference identity, matching how
+  `SameValueZero` itself degenerates to `===` for non-primitive keys in
+  JavaScript), which needs no new machinery since a heap value's pointer
+  is already a stable identity token for as long as the allocation lives.
+  `Optional`/`Nullable`/`Nullish`/`Union` values don't qualify (they're
+  inline tagged structs, not a single pointer), and neither do function
+  values, for a different reason: referencing the same top-level named
+  function as a value builds a fresh closure-ABI wrapper each time in this
+  compiler (confirmed empirically -- `f === f` is observably `false`
+  here), so there is no stable identity to key by even though the value
+  is pointer-shaped; both are a compile-time error as a `Map`/`Set` key
+  type. `new Map()`/`new Set()` require
   explicit type arguments (`new Map<string, number>()`) -- this compiler
   has no contextual/expected-type inference to recover them from an
   assignment target the way TypeScript itself does -- and constructing
