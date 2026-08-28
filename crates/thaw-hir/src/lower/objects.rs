@@ -767,6 +767,48 @@ impl<'a> FnLowerer<'a> {
                             vec![obj],
                         ))
                     }
+                    HirType::Object(_)
+                        if obj_ty == regex_object_type()
+                            && matches!(
+                                prop.sym.as_ref(),
+                                "global"
+                                    | "ignoreCase"
+                                    | "multiline"
+                                    | "dotAll"
+                                    | "sticky"
+                                    | "unicode"
+                                    | "unicodeSets"
+                            ) =>
+                    {
+                        // These aren't stored fields -- `regex_object_type`
+                        // only has `source`/`flags` -- they're each just
+                        // "does `flags` contain this one character",
+                        // matching the specification's own definition of
+                        // each accessor.
+                        let flag_char = match prop.sym.as_ref() {
+                            "global" => "g",
+                            "ignoreCase" => "i",
+                            "multiline" => "m",
+                            "dotAll" => "s",
+                            "sticky" => "y",
+                            "unicode" => "u",
+                            "unicodeSets" => "v",
+                            _ => unreachable!(),
+                        };
+                        let flags = HirExpr::PropAccess(
+                            Box::new(obj),
+                            obj_ty.clone(),
+                            "flags".to_string(),
+                        );
+                        Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_includes".to_string())),
+                            vec![
+                                flags,
+                                HirExpr::Lit(HirLit::Str(flag_char.to_string())),
+                                HirExpr::Lit(HirLit::F64(0.0)),
+                            ],
+                        ))
+                    }
                     HirType::Object(fields) => {
                         if fields.iter().any(|(name, _)| name == prop.sym.as_str()) {
                             Ok(HirExpr::PropAccess(

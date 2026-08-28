@@ -2197,6 +2197,28 @@ fn compiles_regex_match_all() {
 }
 
 #[test]
+fn compiles_regex_flag_properties() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const re: RegExp = /abc/gims;
+            console.log(re.source);
+            console.log(re.flags);
+            console.log(re.global);
+            console.log(re.ignoreCase);
+            console.log(re.multiline);
+            console.log(re.dotAll);
+            console.log(re.sticky);
+            console.log(re.unicode);
+            console.log(/abc/.global);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_flag_properties"),
+        "abc\ngims\ntrue\ntrue\ntrue\ntrue\nfalse\nfalse\nfalse\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {
