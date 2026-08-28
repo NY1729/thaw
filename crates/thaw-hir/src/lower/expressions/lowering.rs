@@ -1040,12 +1040,16 @@ impl<'a> FnLowerer<'a> {
                         // assignment target the way TypeScript itself
                         // does. Explicit type arguments are required.
                         let args = new_expr.args.clone().unwrap_or_default();
-                        if !args.is_empty() {
+                        if args.iter().any(|argument| argument.spread.is_some()) {
                             return Err(format!(
-                                "`new {}(...)` with initial entries is not supported yet; \
-                                 construct empty and call `.{}()` instead",
-                                class.sym,
-                                if class.sym == *"Map" { "set" } else { "add" }
+                                "`new {}()` does not support spread arguments",
+                                class.sym
+                            ));
+                        }
+                        if args.len() > 1 {
+                            return Err(format!(
+                                "`new {}()` expects zero or one argument",
+                                class.sym
                             ));
                         }
                         let params = new_expr
@@ -1053,7 +1057,7 @@ impl<'a> FnLowerer<'a> {
                             .as_ref()
                             .map(|type_args| type_args.params.as_slice())
                             .unwrap_or_default();
-                        let value_type = if class.sym == *"Map" {
+                        if class.sym == *"Map" {
                             let [key, value] = params else {
                                 return Err(
                                     "`new Map<K, V>()` requires explicit type arguments".into(),
@@ -1064,25 +1068,58 @@ impl<'a> FnLowerer<'a> {
                             map_key_intrinsic_suffix(&key_type)?;
                             let value_type =
                                 lower_ts_type(value, self.interfaces, self.generic_interfaces)?;
-                            HirType::Map(Box::new(key_type), Box::new(value_type))
-                        } else {
-                            let [element] = params else {
-                                return Err(
-                                    "`new Set<T>()` requires an explicit type argument".into(),
-                                );
+                            let map_type =
+                                HirType::Map(Box::new(key_type.clone()), Box::new(value_type.clone()));
+                            let Some(argument) = args.first() else {
+                                return Ok(HirExpr::TypedClosure(
+                                    map_type,
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_map_new".to_string())),
+                                        Vec::new(),
+                                    )),
+                                ));
                             };
-                            let element_type =
-                                lower_ts_type(element, self.interfaces, self.generic_interfaces)?;
-                            map_key_intrinsic_suffix(&element_type)?;
-                            HirType::Set(Box::new(element_type))
+                            let entries = self.lower_expr(&argument.expr)?;
+                            let pair_type =
+                                HirType::Tuple(vec![key_type.clone(), value_type.clone()]);
+                            let entries_type = HirType::Array(Box::new(pair_type.clone()));
+                            self.expect_type(&entries_type, &entries, "Map constructor entries")?;
+                            return self.lower_map_or_set_from_iterable(
+                                entries,
+                                entries_type,
+                                map_type,
+                                map_key_intrinsic_suffix(&key_type)?,
+                                key_type,
+                                Some((value_type, pair_type)),
+                            );
+                        }
+                        let [element] = params else {
+                            return Err("`new Set<T>()` requires an explicit type argument".into());
                         };
-                        return Ok(HirExpr::TypedClosure(
-                            value_type,
-                            Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_map_new".to_string())),
-                                Vec::new(),
-                            )),
-                        ));
+                        let element_type =
+                            lower_ts_type(element, self.interfaces, self.generic_interfaces)?;
+                        map_key_intrinsic_suffix(&element_type)?;
+                        let set_type = HirType::Set(Box::new(element_type.clone()));
+                        let Some(argument) = args.first() else {
+                            return Ok(HirExpr::TypedClosure(
+                                set_type,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_map_new".to_string())),
+                                    Vec::new(),
+                                )),
+                            ));
+                        };
+                        let iterable = self.lower_expr(&argument.expr)?;
+                        let iterable_type = HirType::Array(Box::new(element_type.clone()));
+                        self.expect_type(&iterable_type, &iterable, "Set constructor iterable")?;
+                        return self.lower_map_or_set_from_iterable(
+                            iterable,
+                            iterable_type,
+                            set_type,
+                            map_key_intrinsic_suffix(&element_type)?,
+                            element_type,
+                            None,
+                        );
                     }
                     if class.sym == *"Date" {
                         let args = new_expr.args.clone().unwrap_or_default();
@@ -1159,6 +1196,129 @@ impl<'a> FnLowerer<'a> {
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"
             )),
         }
+    }
+
+    /// Builds `new Map<K, V>(entries)`/`new Set<T>(iterable)`: a
+    /// Lambda-IIFE that allocates an empty map (`__thaw_map_new`, the same
+    /// as the no-argument constructor), loops over `source` by index, and
+    /// calls the matching `__thaw_map_{suffix}_set` intrinsic once per
+    /// element -- for a `Map`, each element is itself a `[key, value]`
+    /// pair (`value_info` carries the value/pair types needed to read
+    /// both halves); for a `Set`, each element IS the key, with the value
+    /// half fixed at `0.0` (a dummy word, exactly like `.add()`).
+    fn lower_map_or_set_from_iterable(
+        &mut self,
+        source: HirExpr,
+        source_type: HirType,
+        result_type: HirType,
+        key_suffix: &'static str,
+        key_type: HirType,
+        value_info: Option<(HirType, HirType)>,
+    ) -> Result<HirExpr, String> {
+        let source_name = format!("__thaw_map_ctor_source_{}", self.next_binding);
+        self.next_binding += 1;
+        let map_name = format!("__thaw_map_ctor_map_{}", self.next_binding);
+        self.next_binding += 1;
+        let length_name = format!("__thaw_map_ctor_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_map_ctor_index_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), source_type.clone());
+        self.scope.insert(map_name.clone(), result_type.clone());
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(index_name.clone(), HirType::F64);
+        let var = |name: &str| HirExpr::Var(name.into());
+
+        let (set_key_expr, set_value_expr, mut loop_body) =
+            if let Some((value_type, pair_type)) = value_info {
+                let pair_name = format!("__thaw_map_ctor_pair_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(pair_name.clone(), pair_type.clone());
+                let pair_let = HirStmt::Let(
+                    pair_name.clone(),
+                    pair_type.clone(),
+                    HirExpr::TypedIndex(
+                        Box::new(var(&source_name)),
+                        Box::new(var(&index_name)),
+                        pair_type,
+                    ),
+                );
+                let key_expr = HirExpr::TypedIndex(
+                    Box::new(var(&pair_name)),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    key_type.clone(),
+                );
+                let value_expr = HirExpr::TypedIndex(
+                    Box::new(var(&pair_name)),
+                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    value_type,
+                );
+                (key_expr, value_expr, vec![pair_let])
+            } else {
+                let element_expr = HirExpr::TypedIndex(
+                    Box::new(var(&source_name)),
+                    Box::new(var(&index_name)),
+                    key_type,
+                );
+                (element_expr, HirExpr::Lit(HirLit::F64(0.0)), Vec::new())
+            };
+        loop_body.push(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),
+            vec![var(&map_name), set_key_expr, set_value_expr],
+        )));
+        loop_body.push(HirStmt::Expr(HirExpr::Assign(
+            index_name.clone(),
+            Box::new(HirExpr::BinOp(
+                BinOp::Add,
+                Box::new(var(&index_name)),
+                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+            )),
+        )));
+
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                map_name.clone(),
+                result_type.clone(),
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_map_new".to_string())), Vec::new()),
+            ),
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(var(&source_name))),
+            ),
+            HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&index_name)),
+                    Box::new(var(&length_name)),
+                ),
+                loop_body,
+            ),
+            HirStmt::Return(Some(var(&map_name))),
+        ]);
+
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&body, &mut referenced);
+        let captures = referenced
+            .into_iter()
+            .filter_map(|captured| {
+                self.scope
+                    .get(&captured)
+                    .cloned()
+                    .map(|ty| HirParam { name: captured, ty })
+            })
+            .collect();
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                captures,
+                Vec::new(),
+                result_type,
+                Box::new(body),
+            )),
+            Vec::new(),
+        );
+        self.wrap_call_argument_bindings(result, &[(source_name, source_type, source)])
     }
 
 }
