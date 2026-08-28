@@ -2731,6 +2731,21 @@ fn compiles_object_assign_for_runtime_keyed_objects() {
 }
 
 #[test]
+fn compiles_object_assign_for_plain_object_literals() {
+    let source = r#"
+        function main(): void {
+            console.log(Object.assign({}, { a: 1 }, { b: 2 }));
+            console.log(Object.assign({ a: 1 }, { b: 2 }, { c: 3 }));
+            console.log(Object.fromEntries([["a", 1], ["b", 2]]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_assign_plain_literals"),
+        "{\"a\":1,\"b\":2}\n{\"a\":1,\"b\":2,\"c\":3}\n{\"a\":1,\"b\":2}\n"
+    );
+}
+
+#[test]
 fn compiles_object_is_same_value_comparisons() {
     let source = r#"
         interface Item { value: number; }
