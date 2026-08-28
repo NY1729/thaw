@@ -974,6 +974,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("string repeat returned no value".into());
             }
+            "__thaw_string_at" => {
+                let [value, index] = args else {
+                    return Err("string at expects two operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let index = self.compile_expr(index)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_string_at").unwrap(),
+                        &[value.into(), index.into()],
+                        "string_at",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string at returned no value".into());
+            }
             "__thaw_string_pad_start" | "__thaw_string_pad_end" => {
                 let [value, pad, length] = args else {
                     return Err("string pad expects three operands".into());

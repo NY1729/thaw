@@ -1440,6 +1440,13 @@ The workspace crates have narrow responsibilities:
 - Native string `.length` and `.charCodeAt()` operate on JavaScript UTF-16
   code units, including surrogate pairs, default/converted indices, out-of-range
   `NaN`, receiver-before-index evaluation, awaited receivers and tuple-spread indices
+- `String.prototype.at(index)` (`Array.prototype.at` already existed) returns
+  the single UTF-16 code unit at `index` as a one-character string, or
+  `undefined` for an index at or past the string's length after negative
+  indices wrap from the end, mirroring `Array.prototype.at`'s own
+  wraparound. A lone surrogate split off by `index` becomes U+FFFD, the
+  same lossy fallback used elsewhere in this runtime -- full WTF-16
+  fidelity for an isolated surrogate isn't supported
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
