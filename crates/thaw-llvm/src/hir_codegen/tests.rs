@@ -32,6 +32,9 @@ fn compiles_typed_napi_collection_arguments_and_results() {
            declare function __thaw_typed_napi_6f626a65637473(value: { name: string }[]): { name: string }[];
            declare function __thaw_typed_napi_6e756c6c61626c65(value: string | null): string | null;
            declare function __thaw_typed_napi_6e756c6c61626c656172726179(value: (string | null)[]): (string | null)[];
+           declare function __thaw_typed_napi_6f7074696f6e616c(value: string | undefined): string | undefined;
+           declare function __thaw_typed_napi_6e756c6c697368(value: string | null | undefined): string | null | undefined;
+           declare function __thaw_typed_napi_6f7074696f6e616c6172726179(value: (string | undefined)[]): (string | undefined)[];
            function main(): void {
                const value: [number, string] = [7, "value"];
                const swapped: [string, number] = __thaw_typed_napi_737761705475706c65(value);
@@ -41,6 +44,9 @@ fn compiles_typed_napi_collection_arguments_and_results() {
                const objects: { name: string }[] = __thaw_typed_napi_6f626a65637473([{ name: "a" }]);
                const nullable: string | null = __thaw_typed_napi_6e756c6c61626c65(null);
                const nullableArray: (string | null)[] = __thaw_typed_napi_6e756c6c61626c656172726179(["a", null]);
+               const optional: string | undefined = __thaw_typed_napi_6f7074696f6e616c(undefined);
+               const nullish: string | null | undefined = __thaw_typed_napi_6e756c6c697368(undefined);
+               const optionalArray: (string | undefined)[] = __thaw_typed_napi_6f7074696f6e616c6172726179(["a", undefined]);
                console.log(swapped[0]);
                console.log(strings[0]);
                console.log(bools[0]);
@@ -48,6 +54,9 @@ fn compiles_typed_napi_collection_arguments_and_results() {
                console.log(objects[0].name);
                console.log(nullable);
                console.log(nullableArray[1]);
+               console.log(optional);
+               console.log(nullish);
+               console.log(optionalArray[1]);
            }"#,
     )
     .unwrap();

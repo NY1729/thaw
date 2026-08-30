@@ -75,12 +75,15 @@ fn loads_and_calls_a_real_napi_addon() {
             #include <stdlib.h>
             typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
             typedef int napi_status;
+            typedef enum { napi_undefined = 0, napi_null = 1, napi_boolean = 2, napi_number = 3, napi_string = 4, napi_symbol = 5, napi_object = 6, napi_function = 7, napi_external = 8, napi_bigint = 9 } napi_valuetype;
             extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
             extern napi_status napi_get_value_bool(napi_env, napi_value, _Bool*);
             extern napi_status napi_get_value_string_utf8(napi_env, napi_value, char*, size_t, size_t*);
             extern napi_status napi_create_double(napi_env, double, napi_value*);
             extern napi_status napi_get_boolean(napi_env, _Bool, napi_value*);
+            extern napi_status napi_get_undefined(napi_env, napi_value*);
+            extern napi_status napi_typeof(napi_env, napi_value, napi_valuetype*);
             extern napi_status napi_create_string_utf8(napi_env, const char*, size_t, napi_value*);
             extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
             extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
@@ -146,6 +149,14 @@ fn loads_and_calls_a_real_napi_addon() {
                 napi_get_value_string_utf8(env, arg, text, sizeof(text), &length);
                 napi_create_string_utf8(env, text, length, &result); return result;
             }
+            static napi_value is_undefined(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, result; napi_valuetype type;
+                napi_get_cb_info(env, info, &argc, &arg, 0, 0);
+                napi_typeof(env, arg, &type); napi_get_boolean(env, type == napi_undefined, &result); return result;
+            }
+            static napi_value return_undefined(napi_env env, napi_callback_info info) {
+                (void)info; napi_value result; napi_get_undefined(env, &result); return result;
+            }
             static napi_value module_file(napi_env env, napi_callback_info info) {
                 (void)info; const char* path; napi_value result;
                 node_api_get_module_file_name(env, &path);
@@ -163,6 +174,8 @@ fn loads_and_calls_a_real_napi_addon() {
                 napi_create_function(env, "add", 3, add, 0, &fn); napi_set_named_property(env, exports, "add", fn);
                 napi_create_function(env, "negate", 6, negate, 0, &fn); napi_set_named_property(env, exports, "negate", fn);
                 napi_create_function(env, "echo", 4, echo, 0, &fn); napi_set_named_property(env, exports, "echo", fn);
+                napi_create_function(env, "isUndefined", 11, is_undefined, 0, &fn); napi_set_named_property(env, exports, "isUndefined", fn);
+                napi_create_function(env, "returnUndefined", 15, return_undefined, 0, &fn); napi_set_named_property(env, exports, "returnUndefined", fn);
                 napi_create_function(env, "moduleFile", 10, module_file, 0, &fn); napi_set_named_property(env, exports, "moduleFile", fn);
                 return exports;
             }
@@ -202,6 +215,20 @@ fn loads_and_calls_a_real_napi_addon() {
         let result = thaw_napi_call_result(c"finalized".as_ptr(), c"[]".as_ptr());
         assert!(result.error.is_null());
         assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "1.0");
+        let typed = thaw_napi_call_typed_result(
+            c"isUndefined".as_ptr(),
+            c"[{\"$__thaw_napi_undefined$\":true}]".as_ptr(),
+        );
+        assert!(typed.error.is_null());
+        assert_eq!(CStr::from_ptr(typed.value).to_str().unwrap(), "true");
+        let typed = thaw_napi_call_typed_result(c"returnUndefined".as_ptr(), c"[]".as_ptr());
+        assert!(typed.error.is_null());
+        assert_eq!(
+            CStr::from_ptr(typed.value).to_str().unwrap(),
+            "{\"$__thaw_napi_undefined$\":true}"
+        );
+        let untyped = thaw_napi_call_result(c"returnUndefined".as_ptr(), c"[]".as_ptr());
+        assert_eq!(CStr::from_ptr(untyped.value).to_str().unwrap(), "null");
         let constructor = thaw_napi_get_export(c"NativeBox".as_ptr());
         assert_ne!(constructor, 0);
         let instance = thaw_napi_construct_handle_result(constructor, c"[21]".as_ptr());
