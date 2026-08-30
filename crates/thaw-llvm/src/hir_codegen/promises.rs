@@ -562,7 +562,8 @@ impl<'ctx> HirCompiler<'ctx> {
         element: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let base = self.compile_expr(array)?.into_pointer_value();
+        let handle = self.compile_expr(array)?.into_pointer_value();
+        let base = self.compile_array_data(handle)?;
         let len = self
             .builder
             .build_load(i64_type, base, "promise_all_len")
@@ -723,7 +724,8 @@ impl<'ctx> HirCompiler<'ctx> {
         element: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let base = self.compile_expr(array)?.into_pointer_value();
+        let handle = self.compile_expr(array)?.into_pointer_value();
+        let base = self.compile_array_data(handle)?;
         let len = self
             .builder
             .build_load(i64_type, base, "promise_all_settled_len")
@@ -854,7 +856,8 @@ impl<'ctx> HirCompiler<'ctx> {
         label: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let base = self.compile_expr(array)?.into_pointer_value();
+        let handle = self.compile_expr(array)?.into_pointer_value();
+        let base = self.compile_array_data(handle)?;
         let len = self
             .builder
             .build_load(i64_type, base, &format!("{label}_len"))

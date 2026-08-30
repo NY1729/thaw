@@ -373,7 +373,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(allocation, i64_type.const_zero())
                     .map_err(|error| error.to_string())?;
-                Ok(allocation.into())
+                Ok(self.compile_array_wrap(allocation)?.into())
             }
             HirType::Object(fields) => {
                 let i64_type = self.context.i64_type();

@@ -252,7 +252,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_call(destroy_fn, &[data.into()], "ffi_bool_array_destroy")
                 .map_err(|error| error.to_string())?;
         }
-        Ok(result.into())
+        Ok(self.compile_array_wrap(result)?.into())
     }
 
     fn marshal_ffi_tagged_return(
@@ -403,7 +403,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(pointer, value)
                 .map_err(|error| error.to_string())?;
         }
-        Ok(tuple.into())
+        Ok(self.compile_array_wrap(tuple)?.into())
     }
 
     fn marshal_ffi_return(
@@ -566,7 +566,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .build_call(destroy_fn, &[data.into()], "ffi_array_destroy")
                         .map_err(|error| error.to_string())?;
                 }
-                Ok(result.into())
+                Ok(self.compile_array_wrap(result)?.into())
             }
             HirType::Optional(payload) | HirType::Nullable(payload)
                 if value.is_struct_value() && aggregate_abi != FfiAggregateAbi::Internal =>
@@ -988,18 +988,18 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<(), String> {
         match ty {
             HirType::Array(element) if element.as_ref() == &HirType::Bool => {
-                let (data, length) = self.pack_ffi_bool_array(
-                    value.into_pointer_value(),
-                    self.context.i8_type(),
-                    1,
-                )?;
+                let handle = value.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                let (data, length) =
+                    self.pack_ffi_bool_array(buffer, self.context.i8_type(), 1)?;
                 output.push(data.into());
                 output.push(length.into());
             }
             HirType::Array(element)
                 if matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::JsValue) =>
             {
-                let base = value.into_pointer_value();
+                let handle = value.into_pointer_value();
+                let base = self.compile_array_data(handle)?;
                 let i64_type = self.context.i64_type();
                 let length = self
                     .builder
@@ -1019,7 +1019,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 output.push(length.into());
             }
             HirType::Tuple(elements) => {
-                let base = value.into_pointer_value();
+                let handle = value.into_pointer_value();
+                let base = self.compile_array_data(handle)?;
                 let i64_type = self.context.i64_type();
                 let element_bytes = elements
                     .iter()
@@ -1143,7 +1144,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirType::F64 | HirType::Str | HirType::JsValue
                 ) =>
             {
-                let base = value.into_pointer_value();
+                let handle = value.into_pointer_value();
+                let base = self.compile_array_data(handle)?;
                 let i64_type = self.context.i64_type();
                 let length = self
                     .builder
@@ -1163,7 +1165,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 output.push(length.into());
             }
             HirType::Array(element) if element.as_ref() == &HirType::Bool => {
-                let base = value.into_pointer_value();
+                let handle = value.into_pointer_value();
+                let base = self.compile_array_data(handle)?;
                 let (packed, length) =
                     self.pack_ffi_bool_array(base, self.context.i32_type(), 4)?;
                 output.push(packed.into());
