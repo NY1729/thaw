@@ -1050,6 +1050,19 @@ bare registry package/subpathは選択済みの`bundle.js`、
 初期化する。JSON attributeの拡張子検証もsuffixを除いたpathに対して行う。
 その他のmeta propertyはまだ対象外である。
 
+## 28. 分割`.d.ts`のnamed function re-export
+
+`yaml@2.8.1`のentry型定義は関数を直接宣言せず、`export { parse, stringify }
+from './public-api'`で公開する。registryがentry fileだけを`package.d.ts`へコピーすると
+runtime bundleには関数が存在してもbridgeがexportを発見できなかった。
+
+package自身が同梱する型定義について、相対named re-exportの参照先を読み、対応する
+`export declare function` overloadをpackage surfaceへ追記する。alias re-exportは公開名へ
+置換し、外部package、型だけのexport、class／value re-exportには推測で手を広げない。
+offline fixtureで通常名とaliasを検証し、opt-in npm E2Eでは実`yaml`を取得して単一実行
+ファイル化し、registry削除後にnested YAMLをparseして`thaw`と`42`を得る。
+`yaml.stringify`はembedded QuickJSのstack上限へ達するため、別の互換性課題として残す。
+
 ## 北極星: 「npm と同じ感覚で使える」こと
 
 このドキュメントの各章は、実在する npm パッケージを実際に試して

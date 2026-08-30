@@ -468,7 +468,7 @@ fn add_installed_inner(
         Some((rel, abs)) => {
             let source =
                 fs::read_to_string(&abs).map_err(|e| format!("failed to read `{rel}`: {e}"))?;
-            (rel, source)
+            (rel, dts_source_with_reexported_functions(&abs, &source)?)
         }
         None => fallback_dts.ok_or_else(|| {
             format!(
@@ -611,6 +611,101 @@ fn add_installed_inner(
         native_addon,
         native_diagnostic,
     })
+}
+
+fn dts_source_with_reexported_functions(
+    entry_path: &Path,
+    entry_source: &str,
+) -> Result<String, String> {
+    use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let module = thaw_parser::parse_typescript(entry_source)?;
+    let mut output = entry_source.to_string();
+    let mut seen = std::collections::BTreeSet::new();
+    for item in module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+            continue;
+        };
+        if export.type_only {
+            continue;
+        }
+        let Some(source) = export.src else {
+            continue;
+        };
+        let Some(source) = source.value.as_str() else {
+            continue;
+        };
+        let Some(target_path) = declaration_reexport_path(entry_path, source) else {
+            continue;
+        };
+        let target_source = fs::read_to_string(&target_path).map_err(|error| {
+            format!(
+                "failed to read re-exported declarations `{}`: {error}",
+                target_path.display()
+            )
+        })?;
+        let (target, source_map) = thaw_parser::parse_typescript_with_source_map(&target_source)?;
+        for specifier in export.specifiers {
+            let ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            if named.is_type_only {
+                continue;
+            }
+            let export_name = |name: &ModuleExportName| match name {
+                ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                ModuleExportName::Str(_) => None,
+            };
+            let Some(original) = export_name(&named.orig) else {
+                continue;
+            };
+            let exported = named
+                .exported
+                .as_ref()
+                .and_then(export_name)
+                .unwrap_or_else(|| original.clone());
+            if !seen.insert(exported.clone()) {
+                continue;
+            }
+            for target_item in &target.body {
+                let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = target_item else {
+                    continue;
+                };
+                let Decl::Fn(function) = &declaration.decl else {
+                    continue;
+                };
+                if function.ident.sym != original {
+                    continue;
+                }
+                let mut snippet = source_map
+                    .span_to_snippet(declaration.span())
+                    .map_err(|error| {
+                        format!("failed to read declaration for `{original}`: {error:?}")
+                    })?;
+                if exported != original {
+                    snippet = snippet.replacen(
+                        &format!("function {original}"),
+                        &format!("function {exported}"),
+                        1,
+                    );
+                }
+                output.push('\n');
+                output.push_str(&snippet);
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {
+    if !source.starts_with('.') {
+        return None;
+    }
+    let path = entry_path.parent()?.join(source);
+    [path.with_extension("d.ts"), path.join("index.d.ts")]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
 }
 
 fn npm_install(scratch: &Path, package: &str) -> Result<(), String> {
@@ -914,4 +1009,3 @@ fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBu
         candidates.join("`, `")
     ))
 }
-
