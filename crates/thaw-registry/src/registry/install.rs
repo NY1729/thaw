@@ -830,6 +830,13 @@ fn select_export_condition<'a>(
     conditions: &[&str],
 ) -> Option<&'a str> {
     if let Some(path) = value.as_str() {
+        if conditions == ["types"]
+            && ![".d.ts", ".d.cts", ".d.mts"]
+                .iter()
+                .any(|extension| path.ends_with(extension))
+        {
+            return None;
+        }
         return Some(path);
     }
     if let Some(candidates) = value.as_array() {
@@ -847,6 +854,14 @@ fn select_export_condition<'a>(
         }
     }
     if conditions == ["types"] {
+        for condition in ["require", "import", "default"] {
+            if let Some(path) = object
+                .get(condition)
+                .and_then(|value| select_export_condition(value, conditions))
+            {
+                return Some(path);
+            }
+        }
         for child in object.values() {
             if let Some(path) = select_export_condition(child, conditions) {
                 return Some(path);

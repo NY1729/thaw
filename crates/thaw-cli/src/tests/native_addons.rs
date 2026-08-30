@@ -687,6 +687,37 @@ fn registry_add_builds_and_runs_yaml_when_enabled() {
 }
 
 #[test]
+fn registry_add_builds_and_runs_date_fns_subpath_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-date-fns-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "date-fns@4.1.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { weeksToDays } from "date-fns/weeksToDays";
+                function main(): void {
+                    console.log(weeksToDays(6));
+                }"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
