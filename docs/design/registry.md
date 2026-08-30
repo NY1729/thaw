@@ -1073,7 +1073,9 @@ live binding変換が置換した無限再帰だった。function body直下のl
 `./package.json`を単なる文字列targetとして公開する。`types`探索時に任意の文字列leafを
 受理すると、このJSON exportまでsubpath型定義と誤認してTypeScript parserへ渡していた。
 型targetは`.d.ts`／`.d.cts`／`.d.mts`だけを受理する。opt-in npm E2Eでは
-`date-fns/weeksToDays`を単一実行ファイル化し、registry削除後に`42`を得る。
+`date-fns` rootの`export *` barrelから関数宣言を再帰的に収集し、`weeksToDays`を
+単一実行ファイル化してregistry削除後に`42`を得る。star chainもpath単位で循環を停止し、
+named re-exportのaliasとoverloadは既存の追跡処理を再利用する。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

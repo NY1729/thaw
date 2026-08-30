@@ -2588,7 +2588,9 @@ parses and stringifies nested YAML data at runtime. Imported names shadowed by
 function-local bindings retain normal JavaScript lexical scope.
 Conditional exports that expose JavaScript or `package.json` strings are not
 mistaken for type declarations. The opt-in npm suite installs `date-fns@4.1.0`
-and runs `weeksToDays` from a package subpath after removing the registry.
+and follows root declaration `export *` barrels to run `weeksToDays` after
+removing the registry. Star barrels retain function overloads, aliases and
+cycle protection without expanding class or value declarations.
 
 Each step must include an end-to-end native execution test in addition to unit
 tests for its individual lowering/runtime layers.
