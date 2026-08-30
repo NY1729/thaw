@@ -1764,6 +1764,77 @@ fn compiles_in_place_array_copy_within() {
 }
 
 #[test]
+fn compiles_array_push_pop_shift_unshift_with_reference_sharing() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const a: number[] = [1, 2, 3];
+            const alias = a;
+            console.log(a.push(4));
+            console.log(a.push(5, 6));
+            console.log(a.join(","), alias.join(","), a === alias);
+            console.log(a.pop());
+            console.log(a.join(","), alias.join(","));
+            const words: string[] = ["y", "z"];
+            const wordsAlias = words;
+            console.log(words.unshift("w", "x"));
+            console.log(words.join(""), wordsAlias.join(""));
+            console.log(words.shift());
+            console.log(words.join(""), wordsAlias.join(""));
+            const empty: number[] = [];
+            console.log(empty.pop(), empty.shift(), empty.length);
+            const nested: number[][] = [];
+            const poppedNested = nested.pop();
+            console.log(poppedNested.length);
+            const single: number[] = [42];
+            console.log(single.push());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_push_pop_shift_unshift"),
+        concat!(
+            "4\n",
+            "6\n",
+            "1,2,3,4,5,6 1,2,3,4,5,6 true\n",
+            "6\n",
+            "1,2,3,4,5 1,2,3,4,5\n",
+            "4\n",
+            "wxyz wxyz\n",
+            "w\n",
+            "xyz xyz\n",
+            "0 0 0\n",
+            "0\n",
+            "1\n",
+        )
+    );
+}
+
+#[test]
+fn compiles_array_splice_removes_inserts_and_shares_the_receiver() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const a: number[] = [1, 2, 3, 4, 5];
+            const alias = a;
+            const removed = a.splice(1, 2, 10, 11, 12);
+            console.log(removed.join(","), a.join(","), alias.join(","));
+            const b: number[] = [1, 2, 3, 4, 5];
+            const tail = b.splice(2);
+            console.log(tail.join(","), b.join(","));
+            const c: string[] = ["a", "b", "c"];
+            const none = c.splice(1, 0, "x");
+            console.log(none.length, c.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_splice"),
+        concat!(
+            "2,3 1,10,11,12,4,5 1,10,11,12,4,5\n",
+            "3,4,5 1,2\n",
+            "0 a,x,b,c\n",
+        )
+    );
+}
+
+#[test]
 fn compiles_union_array_fill_without_losing_discriminants() {
     let source = r#"
         type Result =

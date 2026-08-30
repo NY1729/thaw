@@ -256,10 +256,22 @@ impl<'ctx> HirCompiler<'ctx> {
                             | "__thaw_bool_array_fill"
                             | "__thaw_array_slice"
                             | "__thaw_array_to_reversed"
+                            | "__thaw_array_splice"
                     ) {
                         return arguments
                             .first()
                             .and_then(|argument| self.expr_hir_type(argument));
+                    }
+                    if matches!(name.as_str(), "__thaw_array_push" | "__thaw_array_unshift") {
+                        return Some(HirType::F64);
+                    }
+                    if matches!(name.as_str(), "__thaw_array_pop" | "__thaw_array_shift") {
+                        return arguments.first().and_then(|argument| {
+                            match self.expr_hir_type(argument)? {
+                                HirType::Array(element) => Some(*element),
+                                _ => None,
+                            }
+                        });
                     }
                     if let Some(ret) = self.frame_async_functions.get(name) {
                         return Some(HirType::Promise(Box::new(ret.clone())));

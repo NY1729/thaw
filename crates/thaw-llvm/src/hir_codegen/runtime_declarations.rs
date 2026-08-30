@@ -331,6 +331,39 @@ impl<'ctx> HirCompiler<'ctx> {
             array_reverse_type,
             Some(Linkage::External),
         );
+        let array_extend_type = i8_ptr.fn_type(
+            &[i8_ptr.into(), i64_type.into(), i8_ptr.into(), i64_type.into()],
+            false,
+        );
+        for name in ["thaw_array_push_values", "thaw_array_unshift_values"] {
+            self.module
+                .add_function(name, array_extend_type, Some(Linkage::External));
+        }
+        let array_remove_type = i8_ptr.fn_type(
+            &[i8_ptr.into(), i64_type.into(), i8_ptr.into()],
+            false,
+        );
+        for name in ["thaw_array_pop", "thaw_array_shift"] {
+            self.module
+                .add_function(name, array_remove_type, Some(Linkage::External));
+        }
+        let array_splice_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                i8_ptr.into(),
+                i64_type.into(),
+                i8_ptr.into(),
+            ],
+            false,
+        );
+        self.module.add_function(
+            "thaw_array_splice",
+            array_splice_type,
+            Some(Linkage::External),
+        );
         let array_sort_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         for name in [
             "thaw_number_array_sort",
