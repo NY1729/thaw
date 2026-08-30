@@ -380,6 +380,48 @@ fn compiles_class_fields_with_types_inferred_from_literal_initializers() {
 }
 
 #[test]
+fn compiles_class_fields_inferred_from_aggregate_literals() {
+    let source = r#"
+        class Store {
+            values = [10, 20];
+            config = {
+                label: "store",
+                flags: [true, false],
+                point: { x: 1, y: 2 }
+            };
+            #privateData = { names: ["a", "b"] };
+            static defaults = { scores: [3, 4] };
+
+            summarize(): string {
+                this.values.push(12);
+                return this.config.label + " " +
+                    (this.values[0] + this.values[1] + this.values[2]) + " " +
+                    this.config.flags[0] + " " +
+                    (this.config.point.x + this.config.point.y) + " " +
+                    this.#privateData.names[1];
+            }
+
+            static total(): number {
+                Store.defaults.scores.push(5);
+                return Store.defaults.scores[0] +
+                    Store.defaults.scores[1] +
+                    Store.defaults.scores[2];
+            }
+        }
+
+        function main(): void {
+            const store = new Store();
+            console.log(store.summarize());
+            console.log(Store.total());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "class_fields_inferred_from_aggregates"),
+        "store 42 true 3 b\n12\n"
+    );
+}
+
+#[test]
 fn compiles_and_runs_native_class_implements() {
     let source = r#"
         interface NamedValue<N, V> { name: N; value: V; }
