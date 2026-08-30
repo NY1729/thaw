@@ -408,6 +408,44 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
+                    "__thaw_array_push" | "__thaw_array_unshift" => {
+                        let [array, values @ ..] = args.as_slice() else {
+                            return Err("array push/unshift expects a receiver".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        let HirType::Array(element) = &ty else {
+                            return Err("array push/unshift requires a homogeneous array".into());
+                        };
+                        for value in values {
+                            self.expect_type(element, value, "array push/unshift value")?;
+                        }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_array_pop" | "__thaw_array_shift" => {
+                        let [array] = args.as_slice() else {
+                            return Err("array pop/shift expects one operand".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        let HirType::Array(element) = ty else {
+                            return Err("array pop/shift requires a homogeneous array".into());
+                        };
+                        return Ok(*element);
+                    }
+                    "__thaw_array_splice" => {
+                        if args.len() < 3 {
+                            return Err("array splice expects at least three operands".into());
+                        }
+                        let ty = self.infer_expr_type(&args[0])?;
+                        let HirType::Array(element) = &ty else {
+                            return Err("array splice requires a homogeneous array".into());
+                        };
+                        self.expect_type(&HirType::F64, &args[1], "splice start")?;
+                        self.expect_type(&HirType::F64, &args[2], "splice deleteCount")?;
+                        for item in &args[3..] {
+                            self.expect_type(element, item, "splice item")?;
+                        }
+                        return Ok(ty);
+                    }
                     "__thaw_number_array_sort"
                     | "__thaw_string_array_sort"
                     | "__thaw_bool_array_sort"

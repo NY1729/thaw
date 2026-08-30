@@ -371,6 +371,266 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
             }
+            "__thaw_array_push" | "__thaw_array_unshift" => {
+                let [receiver, values @ ..] = args else {
+                    return Err("array push/unshift expects a receiver".to_string());
+                };
+                let Some(HirType::Array(element)) = self.expr_hir_type(receiver) else {
+                    return Err("array push/unshift requires a homogeneous array".to_string());
+                };
+                let i64_type = self.context.i64_type();
+                let width = array_element_storage_bytes(&element);
+                let handle = self.compile_expr(receiver)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                // Build a scratch buffer holding each pushed/unshifted
+                // value's bytes contiguously, matching the raw array
+                // element layout, so a single runtime call can append/
+                // prepend all of them at once.
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let values_ptr = if values.is_empty() {
+                    ptr_type.const_null()
+                } else {
+                    let byte_array_type = self
+                        .context
+                        .i8_type()
+                        .array_type((width as u32) * values.len() as u32);
+                    let slot = self
+                        .builder
+                        .build_alloca(byte_array_type, "array_extend_values")
+                        .map_err(|error| error.to_string())?;
+                    for (index, value) in values.iter().enumerate() {
+                        let compiled = self.compile_expr(value)?;
+                        let offset = i64_type.const_int(width * index as u64, false);
+                        let elem_ptr = unsafe {
+                            self.builder
+                                .build_in_bounds_gep(
+                                    self.context.i8_type(),
+                                    slot,
+                                    &[offset],
+                                    "array_extend_slot",
+                                )
+                                .map_err(|error| error.to_string())?
+                        };
+                        self.builder
+                            .build_store(elem_ptr, compiled)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    slot
+                };
+                let runtime = if name == "__thaw_array_push" {
+                    "thaw_array_push_values"
+                } else {
+                    "thaw_array_unshift_values"
+                };
+                let new_buffer = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(runtime).unwrap(),
+                        &[
+                            buffer.into(),
+                            i64_type.const_int(width, false).into(),
+                            values_ptr.into(),
+                            i64_type.const_int(values.len() as u64, false).into(),
+                        ],
+                        "array_extend",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array push/unshift returned no value".to_string())?
+                    .into_pointer_value();
+                // Mutate the receiver's existing handle in place -- every
+                // alias sharing it observes the grown buffer.
+                self.builder
+                    .build_store(handle, new_buffer)
+                    .map_err(|error| error.to_string())?;
+                let new_length = self
+                    .builder
+                    .build_load(i64_type, new_buffer, "array_extend_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_signed_int_to_float(
+                        new_length,
+                        self.context.f64_type(),
+                        "array_extend_length_f64",
+                    )
+                    .map_err(|error| error.to_string())
+                    .map(Into::into);
+            }
+            "__thaw_array_pop" | "__thaw_array_shift" => {
+                let [receiver] = args else {
+                    return Err("array pop/shift expects one operand".to_string());
+                };
+                let Some(HirType::Array(element)) = self.expr_hir_type(receiver) else {
+                    return Err("array pop/shift requires a homogeneous array".to_string());
+                };
+                let i64_type = self.context.i64_type();
+                let width = array_element_storage_bytes(&element);
+                let handle = self.compile_expr(receiver)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                let old_length = self
+                    .builder
+                    .build_load(i64_type, buffer, "array_remove_old_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let is_empty = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        old_length,
+                        i64_type.const_zero(),
+                        "array_remove_is_empty",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let element_llvm_type = self.basic_type(&element)?;
+                let out_slot = self
+                    .builder
+                    .build_alloca(element_llvm_type, "array_remove_value")
+                    .map_err(|error| error.to_string())?;
+                let runtime = if name == "__thaw_array_pop" {
+                    "thaw_array_pop"
+                } else {
+                    "thaw_array_shift"
+                };
+                let new_buffer = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(runtime).unwrap(),
+                        &[
+                            buffer.into(),
+                            i64_type.const_int(width, false).into(),
+                            out_slot.into(),
+                        ],
+                        "array_remove",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array pop/shift returned no value".to_string())?
+                    .into_pointer_value();
+                self.builder
+                    .build_store(handle, new_buffer)
+                    .map_err(|error| error.to_string())?;
+                // An empty receiver has nothing to remove -- the runtime
+                // zero-fills `out_slot` in that case, which is only a valid
+                // representation for scalar/pointer element types, so branch
+                // to the element type's own zero value (a real empty array/
+                // object, not a null pointer) instead of just reading it back.
+                let function = self.current_function();
+                let empty_block = self.context.append_basic_block(function, "array_remove_empty");
+                let present_block = self
+                    .context
+                    .append_basic_block(function, "array_remove_present");
+                let merge_block = self.context.append_basic_block(function, "array_remove_merge");
+                self.builder
+                    .build_conditional_branch(is_empty, empty_block, present_block)
+                    .map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(empty_block);
+                let zero_value = self.compile_zero_value(&element)?;
+                let empty_block = self.builder.get_insert_block().unwrap();
+                self.builder
+                    .build_unconditional_branch(merge_block)
+                    .map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(present_block);
+                let removed_value = self
+                    .builder
+                    .build_load(element_llvm_type, out_slot, "array_removed_value")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_unconditional_branch(merge_block)
+                    .map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(merge_block);
+                let phi = self
+                    .builder
+                    .build_phi(element_llvm_type, "array_remove_result")
+                    .map_err(|error| error.to_string())?;
+                phi.add_incoming(&[(&zero_value, empty_block), (&removed_value, present_block)]);
+                return Ok(phi.as_basic_value());
+            }
+            "__thaw_array_splice" => {
+                if args.len() < 3 {
+                    return Err("array splice expects at least three operands".to_string());
+                }
+                let Some(HirType::Array(element)) = self.expr_hir_type(&args[0]) else {
+                    return Err("array splice requires a homogeneous array".to_string());
+                };
+                let i64_type = self.context.i64_type();
+                let width = array_element_storage_bytes(&element);
+                let handle = self.compile_expr(&args[0])?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                let start = self.compile_expr(&args[1])?;
+                let delete_count = self.compile_expr(&args[2])?;
+                let items = &args[3..];
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let values_ptr = if items.is_empty() {
+                    ptr_type.const_null()
+                } else {
+                    let byte_array_type = self
+                        .context
+                        .i8_type()
+                        .array_type((width as u32) * items.len() as u32);
+                    let slot = self
+                        .builder
+                        .build_alloca(byte_array_type, "array_splice_values")
+                        .map_err(|error| error.to_string())?;
+                    for (index, item) in items.iter().enumerate() {
+                        let compiled = self.compile_expr(item)?;
+                        let offset = i64_type.const_int(width * index as u64, false);
+                        let elem_ptr = unsafe {
+                            self.builder
+                                .build_in_bounds_gep(
+                                    self.context.i8_type(),
+                                    slot,
+                                    &[offset],
+                                    "array_splice_slot",
+                                )
+                                .map_err(|error| error.to_string())?
+                        };
+                        self.builder
+                            .build_store(elem_ptr, compiled)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    slot
+                };
+                let out_removed = self
+                    .builder
+                    .build_alloca(ptr_type, "array_splice_removed")
+                    .map_err(|error| error.to_string())?;
+                let new_buffer = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_splice").unwrap(),
+                        &[
+                            buffer.into(),
+                            i64_type.const_int(width, false).into(),
+                            start.into(),
+                            delete_count.into(),
+                            values_ptr.into(),
+                            i64_type.const_int(items.len() as u64, false).into(),
+                            out_removed.into(),
+                        ],
+                        "array_splice",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array splice returned no value".to_string())?
+                    .into_pointer_value();
+                self.builder
+                    .build_store(handle, new_buffer)
+                    .map_err(|error| error.to_string())?;
+                let removed = self
+                    .builder
+                    .build_load(ptr_type, out_removed, "array_splice_removed_buffer")
+                    .map_err(|error| error.to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(removed)?.into());
+            }
             "__thaw_number_array_sort"
             | "__thaw_string_array_sort"
             | "__thaw_bool_array_sort"
