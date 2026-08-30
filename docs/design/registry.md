@@ -1067,6 +1067,14 @@ offline fixtureで通常名とaliasを検証し、opt-in npm E2Eでは実`yaml`�
 live binding変換が置換した無限再帰だった。function body直下のlexical bindingもshadowingとして
 保持し、runtimeのstack保護設定は変更しない。
 
+## 29. conditional exportsの型leaf検証
+
+`date-fns@4.1.0`はrootで`require.types`／`import.types`を使いながら、
+`./package.json`を単なる文字列targetとして公開する。`types`探索時に任意の文字列leafを
+受理すると、このJSON exportまでsubpath型定義と誤認してTypeScript parserへ渡していた。
+型targetは`.d.ts`／`.d.cts`／`.d.mts`だけを受理する。opt-in npm E2Eでは
+`date-fns/weeksToDays`を単一実行ファイル化し、registry削除後に`42`を得る。
+
 ## 北極星: 「npm と同じ感覚で使える」こと
 
 このドキュメントの各章は、実在する npm パッケージを実際に試して

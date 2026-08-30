@@ -2586,6 +2586,9 @@ inventing a declaration. An opt-in `yaml@2.8.1` integration test fetches the rea
 compiles `yaml.parse` into a standalone executable, removes the registry, and
 parses and stringifies nested YAML data at runtime. Imported names shadowed by
 function-local bindings retain normal JavaScript lexical scope.
+Conditional exports that expose JavaScript or `package.json` strings are not
+mistaken for type declarations. The opt-in npm suite installs `date-fns@4.1.0`
+and runs `weeksToDays` from a package subpath after removing the registry.
 
 Each step must include an end-to-end native execution test in addition to unit
 tests for its individual lowering/runtime layers.

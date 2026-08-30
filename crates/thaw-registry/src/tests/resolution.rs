@@ -44,6 +44,19 @@ fn selects_package_exports_conditions_for_runtime_and_types() {
         package_export_target(&array, None, &["require", "default"]),
         Some("./fallback.cjs")
     );
+
+    let nested: serde_json::Value = serde_json::from_str(
+        r#"{"exports":{"./package.json":"./package.json",".":{"require":{"types":"./index.d.cts","default":"./index.cjs"},"import":{"types":"./index.d.ts","default":"./index.js"}}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        package_export_target(&nested, None, &["types"]),
+        Some("./index.d.cts")
+    );
+    assert_eq!(
+        package_export_target(&nested, Some("package.json"), &["types"]),
+        None
+    );
 }
 
 #[test]
