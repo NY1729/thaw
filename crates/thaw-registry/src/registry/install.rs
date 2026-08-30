@@ -564,6 +564,7 @@ fn add_installed_inner(
                 types_path.display()
             )
         })?;
+        let subpath_dts = dts_source_with_reexported_functions(&types_path, &subpath_dts)?;
         let subpath_dest = subpaths_dir.join(&subpath);
         fs::create_dir_all(&subpath_dest)
             .map_err(|error| format!("failed to create `{}`: {error}", subpath_dest.display()))?;
@@ -617,8 +618,7 @@ fn dts_source_with_reexported_functions(
     entry_path: &Path,
     entry_source: &str,
 ) -> Result<String, String> {
-    use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
-    use thaw_parser::common::{SourceMapper, Spanned};
+    use thaw_parser::ast::{ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
 
     let module = thaw_parser::parse_typescript(entry_source)?;
     let mut output = entry_source.to_string();
@@ -639,13 +639,6 @@ fn dts_source_with_reexported_functions(
         let Some(target_path) = declaration_reexport_path(entry_path, source) else {
             continue;
         };
-        let target_source = fs::read_to_string(&target_path).map_err(|error| {
-            format!(
-                "failed to read re-exported declarations `{}`: {error}",
-                target_path.display()
-            )
-        })?;
-        let (target, source_map) = thaw_parser::parse_typescript_with_source_map(&target_source)?;
         for specifier in export.specifiers {
             let ExportSpecifier::Named(named) = specifier else {
                 continue;
@@ -665,24 +658,19 @@ fn dts_source_with_reexported_functions(
                 .as_ref()
                 .and_then(export_name)
                 .unwrap_or_else(|| original.clone());
-            if !seen.insert(exported.clone()) {
+            if seen.contains(&exported) {
                 continue;
             }
-            for target_item in &target.body {
-                let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = target_item else {
-                    continue;
-                };
-                let Decl::Fn(function) = &declaration.decl else {
-                    continue;
-                };
-                if function.ident.sym != original {
-                    continue;
-                }
-                let mut snippet = source_map
-                    .span_to_snippet(declaration.span())
-                    .map_err(|error| {
-                        format!("failed to read declaration for `{original}`: {error:?}")
-                    })?;
+            let mut visited = std::collections::BTreeSet::new();
+            let declarations = reexported_function_declarations(
+                &target_path,
+                &original,
+                &mut visited,
+            )?;
+            if !declarations.is_empty() {
+                seen.insert(exported.clone());
+            }
+            for mut snippet in declarations {
                 if exported != original {
                     snippet = snippet.replacen(
                         &format!("function {original}"),
@@ -696,6 +684,84 @@ fn dts_source_with_reexported_functions(
         }
     }
     Ok(output)
+}
+
+fn reexported_function_declarations(
+    path: &Path,
+    name: &str,
+    visited: &mut std::collections::BTreeSet<(PathBuf, String)>,
+) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    if !visited.insert((path.to_path_buf(), name.to_string())) {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read re-exported declarations `{}`: {error}",
+            path.display()
+        )
+    })?;
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let mut declarations = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = item else {
+            continue;
+        };
+        let Decl::Fn(function) = &declaration.decl else {
+            continue;
+        };
+        if function.ident.sym == name {
+            declarations.push(
+                source_map
+                    .span_to_snippet(declaration.span())
+                    .map_err(|error| {
+                        format!("failed to read declaration for `{name}`: {error:?}")
+                    })?,
+            );
+        }
+    }
+    if !declarations.is_empty() {
+        return Ok(declarations);
+    }
+    for item in module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+            continue;
+        };
+        if export.type_only {
+            continue;
+        }
+        let Some(source) = export.src.and_then(|source| source.value.as_str().map(str::to_owned))
+        else {
+            continue;
+        };
+        let Some(target_path) = declaration_reexport_path(path, &source) else {
+            continue;
+        };
+        for specifier in export.specifiers {
+            let ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            if named.is_type_only {
+                continue;
+            }
+            let export_name = |name: &ModuleExportName| match name {
+                ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                ModuleExportName::Str(_) => None,
+            };
+            let original = export_name(&named.orig);
+            let exported = named.exported.as_ref().and_then(export_name).or_else(|| original.clone());
+            if exported.as_deref() == Some(name) {
+                return reexported_function_declarations(
+                    &target_path,
+                    original.as_deref().unwrap_or(name),
+                    visited,
+                );
+            }
+        }
+    }
+    Ok(Vec::new())
 }
 
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {

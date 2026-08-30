@@ -82,6 +82,7 @@ fn installed_npm_layout_registers_wildcard_subpath_artifacts() {
     let registry = temp_registry("installed-wildcard-registry");
     let package = scratch.join("node_modules/feature-kit");
     fs::create_dir_all(package.join("dist/features")).unwrap();
+    fs::create_dir_all(package.join("dist/internal")).unwrap();
     fs::write(
         package.join("package.json"),
         r#"{
@@ -111,19 +112,26 @@ fn installed_npm_layout_registers_wildcard_subpath_artifacts() {
     .unwrap();
     fs::write(
         package.join("dist/features/double.d.ts"),
-        "export default function double(value: number): number;",
+        "export { double } from '../internal/double-api';",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/internal/double-api.d.ts"),
+        "export declare function double(value: number): number;",
     )
     .unwrap();
     fs::write(
         package.join("dist/features/double.js"),
-        "module.exports = function(value) { return value * 2; };",
+        "module.exports = { double: function(value) { return value * 2; } };",
     )
     .unwrap();
 
     let added = add_installed(&registry, &scratch.join("node_modules"), "feature-kit").unwrap();
     assert_eq!(added.resolved_version, "1.2.3");
     let subpath = resolve(&registry, "feature-kit/features/double").unwrap();
-    assert!(subpath.dts_source.contains("double"));
+    assert!(subpath
+        .dts_source
+        .contains("declare function double(value: number): number"));
     assert!(subpath.bundle_js.unwrap().contains("value * 2"));
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
@@ -142,12 +150,32 @@ fn installed_package_inlines_named_function_reexports() {
     .unwrap();
     fs::write(
         package.join("dist/index.d.ts"),
-        "export { parse, stringify as encode } from './public-api';",
+        "export { parse, stringify as encode } from './public-api';\nexport { loop } from './cycle-a';",
     )
     .unwrap();
     fs::write(
         package.join("dist/public-api.d.ts"),
-        "export declare function parse(value: string): any;\nexport declare function stringify(value: any): string;",
+        "export { parse } from './parse';\nexport { stringify } from './stringify';",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/parse.d.ts"),
+        "export declare function parse(value: string): any;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/stringify.d.ts"),
+        "export declare function stringify(value: any): string;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/cycle-a.d.ts"),
+        "export { loop } from './cycle-b';",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/cycle-b.d.ts"),
+        "export { loop } from './cycle-a';",
     )
     .unwrap();
     fs::write(

@@ -1059,6 +1059,8 @@ runtime bundleには関数が存在してもbridgeがexportを発見できなか
 package自身が同梱する型定義について、相対named re-exportの参照先を読み、対応する
 `export declare function` overloadをpackage surfaceへ追記する。alias re-exportは公開名へ
 置換し、外部package、型だけのexport、class／value re-exportには推測で手を広げない。
+相対named re-exportがさらにbarrelを指す場合は関数宣言まで再帰的に追跡し、pathと名前の
+組で循環を停止する。同じ処理をpackage rootだけでなくsubpath exportにも適用する。
 offline fixtureで通常名とaliasを検証し、opt-in npm E2Eでは実`yaml`を取得して単一実行
 ファイル化し、registry削除後にnested YAMLのparseとstringifyを実行する。
 当初のstack超過は容量不足ではなく、importした`stringify`と同名のfunction-local bindingを
