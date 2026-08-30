@@ -2583,8 +2583,8 @@ Registry installation now follows named function re-exports in split `.d.ts`
 barrels and appends the referenced overload declarations to the package
 surface. An opt-in `yaml@2.8.1` integration test fetches the real package,
 compiles `yaml.parse` into a standalone executable, removes the registry, and
-parses nested YAML data at runtime. `yaml.stringify` currently exceeds the
-embedded QuickJS stack limit and remains a separate compatibility gap.
+parses and stringifies nested YAML data at runtime. Imported names shadowed by
+function-local bindings retain normal JavaScript lexical scope.
 
 Each step must include an end-to-end native execution test in addition to unit
 tests for its individual lowering/runtime layers.

@@ -516,9 +516,9 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
         }
     }
 
-    fn direct_block_bindings(block: &BlockStmt) -> BTreeSet<String> {
+    fn direct_bindings(statements: &[Stmt]) -> BTreeSet<String> {
         let mut names = BTreeSet::new();
-        for statement in &block.stmts {
+        for statement in statements {
             if let Stmt::Decl(declaration) = statement {
                 match declaration {
                     Decl::Var(variable) => {
@@ -604,7 +604,11 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
             }
             self.shadowed.push(names);
             function.decorators.visit_with(self);
-            function.body.visit_with(self);
+            if let Some(body) = &function.body {
+                self.shadowed.push(direct_bindings(&body.stmts));
+                body.stmts.visit_with(self);
+                self.shadowed.pop();
+            }
             self.shadowed.pop();
         }
     }
@@ -624,7 +628,7 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
         }
 
         fn visit_block_stmt(&mut self, block: &BlockStmt) {
-            self.shadowed.push(direct_block_bindings(block));
+            self.shadowed.push(direct_bindings(&block.stmts));
             block.stmts.visit_with(self);
             self.shadowed.pop();
         }
