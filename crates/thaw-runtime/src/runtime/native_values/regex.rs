@@ -35,6 +35,25 @@ fn with_compiled_regex<T>(
     })
 }
 
+/// Wraps a freshly built native `[length][elem...]` array/tuple `buffer` in
+/// a one-word "handle" cell, matching thaw-llvm's `compile_array_wrap` --
+/// every `Array`/`Tuple` value is a handle now, including one built
+/// entirely in Rust like `matchAll`'s per-match capture array, since it
+/// becomes an *element* of the outer matches array and gets indexed back
+/// out expecting a handle. Returns null if `buffer` is null (propagating an
+/// earlier allocation failure) or if the handle's own allocation fails.
+fn wrap_array_handle(buffer: *mut u8) -> *mut u8 {
+    if buffer.is_null() {
+        return std::ptr::null_mut();
+    }
+    let handle = thaw_arena::thaw_arena_alloc(8, 8);
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { handle.cast::<*mut u8>().write_unaligned(buffer) };
+    handle
+}
+
 /// Writes `parts` into a fresh arena-allocated native `string[]` (length
 /// prefix, then one pointer-sized slot per element), returning null on
 /// allocation failure.
@@ -512,7 +531,7 @@ pub unsafe extern "C" fn thaw_regex_match_all(
     };
     let mut inner_arrays = Vec::with_capacity(matches.len());
     for captures in matches {
-        let inner = arena_string_array(captures);
+        let inner = wrap_array_handle(arena_string_array(captures));
         if inner.is_null() {
             return std::ptr::null_mut();
         }

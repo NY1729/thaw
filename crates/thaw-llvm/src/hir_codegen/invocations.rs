@@ -120,28 +120,28 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_string_lte" => return self.compile_string_comparison(args, IntPredicate::SLE),
             "__thaw_string_gte" => return self.compile_string_comparison(args, IntPredicate::SGE),
             "__thaw_number_array_to_string" => {
-                return self.compile_single_arg_call(
+                return self.compile_single_array_arg_call(
                     "thaw_number_array_to_string",
                     args,
                     "String(number[])",
                 )
             }
             "__thaw_string_array_to_string" => {
-                return self.compile_single_arg_call(
+                return self.compile_single_array_arg_call(
                     "thaw_string_array_to_string",
                     args,
                     "String(string[])",
                 )
             }
             "__thaw_bool_array_to_string" => {
-                return self.compile_single_arg_call(
+                return self.compile_single_array_arg_call(
                     "thaw_bool_array_to_string",
                     args,
                     "String(boolean[])",
                 )
             }
             "__thaw_object_array_to_string" => {
-                return self.compile_single_arg_call(
+                return self.compile_single_array_arg_call(
                     "thaw_object_array_to_string",
                     args,
                     "String(object[])",
@@ -156,7 +156,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [array, separator] = args else {
                     return Err("array join expects an array and separator".to_string());
                 };
-                let array = self.compile_expr(array)?;
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let array = self.compile_array_data(handle)?;
                 let separator = self.compile_expr(separator)?;
                 return self
                     .builder
@@ -177,22 +178,23 @@ impl<'ctx> HirCompiler<'ctx> {
                 let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
                     return Err("array reverse requires a homogeneous array".to_string());
                 };
-                let array = self.compile_expr(array)?;
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
                 let width = self
                     .context
                     .i64_type()
                     .const_int(array_element_storage_bytes(&element), false);
-                return self
-                    .builder
+                // Mutates the buffer's elements in place and returns the
+                // same pointer -- the expression's own value is still the
+                // original handle (no reallocation, so no new one).
+                self.builder
                     .build_call(
                         self.module.get_function("thaw_array_reverse").unwrap(),
-                        &[array.into(), width.into()],
+                        &[buffer.into(), width.into()],
                         "array_reverse",
                     )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("array reverse returned no value".to_string());
+                    .map_err(|error| error.to_string())?;
+                return Ok(handle.into());
             }
             "__thaw_array_copy_within" => {
                 if args.len() != 4 {
@@ -201,8 +203,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 let Some(HirType::Array(element)) = self.expr_hir_type(&args[0]) else {
                     return Err("array copyWithin requires a homogeneous array".to_string());
                 };
+                let handle = self.compile_expr(&args[0])?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
                 let mut arguments = Vec::with_capacity(5);
-                arguments.push(self.compile_expr(&args[0])?.into());
+                arguments.push(buffer.into());
                 arguments.push(
                     self.context
                         .i64_type()
@@ -212,24 +216,26 @@ impl<'ctx> HirCompiler<'ctx> {
                 for argument in &args[1..] {
                     arguments.push(self.compile_expr(argument)?.into());
                 }
-                return self
-                    .builder
+                // Mutates in place and returns the same pointer -- keep
+                // using the original handle as this expression's value.
+                self.builder
                     .build_call(
                         self.module.get_function("thaw_array_copy_within").unwrap(),
                         &arguments,
                         "array_copy_within",
                     )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("array copyWithin returned no value".to_string());
+                    .map_err(|error| error.to_string())?;
+                return Ok(handle.into());
             }
             "__thaw_number_array_fill" | "__thaw_pointer_array_fill" | "__thaw_bool_array_fill" => {
                 if args.len() != 4 {
                     return Err("array fill expects four operands".to_string());
                 }
+                let handle = self.compile_expr(&args[0])?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
                 let mut arguments = Vec::with_capacity(4);
-                for (index, argument) in args.iter().enumerate() {
+                arguments.push(buffer.into());
+                for (index, argument) in args.iter().enumerate().skip(1) {
                     let mut value = self.compile_expr(argument)?;
                     if index == 1 && name == "__thaw_bool_array_fill" {
                         value = self
@@ -245,8 +251,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     arguments.push(value.into());
                 }
                 let runtime = name.trim_start_matches("__thaw_");
-                return self
-                    .builder
+                // Mutates in place and returns the same pointer -- keep
+                // using the original handle as this expression's value.
+                self.builder
                     .build_call(
                         self.module
                             .get_function(&format!("thaw_{runtime}"))
@@ -254,10 +261,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         &arguments,
                         "array_fill",
                     )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("array fill returned no value".to_string());
+                    .map_err(|error| error.to_string())?;
+                return Ok(handle.into());
             }
             "__thaw_array_fill" => {
                 if args.len() != 4 {
@@ -266,7 +271,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 let Some(HirType::Array(element)) = self.expr_hir_type(&args[0]) else {
                     return Err("array fill requires a homogeneous array".to_string());
                 };
-                let array = self.compile_expr(&args[0])?;
+                let handle = self.compile_expr(&args[0])?.into_pointer_value();
+                let array = self.compile_array_data(handle)?;
                 let value = self.compile_expr(&args[1])?;
                 let value_slot = self
                     .builder
@@ -293,17 +299,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.compile_expr(&args[2])?.into(),
                     self.compile_expr(&args[3])?.into(),
                 ];
-                return self
-                    .builder
+                // Mutates in place and returns the same pointer -- keep
+                // using the original handle as this expression's value.
+                self.builder
                     .build_call(
                         self.module.get_function("thaw_array_fill").unwrap(),
                         &arguments,
                         "array_fill",
                     )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("array fill returned no value".to_string());
+                    .map_err(|error| error.to_string())?;
+                return Ok(handle.into());
             }
             "__thaw_array_slice" => {
                 if args.len() != 3 {
@@ -312,8 +317,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 let Some(HirType::Array(element)) = self.expr_hir_type(&args[0]) else {
                     return Err("array slice requires a homogeneous array".to_string());
                 };
+                let handle = self.compile_expr(&args[0])?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
                 let mut arguments = Vec::with_capacity(4);
-                arguments.push(self.compile_expr(&args[0])?.into());
+                arguments.push(buffer.into());
                 arguments.push(
                     self.context
                         .i64_type()
@@ -323,7 +330,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 for argument in &args[1..] {
                     arguments.push(self.compile_expr(argument)?.into());
                 }
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_array_slice").unwrap(),
@@ -333,7 +340,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("array slice returned no value".to_string());
+                    .ok_or("array slice returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_array_to_reversed" => {
                 let [array] = args else {
@@ -342,33 +351,70 @@ impl<'ctx> HirCompiler<'ctx> {
                 let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
                     return Err("array toReversed requires a homogeneous array".to_string());
                 };
-                let array = self.compile_expr(array)?;
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
                 let width = self
                     .context
                     .i64_type()
                     .const_int(array_element_storage_bytes(&element), false);
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_array_to_reversed").unwrap(),
-                        &[array.into(), width.into()],
+                        &[buffer.into(), width.into()],
                         "array_to_reversed",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("array toReversed returned no value".to_string());
+                    .ok_or("array toReversed returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_number_array_sort"
             | "__thaw_string_array_sort"
             | "__thaw_bool_array_sort"
-            | "__thaw_object_array_sort"
-            | "__thaw_number_array_to_sorted"
+            | "__thaw_object_array_sort" => {
+                let [array] = args else {
+                    return Err("array sort expects one operand".to_string());
+                };
+                let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                // Mutates in place and returns the same pointer -- keep
+                // using the original handle as this expression's value.
+                self.builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[buffer.into()],
+                        "array_sort",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(handle.into());
+            }
+            "__thaw_number_array_to_sorted"
             | "__thaw_string_array_to_sorted"
             | "__thaw_bool_array_to_sorted"
             | "__thaw_object_array_to_sorted" => {
+                let [array] = args else {
+                    return Err("array toSorted expects one operand".to_string());
+                };
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
-                return self.compile_single_arg_call(&runtime, args, "array sort");
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[buffer.into()],
+                        "array_to_sorted",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array toSorted returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_number_array_index_of"
             | "__thaw_number_array_includes"
@@ -389,6 +435,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 let mut arguments = Vec::with_capacity(3);
                 for (index, argument) in args.iter().enumerate() {
                     let mut value = self.compile_expr(argument)?;
+                    if index == 0 {
+                        value = self.compile_array_data(value.into_pointer_value())?.into();
+                    }
                     if index == 1 && name.starts_with("__thaw_bool_array_") {
                         value = self
                             .builder
@@ -478,11 +527,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_single_arg_call(&runtime, args, "string transform");
             }
             "__thaw_string_to_array" => {
-                return self.compile_single_arg_call(
-                    "thaw_string_to_array",
-                    args,
-                    "string iterator array",
-                )
+                let result = self
+                    .compile_single_arg_call("thaw_string_to_array", args, "string iterator array")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_string_split" => {
                 let [value, separator, limit] = args else {
@@ -491,7 +539,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let value = self.compile_expr(value)?;
                 let separator = self.compile_expr(separator)?;
                 let limit = self.compile_expr(limit)?;
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_string_split").unwrap(),
@@ -501,7 +549,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("string split returned no value".into());
+                    .ok_or("string split returned no value")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_string_replace" | "__thaw_string_replace_all" => {
                 let [value, search, replacement] = args else {
@@ -710,7 +760,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let map = self.compile_expr(map)?;
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 let runtime = format!("thaw_{runtime}");
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
@@ -720,7 +770,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or_else(|| format!("{name} returned no value"));
+                    .ok_or_else(|| format!("{name} returned no value"))?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_map_size" => {
                 let [map] = args else {
@@ -857,7 +909,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let flags = self.compile_expr(flags)?;
                 let value = self.compile_expr(value)?;
                 let last_index = self.compile_expr(last_index)?;
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_regex_exec").unwrap(),
@@ -867,7 +919,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("RegExp.exec returned no value".into());
+                    .ok_or("RegExp.exec returned no value")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap_nullable(result)?.into());
             }
             "__thaw_regex_exec_advance" => {
                 let [value, source, flags, last_index] = args else {
@@ -898,7 +952,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let flags = self.compile_expr(flags)?;
                 let runtime = name.trim_start_matches("__thaw_").to_string();
                 let runtime = format!("thaw_{runtime}");
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function(&runtime).unwrap(),
@@ -908,7 +962,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or_else(|| format!("{name} returned no value"));
+                    .ok_or_else(|| format!("{name} returned no value"))?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap_nullable(result)?.into());
             }
             "__thaw_regex_split" => {
                 let [value, source, flags, limit] = args else {
@@ -918,7 +974,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let source = self.compile_expr(source)?;
                 let flags = self.compile_expr(flags)?;
                 let limit = self.compile_expr(limit)?;
-                return self
+                let result = self
                     .builder
                     .build_call(
                         self.module.get_function("thaw_regex_split").unwrap(),
@@ -928,7 +984,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or_else(|| format!("{name} returned no value"));
+                    .ok_or_else(|| format!("{name} returned no value"))?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap_nullable(result)?.into());
             }
             "__thaw_regex_replace" | "__thaw_regex_replace_all" => {
                 let [value, source, flags, replacement] = args else {
@@ -1413,7 +1471,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("JSON.stringify expects value and replacer keys".into());
                 };
                 let value = self.compile_expr(value)?;
-                let keys = self.compile_expr(keys)?;
+                let keys_handle = self.compile_expr(keys)?.into_pointer_value();
+                let keys = self.compile_array_data(keys_handle)?;
                 return self
                     .builder
                     .build_call(
@@ -1432,7 +1491,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("JSON.stringify expects value, replacer keys and space".into());
                 };
                 let value = self.compile_expr(value)?;
-                let keys = self.compile_expr(keys)?;
+                let keys_handle = self.compile_expr(keys)?.into_pointer_value();
+                let keys = self.compile_array_data(keys_handle)?;
                 let space = self.compile_expr(space)?;
                 return self
                     .builder
@@ -1477,40 +1537,58 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string());
             }
             "__thaw_json_keys" => {
-                return self.compile_single_arg_call("thaw_json_keys", args, "Object.keys")
+                let result = self
+                    .compile_single_arg_call("thaw_json_keys", args, "Object.keys")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_array_keys" => {
-                return self.compile_single_arg_call("thaw_array_keys", args, "Object.keys")
+                let result = self
+                    .compile_single_array_arg_call("thaw_array_keys", args, "Object.keys")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_json_values" => {
-                return self.compile_single_arg_call("thaw_json_values", args, "Object.values")
+                let result = self
+                    .compile_single_arg_call("thaw_json_values", args, "Object.values")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_json_number_values"
             | "__thaw_json_string_values"
             | "__thaw_json_bool_values" => {
-                return self.compile_single_arg_call(
-                    name.trim_start_matches("__"),
-                    args,
-                    "Object.values",
-                )
+                let result = self
+                    .compile_single_arg_call(
+                        name.trim_start_matches("__"),
+                        args,
+                        "Object.values",
+                    )?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_json_entries" => {
-                return self.compile_single_arg_call("thaw_json_entries", args, "Object.entries")
+                let result = self
+                    .compile_single_arg_call("thaw_json_entries", args, "Object.entries")?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_json_number_entries"
             | "__thaw_json_string_entries"
             | "__thaw_json_bool_entries" => {
-                return self.compile_single_arg_call(
-                    name.trim_start_matches("__"),
-                    args,
-                    "Object.entries",
-                )
+                let result = self
+                    .compile_single_arg_call(
+                        name.trim_start_matches("__"),
+                        args,
+                        "Object.entries",
+                    )?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_json_object_from_number_entries"
             | "__thaw_json_object_from_string_entries"
             | "__thaw_json_object_from_bool_entries"
             | "__thaw_json_object_from_json_entries" => {
-                return self.compile_single_arg_call(
+                return self.compile_single_array_arg_call(
                     name.trim_start_matches("__"),
                     args,
                     "Object.fromEntries",

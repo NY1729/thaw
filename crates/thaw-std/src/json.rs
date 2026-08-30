@@ -331,6 +331,39 @@ fn alloc_pointer_array(values: Vec<*mut u8>) -> *mut u8 {
     output
 }
 
+/// Wraps a freshly built native `[length][elem...]` array/tuple `buffer`
+/// (a `[string, T]` entry pair, here) in a one-word "handle" cell, matching
+/// thaw-llvm's `compile_array_wrap` -- every `Array`/`Tuple` value is a
+/// handle now, including one built entirely in Rust like an
+/// `Object.entries` pair, since it becomes an *element* of the outer
+/// entries array and gets indexed back out expecting a handle. Returns
+/// null if `buffer` is null (propagating an earlier allocation failure)
+/// or if the handle's own allocation fails.
+fn wrap_array_handle(buffer: *mut u8) -> *mut u8 {
+    if buffer.is_null() {
+        return std::ptr::null_mut();
+    }
+    let handle = thaw_arena::thaw_arena_alloc(8, 8);
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { (handle as *mut *mut u8).write(buffer) };
+    handle
+}
+
+/// Loads the current raw buffer pointer out of an array/tuple handle. See
+/// `wrap_array_handle`. Returns null if `handle` itself is null.
+///
+/// # Safety
+/// `handle` must be null or a pointer written by `wrap_array_handle` (or
+/// thaw-llvm's `compile_array_wrap`).
+unsafe fn unwrap_array_handle(handle: *const u8) -> *const u8 {
+    if handle.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { (handle as *const *const u8).read() }
+}
+
 #[no_mangle]
 /// # Safety
 ///
@@ -455,10 +488,10 @@ pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
         entries
             .into_iter()
             .map(|(key, value)| {
-                alloc_pointer_array(vec![
+                wrap_array_handle(alloc_pointer_array(vec![
                     CString::new(key).unwrap_or_default().into_raw().cast(),
                     Box::into_raw(Box::new(value)).cast(),
-                ])
+                ]))
             })
             .collect(),
     )
@@ -487,7 +520,7 @@ fn alloc_typed_entries(value: *const Value, write: impl Fn(*mut u8, &Value)) -> 
                     );
                 }
                 write(unsafe { entry.add(16) }, value);
-                entry
+                wrap_array_handle(entry)
             })
             .collect(),
     )
@@ -535,7 +568,8 @@ fn object_from_typed_entries(entries: *const u8, read: impl Fn(*const u8) -> Val
     }
     let length = unsafe { (entries as *const i64).read() }.max(0) as usize;
     for index in 0..length {
-        let entry = unsafe { (entries.add(8 + index * 8) as *const *const u8).read() };
+        let handle = unsafe { (entries.add(8 + index * 8) as *const *const u8).read() };
+        let entry = unsafe { unwrap_array_handle(handle) };
         if entry.is_null() {
             continue;
         }

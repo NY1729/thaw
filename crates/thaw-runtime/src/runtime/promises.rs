@@ -363,7 +363,10 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
     }
     let result_slot = allocation.cast::<*const u8>();
     let result = unsafe { allocation.add(size_of::<*const u8>()) };
-    unsafe { result_slot.write(result.cast()) };
+    // The Promise's own resolved value has Array/Tuple type, so it must be a
+    // handle - not the raw buffer - by the time codegen's generic await
+    // extraction loads it back out of `result_slot`. See `wrap_array_handle`.
+    unsafe { result_slot.write(wrap_array_handle(result).cast()) };
     unsafe { result.cast::<u64>().write(len as u64) };
     if len == 0 {
         thaw_promise_resolve(output, result_slot.cast());
@@ -685,7 +688,12 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     let result_slot = allocation.cast::<*const u8>();
     let result = unsafe { allocation.add(1) };
     unsafe {
-        result_slot.write(result.cast());
+        // The Promise's own resolved value has Array type, so it must be a
+        // handle - not the raw buffer - by the time codegen's generic await
+        // extraction loads it back out of `result_slot`. See
+        // `wrap_array_handle` (defined alongside `thaw_regex_match_all`,
+        // which needs the identical wrap for its own nested arrays).
+        result_slot.write(wrap_array_handle(result.cast()).cast());
         result.write(len as u64);
     }
     if len == 0 {

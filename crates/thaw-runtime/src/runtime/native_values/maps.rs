@@ -425,8 +425,15 @@ pub unsafe extern "C" fn thaw_map_snapshot_values(map: *const u8) -> *mut u8 {
 }
 
 /// Allocates a native 2-tuple (`[i64 length=2][first][second]`, the same
-/// layout an `HirExpr::ArrayLit` of two elements produces) and returns its
-/// address as a `u64`, or `0` only on arena allocation failure.
+/// layout an `HirExpr::ArrayLit` of two elements produces), then wraps its
+/// address in a one-word "handle" cell (see thaw-llvm's
+/// `compile_array_wrap`/`compile_array_data` doc comment) and returns the
+/// handle's address as a `u64`, or `0` only on arena allocation failure.
+/// An `Array`/`Tuple` value is always a handle now, including one built
+/// entirely in Rust like this rather than through generated code, since
+/// this pair becomes an *element* of the outer array `map_snapshot`
+/// builds -- indexing into that outer array later loads this value back
+/// out expecting a handle, not the raw tuple buffer directly.
 fn arena_pair(first: u64, second: u64) -> u64 {
     let pair = thaw_arena::thaw_arena_alloc(24, 8);
     if pair.is_null() {
@@ -437,7 +444,14 @@ fn arena_pair(first: u64, second: u64) -> u64 {
         pair.add(8).cast::<u64>().write_unaligned(first);
         pair.add(16).cast::<u64>().write_unaligned(second);
     }
-    pair as u64
+    let handle = thaw_arena::thaw_arena_alloc(8, 8);
+    if handle.is_null() {
+        return 0;
+    }
+    unsafe {
+        handle.cast::<u64>().write_unaligned(pair as u64);
+    }
+    handle as u64
 }
 
 #[no_mangle]
@@ -746,8 +760,13 @@ mod map_native_tests {
         assert_eq!(entries.len(), 2);
         let pairs: Vec<(f64, f64)> = entries
             .iter()
-            .map(|&pointer| {
-                let pair = pointer as *mut u8;
+            .map(|&handle| {
+                // Each entry is itself an array/tuple value, so (like the
+                // outer array `read_word_array` already unwraps) it's a
+                // handle: one more level of indirection than the raw pair
+                // buffer `arena_pair` builds. See `compile_array_wrap`'s
+                // doc comment in thaw-llvm.
+                let pair = unsafe { (handle as *const u64).read() } as *mut u8;
                 let key = f64::from_bits(unsafe { pair.add(8).cast::<u64>().read() });
                 let value = f64::from_bits(unsafe { pair.add(16).cast::<u64>().read() });
                 (key, value)
