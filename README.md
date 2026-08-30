@@ -2580,8 +2580,9 @@ Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
 to a real `napi_value` Buffer, and addons that return a function as their
 module root are bound to the single declaration name from `package.d.ts`.
 Registry installation now follows named function re-exports in split `.d.ts`
-barrels and appends the referenced overload declarations to the package
-surface. An opt-in `yaml@2.8.1` integration test fetches the real package,
+barrels recursively, including package subpaths, and appends the referenced
+overload declarations to the package surface. Cyclic barrels terminate without
+inventing a declaration. An opt-in `yaml@2.8.1` integration test fetches the real package,
 compiles `yaml.parse` into a standalone executable, removes the registry, and
 parses and stringifies nested YAML data at runtime. Imported names shadowed by
 function-local bindings retain normal JavaScript lexical scope.
