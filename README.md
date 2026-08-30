@@ -1893,12 +1893,11 @@ The workspace crates have narrow responsibilities:
   subset. Compatible declarations merge in source order, with duplicate
   member names and mixed native layouts rejected
 - An instance or static field (including a private `#field`) without an
-  explicit type annotation infers its type from a simple number/string/
-  boolean literal initializer (`count = 0`, `name = "x"`, `active = true`),
-  matching how a local `let`/`const` already infers from its initializer.
-  This only covers a literal: anything that could depend on the rest of
-  the class not yet resolved at this point (a method call, another
-  field, an array/object literal) still requires an explicit annotation
+  explicit type annotation infers its type from number/string/boolean literals,
+  non-empty homogeneous array literals, and fixed object literals recursively.
+  Empty or mixed-element arrays, spreads, shorthand properties, method calls,
+  identifiers and anything else that can depend on the unresolved class still
+  require an explicit annotation
 - The typed AOT class subset supports constructors, parameter properties,
   instance fields and methods, accessors, initialized typed static fields and
   static methods, inherited static-field reads/writes with shared base storage,

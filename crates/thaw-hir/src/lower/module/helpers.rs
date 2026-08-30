@@ -22,20 +22,53 @@ fn class_property_name(name: &PropName) -> Result<Symbol, String> {
     }
 }
 
-/// Infers a class field's type from a simple literal initializer
-/// (`count = 0`, `label = "x"`, `active = false`) when it has no explicit
-/// type annotation, mirroring how a local `let`/`const` already infers from
-/// its initializer without one. Deliberately limited to number/string/bool
-/// literals: this runs in the pre-pass that computes a class's field
-/// layout, before the rest of the class (and its own field types) has been
-/// resolved, so anything that could depend on that -- a method call, a
-/// reference to another field, an array/object literal -- still requires
-/// an explicit annotation rather than risking a lowering-order cycle.
+/// Infers a class field's type from a self-contained literal initializer.
+/// This runs before the class body is resolved, so identifiers, calls,
+/// spreads, empty arrays, and mixed-element arrays still require an explicit
+/// annotation rather than introducing a lowering-order dependency or guessing
+/// a union layout.
 fn infer_class_field_literal_type(expr: &Expr) -> Option<HirType> {
     match expr {
         Expr::Lit(Lit::Num(_)) => Some(HirType::F64),
         Expr::Lit(Lit::Str(_)) => Some(HirType::Str),
         Expr::Lit(Lit::Bool(_)) => Some(HirType::Bool),
+        Expr::Paren(parenthesized) => infer_class_field_literal_type(&parenthesized.expr),
+        Expr::Array(array) => {
+            let elements = array
+                .elems
+                .iter()
+                .map(|element| {
+                    let element = element.as_ref()?;
+                    element.spread.is_none().then_some(())?;
+                    infer_class_field_literal_type(&element.expr)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let first = elements.first()?.clone();
+            elements
+                .iter()
+                .all(|element| element == &first)
+                .then(|| HirType::Array(Box::new(first)))
+        }
+        Expr::Object(object) => {
+            let mut fields = Vec::with_capacity(object.props.len());
+            for property in &object.props {
+                let PropOrSpread::Prop(property) = property else {
+                    return None;
+                };
+                let Prop::KeyValue(property) = property.as_ref() else {
+                    return None;
+                };
+                let name = class_property_name(&property.key).ok()?;
+                if fields.iter().any(|(existing, _)| existing == &name) {
+                    return None;
+                }
+                fields.push((
+                    name,
+                    infer_class_field_literal_type(&property.value)?,
+                ));
+            }
+            Some(HirType::Object(fields))
+        }
         _ => None,
     }
 }
@@ -294,4 +327,3 @@ fn parameter_property_binding(
         },
     }
 }
-
