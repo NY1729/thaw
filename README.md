@@ -1352,6 +1352,19 @@ The workspace crates have narrow responsibilities:
 - Homogeneous native arrays implement in-place `.fill()` for numbers, strings,
   booleans and fixed objects, with negative/clamped bounds, shallow reference
   assignment and left-to-right awaited argument evaluation
+- Homogeneous native arrays implement in-place `.push()`, `.pop()`, `.shift()`,
+  `.unshift()` and `.splice()` through the same handle indirection every
+  array/tuple value already carries, so every existing alias of the receiver
+  (another variable, a captured closure, a struct field) observes the
+  mutation the next time it reads the array, not just the original binding.
+  `push`/`unshift` accept zero or more values and return the new length;
+  `pop`/`shift` return the removed element, or the element type's zero/default
+  value for an empty array -- a real empty nested array or object, not a null
+  pointer, when the element type is itself one. `splice` accepts JavaScript's
+  negative/clamped `start`, an optional `deleteCount` defaulting to the rest
+  of the array, and zero or more replacement items, returning an arena-owned
+  array of the removed elements. The receiver and every argument are
+  evaluated once, left to right, and may suspend with `await`
 - Homogeneous native arrays implement `.concat()` with one-level flattening of
   same-element arrays, scalar element arguments, arena-owned shallow copies,
   empty inputs and left-to-right awaited receiver/argument evaluation
