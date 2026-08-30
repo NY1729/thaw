@@ -332,6 +332,252 @@ pub unsafe extern "C" fn thaw_array_to_reversed(array: *const u8, element_width:
     unsafe { thaw_array_reverse(output, element_width) }
 }
 
+#[no_mangle]
+/// `Array.prototype.push`. Appends `count` elements (each `element_width`
+/// bytes, read consecutively from `values`) to `array` and returns a fresh
+/// buffer with the combined contents; the codegen caller stores the result
+/// back into the receiver's handle. `array` may be null, treated as an
+/// empty array. Returns null only on allocation failure.
+///
+/// # Safety
+///
+/// `array` must be null or point to a readable Thaw array whose elements
+/// occupy `element_width` bytes. `values` must be readable for
+/// `count * element_width` bytes, and `element_width` must be nonzero.
+pub unsafe extern "C" fn thaw_array_push_values(
+    array: *const u8,
+    element_width: usize,
+    values: *const u8,
+    count: usize,
+) -> *mut u8 {
+    let old_len = unsafe { native_array_length(array) }.unwrap_or(0);
+    let new_len = old_len + count;
+    let Some(payload_bytes) = new_len.checked_mul(element_width) else {
+        return std::ptr::null_mut();
+    };
+    let output = thaw_arena::thaw_arena_alloc(8 + payload_bytes, element_width.min(8));
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(new_len as u64);
+        if old_len != 0 {
+            std::ptr::copy_nonoverlapping(array.add(8), output.add(8), old_len * element_width);
+        }
+        if count != 0 {
+            std::ptr::copy_nonoverlapping(
+                values,
+                output.add(8 + old_len * element_width),
+                count * element_width,
+            );
+        }
+    }
+    output
+}
+
+#[no_mangle]
+/// `Array.prototype.unshift`. Prepends `count` elements (each
+/// `element_width` bytes, read consecutively from `values`) to `array` and
+/// returns a fresh buffer with the combined contents. See
+/// `thaw_array_push_values`, which this mirrors.
+///
+/// # Safety
+///
+/// Same contract as `thaw_array_push_values`.
+pub unsafe extern "C" fn thaw_array_unshift_values(
+    array: *const u8,
+    element_width: usize,
+    values: *const u8,
+    count: usize,
+) -> *mut u8 {
+    let old_len = unsafe { native_array_length(array) }.unwrap_or(0);
+    let new_len = old_len + count;
+    let Some(payload_bytes) = new_len.checked_mul(element_width) else {
+        return std::ptr::null_mut();
+    };
+    let output = thaw_arena::thaw_arena_alloc(8 + payload_bytes, element_width.min(8));
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(new_len as u64);
+        if count != 0 {
+            std::ptr::copy_nonoverlapping(values, output.add(8), count * element_width);
+        }
+        if old_len != 0 {
+            std::ptr::copy_nonoverlapping(
+                array.add(8),
+                output.add(8 + count * element_width),
+                old_len * element_width,
+            );
+        }
+    }
+    output
+}
+
+#[no_mangle]
+/// `Array.prototype.pop`. Removes the last element of `array`, writing its
+/// `element_width` bytes into `out_value` and returning a fresh buffer with
+/// the remaining elements. If `array` is null or already empty, `out_value`
+/// is zero-filled (codegen substitutes the element type's own zero value in
+/// that case, matching `undefined`) and `array` is returned unchanged.
+///
+/// # Safety
+///
+/// `array` must be null or point to a readable Thaw array whose elements
+/// occupy `element_width` bytes. `out_value` must be writable for
+/// `element_width` bytes, and `element_width` must be nonzero.
+pub unsafe extern "C" fn thaw_array_pop(
+    array: *const u8,
+    element_width: usize,
+    out_value: *mut u8,
+) -> *mut u8 {
+    let old_len = unsafe { native_array_length(array) }.unwrap_or(0);
+    if old_len == 0 {
+        unsafe { out_value.write_bytes(0, element_width) };
+        return array as *mut u8;
+    }
+    let new_len = old_len - 1;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            array.add(8 + new_len * element_width),
+            out_value,
+            element_width,
+        );
+    }
+    let output = thaw_arena::thaw_arena_alloc(8 + new_len * element_width, element_width.min(8));
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(new_len as u64);
+        if new_len != 0 {
+            std::ptr::copy_nonoverlapping(array.add(8), output.add(8), new_len * element_width);
+        }
+    }
+    output
+}
+
+#[no_mangle]
+/// `Array.prototype.shift`. Removes the first element of `array`, writing
+/// its `element_width` bytes into `out_value` and returning a fresh buffer
+/// with the remaining elements, shifted down by one slot. See
+/// `thaw_array_pop`, which this mirrors.
+///
+/// # Safety
+///
+/// Same contract as `thaw_array_pop`.
+pub unsafe extern "C" fn thaw_array_shift(
+    array: *const u8,
+    element_width: usize,
+    out_value: *mut u8,
+) -> *mut u8 {
+    let old_len = unsafe { native_array_length(array) }.unwrap_or(0);
+    if old_len == 0 {
+        unsafe { out_value.write_bytes(0, element_width) };
+        return array as *mut u8;
+    }
+    let new_len = old_len - 1;
+    unsafe {
+        std::ptr::copy_nonoverlapping(array.add(8), out_value, element_width);
+    }
+    let output = thaw_arena::thaw_arena_alloc(8 + new_len * element_width, element_width.min(8));
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(new_len as u64);
+        if new_len != 0 {
+            std::ptr::copy_nonoverlapping(
+                array.add(8 + element_width),
+                output.add(8),
+                new_len * element_width,
+            );
+        }
+    }
+    output
+}
+
+#[no_mangle]
+/// `Array.prototype.splice`. Removes the elements of `array` in
+/// `[start, start + delete_count)` (both clamped to the array's bounds, as
+/// `Array.prototype.slice` clamps its own bounds) and inserts `insert_count`
+/// elements (each `element_width` bytes, read consecutively from `values`)
+/// in their place, returning a fresh buffer with the spliced contents. The
+/// removed elements are written to a second freshly allocated array buffer,
+/// whose pointer is written to `*out_removed` (null on allocation failure,
+/// matching the overall null-on-failure return).
+///
+/// # Safety
+///
+/// `array` must be null or point to a readable Thaw array whose elements
+/// occupy `element_width` bytes. `values` must be readable for
+/// `insert_count * element_width` bytes, `out_removed` must be writable for
+/// one pointer, and `element_width` must be nonzero.
+pub unsafe extern "C" fn thaw_array_splice(
+    array: *const u8,
+    element_width: usize,
+    start: f64,
+    delete_count: f64,
+    values: *const u8,
+    insert_count: usize,
+    out_removed: *mut *mut u8,
+) -> *mut u8 {
+    let old_len = unsafe { native_array_length(array) }.unwrap_or(0);
+    let start = relative_array_index(start, old_len);
+    let delete_count = if delete_count.is_nan() { 0.0 } else { delete_count.max(0.0) };
+    let delete_count = (delete_count as usize).min(old_len - start);
+
+    let removed = thaw_arena::thaw_arena_alloc(8 + delete_count * element_width, element_width.min(8));
+    if removed.is_null() {
+        unsafe { out_removed.write(std::ptr::null_mut()) };
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        removed.cast::<u64>().write(delete_count as u64);
+        if delete_count != 0 {
+            std::ptr::copy_nonoverlapping(
+                array.add(8 + start * element_width),
+                removed.add(8),
+                delete_count * element_width,
+            );
+        }
+        out_removed.write(removed);
+    }
+
+    let new_len = old_len - delete_count + insert_count;
+    let Some(payload_bytes) = new_len.checked_mul(element_width) else {
+        return std::ptr::null_mut();
+    };
+    let output = thaw_arena::thaw_arena_alloc(8 + payload_bytes, element_width.min(8));
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(new_len as u64);
+        if start != 0 {
+            std::ptr::copy_nonoverlapping(array.add(8), output.add(8), start * element_width);
+        }
+        if insert_count != 0 {
+            std::ptr::copy_nonoverlapping(
+                values,
+                output.add(8 + start * element_width),
+                insert_count * element_width,
+            );
+        }
+        let tail_start = start + delete_count;
+        let tail_len = old_len - tail_start;
+        if tail_len != 0 {
+            std::ptr::copy_nonoverlapping(
+                array.add(8 + tail_start * element_width),
+                output.add(8 + (start + insert_count) * element_width),
+                tail_len * element_width,
+            );
+        }
+    }
+    output
+}
+
 unsafe fn native_array_slots(array: *mut u8) -> Option<&'static mut [u64]> {
     let length = unsafe { native_array_length(array) }?;
     Some(unsafe { std::slice::from_raw_parts_mut(array.add(8).cast::<u64>(), length) })

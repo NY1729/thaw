@@ -180,6 +180,7 @@ impl<'a> FnLowerer<'a> {
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
                 | "toSpliced" | "at" | "with" | "flat" | "flatMap" | "map" | "filter"
                 | "forEach" | "slice" | "copyWithin" | "fill" | "reverse" | "join"
+                | "push" | "pop" | "shift" | "unshift" | "splice"
                 | "indexOf" | "lastIndexOf" | "includes" | "startsWith" | "endsWith"
                 | "toString" | "valueOf"
                 | "getTime" | "setTime" | "toISOString"
@@ -2962,6 +2963,123 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_array_reverse".to_string())),
                         vec![receiver],
                     ));
+                }
+                if property.sym == *"pop" || property.sym == *"shift" {
+                    if !call.args.is_empty() {
+                        return Err(format!("native `.{}()` expects no arguments", property.sym));
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if !matches!(receiver_type, HirType::Array(_)) {
+                        return Err(format!(
+                            "`.{}()` requires a homogeneous array, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    }
+                    let runtime = if property.sym == *"pop" {
+                        "__thaw_array_pop"
+                    } else {
+                        "__thaw_array_shift"
+                    };
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(runtime.to_string())),
+                        vec![receiver],
+                    ));
+                }
+                if property.sym == *"push" || property.sym == *"unshift" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &receiver_type else {
+                        return Err(format!(
+                            "`.{}()` requires a homogeneous array, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    };
+                    let element = element.as_ref().clone();
+                    let label = if property.sym == *"push" { "push" } else { "unshift" };
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, &format!("Array.{label}"))?;
+                    for value in &arguments {
+                        self.expect_type(&element, value, "array push/unshift value")?;
+                    }
+                    let receiver_name = format!("__thaw_{label}_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(receiver_name.clone(), receiver_type.clone());
+                    let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    let mut call_arguments = vec![HirExpr::Var(receiver_name)];
+                    for (position, value) in arguments.into_iter().enumerate() {
+                        let name = format!("__thaw_{label}_value_{position}_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), element.clone());
+                        call_arguments.push(HirExpr::Var(name.clone()));
+                        bindings.push((name, element.clone(), value));
+                    }
+                    let runtime = if property.sym == *"push" {
+                        "__thaw_array_push"
+                    } else {
+                        "__thaw_array_unshift"
+                    };
+                    let result =
+                        HirExpr::Call(Box::new(HirExpr::Var(runtime.to_string())), call_arguments);
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"splice" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &receiver_type else {
+                        return Err(format!(
+                            "`.splice()` requires a homogeneous array, got {receiver_type:?}"
+                        ));
+                    };
+                    let element = element.as_ref().clone();
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.splice")?;
+                    let mut arguments = arguments.into_iter();
+                    let start = match arguments.next() {
+                        Some(value) => self.coerce_primitive_to_number(value)?,
+                        None => HirExpr::Lit(HirLit::F64(0.0)),
+                    };
+                    let delete_count = match arguments.next() {
+                        Some(value) => self.coerce_primitive_to_number(value)?,
+                        None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                    };
+                    let items: Vec<HirExpr> = arguments.collect();
+                    for item in &items {
+                        self.expect_type(&element, item, "splice item")?;
+                    }
+                    let receiver_name = format!("__thaw_splice_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(receiver_name.clone(), receiver_type.clone());
+                    let start_name = format!("__thaw_splice_start_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(start_name.clone(), HirType::F64);
+                    let delete_name = format!("__thaw_splice_delete_count_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(delete_name.clone(), HirType::F64);
+                    let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((start_name.clone(), HirType::F64, start));
+                    bindings.push((delete_name.clone(), HirType::F64, delete_count));
+                    let mut call_arguments = vec![
+                        HirExpr::Var(receiver_name),
+                        HirExpr::Var(start_name),
+                        HirExpr::Var(delete_name),
+                    ];
+                    for (position, item) in items.into_iter().enumerate() {
+                        let name = format!("__thaw_splice_item_{position}_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), element.clone());
+                        call_arguments.push(HirExpr::Var(name.clone()));
+                        bindings.push((name, element.clone(), item));
+                    }
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_splice".to_string())),
+                        call_arguments,
+                    );
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"join" {
                     let receiver = self.lower_expr(&member.obj)?;
