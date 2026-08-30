@@ -130,6 +130,41 @@ fn installed_npm_layout_registers_wildcard_subpath_artifacts() {
 }
 
 #[test]
+fn installed_package_inlines_named_function_reexports() {
+    let scratch = temp_registry("installed-dts-reexport-scratch");
+    let registry = temp_registry("installed-dts-reexport-registry");
+    let package = scratch.join("node_modules/parser-kit");
+    fs::create_dir_all(package.join("dist")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"parser-kit","version":"1.0.0","types":"./dist/index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/index.d.ts"),
+        "export { parse, stringify as encode } from './public-api';",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/public-api.d.ts"),
+        "export declare function parse(value: string): any;\nexport declare function stringify(value: any): string;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { parse: JSON.parse, encode: JSON.stringify };",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "parser-kit").unwrap();
+    let declarations = resolve(&registry, "parser-kit").unwrap().dts_source;
+    assert!(declarations.contains("declare function parse(value: string): any"));
+    assert!(declarations.contains("declare function encode(value: any): string"));
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn resolves_an_installed_package_subpath() {
     let registry = temp_registry("subpath");
     let dir = registry.join("math-kit/subpaths/advanced");

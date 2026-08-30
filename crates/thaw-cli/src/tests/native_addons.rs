@@ -648,6 +648,40 @@ fn registry_add_builds_and_runs_a_real_esm_package_when_enabled() {
 }
 
 #[test]
+fn registry_add_builds_and_runs_yaml_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-yaml-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "yaml@2.8.1").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { parse } from "yaml";
+                function main(): void {
+                    const args: Json = JSON.parse("[\"name: thaw\\nitems:\\n  - 20\\n  - 22\\n\"]");
+                    const value: Json = parse(args);
+                    console.log(String(value.name));
+                    console.log(Number(value.items[0]) + Number(value.items[1]));
+                }"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "thaw\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
