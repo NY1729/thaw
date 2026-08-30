@@ -2492,6 +2492,10 @@ primitive conversion calls, `.length`, fixed-result string/number/array methods,
 `Math` numeric calls, `Array.isArray`, and serializable-value `JSON.stringify`.
 Nullable `T | null` values and nullable collection elements use the same typed
 N-API constructor, method, and property path while preserving `null` in both directions.
+Optional `T | undefined` and nullish `T | null | undefined` values use a
+typed-only reserved JSON sentinel, preserving `undefined` across constructors,
+methods, properties, arrays, tuples, and fixed objects. Ordinary JSON-facing
+APIs retain their existing `undefined`-to-`null` behavior.
 Trailing optional method parameters
 generate every callable arity from the required prefix through the complete
 signature. Number-typed rest
