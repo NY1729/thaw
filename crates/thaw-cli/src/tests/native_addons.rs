@@ -687,7 +687,7 @@ fn registry_add_builds_and_runs_yaml_when_enabled() {
 }
 
 #[test]
-fn registry_add_builds_and_runs_date_fns_subpath_when_enabled() {
+fn registry_add_builds_and_runs_date_fns_root_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
@@ -699,7 +699,7 @@ fn registry_add_builds_and_runs_date_fns_subpath_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
-        r#"import { weeksToDays } from "date-fns/weeksToDays";
+        r#"import { weeksToDays } from "date-fns";
                 function main(): void {
                     console.log(weeksToDays(6));
                 }"#,

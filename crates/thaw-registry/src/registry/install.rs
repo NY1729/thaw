@@ -623,14 +623,14 @@ fn dts_source_with_reexported_functions(
     let module = thaw_parser::parse_typescript(entry_source)?;
     let mut output = entry_source.to_string();
     let mut seen = std::collections::BTreeSet::new();
-    for item in module.body {
+    for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
         };
         if export.type_only {
             continue;
         }
-        let Some(source) = export.src else {
+        let Some(source) = &export.src else {
             continue;
         };
         let Some(source) = source.value.as_str() else {
@@ -639,7 +639,7 @@ fn dts_source_with_reexported_functions(
         let Some(target_path) = declaration_reexport_path(entry_path, source) else {
             continue;
         };
-        for specifier in export.specifiers {
+        for specifier in &export.specifiers {
             let ExportSpecifier::Named(named) = specifier else {
                 continue;
             };
@@ -683,7 +683,133 @@ fn dts_source_with_reexported_functions(
             }
         }
     }
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) = item else {
+            continue;
+        };
+        if export.type_only {
+            continue;
+        }
+        let Some(source) = export.src.value.as_str() else {
+            continue;
+        };
+        let Some(target_path) = declaration_reexport_path(entry_path, source) else {
+            continue;
+        };
+        let mut visited = std::collections::BTreeSet::new();
+        let declarations = all_reexported_function_declarations(&target_path, &mut visited)?;
+        let names = declarations
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !seen.contains(name))
+            .collect::<std::collections::BTreeSet<_>>();
+        for (name, snippet) in declarations {
+            if names.contains(&name) {
+                output.push('\n');
+                output.push_str(&snippet);
+            }
+        }
+        seen.extend(names);
+    }
     Ok(output)
+}
+
+fn all_reexported_function_declarations(
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Vec<(String, String)>, String> {
+    use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    if !visited.insert(path.to_path_buf()) {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read re-exported declarations `{}`: {error}",
+            path.display()
+        )
+    })?;
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let mut declarations = Vec::new();
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = item {
+            if let Decl::Fn(function) = &declaration.decl {
+                declarations.push((
+                    function.ident.sym.to_string(),
+                    source_map
+                        .span_to_snippet(declaration.span())
+                        .map_err(|error| {
+                            format!(
+                                "failed to read declaration for `{}`: {error:?}",
+                                function.ident.sym
+                            )
+                        })?,
+                ));
+            }
+        }
+    }
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) if !export.type_only => {
+                if let Some(source) = export.src.value.as_str() {
+                    if let Some(target) = declaration_reexport_path(path, source) {
+                        declarations.extend(all_reexported_function_declarations(
+                            &target, visited,
+                        )?);
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export))
+                if !export.type_only && export.src.is_some() =>
+            {
+                let source = export.src.as_ref().unwrap();
+                let Some(source) = source.value.as_str() else {
+                    continue;
+                };
+                let Some(target) = declaration_reexport_path(path, source) else {
+                    continue;
+                };
+                for specifier in &export.specifiers {
+                    let ExportSpecifier::Named(named) = specifier else {
+                        continue;
+                    };
+                    if named.is_type_only {
+                        continue;
+                    }
+                    let export_name = |name: &ModuleExportName| match name {
+                        ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                        ModuleExportName::Str(_) => None,
+                    };
+                    let Some(original) = export_name(&named.orig) else {
+                        continue;
+                    };
+                    let exported = named
+                        .exported
+                        .as_ref()
+                        .and_then(export_name)
+                        .unwrap_or_else(|| original.clone());
+                    let mut named_visited = std::collections::BTreeSet::new();
+                    for mut snippet in reexported_function_declarations(
+                        &target,
+                        &original,
+                        &mut named_visited,
+                    )? {
+                        if exported != original {
+                            snippet = snippet.replacen(
+                                &format!("function {original}"),
+                                &format!("function {exported}"),
+                                1,
+                            );
+                        }
+                        declarations.push((exported.clone(), snippet));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(declarations)
 }
 
 fn reexported_function_declarations(

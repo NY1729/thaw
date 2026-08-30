@@ -163,7 +163,7 @@ fn installed_package_inlines_named_function_reexports() {
     .unwrap();
     fs::write(
         package.join("dist/index.d.ts"),
-        "export { parse, stringify as encode } from './public-api';\nexport { loop } from './cycle-a';",
+        "export { parse, stringify as encode } from './public-api';\nexport { loop } from './cycle-a';\nexport * from './all';",
     )
     .unwrap();
     fs::write(
@@ -192,6 +192,16 @@ fn installed_package_inlines_named_function_reexports() {
     )
     .unwrap();
     fs::write(
+        package.join("dist/all.d.ts"),
+        "export declare function decode(value: string): any;\nexport * from './all-cycle';",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/all-cycle.d.ts"),
+        "export * from './all';",
+    )
+    .unwrap();
+    fs::write(
         package.join("index.js"),
         "module.exports = { parse: JSON.parse, encode: JSON.stringify };",
     )
@@ -201,6 +211,7 @@ fn installed_package_inlines_named_function_reexports() {
     let declarations = resolve(&registry, "parser-kit").unwrap().dts_source;
     assert!(declarations.contains("declare function parse(value: string): any"));
     assert!(declarations.contains("declare function encode(value: any): string"));
+    assert!(declarations.contains("declare function decode(value: string): any"));
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
