@@ -146,6 +146,22 @@ fn live_import_rewrite_respects_shadowing_and_shorthand_properties() {
     assert!(rewritten.contains("return { value: __thaw_esm_import_0[\"value\"] }.value + before"));
 }
 
+#[test]
+fn live_import_rewrite_respects_function_local_shadowing() {
+    let rewritten = rewrite_esm_to_commonjs(
+        "import { stringify } from './stringify.js';\n\
+         function stringifyCollection(value) {\n\
+           const stringify = value ? first : second;\n\
+           return stringify(value);\n\
+         }",
+    )
+    .unwrap();
+    assert!(
+        rewritten.contains("return stringify(value);"),
+        "{rewritten}"
+    );
+}
+
 /// The bundle isn't just plausible-looking text: an ESM main file
 /// importing from an ESM sibling file must actually run correctly
 /// through the real QuickJS-NG engine, exactly like the equivalent

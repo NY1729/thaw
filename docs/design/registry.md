@@ -1060,8 +1060,10 @@ package自身が同梱する型定義について、相対named re-exportの参�
 `export declare function` overloadをpackage surfaceへ追記する。alias re-exportは公開名へ
 置換し、外部package、型だけのexport、class／value re-exportには推測で手を広げない。
 offline fixtureで通常名とaliasを検証し、opt-in npm E2Eでは実`yaml`を取得して単一実行
-ファイル化し、registry削除後にnested YAMLをparseして`thaw`と`42`を得る。
-`yaml.stringify`はembedded QuickJSのstack上限へ達するため、別の互換性課題として残す。
+ファイル化し、registry削除後にnested YAMLのparseとstringifyを実行する。
+当初のstack超過は容量不足ではなく、importした`stringify`と同名のfunction-local bindingを
+live binding変換が置換した無限再帰だった。function body直下のlexical bindingもshadowingとして
+保持し、runtimeのstack保護設定は変更しない。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

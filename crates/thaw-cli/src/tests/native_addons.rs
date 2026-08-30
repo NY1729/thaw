@@ -660,12 +660,14 @@ fn registry_add_builds_and_runs_yaml_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
-        r#"import { parse } from "yaml";
+        r#"import { parse, stringify } from "yaml";
                 function main(): void {
                     const args: Json = JSON.parse("[\"name: thaw\\nitems:\\n  - 20\\n  - 22\\n\"]");
                     const value: Json = parse(args);
                     console.log(String(value.name));
                     console.log(Number(value.items[0]) + Number(value.items[1]));
+                    const output: Json = stringify(JSON.parse("[{\"enabled\":true}]"));
+                    console.log(String(output));
                 }"#,
     )
     .unwrap();
@@ -677,7 +679,10 @@ fn registry_add_builds_and_runs_yaml_when_enabled() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "thaw\n42\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "thaw\n42\nenabled: true\n\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
