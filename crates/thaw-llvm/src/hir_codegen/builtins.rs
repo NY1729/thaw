@@ -22,6 +22,30 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| format!("`{fn_name}` did not return a value"))
     }
 
+    /// Like `compile_single_arg_call`, but for a function whose one
+    /// argument is an array/tuple *handle* that the callee itself expects
+    /// as a raw `[length][elem...]` buffer -- unwraps it first.
+    fn compile_single_array_arg_call(
+        &mut self,
+        fn_name: &str,
+        args: &[HirExpr],
+        source_name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [arg] = args else {
+            return Err(format!("`{source_name}` expects exactly one argument"));
+        };
+        let handle = self.compile_expr(arg)?.into_pointer_value();
+        let buffer = self.compile_array_data(handle)?;
+        let function = self.module.get_function(fn_name).unwrap();
+        let call = self
+            .builder
+            .build_call(function, &[buffer.into()], "call")
+            .map_err(|e| e.to_string())?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| format!("`{fn_name}` did not return a value"))
+    }
+
     fn compile_i8_predicate_call(
         &mut self,
         fn_name: &str,

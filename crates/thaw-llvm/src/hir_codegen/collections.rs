@@ -1,4 +1,75 @@
 impl<'ctx> HirCompiler<'ctx> {
+    /// An `HirType::Array`/`Tuple` value is a pointer to a one-word "handle"
+    /// cell holding the *current* raw `[length][elem...]` buffer pointer,
+    /// not the buffer itself -- this indirection is what lets `.push()`/
+    /// `.pop()`/`.shift()`/`.unshift()`/`.splice()` grow or shrink an array
+    /// by replacing the buffer the handle points to, while every alias of
+    /// the same array (another variable, a field, a captured closure
+    /// value) shares the same handle pointer and so observes the new
+    /// buffer on its next read, matching JavaScript's array reference
+    /// semantics. Every array/tuple-typed `HirExpr` compiles to a handle;
+    /// `compile_array_data` unwraps one to the buffer a specific operation
+    /// actually needs to read/write, and `compile_array_wrap` allocates a
+    /// fresh handle around a freshly built buffer.
+    fn compile_array_wrap(
+        &mut self,
+        buffer: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let handle = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[i64_type.const_int(8, false).into(), i64_type.const_int(8, false).into()],
+                "array_handle",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return an array handle")?
+            .into_pointer_value();
+        self.builder
+            .build_store(handle, buffer)
+            .map_err(|error| error.to_string())?;
+        Ok(handle)
+    }
+
+    /// Loads the current raw `[length][elem...]` buffer pointer out of an
+    /// array/tuple handle. See `compile_array_wrap`.
+    fn compile_array_data(
+        &mut self,
+        handle: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        self.builder
+            .build_load(ptr_type, handle, "array_data")
+            .map_err(|error| error.to_string())
+            .map(BasicValueEnum::into_pointer_value)
+    }
+
+    /// Like `compile_array_wrap`, but for a runtime call that signals
+    /// failure with a null buffer pointer (regex `exec`/`split`/`match`/
+    /// `matchAll`, checked afterward via `__thaw_array_is_null`) -- wrapping
+    /// unconditionally would turn that null into a handle pointing at a
+    /// cell holding null, which is never itself null, breaking that check.
+    /// Only wraps when `buffer` is non-null; a null buffer passes through
+    /// as a null "handle" so the null check still means what it always did.
+    fn compile_array_wrap_nullable(
+        &mut self,
+        buffer: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let handle = self.compile_array_wrap(buffer)?;
+        let is_null = self
+            .builder
+            .build_is_null(buffer, "array_wrap_is_null")
+            .map_err(|error| error.to_string())?;
+        let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+        self.builder
+            .build_select(is_null, null_ptr, handle, "array_wrap_nullable")
+            .map_err(|error| error.to_string())
+            .map(|value| value.into_pointer_value())
+    }
+
     fn compile_array_lit(&mut self, elems: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let element_bytes = elems
             .iter()
@@ -43,7 +114,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
         }
 
-        Ok(base_ptr.into())
+        Ok(self.compile_array_wrap(base_ptr)?.into())
     }
 
     fn compile_array_alloc(
@@ -93,7 +164,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(result, length)
             .map_err(|error| error.to_string())?;
-        Ok(result.into())
+        Ok(self.compile_array_wrap(result)?.into())
     }
 
     /// Evaluates each array part once from left to right and copies their
@@ -107,7 +178,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut arrays = Vec::with_capacity(parts.len());
         let mut total = i64_type.const_zero();
         for part in parts {
-            let array = self.compile_expr(part)?.into_pointer_value();
+            let handle = self.compile_expr(part)?.into_pointer_value();
+            let array = self.compile_array_data(handle)?;
             let length = self
                 .builder
                 .build_load(i64_type, array, "spread_length")
@@ -191,7 +263,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_int_add(destination_offset, bytes, "next_spread_destination")
                 .map_err(|error| error.to_string())?;
         }
-        Ok(result.into())
+        Ok(self.compile_array_wrap(result)?.into())
     }
 
     /// Computes the address of `array[index]` (past the length header).
@@ -200,7 +272,8 @@ impl<'ctx> HirCompiler<'ctx> {
         array: &HirExpr,
         index: &HirExpr,
     ) -> Result<PointerValue<'ctx>, String> {
-        let arr_ptr = self.compile_expr(array)?.into_pointer_value();
+        let handle = self.compile_expr(array)?.into_pointer_value();
+        let arr_ptr = self.compile_array_data(handle)?;
         let idx_val = self.compile_expr(index)?.into_float_value();
 
         let i64_type = self.context.i64_type();

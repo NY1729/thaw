@@ -9,6 +9,18 @@ use std::sync::mpsc;
 
 static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// A settled `Promise<Array<_>>`'s (or `Promise<Tuple<_>>`'s) own resolved
+/// value is an array/tuple handle - a one-word cell holding the raw
+/// `[i64 len][elem...]` buffer address - matching the indirection
+/// `wrap_array_handle` applies in `promises.rs` and `compile_array_wrap`
+/// applies at the LLVM codegen boundary. `thaw_runtime_run_until_resolved`
+/// only unwraps the generic "resolve slot" layer, so tests that assert on
+/// the buffer's own bytes need this one extra dereference.
+fn resolved_array_buffer(promise: *const ThawPromise) -> *const u64 {
+    let handle = unsafe { *thaw_runtime_run_until_resolved(promise).cast::<*const u64>() };
+    unsafe { *handle.cast::<*const u64>() }
+}
+
 #[test]
 fn formats_numbers_with_javascript_string_boundaries() {
     let cases = [
@@ -462,7 +474,7 @@ fn promise_all_preserves_input_order_and_resolves_empty_inputs() {
     );
     thaw_runtime_run_until_idle();
     assert_eq!(thaw_promise_state(joined), 1);
-    let result = unsafe { *thaw_runtime_run_until_resolved(joined).cast::<*const u64>() };
+    let result = resolved_array_buffer(joined);
     assert_eq!(unsafe { result.read() }, 2);
     assert_eq!(f64::from_bits(unsafe { result.add(1).read() }), 3.0);
     assert_eq!(f64::from_bits(unsafe { result.add(2).read() }), 7.0);
@@ -470,7 +482,7 @@ fn promise_all_preserves_input_order_and_resolves_empty_inputs() {
 
     let empty = unsafe { thaw_promise_all_f64(std::ptr::null(), 0) };
     assert_eq!(thaw_promise_state(empty), 1);
-    let result = unsafe { *thaw_runtime_run_until_resolved(empty).cast::<*const u64>() };
+    let result = resolved_array_buffer(empty);
     assert_eq!(unsafe { result.read() }, 0);
     unsafe { thaw_promise_destroy(empty) };
 }
@@ -491,7 +503,7 @@ fn promise_all_typed_copies_position_sizes_and_deduplicates_handles() {
     );
     assert_eq!(thaw_promise_resolve(flag, &flag_value), 1);
     thaw_runtime_run_until_idle();
-    let result = unsafe { *thaw_runtime_run_until_resolved(joined).cast::<*const u64>() };
+    let result = resolved_array_buffer(joined);
     assert_eq!(unsafe { result.read() }, 3);
     assert_eq!(unsafe { result.add(1).read() }, 1);
     assert_eq!(unsafe { result.add(2).read() }, pointer_value);
@@ -515,7 +527,7 @@ fn promise_all_typed_preserves_wide_values() {
         1
     );
     thaw_runtime_run_until_idle();
-    let result = unsafe { *thaw_runtime_run_until_resolved(joined).cast::<*const u8>() };
+    let result = resolved_array_buffer(joined).cast::<u8>();
     assert_eq!(unsafe { result.cast::<u64>().read() }, 2);
     assert_eq!(
         unsafe { result.add(8).cast::<[u64; 2]>().read() },
@@ -689,7 +701,7 @@ fn promise_all_settled_preserves_order_and_turns_rejections_into_values() {
         1
     );
     thaw_runtime_run_until_idle();
-    let result = unsafe { *thaw_runtime_run_until_resolved(settled).cast::<*const u64>() };
+    let result = resolved_array_buffer(settled);
     assert_eq!(unsafe { result.read() }, 3);
     let first = unsafe { result.add(1).read() as *const u64 };
     let second = unsafe { result.add(2).read() as *const u64 };
@@ -725,7 +737,7 @@ fn promise_all_settled_preserves_wide_values() {
     let value = [3u64, 33];
     assert_eq!(thaw_promise_resolve(fulfilled, value.as_ptr().cast()), 1);
     thaw_runtime_run_until_idle();
-    let result = unsafe { *thaw_runtime_run_until_resolved(settled).cast::<*const u64>() };
+    let result = resolved_array_buffer(settled);
     let object = unsafe { result.add(1).read() as *const u8 };
     assert_eq!(
         unsafe { object.cast::<u64>().read() as *const u8 },
@@ -743,7 +755,7 @@ fn promise_all_settled_preserves_wide_values() {
 fn promise_all_settled_resolves_an_empty_input() {
     let settled = unsafe { thaw_promise_all_settled(std::ptr::null(), 0, size_of::<f64>()) };
     assert_eq!(thaw_promise_state(settled), 1);
-    let result = unsafe { *thaw_runtime_run_until_resolved(settled).cast::<*const u64>() };
+    let result = resolved_array_buffer(settled);
     assert_eq!(unsafe { result.read() }, 0);
     unsafe { thaw_promise_destroy(settled) };
 }
@@ -776,7 +788,7 @@ fn promise_all_deduplicates_repeated_handles() {
     );
     thaw_runtime_run_until_idle();
     assert_eq!(thaw_promise_state(joined), 1);
-    let result = unsafe { *thaw_runtime_run_until_resolved(joined).cast::<*const u64>() };
+    let result = resolved_array_buffer(joined);
     assert_eq!(f64::from_bits(unsafe { result.add(1).read() }), 9.0);
     assert_eq!(f64::from_bits(unsafe { result.add(2).read() }), 9.0);
     unsafe { thaw_promise_destroy(joined) };

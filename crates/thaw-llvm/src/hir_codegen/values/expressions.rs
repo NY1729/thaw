@@ -203,7 +203,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::ArrayConcat(parts, element) => self.compile_array_concat(parts, element),
             HirExpr::ArrayAlloc(length, element) => self.compile_array_alloc(length, element),
             HirExpr::ArraySetLen(array, length, _) => {
-                let array = self.compile_expr(array)?.into_pointer_value();
+                let handle = self.compile_expr(array)?.into_pointer_value();
+                let buffer = self.compile_array_data(handle)?;
                 let length = self.compile_expr(length)?.into_float_value();
                 let length = self
                     .builder
@@ -214,9 +215,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 self.builder
-                    .build_store(array, length)
+                    .build_store(buffer, length)
                     .map_err(|error| error.to_string())?;
-                Ok(array.into())
+                // The buffer shrinks in place; the handle (this
+                // expression's own value, same reference as before) is
+                // unchanged.
+                Ok(handle.into())
             }
             HirExpr::Index(arr, idx) => {
                 let elem_ptr = self.compile_element_ptr(arr, idx)?;
@@ -239,7 +243,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(val)
             }
             HirExpr::ArrayLen(arr) => {
-                let arr_ptr = self.compile_expr(arr)?.into_pointer_value();
+                let handle = self.compile_expr(arr)?.into_pointer_value();
+                let arr_ptr = self.compile_array_data(handle)?;
                 let len = self
                     .builder
                     .build_load(self.context.i64_type(), arr_ptr, "arrlen_i64")
