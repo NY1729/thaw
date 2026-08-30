@@ -10,7 +10,9 @@ fn napi_constructor_export_name(symbol: &str) -> Option<&str> {
 fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
     match ty {
         HirType::F64 | HirType::Str | HirType::Bool | HirType::Json => true,
-        HirType::Nullable(payload) => dynamic_json_collection_element_supported(payload),
+        HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+            dynamic_json_collection_element_supported(payload)
+        }
         HirType::Array(element) => dynamic_json_collection_element_supported(element),
         HirType::Tuple(elements) => elements
             .iter()
@@ -23,13 +25,266 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
 }
 
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_napi_undefined_json(&mut self) -> Result<BasicValueEnum<'ctx>, String> {
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_object_new").unwrap(),
+                &[],
+                "napi_undefined_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        let key = self
+            .builder
+            .build_global_string_ptr("$__thaw_napi_undefined$", "napi_undefined_key")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_json_object_set_bool")
+                    .unwrap(),
+                &[
+                    json.into(),
+                    key.as_pointer_value().into(),
+                    self.context.i8_type().const_int(1, false).into(),
+                ],
+                "set_napi_undefined_tag",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(json)
+    }
+
+    fn compile_json_is_napi_undefined(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let key = self
+            .builder
+            .build_global_string_ptr("$__thaw_napi_undefined$", "napi_undefined_test_key")
+            .map_err(|error| error.to_string())?;
+        let tagged = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_has_own").unwrap(),
+                &[json.into(), key.as_pointer_value().into()],
+                "json_is_napi_undefined",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_has_own returned no value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                tagged,
+                self.context.i8_type().const_zero(),
+                "json_is_napi_undefined_bool",
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_typed_dynamic_tagged_argument(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        tagged: StructValue<'ctx>,
+        payload_type: &HirType,
+        three_state: bool,
+    ) -> Result<(), String> {
+        let tag = self
+            .builder
+            .build_extract_value(tagged, 0, "napi_argument_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(tagged, 1, "napi_argument_payload")
+            .map_err(|error| error.to_string())?;
+        let present = if three_state {
+            self.builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.context.i8_type().const_zero(),
+                    "napi_argument_has_value",
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            tag
+        };
+        let function = self.current_function();
+        let value_block = self.context.append_basic_block(function, "napi_argument_value");
+        let absent_block = self.context.append_basic_block(function, "napi_argument_absent");
+        let done = self.context.append_basic_block(function, "napi_argument_done");
+        self.builder
+            .build_conditional_branch(present, value_block, absent_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(value_block);
+        self.compile_json_array_push_native_with_undefined(array, payload, payload_type, true)?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(absent_block);
+        let absent = if three_state {
+            let null_block = self.context.append_basic_block(function, "napi_argument_null");
+            let undefined_block = self
+                .context
+                .append_basic_block(function, "napi_argument_undefined");
+            let absent_done = self
+                .context
+                .append_basic_block(function, "napi_argument_absent_done");
+            let is_null = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.context.i8_type().const_int(1, false),
+                    "napi_argument_is_null",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(is_null, null_block, undefined_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(null_block);
+            let null = self.compile_json_null()?;
+            self.builder
+                .build_unconditional_branch(absent_done)
+                .map_err(|error| error.to_string())?;
+            let null_end = self.builder.get_insert_block().ok_or("lost N-API null block")?;
+            self.builder.position_at_end(undefined_block);
+            let undefined = self.compile_napi_undefined_json()?;
+            self.builder
+                .build_unconditional_branch(absent_done)
+                .map_err(|error| error.to_string())?;
+            let undefined_end = self
+                .builder
+                .get_insert_block()
+                .ok_or("lost N-API undefined block")?;
+            self.builder.position_at_end(absent_done);
+            let result = self
+                .builder
+                .build_phi(self.context.ptr_type(AddressSpace::default()), "napi_absent_json")
+                .map_err(|error| error.to_string())?;
+            result.add_incoming(&[(&null, null_end), (&undefined, undefined_end)]);
+            result.as_basic_value()
+        } else {
+            self.compile_napi_undefined_json()?
+        };
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_json_array_push_json")
+                    .unwrap(),
+                &[array.into(), absent.into()],
+                "push_napi_absent_argument",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
     fn compile_typed_dynamic_argument(
         &mut self,
         array: BasicValueEnum<'ctx>,
         value: BasicValueEnum<'ctx>,
         ty: &HirType,
     ) -> Result<(), String> {
-        self.compile_json_array_push_native(array, value, ty)
+        match ty {
+            HirType::Optional(payload) => self.compile_typed_dynamic_tagged_argument(
+                array,
+                value.into_struct_value(),
+                payload,
+                false,
+            ),
+            HirType::Nullish(payload) => self.compile_typed_dynamic_tagged_argument(
+                array,
+                value.into_struct_value(),
+                payload,
+                true,
+            ),
+            HirType::Array(element) => {
+                let json = self.compile_native_array_to_json_with_undefined(
+                    value.into_pointer_value(),
+                    element,
+                    true,
+                )?;
+                self.compile_json_array_push_native(array, json, &HirType::Json)
+            }
+            HirType::Tuple(elements) => {
+                let json = self.compile_native_tuple_to_json_with_undefined(
+                    value.into_pointer_value(),
+                    elements,
+                    true,
+                )?;
+                self.compile_json_array_push_native(array, json, &HirType::Json)
+            }
+            HirType::Object(_) => {
+                let json = self.compile_native_object_to_json_with_undefined(
+                    value.into_pointer_value(),
+                    ty,
+                    true,
+                )?;
+                self.compile_json_array_push_native(array, json, &HirType::Json)
+            }
+            _ => self.compile_json_array_push_native(array, value, ty),
+        }
+    }
+
+    fn compile_napi_optional_result_container(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+    ) -> Result<(BasicValueEnum<'ctx>, PointerValue<'ctx>), String> {
+        let object = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_object_new").unwrap(),
+                &[],
+                "napi_optional_result_object",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        let key = self
+            .builder
+            .build_global_string_ptr("value", "napi_optional_result_key")
+            .map_err(|error| error.to_string())?
+            .as_pointer_value();
+        let is_undefined = self.compile_json_is_napi_undefined(json)?;
+        let function = self.current_function();
+        let absent = self.context.append_basic_block(function, "napi_result_undefined");
+        let present = self.context.append_basic_block(function, "napi_result_present");
+        let done = self.context.append_basic_block(function, "napi_result_optional_done");
+        self.builder
+            .build_conditional_branch(is_undefined, absent, present)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(absent);
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(present);
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_json_object_set_json")
+                    .unwrap(),
+                &[object.into(), key.into(), json.into()],
+                "set_napi_optional_result",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok((object, key))
     }
 
     fn compile_typed_dynamic_result(
@@ -42,20 +297,32 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json => Ok(json),
+            HirType::Optional(payload) => {
+                let (object, key) = self.compile_napi_optional_result_container(json)?;
+                self.compile_json_to_optional_field(object, key, json, payload, false)
+            }
             HirType::Nullable(payload) => self.compile_json_to_nullable_field(json, payload),
-            HirType::Array(element) if **element == HirType::F64 => self
-                .builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_json_to_number_array")
-                        .unwrap(),
-                    &[json.into()],
-                    "dynamic_number_array_result",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Nullish(payload) => {
+                let (object, key) = self.compile_napi_optional_result_container(json)?;
+                self.compile_json_to_nullish_field(object, key, json, payload)
+            }
+            HirType::Array(element) if **element == HirType::F64 => {
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_json_to_number_array")
+                            .unwrap(),
+                        &[json.into()],
+                        "dynamic_number_array_result",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string())?
+                    .into_pointer_value();
+                Ok(self.compile_array_wrap(result)?.into())
+            }
             HirType::Array(element) if dynamic_json_collection_element_supported(element) => {
                 self.compile_json_to_native_array(json, element)
             }
@@ -459,7 +726,8 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let callable = self.compile_expr(callable)?;
         let json_args = self.compile_expr(json_args)?;
-        let handles = self.compile_expr(handles)?;
+        let handles = self.compile_expr(handles)?.into_pointer_value();
+        let handles = self.compile_array_data(handles)?;
         let text = self
             .builder
             .build_call(
@@ -638,7 +906,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_call(
                     self.module
-                        .get_function("thaw_napi_construct_handle_result")
+                        .get_function("thaw_napi_construct_handle_typed_result")
                         .unwrap(),
                     &[constructor.into(), args_json.into()],
                     "napi_construct_result",
@@ -716,7 +984,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let backend = match signature.backend {
             DynamicBackend::QuickJs => "thaw_js_call_result",
-            DynamicBackend::Napi => "thaw_napi_call_result",
+            DynamicBackend::Napi => "thaw_napi_call_typed_result",
         };
         let json =
             self.compile_json_backend_values(name.as_pointer_value().into(), array, backend)?;
@@ -805,7 +1073,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_napi_set_property_result")
+                    .get_function("thaw_napi_set_property_typed_result")
                     .unwrap(),
                 &[
                     receiver.into(),
@@ -893,7 +1161,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_napi_get_property_result")
+                    .get_function("thaw_napi_get_property_typed_result")
                     .unwrap(),
                 &[receiver.into(), property.as_pointer_value().into()],
                 "napi_getter_result",
@@ -1028,7 +1296,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_call(
                     self.module
-                        .get_function("thaw_napi_call_method_result")
+                        .get_function("thaw_napi_call_method_typed_result")
                         .unwrap(),
                     &[
                         receiver.into(),

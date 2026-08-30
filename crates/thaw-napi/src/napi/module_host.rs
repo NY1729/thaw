@@ -225,7 +225,13 @@ pub unsafe extern "C" fn thaw_napi_load_embedded_hex(
     }
 }
 
-fn value_from_json(env: &mut Env, json: &JsonValue) -> NapiValue {
+const TYPED_UNDEFINED_KEY: &str = "$__thaw_napi_undefined$";
+
+fn value_from_json_with_undefined(
+    env: &mut Env,
+    json: &JsonValue,
+    preserve_undefined: bool,
+) -> NapiValue {
     match json {
         JsonValue::Null => env.alloc(Value::Null),
         JsonValue::Bool(value) => env.alloc(Value::Bool(*value)),
@@ -234,11 +240,23 @@ fn value_from_json(env: &mut Env, json: &JsonValue) -> NapiValue {
         JsonValue::Array(values) => {
             let values = values
                 .iter()
-                .map(|value| Some(value_from_json(env, value)))
+                .map(|value| {
+                    Some(value_from_json_with_undefined(
+                        env,
+                        value,
+                        preserve_undefined,
+                    ))
+                })
                 .collect();
             env.alloc(Value::Array(values))
         }
         JsonValue::Object(values) => {
+            if preserve_undefined
+                && values.len() == 1
+                && values.get(TYPED_UNDEFINED_KEY).and_then(JsonValue::as_bool) == Some(true)
+            {
+                return env.alloc(Value::Undefined);
+            }
             if values.get("type").and_then(JsonValue::as_str) == Some("Buffer") {
                 if let Some(bytes) = values.get("data").and_then(JsonValue::as_array) {
                     return env.alloc(Value::Buffer(
@@ -251,15 +269,30 @@ fn value_from_json(env: &mut Env, json: &JsonValue) -> NapiValue {
             }
             let values = values
                 .iter()
-                .map(|(key, value)| (key.clone().into(), value_from_json(env, value)))
+                .map(|(key, value)| {
+                    (
+                        key.clone().into(),
+                        value_from_json_with_undefined(env, value, preserve_undefined),
+                    )
+                })
                 .collect();
             env.alloc(Value::Object(values))
         }
     }
 }
 
-unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
+fn value_from_json(env: &mut Env, json: &JsonValue) -> NapiValue {
+    value_from_json_with_undefined(env, json, false)
+}
+
+unsafe fn json_from_value_with_undefined(
+    value: NapiValue,
+    preserve_undefined: bool,
+) -> Result<JsonValue, String> {
     Ok(match value_ref(value).map_err(|_| "invalid napi_value")? {
+        Value::Undefined if preserve_undefined => {
+            serde_json::json!({ (TYPED_UNDEFINED_KEY): true })
+        }
         Value::Undefined => JsonValue::Null,
         Value::Null => JsonValue::Null,
         Value::Bool(value) => JsonValue::Bool(*value),
@@ -272,7 +305,7 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
             values
                 .iter()
                 .map(|value| match value {
-                    Some(value) => json_from_value(*value),
+                    Some(value) => json_from_value_with_undefined(*value, preserve_undefined),
                     None => Ok(JsonValue::Null),
                 })
                 .collect::<Result<_, _>>()?,
@@ -282,7 +315,10 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
                 .iter()
                 .filter_map(|(key, value)| match key {
                     PropertyKey::String(key) => {
-                        Some(json_from_value(*value).map(|value| (key.clone(), value)))
+                        Some(
+                            json_from_value_with_undefined(*value, preserve_undefined)
+                                .map(|value| (key.clone(), value)),
+                        )
                     }
                     PropertyKey::Symbol(_) => None,
                 })
@@ -338,6 +374,10 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
     })
 }
 
+unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
+    json_from_value_with_undefined(value, false)
+}
+
 fn wait_for_promise(value: NapiValue) -> Result<NapiValue, String> {
     let state = match unsafe { value_ref(value) } {
         Ok(Value::Promise(state)) => Rc::clone(state),
@@ -377,7 +417,11 @@ fn module_file_name_for_export(name: &str) -> Option<CString> {
     })
 }
 
-unsafe fn call_impl(name: &str, args_json: &str) -> Result<String, String> {
+unsafe fn call_impl(
+    name: &str,
+    args_json: &str,
+    preserve_undefined: bool,
+) -> Result<String, String> {
     let args: Vec<JsonValue> = serde_json::from_str(args_json)
         .map_err(|error| format!("invalid argument JSON: {error}"))?;
     let function = HOST
@@ -389,7 +433,7 @@ unsafe fn call_impl(name: &str, args_json: &str) -> Result<String, String> {
     }
     let args = args
         .iter()
-        .map(|value| value_from_json(&mut env, value))
+        .map(|value| value_from_json_with_undefined(&mut env, value, preserve_undefined))
         .collect();
     let this_arg = env.alloc(Value::Undefined);
     let mut info = CallbackInfo {
@@ -407,18 +451,14 @@ unsafe fn call_impl(name: &str, args_json: &str) -> Result<String, String> {
         return Err(message);
     }
     let result = wait_for_promise(result)?;
-    serde_json::to_string(&json_from_value(result)?).map_err(|error| error.to_string())
+    serde_json::to_string(&json_from_value_with_undefined(result, preserve_undefined)?)
+        .map_err(|error| error.to_string())
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn thaw_napi_call_result(
-    name: *const c_char,
-    args: *const c_char,
-) -> ThawResult {
-    let result = text(name).and_then(|name| text(args).and_then(|args| call_impl(&name, &args)));
+fn text_result(result: Result<String, String>) -> ThawResult {
     match result {
         Ok(value) => ThawResult {
-            value: CString::new(value).unwrap().into_raw(),
+            value: CString::new(value).unwrap_or_default().into_raw(),
             error: ptr::null_mut(),
         },
         Err(error) => ThawResult {
@@ -426,6 +466,26 @@ pub unsafe extern "C" fn thaw_napi_call_result(
             error: CString::new(error).unwrap_or_default().into_raw(),
         },
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_result(
+    name: *const c_char,
+    args: *const c_char,
+) -> ThawResult {
+    text_result(text(name).and_then(|name| {
+        text(args).and_then(|args| call_impl(&name, &args, false))
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_typed_result(
+    name: *const c_char,
+    args: *const c_char,
+) -> ThawResult {
+    text_result(text(name).and_then(|name| {
+        text(args).and_then(|args| call_impl(&name, &args, true))
+    }))
 }
 
 #[no_mangle]
@@ -463,13 +523,17 @@ unsafe fn module_env_for_handle(handle: u64) -> Result<NapiEnv, String> {
     })
 }
 
-unsafe fn module_arguments(env: NapiEnv, args: *const c_char) -> Result<Vec<NapiValue>, String> {
+unsafe fn module_arguments(
+    env: NapiEnv,
+    args: *const c_char,
+    preserve_undefined: bool,
+) -> Result<Vec<NapiValue>, String> {
     let args: Vec<JsonValue> = serde_json::from_str(&text(args)?)
         .map_err(|error| format!("invalid argument JSON: {error}"))?;
     let env = env_mut(env).map_err(|_| "invalid native addon environment")?;
     Ok(args
         .iter()
-        .map(|value| value_from_json(env, value))
+        .map(|value| value_from_json_with_undefined(env, value, preserve_undefined))
         .collect())
 }
 
@@ -488,14 +552,14 @@ unsafe fn take_env_exception(env: NapiEnv) -> Result<(), String> {
     Err(message)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn thaw_napi_construct_handle_result(
+unsafe fn construct_handle_impl(
     constructor: u64,
     args: *const c_char,
+    preserve_undefined: bool,
 ) -> ThawNapiHandleResult {
     let result = (|| -> Result<u64, String> {
         let env = module_env_for_handle(constructor)?;
-        let values = module_arguments(env, args)?;
+        let values = module_arguments(env, args, preserve_undefined)?;
         let mut instance = ptr::null_mut();
         let status = napi_new_instance(
             env,
@@ -522,15 +586,31 @@ pub unsafe extern "C" fn thaw_napi_construct_handle_result(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn thaw_napi_call_method_result(
+pub unsafe extern "C" fn thaw_napi_construct_handle_result(
+    constructor: u64,
+    args: *const c_char,
+) -> ThawNapiHandleResult {
+    construct_handle_impl(constructor, args, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_construct_handle_typed_result(
+    constructor: u64,
+    args: *const c_char,
+) -> ThawNapiHandleResult {
+    construct_handle_impl(constructor, args, true)
+}
+
+unsafe fn call_method_impl(
     receiver: u64,
     method: *const c_char,
     args: *const c_char,
+    preserve_undefined: bool,
 ) -> ThawResult {
     let result = (|| -> Result<String, String> {
         let env = module_env_for_handle(receiver)?;
         let method_name = text(method)?;
-        let values = module_arguments(env, args)?;
+        let values = module_arguments(env, args, preserve_undefined)?;
         let mut callable = ptr::null_mut();
         let method_name_c = CString::new(method_name.clone()).map_err(|_| "method contains NUL")?;
         let status = napi_get_named_property(
@@ -558,24 +638,34 @@ pub unsafe extern "C" fn thaw_napi_call_method_result(
         let value = (function.callback)(env, &mut info);
         take_env_exception(env)?;
         let value = wait_for_promise(value)?;
-        serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())
+        serde_json::to_string(&json_from_value_with_undefined(value, preserve_undefined)?)
+            .map_err(|error| error.to_string())
     })();
-    match result {
-        Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
-            error: ptr::null_mut(),
-        },
-        Err(error) => ThawResult {
-            value: ptr::null_mut(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
-        },
-    }
+    text_result(result)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn thaw_napi_get_property_result(
+pub unsafe extern "C" fn thaw_napi_call_method_result(
+    receiver: u64,
+    method: *const c_char,
+    args: *const c_char,
+) -> ThawResult {
+    call_method_impl(receiver, method, args, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_method_typed_result(
+    receiver: u64,
+    method: *const c_char,
+    args: *const c_char,
+) -> ThawResult {
+    call_method_impl(receiver, method, args, true)
+}
+
+unsafe fn get_property_impl(
     receiver: u64,
     property: *const c_char,
+    preserve_undefined: bool,
 ) -> ThawResult {
     let result = (|| -> Result<String, String> {
         let env = module_env_for_handle(receiver)?;
@@ -596,32 +686,40 @@ pub unsafe extern "C" fn thaw_napi_get_property_result(
             ));
         }
         let value = wait_for_promise(value)?;
-        serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())
+        serde_json::to_string(&json_from_value_with_undefined(value, preserve_undefined)?)
+            .map_err(|error| error.to_string())
     })();
-    match result {
-        Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
-            error: ptr::null_mut(),
-        },
-        Err(error) => ThawResult {
-            value: ptr::null_mut(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
-        },
-    }
+    text_result(result)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn thaw_napi_set_property_result(
+pub unsafe extern "C" fn thaw_napi_get_property_result(
+    receiver: u64,
+    property: *const c_char,
+) -> ThawResult {
+    get_property_impl(receiver, property, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_get_property_typed_result(
+    receiver: u64,
+    property: *const c_char,
+) -> ThawResult {
+    get_property_impl(receiver, property, true)
+}
+
+unsafe fn set_property_impl(
     receiver: u64,
     property: *const c_char,
     args: *const c_char,
+    preserve_undefined: bool,
 ) -> ThawResult {
     let result = (|| -> Result<String, String> {
         let env = module_env_for_handle(receiver)?;
         let property_name = text(property)?;
         let property_name_c =
             CString::new(property_name.clone()).map_err(|_| "property contains NUL")?;
-        let values = module_arguments(env, args)?;
+        let values = module_arguments(env, args, preserve_undefined)?;
         let [value] = values.as_slice() else {
             return Err("native property setter expects exactly one value".into());
         };
@@ -633,18 +731,28 @@ pub unsafe extern "C" fn thaw_napi_set_property_result(
                 "failed to set native property `{property_name}`: status {status}"
             ));
         }
-        serde_json::to_string(&json_from_value(*value)?).map_err(|error| error.to_string())
+        serde_json::to_string(&json_from_value_with_undefined(*value, preserve_undefined)?)
+            .map_err(|error| error.to_string())
     })();
-    match result {
-        Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
-            error: ptr::null_mut(),
-        },
-        Err(error) => ThawResult {
-            value: ptr::null_mut(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
-        },
-    }
+    text_result(result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_set_property_result(
+    receiver: u64,
+    property: *const c_char,
+    args: *const c_char,
+) -> ThawResult {
+    set_property_impl(receiver, property, args, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_set_property_typed_result(
+    receiver: u64,
+    property: *const c_char,
+    args: *const c_char,
+) -> ThawResult {
+    set_property_impl(receiver, property, args, true)
 }
 
 unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
@@ -829,7 +937,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
         );
         let mut values: Vec<NapiValue> = args
             .iter()
-            .map(|value| value_from_json(&mut *env, value))
+            .map(|value| value_from_json_with_undefined(&mut *env, value, true))
             .collect();
         let cached_callback =
             HOST.with(|host| host.borrow().compiled_callbacks.get(&callback_key).copied());
@@ -867,19 +975,11 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
         if discard_result != 0 || value.is_null() {
             Ok("null".to_string())
         } else {
-            serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())
+            serde_json::to_string(&json_from_value_with_undefined(value, true)?)
+                .map_err(|error| error.to_string())
         }
     })();
-    match result {
-        Ok(value) => ThawResult {
-            value: CString::new(value).unwrap_or_default().into_raw(),
-            error: ptr::null_mut(),
-        },
-        Err(error) => ThawResult {
-            value: ptr::null_mut(),
-            error: CString::new(error).unwrap_or_default().into_raw(),
-        },
-    }
+    text_result(result)
 }
 
 #[no_mangle]
@@ -897,4 +997,3 @@ pub unsafe extern "C" fn thaw_napi_call(name: *const c_char, args: *const c_char
         .into_raw()
     }
 }
-

@@ -806,7 +806,9 @@ fn optional_hir_type(ty: HirType) -> HirType {
 fn supports_native_array_element(ty: &HirType) -> bool {
     match ty {
         HirType::F64 | HirType::Str | HirType::Bool | HirType::Json | HirType::JsValue => true,
-        HirType::Nullable(payload) => supports_native_array_element(payload),
+        HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+            supports_native_array_element(payload)
+        }
         HirType::Array(element) => supports_native_array_element(element),
         HirType::Tuple(elements) => elements.iter().all(supports_native_array_element),
         HirType::Object(fields) => fields

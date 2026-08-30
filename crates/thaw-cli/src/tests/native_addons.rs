@@ -68,7 +68,7 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
             package.join("package.d.ts"),
-            "export declare class NativeBox { constructor(value: number); static twice(value: number): number; static get version(): number; static set version(value: number); get value(): number; set value(value: number); get(): number; add(delta?: number): number; sum(...values: number[]): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
+            "export declare class NativeBox { constructor(value: number); constructor(value: string | undefined); static twice(value: number): number; static get version(): number; static set version(value: number); get value(): number; set value(value: number); get optional(): string | undefined; set optional(value: string | undefined); get(): number; add(delta?: number): number; sum(...values: number[]): number; isUndefined(value: string | undefined): boolean; returnUndefined(): string | undefined; echoNullish(value: string | null | undefined): string | null | undefined; echoOptionalArray(value: (string | undefined)[]): (string | undefined)[]; echoOptionalTuple(value: [string, string | undefined]): [string, string | undefined]; hasUndefinedProperty(value: { value?: string }): boolean; getLater(callback: (error: Json, result: Json) => void): number; }\n",
         )
         .unwrap();
     let addon_c = dir.join("addon.c");
@@ -79,6 +79,7 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
             #include <stdlib.h>
             typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
             typedef int napi_status;
+            typedef enum { napi_undefined = 0, napi_null = 1, napi_boolean = 2, napi_number = 3, napi_string = 4, napi_symbol = 5, napi_object = 6, napi_function = 7, napi_external = 8, napi_bigint = 9 } napi_valuetype;
             typedef napi_value (*napi_callback)(napi_env,napi_callback_info);
             typedef struct { const char* utf8name; napi_value name; napi_callback method; napi_callback getter; napi_callback setter; napi_value value; unsigned attributes; void* data; } napi_property_descriptor;
             typedef struct { double value; } native_box;
@@ -87,6 +88,12 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
             extern napi_status napi_create_double(napi_env, double, napi_value*);
             extern napi_status napi_get_null(napi_env, napi_value*);
+            extern napi_status napi_get_undefined(napi_env, napi_value*);
+            extern napi_status napi_get_boolean(napi_env, _Bool, napi_value*);
+            extern napi_status napi_typeof(napi_env, napi_value, napi_valuetype*);
+            extern napi_status napi_create_string_utf8(napi_env, const char*, size_t, napi_value*);
+            extern napi_status napi_has_own_property(napi_env, napi_value, napi_value, _Bool*);
+            extern napi_status napi_get_named_property(napi_env, napi_value, const char*, napi_value*);
             extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
             extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
             extern napi_status napi_wrap(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
@@ -94,9 +101,9 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
             extern napi_status napi_define_class(napi_env, const char*, size_t, napi_callback, void*, size_t, const napi_property_descriptor*, napi_value*);
             static void finalize_box(napi_env env, void* data, void* hint) { (void)env; (void)hint; free(data); }
             static napi_value box_new(napi_env env, napi_callback_info info) {
-                size_t argc = 1; napi_value arg, self; double value;
+                size_t argc = 1; napi_value arg, self; double value = -1; napi_valuetype type;
                 napi_get_cb_info(env, info, &argc, &arg, &self, 0);
-                napi_get_value_double(env, arg, &value);
+                napi_typeof(env, arg, &type); if (type != napi_undefined) napi_get_value_double(env, arg, &value);
                 native_box* box = malloc(sizeof(*box)); box->value = value;
                 napi_wrap(env, self, box, finalize_box, 0, 0); return self;
             }
@@ -142,6 +149,25 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
                 }
                 napi_create_double(env, sum, &result); return result;
             }
+            static napi_value box_is_undefined(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, result; napi_valuetype type;
+                napi_get_cb_info(env, info, &argc, &arg, 0, 0);
+                napi_typeof(env, arg, &type); napi_get_boolean(env, type == napi_undefined, &result); return result;
+            }
+            static napi_value box_return_undefined(napi_env env, napi_callback_info info) {
+                (void)info; napi_value result; napi_get_undefined(env, &result); return result;
+            }
+            static napi_value box_echo_nullish(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg; napi_get_cb_info(env, info, &argc, &arg, 0, 0); return arg;
+            }
+            static napi_value box_has_undefined_property(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, key, property, result; _Bool has = 0; napi_valuetype type = napi_null;
+                napi_get_cb_info(env, info, &argc, &arg, 0, 0);
+                napi_create_string_utf8(env, "value", 5, &key);
+                napi_has_own_property(env, arg, key, &has);
+                if (has) { napi_get_named_property(env, arg, "value", &property); napi_typeof(env, property, &type); }
+                napi_get_boolean(env, has && type == napi_undefined, &result); return result;
+            }
             static napi_value box_get_later(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value callback, self, callback_args[2], ignored, queued; native_box* box;
                 napi_get_cb_info(env, info, &argc, &callback, &self, 0);
@@ -153,16 +179,23 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
             }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
                 napi_value constructor;
-                napi_property_descriptor properties[7] = {
+                napi_property_descriptor properties[14] = {
                     { "get", 0, box_get, 0, 0, 0, 0, 0 },
                     { "value", 0, 0, box_get, box_set, 0, 0, 0 },
                     { "add", 0, box_add, 0, 0, 0, 0, 0 },
                     { "sum", 0, box_sum, 0, 0, 0, 0, 0 },
                     { "getLater", 0, box_get_later, 0, 0, 0, 0, 0 },
+                    { "isUndefined", 0, box_is_undefined, 0, 0, 0, 0, 0 },
+                    { "returnUndefined", 0, box_return_undefined, 0, 0, 0, 0, 0 },
+                    { "echoNullish", 0, box_echo_nullish, 0, 0, 0, 0, 0 },
+                    { "echoOptionalArray", 0, box_echo_nullish, 0, 0, 0, 0, 0 },
+                    { "echoOptionalTuple", 0, box_echo_nullish, 0, 0, 0, 0, 0 },
+                    { "hasUndefinedProperty", 0, box_has_undefined_property, 0, 0, 0, 0, 0 },
+                    { "optional", 0, 0, box_return_undefined, box_echo_nullish, 0, 0, 0 },
                     { "twice", 0, box_twice, 0, 0, 0, 1024, 0 },
                     { "version", 0, 0, box_get_version, box_set_version, 0, 1024, 0 }
                 };
-                napi_define_class(env, "NativeBox", 9, box_new, 0, 7, properties, &constructor);
+                napi_define_class(env, "NativeBox", 9, box_new, 0, 14, properties, &constructor);
                 napi_set_named_property(env, exports, "NativeBox", constructor);
                 return exports;
             }
@@ -181,7 +214,7 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
     let output = dir.join("app");
     std::fs::write(
             &source,
-            "import { NativeBox } from \"native-box\"; function main(): void { console.log(NativeBox.twice(21)); console.log(NativeBox.version); console.log(NativeBox.version = 3); console.log(NativeBox.version); const box: JsValue = new NativeBox(42); console.log(box.value); console.log(box.value = 10); console.log(box.value); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); console.log(box.sum()); console.log(box.sum(1, 2, 3)); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
+            "import { NativeBox } from \"native-box\"; function main(): void { console.log(NativeBox.twice(21)); console.log(NativeBox.version); console.log(NativeBox.version = 3); console.log(NativeBox.version); const box: JsValue = new NativeBox(42); console.log(box.value); console.log(box.value = 10); console.log(box.value); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); console.log(box.sum()); console.log(box.sum(1, 2, 3)); console.log(box.isUndefined(undefined)); console.log(box.returnUndefined() === undefined); console.log(box.echoNullish(null) === null); console.log(box.echoNullish(undefined) === undefined); console.log(box.optional === undefined); console.log((box.optional = undefined) === undefined); console.log(box.echoOptionalArray([\"x\", undefined])[1] === undefined); const tuple: [string, string | undefined] = [\"x\", undefined]; const echoed = box.echoOptionalTuple(tuple); console.log(echoed[1] === undefined); console.log(box.hasUndefinedProperty({ value: undefined })); const optionalBox: JsValue = new NativeBox(undefined); console.log(optionalBox.get()); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
         )
         .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -194,7 +227,7 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\n1\n3\n3\n42\n10\n10\n10\n10\n18\n0\n6\n10\n1\n"
+        "42\n1\n3\n3\n42\n10\n10\n10\n10\n18\n0\n6\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n-1\n10\n1\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -726,4 +759,3 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     assert!(event_file.is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
-

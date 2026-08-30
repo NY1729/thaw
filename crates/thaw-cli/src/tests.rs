@@ -440,6 +440,79 @@ fn generates_typed_napi_nullable_shims() {
 }
 
 #[test]
+fn generates_typed_napi_optional_and_nullish_shims() {
+    let class = thaw_bridge::parse_dts_classes(
+        r#"export class OptionalBox {
+                constructor(value: string | undefined);
+                normalize(value: string | undefined): string | undefined;
+                mixed(value: string | null | undefined): string | null | undefined;
+                value: string | undefined;
+            }"#,
+    )
+    .unwrap()
+    .remove(0);
+    let optional = thaw_hir::HirType::Optional(Box::new(thaw_hir::HirType::Str));
+    let nullish = thaw_hir::HirType::Nullish(Box::new(thaw_hir::HirType::Str));
+    let mut shim = String::new();
+    let constructors = generate_napi_class_constructors(&class, &mut shim);
+    assert_eq!(constructors[0].2, vec![optional.clone()]);
+    let methods = generate_napi_class_method_overloads(
+        &class,
+        false,
+        &std::collections::HashMap::new(),
+        &mut shim,
+    );
+    assert_eq!(methods[0].4, vec![optional]);
+    assert_eq!(methods[1].4, vec![nullish]);
+    let property = &class.properties[0];
+    assert!(generate_napi_class_property_getter(
+        &class.name,
+        &property.name,
+        &property.ty,
+        false,
+        &mut shim,
+    )
+    .is_some());
+    assert!(generate_napi_class_property_setter(
+        &class.name,
+        &property.name,
+        &property.ty,
+        false,
+        &mut shim,
+    )
+    .is_some());
+    assert!(shim.contains("value: string | undefined"));
+    assert!(shim.contains("value: string | null | undefined"));
+
+    let rewritten = rewrite_external_class_methods(
+        "const box = new OptionalBox(undefined); box.normalize(undefined); box.mixed(null);",
+        &[("pkg".into(), "OptionalBox".into(), constructors)],
+        &[
+            (
+                "OptionalBox".into(),
+                "normalize".into(),
+                methods[0].1.clone(),
+                1,
+                false,
+                methods[0].4.clone(),
+            ),
+            (
+                "OptionalBox".into(),
+                "mixed".into(),
+                methods[1].1.clone(),
+                1,
+                false,
+                methods[1].4.clone(),
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(!rewritten.contains("new OptionalBox"));
+    assert!(rewritten.contains(&methods[0].1));
+    assert!(rewritten.contains(&methods[1].1));
+}
+
+#[test]
 fn generates_napi_class_property_accessor_helpers() {
     let mut shim = String::new();
     let ty = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);
@@ -472,7 +545,7 @@ fn generates_napi_class_property_accessor_helpers() {
         false,
         &mut shim,
     )
-    .is_none());
+    .is_some());
 }
 
 #[test]

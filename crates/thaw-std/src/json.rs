@@ -977,7 +977,8 @@ mod tests {
 
         let entries = unsafe { thaw_json_entries(object) };
         assert_eq!(unsafe { (entries as *const i64).read() }, 2);
-        let first_entry = unsafe { (entries.add(8) as *const *mut u8).read() };
+        let first_entry =
+            unsafe { unwrap_array_handle((entries.add(8) as *const *mut u8).read()).cast_mut() };
         assert_eq!(unsafe { (first_entry as *const i64).read() }, 2);
         assert_eq!(
             read_c_string(unsafe { (first_entry.add(8) as *const *const c_char).read() }),

@@ -210,7 +210,11 @@ fn rewrite_external_class_methods_with_static(
             | thaw_hir::HirType::Str
             | thaw_hir::HirType::Bool
             | thaw_hir::HirType::Json => true,
-            thaw_hir::HirType::Nullable(payload) => source_collection_element_supported(payload),
+            thaw_hir::HirType::Optional(payload)
+            | thaw_hir::HirType::Nullable(payload)
+            | thaw_hir::HirType::Nullish(payload) => {
+                source_collection_element_supported(payload)
+            }
             thaw_hir::HirType::Array(element) => source_collection_element_supported(element),
             thaw_hir::HirType::Tuple(elements) => {
                 elements.iter().all(source_collection_element_supported)
@@ -299,7 +303,12 @@ fn rewrite_external_class_methods_with_static(
                 }
                 Some(thaw_hir::HirType::Object(fields))
             }
-            Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
+            Expr::Ident(identifier) => variables
+                .get(identifier.sym.as_str())
+                .cloned()
+                .or_else(|| {
+                    (identifier.sym == *"undefined").then_some(thaw_hir::HirType::Undefined)
+                }),
             Expr::Paren(parenthesized) => {
                 source_expr_type(&parenthesized.expr, variables, functions, named)
             }
@@ -1321,6 +1330,14 @@ fn rewrite_external_class_methods_with_static(
                 source_collection_element_supported(payload).then_some(2)
             }
             (thaw_hir::HirType::Nullable(payload), actual) if payload.as_ref() == actual => Some(2),
+            (thaw_hir::HirType::Optional(payload), thaw_hir::HirType::Undefined) => {
+                source_collection_element_supported(payload).then_some(2)
+            }
+            (thaw_hir::HirType::Optional(payload), actual) if payload.as_ref() == actual => Some(2),
+            (thaw_hir::HirType::Nullish(payload), thaw_hir::HirType::Null | thaw_hir::HirType::Undefined) => {
+                source_collection_element_supported(payload).then_some(2)
+            }
+            (thaw_hir::HirType::Nullish(payload), actual) if payload.as_ref() == actual => Some(2),
             (thaw_hir::HirType::Object(declared), thaw_hir::HirType::Object(actual)) => {
                 if declared.is_empty() || actual.is_empty() {
                     return Some(1);

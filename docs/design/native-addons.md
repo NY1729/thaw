@@ -59,6 +59,9 @@ typed N-API constructor／method／propertyでは既存のnative array↔JSON変
 分類し、再帰collectionをABI互換性のない経路へ流さない。
 `T | null`は既存のtagged native値とJSON `null`を対応させ、constructor／method／
 propertyおよびcollection要素で引数・戻り値の両方向を保持する。
+`T | undefined`と`T | null | undefined`はtyped N-API専用の予約済みJSON sentinelを
+使い、constructor／method／propertyに加えてarray／tuple／固定object内でも
+`undefined`を保持する。通常のJSON APIにおける`undefined`から`null`への既存変換は変えない。
 固定tupleは要素型を保持したままtyped constructor／method／property shimを生成し、
 LLVMで既存のnative tuple↔JSON変換を使って引数と戻り値をmarshalする。
 式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、

@@ -1,3 +1,9 @@
+enum JsonTaggedKind {
+    Optional,
+    Nullable,
+    Nullish,
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_json_backend_call(
         &mut self,
@@ -112,6 +118,15 @@ impl<'ctx> HirCompiler<'ctx> {
         object: PointerValue<'ctx>,
         ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_native_object_to_json_with_undefined(object, ty, false)
+    }
+
+    fn compile_native_object_to_json_with_undefined(
+        &mut self,
+        object: PointerValue<'ctx>,
+        ty: &HirType,
+        preserve_undefined: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let HirType::Object(fields) = ty else {
             return Err("dynamic object marshaling requires an object type".to_string());
         };
@@ -144,11 +159,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_global_string_ptr(name, "dynamic_object_key")
                 .map_err(|error| error.to_string())?;
-            self.compile_json_object_set_native(
+            self.compile_json_object_set_native_with_undefined(
                 json,
                 key.as_pointer_value(),
                 value,
                 field_ty,
+                preserve_undefined,
             )?;
         }
         Ok(json)
@@ -158,8 +174,19 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         json: BasicValueEnum<'ctx>,
         key: PointerValue<'ctx>,
+        value: BasicValueEnum<'ctx>,
+        field_type: &HirType,
+    ) -> Result<(), String> {
+        self.compile_json_object_set_native_with_undefined(json, key, value, field_type, false)
+    }
+
+    fn compile_json_object_set_native_with_undefined(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        key: PointerValue<'ctx>,
         mut value: BasicValueEnum<'ctx>,
         field_type: &HirType,
+        preserve_undefined: bool,
     ) -> Result<(), String> {
         match field_type {
             HirType::Optional(payload) => {
@@ -168,8 +195,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     key,
                     value.into_struct_value(),
                     payload,
-                    false,
-                    false,
+                    JsonTaggedKind::Optional,
+                    preserve_undefined,
                 );
             }
             HirType::Nullable(payload) => {
@@ -178,8 +205,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     key,
                     value.into_struct_value(),
                     payload,
-                    true,
-                    false,
+                    JsonTaggedKind::Nullable,
+                    preserve_undefined,
                 );
             }
             HirType::Nullish(payload) => {
@@ -188,8 +215,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     key,
                     value.into_struct_value(),
                     payload,
-                    false,
-                    true,
+                    JsonTaggedKind::Nullish,
+                    preserve_undefined,
                 );
             }
             HirType::Undefined => return Ok(()),
@@ -213,22 +240,27 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 HirType::Json | HirType::Dictionary(_) => "thaw_json_object_set_json",
                 HirType::Array(element) => {
-                    value = self.compile_native_array_to_json(
+                    value = self.compile_native_array_to_json_with_undefined(
                         value.into_pointer_value(),
                         element,
+                        preserve_undefined,
                     )?;
                     "thaw_json_object_set_json"
                 }
                 HirType::Tuple(elements) => {
-                    value = self.compile_native_tuple_to_json(
+                    value = self.compile_native_tuple_to_json_with_undefined(
                         value.into_pointer_value(),
                         elements,
+                        preserve_undefined,
                     )?;
                     "thaw_json_object_set_json"
                 }
                 HirType::Object(_) => {
-                    value =
-                        self.compile_native_object_to_json(value.into_pointer_value(), field_type)?;
+                    value = self.compile_native_object_to_json_with_undefined(
+                        value.into_pointer_value(),
+                        field_type,
+                        preserve_undefined,
+                    )?;
                     "thaw_json_object_set_json"
                 }
                 HirType::Null => "thaw_json_object_set_json",
@@ -250,9 +282,11 @@ impl<'ctx> HirCompiler<'ctx> {
         key: PointerValue<'ctx>,
         tagged: StructValue<'ctx>,
         payload_type: &HirType,
-        absent_is_null: bool,
-        three_state: bool,
+        kind: JsonTaggedKind,
+        preserve_undefined: bool,
     ) -> Result<(), String> {
+        let three_state = matches!(kind, JsonTaggedKind::Nullish);
+        let absent_is_null = matches!(kind, JsonTaggedKind::Nullable);
         let tag = self
             .builder
             .build_extract_value(tagged, 0, "json_object_tag")
@@ -302,21 +336,58 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(null_block);
             let null = self.compile_json_null()?;
-            self.compile_json_object_set_native(json, key, null, &HirType::Null)?;
+            self.compile_json_object_set_native_with_undefined(
+                json,
+                key,
+                null,
+                &HirType::Null,
+                preserve_undefined,
+            )?;
             self.builder
                 .build_unconditional_branch(done)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(undefined_block);
+            if preserve_undefined {
+                let undefined = self.compile_napi_undefined_json()?;
+                self.compile_json_object_set_native_with_undefined(
+                    json,
+                    key,
+                    undefined,
+                    &HirType::Json,
+                    true,
+                )?;
+            }
         } else if absent_is_null {
             let null = self.compile_json_null()?;
-            self.compile_json_object_set_native(json, key, null, &HirType::Null)?;
+            self.compile_json_object_set_native_with_undefined(
+                json,
+                key,
+                null,
+                &HirType::Null,
+                preserve_undefined,
+            )?;
+        } else if preserve_undefined {
+            let undefined = self.compile_napi_undefined_json()?;
+            self.compile_json_object_set_native_with_undefined(
+                json,
+                key,
+                undefined,
+                &HirType::Json,
+                true,
+            )?;
         }
         self.builder
             .build_unconditional_branch(done)
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(value_block);
-        self.compile_json_object_set_native(json, key, payload, payload_type)?;
+        self.compile_json_object_set_native_with_undefined(
+            json,
+            key,
+            payload,
+            payload_type,
+            preserve_undefined,
+        )?;
         self.builder
             .build_unconditional_branch(done)
             .map_err(|error| error.to_string())?;
@@ -329,6 +400,19 @@ impl<'ctx> HirCompiler<'ctx> {
         array: PointerValue<'ctx>,
         element_type: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_native_array_to_json_with_undefined(array, element_type, false)
+    }
+
+    fn compile_native_array_to_json_with_undefined(
+        &mut self,
+        array: PointerValue<'ctx>,
+        element_type: &HirType,
+        preserve_undefined: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // `array` is a handle (see `compile_array_wrap`'s doc comment);
+        // unwrap it once here so every existing byte-level access below
+        // keeps working against the raw buffer unchanged.
+        let array = self.compile_array_data(array)?;
         let json = self
             .builder
             .build_call(
@@ -412,7 +496,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_array_element_value",
             )
             .map_err(|error| error.to_string())?;
-        self.compile_json_array_push_native(json, value, element_type)?;
+        self.compile_json_array_push_native_with_undefined(
+            json,
+            value,
+            element_type,
+            preserve_undefined,
+        )?;
         let next = self
             .builder
             .build_int_add(
@@ -439,6 +528,18 @@ impl<'ctx> HirCompiler<'ctx> {
         tuple: PointerValue<'ctx>,
         element_types: &[HirType],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_native_tuple_to_json_with_undefined(tuple, element_types, false)
+    }
+
+    fn compile_native_tuple_to_json_with_undefined(
+        &mut self,
+        tuple: PointerValue<'ctx>,
+        element_types: &[HirType],
+        preserve_undefined: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // See `compile_native_array_to_json_with_undefined` -- `tuple` is a
+        // handle, unwrap once up front.
+        let tuple = self.compile_array_data(tuple)?;
         let json = self
             .builder
             .build_call(
@@ -478,7 +579,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     "console_tuple_element_value",
                 )
                 .map_err(|error| error.to_string())?;
-            self.compile_json_array_push_native(json, value, element_type)?;
+            self.compile_json_array_push_native_with_undefined(
+                json,
+                value,
+                element_type,
+                preserve_undefined,
+            )?;
         }
         Ok(json)
     }
@@ -486,16 +592,38 @@ impl<'ctx> HirCompiler<'ctx> {
     fn compile_json_array_push_native(
         &mut self,
         json: BasicValueEnum<'ctx>,
-        mut value: BasicValueEnum<'ctx>,
+        value: BasicValueEnum<'ctx>,
         element_type: &HirType,
     ) -> Result<(), String> {
+        self.compile_json_array_push_native_with_undefined(json, value, element_type, false)
+    }
+
+    fn compile_json_array_push_native_with_undefined(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        mut value: BasicValueEnum<'ctx>,
+        element_type: &HirType,
+        preserve_undefined: bool,
+    ) -> Result<(), String> {
         match element_type {
-            HirType::Optional(payload) | HirType::Nullable(payload) => {
+            HirType::Optional(payload) => {
                 return self.compile_json_array_push_tagged(
                     json,
                     value.into_struct_value(),
                     payload,
                     false,
+                    false,
+                    preserve_undefined,
+                );
+            }
+            HirType::Nullable(payload) => {
+                return self.compile_json_array_push_tagged(
+                    json,
+                    value.into_struct_value(),
+                    payload,
+                    true,
+                    false,
+                    preserve_undefined,
                 );
             }
             HirType::Nullish(payload) => {
@@ -503,7 +631,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     json,
                     value.into_struct_value(),
                     payload,
+                    false,
                     true,
+                    preserve_undefined,
                 );
             }
             HirType::Null | HirType::Undefined => {
@@ -528,11 +658,19 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Json | HirType::Dictionary(_) => "thaw_json_array_push_json",
             HirType::Array(nested) => {
-                value = self.compile_native_array_to_json(value.into_pointer_value(), nested)?;
+                value = self.compile_native_array_to_json_with_undefined(
+                    value.into_pointer_value(),
+                    nested,
+                    preserve_undefined,
+                )?;
                 "thaw_json_array_push_json"
             }
             HirType::Tuple(elements) => {
-                value = self.compile_native_tuple_to_json(value.into_pointer_value(), elements)?;
+                value = self.compile_native_tuple_to_json_with_undefined(
+                    value.into_pointer_value(),
+                    elements,
+                    preserve_undefined,
+                )?;
                 "thaw_json_array_push_json"
             }
             HirType::Object(_) => {
@@ -574,7 +712,9 @@ impl<'ctx> HirCompiler<'ctx> {
         json: BasicValueEnum<'ctx>,
         tagged: StructValue<'ctx>,
         payload_type: &HirType,
+        absent_is_null: bool,
         three_state: bool,
+        preserve_undefined: bool,
     ) -> Result<(), String> {
         let tag = self
             .builder
@@ -599,21 +739,74 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let function = self.current_function();
         let value_block = self.context.append_basic_block(function, "json_collection_value");
-        let null_block = self.context.append_basic_block(function, "json_collection_null");
+        let absent_block = self
+            .context
+            .append_basic_block(function, "json_collection_absent");
         let done = self.context.append_basic_block(function, "json_collection_tagged_done");
         self.builder
-            .build_conditional_branch(present, value_block, null_block)
+            .build_conditional_branch(present, value_block, absent_block)
             .map_err(|error| error.to_string())?;
 
-        self.builder.position_at_end(null_block);
-        let null = self.compile_json_null()?;
+        self.builder.position_at_end(absent_block);
+        let absent = if preserve_undefined && !absent_is_null {
+            if three_state {
+                let null_block = self.context.append_basic_block(function, "json_collection_null");
+                let undefined_block = self
+                    .context
+                    .append_basic_block(function, "json_collection_undefined");
+                let absent_done = self
+                    .context
+                    .append_basic_block(function, "json_collection_absent_done");
+                let is_null = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        tag,
+                        self.context.i8_type().const_int(1, false),
+                        "json_collection_is_null",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_conditional_branch(is_null, null_block, undefined_block)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(null_block);
+                let null = self.compile_json_null()?;
+                self.builder
+                    .build_unconditional_branch(absent_done)
+                    .map_err(|error| error.to_string())?;
+                let null_end = self.builder.get_insert_block().ok_or("lost JSON null block")?;
+                self.builder.position_at_end(undefined_block);
+                let undefined = self.compile_napi_undefined_json()?;
+                self.builder
+                    .build_unconditional_branch(absent_done)
+                    .map_err(|error| error.to_string())?;
+                let undefined_end = self
+                    .builder
+                    .get_insert_block()
+                    .ok_or("lost JSON undefined block")?;
+                self.builder.position_at_end(absent_done);
+                let result = self
+                    .builder
+                    .build_phi(
+                        self.context.ptr_type(AddressSpace::default()),
+                        "json_collection_absent_value",
+                    )
+                    .map_err(|error| error.to_string())?;
+                result.add_incoming(&[(&null, null_end), (&undefined, undefined_end)]);
+                result.as_basic_value()
+            } else {
+                self.compile_napi_undefined_json()?
+            }
+        } else {
+            self.compile_json_null()?
+        };
         self.builder
             .build_call(
                 self.module
                     .get_function("thaw_json_array_push_json")
                     .unwrap(),
-                &[json.into(), null.into()],
-                "push_collection_null",
+                &[json.into(), absent.into()],
+                "push_collection_absent",
             )
             .map_err(|error| error.to_string())?;
         self.builder
@@ -621,7 +814,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(value_block);
-        self.compile_json_array_push_native(json, payload, payload_type)?;
+        self.compile_json_array_push_native_with_undefined(
+            json,
+            payload,
+            payload_type,
+            preserve_undefined,
+        )?;
         self.builder
             .build_unconditional_branch(done)
             .map_err(|error| error.to_string())?;
@@ -765,12 +963,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .ok_or("thaw_json_has_own returned no value")?
                 .into_int_value();
-            self.builder
+            let has_own = self.builder
                 .build_int_compare(
                     IntPredicate::NE,
                     has_own,
                     self.context.i8_type().const_zero(),
                     "json_optional_present",
+                )
+                .map_err(|error| error.to_string())?;
+            let is_undefined = self.compile_json_is_napi_undefined(json)?;
+            self.builder
+                .build_and(
+                    has_own,
+                    self.builder
+                        .build_not(is_undefined, "json_optional_not_sentinel")
+                        .map_err(|error| error.to_string())?,
+                    "json_optional_present_value",
                 )
                 .map_err(|error| error.to_string())?
         };
@@ -871,6 +1079,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 has_own,
                 self.context.i8_type().const_zero(),
                 "json_nullish_present",
+            )
+            .map_err(|error| error.to_string())?;
+        let is_undefined = self.compile_json_is_napi_undefined(json)?;
+        let has_own = self
+            .builder
+            .build_and(
+                has_own,
+                self.builder
+                    .build_not(is_undefined, "json_nullish_not_sentinel")
+                    .map_err(|error| error.to_string())?,
+                "json_nullish_has_value",
             )
             .map_err(|error| error.to_string())?;
         let function = self.current_function();
@@ -1047,8 +1266,16 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Str => self.compile_json_as_value(element_json, "thaw_json_as_string")?,
             HirType::Bool => self.compile_json_as_bool_value(element_json)?,
             HirType::Json | HirType::Dictionary(_) => element_json,
+            HirType::Optional(payload) => {
+                let (object, key) = self.compile_napi_optional_result_container(element_json)?;
+                self.compile_json_to_optional_field(object, key, element_json, payload, false)?
+            }
             HirType::Nullable(payload) => {
                 self.compile_json_to_nullable_field(element_json, payload)?
+            }
+            HirType::Nullish(payload) => {
+                let (object, key) = self.compile_napi_optional_result_container(element_json)?;
+                self.compile_json_to_nullish_field(object, key, element_json, payload)?
             }
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(element_json, element)?
@@ -1097,7 +1324,10 @@ impl<'ctx> HirCompiler<'ctx> {
         index.add_incoming(&[(&next, body_end)]);
 
         self.builder.position_at_end(done);
-        Ok(array.into())
+        // `array` is a freshly built raw buffer; wrap it in a handle before
+        // treating it as this call's array-typed return value (see
+        // `compile_array_wrap`'s doc comment).
+        Ok(self.compile_array_wrap(array)?.into())
     }
 
     fn compile_json_to_native_tuple(
@@ -1156,8 +1386,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 HirType::Bool => self.compile_json_as_bool_value(element_json)?,
                 HirType::Json | HirType::Dictionary(_) => element_json,
+                HirType::Optional(payload) => {
+                    let (object, key) = self.compile_napi_optional_result_container(element_json)?;
+                    self.compile_json_to_optional_field(
+                        object,
+                        key,
+                        element_json,
+                        payload,
+                        false,
+                    )?
+                }
                 HirType::Nullable(payload) => {
                     self.compile_json_to_nullable_field(element_json, payload)?
+                }
+                HirType::Nullish(payload) => {
+                    let (object, key) = self.compile_napi_optional_result_container(element_json)?;
+                    self.compile_json_to_nullish_field(object, key, element_json, payload)?
                 }
                 HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                     self.compile_json_to_native(element_json, element)?
@@ -1182,6 +1426,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(pointer, value)
                 .map_err(|error| error.to_string())?;
         }
-        Ok(tuple.into())
+        // `tuple` is a freshly built raw buffer; wrap it in a handle before
+        // treating it as this call's tuple-typed return value (see
+        // `compile_array_wrap`'s doc comment).
+        Ok(self.compile_array_wrap(tuple)?.into())
     }
 }
