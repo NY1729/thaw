@@ -1892,8 +1892,9 @@ HIR through LLVM to a small W^X runtime which specializes and caches numeric
 expressions containing arguments, constants, and nested `add/sub/mul/div`
 operations on first use. Its end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
-extracts a side-effect-free, single CommonJS export whose body is one binary
-number operation, routes it to this backend, and omits its bundle from QuickJS.
+extracts side-effect-free CommonJS function exports, including
+`module.exports = { ... }` packages, whose bodies fit this numeric IR, routes
+them to this backend, and omits fully extracted bundles from QuickJS.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
 
