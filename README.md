@@ -1997,7 +1997,9 @@ exports also avoid QuickJS entirely. String literals, string-only template
 literals, `+` concatenation, and variadic string-only `.concat()` are
 specialized by the same W^X cache,
 with returned UTF-8 strings allocated directly in the caller-provided Thaw
-arena. One-argument `startsWith`,
+arena. Number and boolean interpolation, plus `String(value)` for typed
+primitive values, use the same path and JavaScript-compatible number
+formatting. One-argument `startsWith`,
 `endsWith`, `includes`, `indexOf`, and `lastIndexOf`, plus zero-argument
 `toLowerCase`, `toUpperCase`, `trim`, `trimStart`, and `trimEnd`, and numeric
 `repeat(count)`, `slice(start?, end?)`, and `substring(start?, end?)` use the

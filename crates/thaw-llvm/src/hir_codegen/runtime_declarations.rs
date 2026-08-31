@@ -1065,7 +1065,13 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context
                 .struct_type(&[self.context.f64_type().into(), i8_ptr.into()], false)
                 .fn_type(
-                    &[i8_ptr.into(), i8_ptr.into(), i64_type.into(), i8_ptr.into()],
+                    &[
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i64_type.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                    ],
                     false,
                 ),
             Some(Linkage::External),
