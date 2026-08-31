@@ -1995,7 +1995,8 @@ Required string parameters can enter the typed JIT ABI for UTF-16 `.length`
 and relational/equality comparisons returning number or boolean; these
 exports also avoid QuickJS entirely. String literals and `+` concatenation
 are specialized by the same W^X cache, with returned UTF-8 strings allocated
-directly in the caller-provided Thaw arena.
+directly in the caller-provided Thaw arena. One-argument `startsWith`,
+`endsWith`, and `includes` predicates use the same typed string IR.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,

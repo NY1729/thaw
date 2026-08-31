@@ -208,6 +208,27 @@ extern "C" fn string_compare(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! string_predicates {
+    ($($function:ident => $method:ident),+ $(,)?) => {
+        $(extern "C" fn $function(value: f64, search: f64) -> f64 {
+            unsafe {
+                match (string_argument(value), string_argument(search)) {
+                    (Some(value), Some(search)) => f64::from(value.$method(search.as_str())),
+                    _ => 0.0,
+                }
+            }
+        })+
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+string_predicates! {
+    string_starts_with => starts_with,
+    string_ends_with => ends_with,
+    string_includes => contains,
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_concat(left: f64, right: f64) -> f64 {
     unsafe {
         let left = left.to_bits() as usize as *const c_char;
@@ -513,7 +534,10 @@ enum NumericValue {
     StringCompare,
     StringConcat,
     StringConstant(*const c_char),
+    StringEndsWith,
+    StringIncludes,
     StringLength,
+    StringStartsWith,
     Power,
     UnaryMath(UnaryMath),
     Remainder,
@@ -557,7 +581,10 @@ impl NumericProgram {
                     "imul" => Some(NumericValue::Imul),
                     "strcmp" => Some(NumericValue::StringCompare),
                     "concat" => Some(NumericValue::StringConcat),
+                    "endswith" => Some(NumericValue::StringEndsWith),
+                    "includes" => Some(NumericValue::StringIncludes),
                     "strlen" => Some(NumericValue::StringLength),
+                    "startswith" => Some(NumericValue::StringStartsWith),
                     "pow" => Some(NumericValue::Power),
                     "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
                     "acosh" => Some(NumericValue::UnaryMath(UnaryMath::Acosh)),
@@ -758,6 +785,21 @@ impl NumericProgram {
                     emit_binary_call(&mut code, string_concat as *const () as u64, depth - 2);
                     depth -= 1;
                 }
+                NumericValue::StringStartsWith
+                | NumericValue::StringEndsWith
+                | NumericValue::StringIncludes => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::StringStartsWith => string_starts_with,
+                        NumericValue::StringEndsWith => string_ends_with,
+                        NumericValue::StringIncludes => string_includes,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
                 NumericValue::StringLength => {
                     if depth == 0 {
                         return None;
@@ -869,6 +911,9 @@ fn emit_bit_operation(code: &mut Vec<u8>, value: u8, operation: u8) {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn emit_spill(code: &mut Vec<u8>, registers: u8) {
     code.extend_from_slice(&[0x48, 0x83, 0xec, 0x48]);
+    // The generated function keeps its argument-array base in caller-saved
+    // RDI, so every native helper call must preserve it as well as live XMMs.
+    code.extend_from_slice(&[0x48, 0x89, 0x7c, 0x24, 0x40]);
     for register in 0..registers {
         code.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x44 | (register << 3), 0x24, register * 8]);
     }
@@ -879,6 +924,7 @@ fn emit_restore(code: &mut Vec<u8>, registers: u8) {
     for register in 0..registers {
         code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x44 | (register << 3), 0x24, register * 8]);
     }
+    code.extend_from_slice(&[0x48, 0x8b, 0x7c, 0x24, 0x40]);
     code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x48]);
 }
 
@@ -1219,6 +1265,32 @@ mod tests {
                 ],
             )
             .value,
+            1.0
+        );
+        let value = CString::new("prefix").unwrap();
+        for (operation, search, expected) in [
+            ("startswith", "pre", 1.0),
+            ("endswith", "fix", 1.0),
+            ("includes", "ref", 1.0),
+            ("includes", "xyz", 0.0),
+        ] {
+            let search = CString::new(search).unwrap();
+            let predicate = CString::new(format!("expr:s0,s1,{operation}:{operation}")).unwrap();
+            assert_eq!(
+                call(
+                    &predicate,
+                    &[
+                        f64::from_bits(value.as_ptr() as usize as u64),
+                        f64::from_bits(search.as_ptr() as usize as u64),
+                    ],
+                )
+                .value,
+                expected
+            );
+        }
+        let combined = CString::new("expr:s0,t707265,startswith,s0,t666978,endswith,s0,t707265,startswith,?,s0,t726566,includes,s0,t707265,startswith,s0,t666978,endswith,s0,t707265,startswith,?,?:combined_string_predicates").unwrap();
+        assert_eq!(
+            call(&combined, &[f64::from_bits(value.as_ptr() as usize as u64)]).value,
             1.0
         );
         let name = CString::new("世界").unwrap();

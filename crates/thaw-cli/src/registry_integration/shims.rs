@@ -149,6 +149,34 @@ fn jit_numeric_export(
         }
     }
 
+    fn string_method<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+    ) -> Option<(&'static str, &'a Expr)> {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        if !is_string_expression(member.obj.as_ref(), parameters) {
+            return None;
+        }
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        let operation = match property.sym.as_ref() {
+            "startsWith" => "startswith",
+            "endsWith" => "endswith",
+            "includes" => "includes",
+            _ => return None,
+        };
+        Some((operation, member.obj.as_ref()))
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -290,6 +318,18 @@ fn jit_numeric_export(
                 ) =>
             {
                 encode_condition(expression, parameters, locals, output)?;
+            }
+            Expr::Call(call) if string_method(call, parameters).is_some() => {
+                let (operation, receiver) = string_method(call, parameters)?;
+                let [search] = call.args.as_slice() else {
+                    return None;
+                };
+                if !is_string_expression(search.expr.as_ref(), parameters) {
+                    return None;
+                }
+                encode_expression(receiver, parameters, locals, output)?;
+                encode_expression(search.expr.as_ref(), parameters, locals, output)?;
+                output.push(operation.into());
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
@@ -951,7 +991,10 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
                 return None;
             }
             stack.push(false);
-        } else if token == "strcmp" {
+        } else if matches!(
+            token.as_str(),
+            "strcmp" | "startswith" | "endswith" | "includes"
+        ) {
             if !stack.pop()? || !stack.pop()? {
                 return None;
             }
