@@ -377,6 +377,27 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:s0,s1,strcmp,c0000000000000000,<".into())
     );
+    let mut string_concat = string_length.clone();
+    string_concat.name = "greet".into();
+    string_concat.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.greet = value => 'hello, ' + value + '!';",
+            "greet",
+            false,
+            &string_concat,
+        ),
+        Some("expr:t68656c6c6f2c20,s0,concat,t21,concat".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.greet = value => '\\0' + value;",
+            "greet",
+            false,
+            &string_concat,
+        ),
+        None
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.length = value => value + 1;",

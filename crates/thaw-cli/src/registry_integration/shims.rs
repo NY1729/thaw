@@ -131,6 +131,24 @@ fn jit_numeric_export(
             .map(String::as_str)
     }
 
+    fn is_string_expression(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+    ) -> bool {
+        match expression {
+            Expr::Ident(_) => string_parameter(expression, parameters).is_some(),
+            Expr::Lit(Lit::Str(_)) => true,
+            Expr::Paren(parenthesized) => {
+                is_string_expression(parenthesized.expr.as_ref(), parameters)
+            }
+            Expr::Bin(binary) if binary.op == BinaryOp::Add => {
+                is_string_expression(binary.left.as_ref(), parameters)
+                    && is_string_expression(binary.right.as_ref(), parameters)
+            }
+            _ => false,
+        }
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -151,6 +169,20 @@ fn jit_numeric_export(
                 output.push(format!(
                     "c{:016x}",
                     f64::from(u8::from(boolean.value)).to_bits()
+                ));
+            }
+            Expr::Lit(Lit::Str(string)) => {
+                let string = string.value.to_string_lossy();
+                if string.as_bytes().contains(&0) {
+                    return None;
+                }
+                output.push(format!(
+                    "t{}",
+                    string
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
                 ));
             }
             Expr::Member(member) => {
@@ -205,6 +237,13 @@ fn jit_numeric_export(
             {
                 encode_expression(binary.left.as_ref(), parameters, locals, output)?;
                 encode_expression(binary.right.as_ref(), parameters, locals, output)?;
+                if binary.op == BinaryOp::Add
+                    && is_string_expression(binary.left.as_ref(), parameters)
+                    && is_string_expression(binary.right.as_ref(), parameters)
+                {
+                    output.push("concat".into());
+                    return (output.len() <= 128).then_some(());
+                }
                 output.push(
                     match binary.op {
                         BinaryOp::Add => "+",
@@ -652,7 +691,9 @@ fn jit_numeric_export(
             })
         || !matches!(
             &function.ret,
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64 | thaw_hir::HirType::Bool)
+            thaw_bridge::DtsType::Native(
+                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
+            )
         )
     {
         return None;
@@ -860,10 +901,16 @@ fn jit_numeric_export(
         }
     }
     encode_numeric_body(body, &parameters, &locals, &mut expression)?;
-    validated_jit_expression(expression)
+    validated_jit_expression(
+        expression,
+        matches!(
+            function.ret,
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str)
+        ),
+    )
 }
 
-fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
+fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Option<String> {
     // `true` marks an opaque string pointer; every emitted operation must
     // consume the right kinds before the IR reaches the native JIT.
     let mut stack = Vec::new();
@@ -909,6 +956,11 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 return None;
             }
             stack.push(false);
+        } else if token == "concat" {
+            if !stack.pop()? || !stack.pop()? {
+                return None;
+            }
+            stack.push(true);
         } else if token == "strlen" {
             if !stack.pop()? {
                 return None;
@@ -951,11 +1003,11 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 return None;
             }
         } else {
-            stack.push(token.starts_with('s'));
+            stack.push(token.starts_with('s') || token.starts_with('t'));
             maximum_depth = maximum_depth.max(stack.len());
         }
     }
-    if stack != [false] || maximum_depth > 8 {
+    if stack != [returns_string] || maximum_depth > 8 {
         return None;
     }
     Some(format!("expr:{}", expression.join(",")))
@@ -996,6 +1048,7 @@ fn jit_numeric_declaration(
         .join(", ");
     let ret = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "string",
         _ => "number",
     };
     let declaration = format!("declare function {symbol}({params}): {ret};\n");
