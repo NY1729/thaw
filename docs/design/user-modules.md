@@ -79,8 +79,12 @@ across source-file boundaries without a second type system.
 ## Current boundaries
 
 Generic classes, dynamically computed members, non-top-level class expressions, top-level
-declarations/statements outside the general HIR-supported subset, package multi-capture
-package export keys, and full ESM live bindings are outside the current typed AOT subset.
+declarations/statements outside the general HIR-supported subset, and full ESM live
+bindings are outside the current typed AOT subset. A bare `export { a, b as c };` list
+(with or without `from './other'`) is not one of those boundaries: the relative-module
+bundler resolves and renames every specifier -- local or re-exported, aliased or not --
+before HIR ever sees the module, the same way it already does for `export default`,
+`export *`, and namespace imports.
 Typed fixed-layout class declarations, including inheritance and named or anonymous default
 exports, can be imported, namespace-imported and re-exported across user modules. Their
 `implements` clauses structurally validate inherited and local fields, including specialized
