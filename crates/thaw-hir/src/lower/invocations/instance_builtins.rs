@@ -167,6 +167,173 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// ES2024 `Set.prototype.union`/`.intersection`/`.difference`. Builds a
+    /// fresh `Set` the same way `structuredClone`'s `Map`/`Set` cloning
+    /// does (`__thaw_map_new` plus the `.add()`/`.set()` intrinsic), fed by
+    /// `__thaw_map_snapshot_keys` snapshots of the receiver and/or `other`
+    /// rather than a live iterator -- consistent with every other Map/Set
+    /// method here, none of which expose real iterator objects.
+    fn lower_set_combine(
+        &mut self,
+        receiver: HirExpr,
+        other: HirExpr,
+        element_type: HirType,
+        op: &str,
+        extra_bindings: Vec<LoweredBinding>,
+    ) -> Result<HirExpr, String> {
+        let key_suffix = map_key_intrinsic_suffix(&element_type)?;
+        let set_type = HirType::Set(Box::new(element_type.clone()));
+        let elements_type = HirType::Array(Box::new(element_type.clone()));
+        let has_intrinsic = format!("__thaw_map_{key_suffix}_has");
+        let set_intrinsic = format!("__thaw_map_{key_suffix}_set");
+        let snapshot_intrinsic = "__thaw_map_snapshot_keys".to_string();
+
+        let receiver_name = format!("__thaw_set_combine_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let other_name = format!("__thaw_set_combine_other_{}", self.next_binding);
+        self.next_binding += 1;
+        let elements_name = format!("__thaw_set_combine_elements_{}", self.next_binding);
+        self.next_binding += 1;
+        let length_name = format!("__thaw_set_combine_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_name = format!("__thaw_set_combine_result_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_set_combine_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let element_name = format!("__thaw_set_combine_element_{}", self.next_binding);
+        self.next_binding += 1;
+
+        self.scope.insert(receiver_name.clone(), set_type.clone());
+        self.scope.insert(other_name.clone(), set_type.clone());
+        self.scope
+            .insert(elements_name.clone(), elements_type.clone());
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(result_name.clone(), set_type.clone());
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope
+            .insert(element_name.clone(), element_type.clone());
+
+        let var = |name: &str| HirExpr::Var(name.to_string());
+        let snapshot = |source_name: &str| {
+            HirExpr::TypedClosure(
+                elements_type.clone(),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var(snapshot_intrinsic.clone())),
+                    vec![var(source_name)],
+                )),
+            )
+        };
+        let insert_element = HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var(set_intrinsic)),
+            vec![
+                var(&result_name),
+                var(&element_name),
+                HirExpr::Lit(HirLit::F64(0.0)),
+            ],
+        ));
+        let advance_index = HirStmt::Expr(HirExpr::Assign(
+            index_name.clone(),
+            Box::new(HirExpr::BinOp(
+                BinOp::Add,
+                Box::new(var(&index_name)),
+                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+            )),
+        ));
+        let load_element = HirStmt::Let(
+            element_name.clone(),
+            element_type.clone(),
+            HirExpr::TypedIndex(
+                Box::new(var(&elements_name)),
+                Box::new(var(&index_name)),
+                element_type.clone(),
+            ),
+        );
+        let loop_condition = || {
+            HirExpr::BinOp(
+                BinOp::Lt,
+                Box::new(var(&index_name)),
+                Box::new(var(&length_name)),
+            )
+        };
+
+        let mut body_stmts = vec![
+            HirStmt::Let(
+                elements_name.clone(),
+                elements_type.clone(),
+                snapshot(&receiver_name),
+            ),
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(var(&elements_name))),
+            ),
+            HirStmt::Let(
+                result_name.clone(),
+                set_type.clone(),
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_map_new".to_string())),
+                    Vec::new(),
+                ),
+            ),
+            HirStmt::Let(
+                index_name.clone(),
+                HirType::F64,
+                HirExpr::Lit(HirLit::F64(0.0)),
+            ),
+        ];
+        if op == "union" {
+            body_stmts.push(HirStmt::While(
+                loop_condition(),
+                vec![load_element.clone(), insert_element.clone(), advance_index.clone()],
+            ));
+            body_stmts.push(HirStmt::Let(
+                elements_name.clone(),
+                elements_type.clone(),
+                snapshot(&other_name),
+            ));
+            body_stmts.push(HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(var(&elements_name))),
+            ));
+            body_stmts.push(HirStmt::Expr(HirExpr::Assign(
+                index_name.clone(),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            )));
+            body_stmts.push(HirStmt::While(
+                loop_condition(),
+                vec![load_element, insert_element, advance_index],
+            ));
+        } else {
+            // `intersection`: keep a receiver element only if `other` also
+            // has it. `difference`: keep it only if `other` doesn't.
+            let membership = HirExpr::Call(
+                Box::new(HirExpr::Var(has_intrinsic)),
+                vec![var(&other_name), var(&element_name)],
+            );
+            let (then_branch, else_branch) = if op == "intersection" {
+                (vec![insert_element], Vec::new())
+            } else {
+                (Vec::new(), vec![insert_element])
+            };
+            body_stmts.push(HirStmt::While(
+                loop_condition(),
+                vec![
+                    load_element,
+                    HirStmt::If(membership, then_branch, else_branch),
+                    advance_index,
+                ],
+            ));
+        }
+        body_stmts.push(HirStmt::Return(Some(var(&result_name))));
+        let body = HirExpr::Block(body_stmts);
+
+        let mut bindings = vec![(receiver_name, set_type.clone(), receiver)];
+        bindings.extend(extra_bindings);
+        bindings.push((other_name, set_type, other));
+        self.wrap_call_argument_bindings(body, &bindings)
+    }
+
     /// `Map.groupBy(items, keyfn)`, built entirely from the same generic
     /// primitives `.get()`/`.set()`/`.push()` already lower to (an
     /// intrinsic call per operation, plus `__thaw_map_new` for an empty
@@ -342,6 +509,7 @@ impl<'a> FnLowerer<'a> {
                 | "setUTCMinutes" | "setUTCSeconds" | "setUTCMilliseconds"
                 | "toDateString" | "toTimeString" | "toUTCString" | "toJSON"
                 | "keys" | "values" | "entries"
+                | "union" | "intersection" | "difference"
         )
     }
 
@@ -3904,6 +4072,42 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_map_clear".to_string())),
                         vec![receiver],
                     ));
+                }
+                if matches!(property.sym.as_ref(), "union" | "intersection" | "difference") {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Set(element_type) = &receiver_type else {
+                        return Err(format!(
+                            "native `.{}()` requires a Set receiver, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    };
+                    let element_type = element_type.as_ref().clone();
+                    let (arguments, spread_bindings) = self.lower_native_spread_values(
+                        &call.args,
+                        &format!("Set.{}", property.sym),
+                    )?;
+                    let [other] = arguments.as_slice() else {
+                        return Err(format!(
+                            "native `.{}()` expects exactly one argument",
+                            property.sym
+                        ));
+                    };
+                    let other = other.clone();
+                    let other_type = self.infer_expr_type(&other)?;
+                    if other_type != receiver_type {
+                        return Err(format!(
+                            "native `.{}()` requires a {receiver_type:?} argument, got {other_type:?}",
+                            property.sym
+                        ));
+                    }
+                    return self.lower_set_combine(
+                        receiver,
+                        other,
+                        element_type,
+                        property.sym.as_ref(),
+                        spread_bindings,
+                    );
                 }
                 if property.sym == *"keys" {
                     let receiver = self.lower_expr(&member.obj)?;
