@@ -398,6 +398,31 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let mut string_predicate = string_length.clone();
+    string_predicate.name = "matches".into();
+    string_predicate.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool);
+    for (method, operation, search) in [
+        ("startsWith", "startswith", "pre"),
+        ("endsWith", "endswith", "fix"),
+        ("includes", "includes", "ref"),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.matches = value => value.{method}('{search}');"),
+                "matches",
+                false,
+                &string_predicate,
+            ),
+            Some(format!(
+                "expr:s0,t{},{operation}",
+                search
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ))
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "module.exports.length = value => value + 1;",
