@@ -15,6 +15,8 @@ static INVALID_SYMBOL: &[u8] = b"invalid JIT symbol\0";
 static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 static ALLOCATION_FAILED: &[u8] = b"failed to allocate JIT code\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static INVALID_REPEAT_COUNT: &[u8] = b"invalid string repeat count\0";
 
 pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 
@@ -300,6 +302,78 @@ extern "C" fn string_to_upper_case(value: f64) -> f64 {
         string_argument(value).map_or(f64::from_bits(0), |value| {
             arena_string(value.to_uppercase())
         })
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn is_javascript_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}' | '\u{000b}' | '\u{000c}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+                | '\u{000a}'
+                | '\u{000d}'
+                | '\u{2028}'
+                | '\u{2029}'
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn trim_string(value: f64, start: bool, end: bool) -> f64 {
+    let Some(value) = string_argument(value) else {
+        return f64::from_bits(0);
+    };
+    let value = if start {
+        value.trim_start_matches(is_javascript_whitespace)
+    } else {
+        value.as_str()
+    };
+    let value = if end {
+        value.trim_end_matches(is_javascript_whitespace)
+    } else {
+        value
+    };
+    arena_string(value.to_owned())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_trim(value: f64) -> f64 {
+    unsafe { trim_string(value, true, true) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_trim_start(value: f64) -> f64 {
+    unsafe { trim_string(value, true, false) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_trim_end(value: f64) -> f64 {
+    unsafe { trim_string(value, false, true) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_repeat(value: f64, count: f64) -> f64 {
+    unsafe {
+        let Some(value) = string_argument(value) else {
+            return f64::from_bits(0);
+        };
+        let count = if count.is_nan() || count == 0.0 {
+            0
+        } else if !count.is_finite() || count < 0.0 {
+            CALL_ERROR.with(|error| error.set(INVALID_REPEAT_COUNT.as_ptr().cast()));
+            return f64::from_bits(0);
+        } else {
+            count.trunc() as usize
+        };
+        if value.len().checked_mul(count).is_none() {
+            CALL_ERROR.with(|error| error.set(INVALID_REPEAT_COUNT.as_ptr().cast()));
+            return f64::from_bits(0);
+        }
+        arena_string(value.repeat(count))
     }
 }
 
@@ -615,8 +689,12 @@ enum NumericValue {
     StringLastIndexOf,
     StringLength,
     StringStartsWith,
+    StringRepeat,
     StringToLowerCase,
     StringToUpperCase,
+    StringTrim,
+    StringTrimEnd,
+    StringTrimStart,
     Power,
     UnaryMath(UnaryMath),
     Remainder,
@@ -666,8 +744,12 @@ impl NumericProgram {
                     "lastindexof" => Some(NumericValue::StringLastIndexOf),
                     "strlen" => Some(NumericValue::StringLength),
                     "startswith" => Some(NumericValue::StringStartsWith),
+                    "repeat" => Some(NumericValue::StringRepeat),
                     "tolowercase" => Some(NumericValue::StringToLowerCase),
                     "touppercase" => Some(NumericValue::StringToUpperCase),
+                    "trim" => Some(NumericValue::StringTrim),
+                    "trimend" => Some(NumericValue::StringTrimEnd),
+                    "trimstart" => Some(NumericValue::StringTrimStart),
                     "pow" => Some(NumericValue::Power),
                     "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
                     "acosh" => Some(NumericValue::UnaryMath(UnaryMath::Acosh)),
@@ -872,7 +954,8 @@ impl NumericProgram {
                 | NumericValue::StringEndsWith
                 | NumericValue::StringIncludes
                 | NumericValue::StringIndexOf
-                | NumericValue::StringLastIndexOf => {
+                | NumericValue::StringLastIndexOf
+                | NumericValue::StringRepeat => {
                     if depth < 2 {
                         return None;
                     }
@@ -882,19 +965,27 @@ impl NumericProgram {
                         NumericValue::StringIncludes => string_includes,
                         NumericValue::StringIndexOf => string_index_of,
                         NumericValue::StringLastIndexOf => string_last_index_of,
+                        NumericValue::StringRepeat => string_repeat,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::StringToLowerCase | NumericValue::StringToUpperCase => {
+                NumericValue::StringToLowerCase
+                | NumericValue::StringToUpperCase
+                | NumericValue::StringTrim
+                | NumericValue::StringTrimStart
+                | NumericValue::StringTrimEnd => {
                     if depth == 0 {
                         return None;
                     }
-                    let function = if matches!(value, NumericValue::StringToLowerCase) {
-                        string_to_lower_case
-                    } else {
-                        string_to_upper_case
+                    let function = match value {
+                        NumericValue::StringToLowerCase => string_to_lower_case,
+                        NumericValue::StringToUpperCase => string_to_upper_case,
+                        NumericValue::StringTrim => string_trim,
+                        NumericValue::StringTrimStart => string_trim_start,
+                        NumericValue::StringTrimEnd => string_trim_end,
+                        _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
@@ -1413,6 +1504,39 @@ mod tests {
             );
             unsafe { libc::free(result.cast()) };
         }
+        let whitespace = CString::new("\u{feff}  value\u{3000}").unwrap();
+        for (operation, expected) in [
+            ("trim", "value"),
+            ("trimstart", "value\u{3000}"),
+            ("trimend", "\u{feff}  value"),
+        ] {
+            let trim = CString::new(format!("expr:s0,{operation}:{operation}")).unwrap();
+            let result = call(
+                &trim,
+                &[f64::from_bits(whitespace.as_ptr() as usize as u64)],
+            );
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+                expected
+            );
+            unsafe { libc::free(result.cast()) };
+        }
+        let repeated = CString::new("ab").unwrap();
+        let repeat = CString::new("expr:s0,a1,repeat:repeat").unwrap();
+        let result = call(
+            &repeat,
+            &[f64::from_bits(repeated.as_ptr() as usize as u64), 2.9],
+        );
+        let result = result.value.to_bits() as usize as *mut c_char;
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "abab");
+        unsafe { libc::free(result.cast()) };
+        assert!(!call(
+            &repeat,
+            &[f64::from_bits(repeated.as_ptr() as usize as u64), -1.0],
+        )
+        .error
+        .is_null());
         let combined = CString::new("expr:s0,t707265,startswith,s0,t666978,endswith,s0,t707265,startswith,?,s0,t726566,includes,s0,t707265,startswith,s0,t666978,endswith,s0,t707265,startswith,?,?:combined_string_predicates").unwrap();
         assert_eq!(
             call(&combined, &[f64::from_bits(value.as_ptr() as usize as u64)]).value,

@@ -145,18 +145,24 @@ fn jit_numeric_export(
                 is_string_expression(binary.left.as_ref(), parameters)
                     && is_string_expression(binary.right.as_ref(), parameters)
             }
-            Expr::Call(call) if call.args.is_empty() => {
+            Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else {
                     return false;
                 };
                 let Expr::Member(member) = callee.as_ref() else {
                     return false;
                 };
-                matches!(
-                    &member.prop,
-                    MemberProp::Ident(property)
-                        if matches!(property.sym.as_ref(), "toLowerCase" | "toUpperCase")
-                ) && is_string_expression(member.obj.as_ref(), parameters)
+                let MemberProp::Ident(property) = &member.prop else {
+                    return false;
+                };
+                let arity_matches = match property.sym.as_ref() {
+                    "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimEnd" => {
+                        call.args.is_empty()
+                    }
+                    "repeat" => call.args.len() == 1,
+                    _ => false,
+                };
+                arity_matches && is_string_expression(member.obj.as_ref(), parameters)
             }
             _ => false,
         }
@@ -189,6 +195,10 @@ fn jit_numeric_export(
             "lastIndexOf" => "lastindexof",
             "toLowerCase" => "tolowercase",
             "toUpperCase" => "touppercase",
+            "trim" => "trim",
+            "trimStart" => "trimstart",
+            "trimEnd" => "trimend",
+            "repeat" => "repeat",
             _ => return None,
         };
         Some((operation, member.obj.as_ref()))
@@ -339,10 +349,18 @@ fn jit_numeric_export(
             Expr::Call(call) if string_method(call, parameters).is_some() => {
                 let (operation, receiver) = string_method(call, parameters)?;
                 encode_expression(receiver, parameters, locals, output)?;
-                if matches!(operation, "tolowercase" | "touppercase") {
+                if matches!(
+                    operation,
+                    "tolowercase" | "touppercase" | "trim" | "trimstart" | "trimend"
+                ) {
                     if !call.args.is_empty() {
                         return None;
                     }
+                } else if operation == "repeat" {
+                    let [count] = call.args.as_slice() else {
+                        return None;
+                    };
+                    encode_expression(count.expr.as_ref(), parameters, locals, output)?;
                 } else {
                     let [search] = call.args.as_slice() else {
                         return None;
@@ -1027,8 +1045,16 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
                 return None;
             }
             stack.push(true);
-        } else if matches!(token.as_str(), "tolowercase" | "touppercase") {
+        } else if matches!(
+            token.as_str(),
+            "tolowercase" | "touppercase" | "trim" | "trimstart" | "trimend"
+        ) {
             if !stack.pop()? {
+                return None;
+            }
+            stack.push(true);
+        } else if token == "repeat" {
+            if stack.pop()? || !stack.pop()? {
                 return None;
             }
             stack.push(true);
