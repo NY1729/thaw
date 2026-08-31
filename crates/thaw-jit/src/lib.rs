@@ -286,28 +286,18 @@ extern "C" fn string_compare(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-macro_rules! string_predicates {
-    ($($function:ident => $method:ident),+ $(,)?) => {
-        $(extern "C" fn $function(value: f64, search: f64) -> f64 {
-            unsafe {
-                match (string_argument(value), string_argument(search)) {
-                    (Some(value), Some(search)) => f64::from(value.$method(search.as_str())),
-                    _ => 0.0,
-                }
-            }
-        })+
-    };
+fn clamped_string_position(position: f64, length: usize) -> usize {
+    if position.is_nan() || position == f64::NEG_INFINITY {
+        0
+    } else if position == f64::INFINITY {
+        length
+    } else {
+        position.trunc().clamp(0.0, length as f64) as usize
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-string_predicates! {
-    string_starts_with => starts_with,
-    string_ends_with => ends_with,
-    string_includes => contains,
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-unsafe fn string_index(value: f64, search: f64, reverse: bool) -> f64 {
+unsafe fn positioned_string_search(value: f64, search: f64, position: f64, kind: u8) -> f64 {
     let Some(value) = string_argument(value) else {
         return -1.0;
     };
@@ -316,31 +306,85 @@ unsafe fn string_index(value: f64, search: f64, reverse: bool) -> f64 {
     };
     let value = value.encode_utf16().collect::<Vec<_>>();
     let search = search.encode_utf16().collect::<Vec<_>>();
-    if search.is_empty() {
-        return if reverse { value.len() as f64 } else { 0.0 };
+    let position = clamped_string_position(position, value.len());
+    match kind {
+        0 => f64::from(value.get(position..position.saturating_add(search.len())) == Some(&search)),
+        1 => f64::from(
+            search.len() <= position
+                && value.get(position - search.len()..position) == Some(&search),
+        ),
+        2 | 3 => {
+            if search.is_empty() {
+                return if kind == 2 { 1.0 } else { position as f64 };
+            }
+            let found = value[position..]
+                .windows(search.len())
+                .position(|window| window == search)
+                .map(|index| position + index);
+            if kind == 2 {
+                f64::from(found.is_some())
+            } else {
+                found.map_or(-1.0, |index| index as f64)
+            }
+        }
+        4 => {
+            if search.is_empty() {
+                return position as f64;
+            }
+            if search.len() > value.len() {
+                return -1.0;
+            }
+            let start = position.min(value.len() - search.len());
+            (0..=start)
+                .rev()
+                .find(|index| value.get(*index..*index + search.len()) == Some(&search))
+                .map_or(-1.0, |index| index as f64)
+        }
+        _ => unreachable!(),
     }
-    if search.len() > value.len() {
-        return -1.0;
-    }
-    let mut positions = 0..=value.len() - search.len();
-    let found = if reverse {
-        positions
-            .rev()
-            .find(|index| value[*index..].starts_with(&search))
-    } else {
-        positions.find(|index| value[*index..].starts_with(&search))
-    };
-    found.map_or(-1.0, |index| index as f64)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_index_of(value: f64, search: f64) -> f64 {
-    unsafe { string_index(value, search, false) }
+    unsafe { positioned_string_search(value, search, 0.0, 3) }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_last_index_of(value: f64, search: f64) -> f64 {
-    unsafe { string_index(value, search, true) }
+    unsafe { positioned_string_search(value, search, f64::INFINITY, 4) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! positioned_searches {
+    ($($function:ident, $kind:expr);+ $(;)?) => {
+        $(extern "C" fn $function(value: f64, search: f64, position: f64) -> f64 {
+            unsafe { positioned_string_search(value, search, position, $kind) }
+        })+
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+positioned_searches! {
+    string_starts_with_at, 0;
+    string_ends_with_at, 1;
+    string_includes_at, 2;
+    string_index_of_at, 3;
+    string_last_index_of_at, 4;
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_starts_with(value: f64, search: f64) -> f64 {
+    string_starts_with_at(value, search, 0.0)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_ends_with(value: f64, search: f64) -> f64 {
+    string_ends_with_at(value, search, f64::INFINITY)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_includes(value: f64, search: f64) -> f64 {
+    string_includes_at(value, search, 0.0)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -850,13 +894,18 @@ enum NumericValue {
     StringConcat,
     StringConstant(*const c_char),
     StringEndsWith,
+    StringEndsWithAt,
     StringIncludes,
+    StringIncludesAt,
     StringIndexOf,
+    StringIndexOfAt,
     StringLastIndexOf,
+    StringLastIndexOfAt,
     StringLength,
     StringPadEnd,
     StringPadStart,
     StringStartsWith,
+    StringStartsWithAt,
     StringRepeat,
     StringSlice,
     StringSliceRange,
@@ -915,13 +964,18 @@ impl NumericProgram {
                     "codepointat" => Some(NumericValue::StringCodePointAt),
                     "concat" => Some(NumericValue::StringConcat),
                     "endswith" => Some(NumericValue::StringEndsWith),
+                    "endswith2" => Some(NumericValue::StringEndsWithAt),
                     "includes" => Some(NumericValue::StringIncludes),
+                    "includes2" => Some(NumericValue::StringIncludesAt),
                     "indexof" => Some(NumericValue::StringIndexOf),
+                    "indexof2" => Some(NumericValue::StringIndexOfAt),
                     "lastindexof" => Some(NumericValue::StringLastIndexOf),
+                    "lastindexof2" => Some(NumericValue::StringLastIndexOfAt),
                     "strlen" => Some(NumericValue::StringLength),
                     "padend" => Some(NumericValue::StringPadEnd),
                     "padstart" => Some(NumericValue::StringPadStart),
                     "startswith" => Some(NumericValue::StringStartsWith),
+                    "startswith2" => Some(NumericValue::StringStartsWithAt),
                     "repeat" => Some(NumericValue::StringRepeat),
                     "slice" => Some(NumericValue::StringSlice),
                     "slice2" => Some(NumericValue::StringSliceRange),
@@ -1177,7 +1231,12 @@ impl NumericProgram {
                 NumericValue::StringSliceRange
                 | NumericValue::StringSubstringRange
                 | NumericValue::StringPadStart
-                | NumericValue::StringPadEnd => {
+                | NumericValue::StringPadEnd
+                | NumericValue::StringStartsWithAt
+                | NumericValue::StringEndsWithAt
+                | NumericValue::StringIncludesAt
+                | NumericValue::StringIndexOfAt
+                | NumericValue::StringLastIndexOfAt => {
                     if depth < 3 {
                         return None;
                     }
@@ -1186,6 +1245,11 @@ impl NumericProgram {
                         NumericValue::StringSubstringRange => string_substring_range,
                         NumericValue::StringPadStart => string_pad_start,
                         NumericValue::StringPadEnd => string_pad_end,
+                        NumericValue::StringStartsWithAt => string_starts_with_at,
+                        NumericValue::StringEndsWithAt => string_ends_with_at,
+                        NumericValue::StringIncludesAt => string_includes_at,
+                        NumericValue::StringIndexOfAt => string_index_of_at,
+                        NumericValue::StringLastIndexOfAt => string_last_index_of_at,
                         _ => unreachable!(),
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
@@ -1751,6 +1815,30 @@ mod tests {
                     &[
                         f64::from_bits(value.as_ptr() as usize as u64),
                         f64::from_bits(search.as_ptr() as usize as u64),
+                    ],
+                )
+                .value,
+                expected
+            );
+        }
+        let positioned = CString::new("😀abc😀").unwrap();
+        for (operation, search, position, expected) in [
+            ("startswith2", "abc", 2.0, 1.0),
+            ("endswith2", "😀", 7.0, 1.0),
+            ("includes2", "😀", 1.0, 1.0),
+            ("indexof2", "😀", 1.0, 5.0),
+            ("lastindexof2", "😀", 4.0, 0.0),
+            ("indexof2", "", f64::INFINITY, 7.0),
+        ] {
+            let search = CString::new(search).unwrap();
+            let search_at = CString::new(format!("expr:s0,s1,a2,{operation}:{operation}")).unwrap();
+            assert_eq!(
+                call(
+                    &search_at,
+                    &[
+                        f64::from_bits(positioned.as_ptr() as usize as u64),
+                        f64::from_bits(search.as_ptr() as usize as u64),
+                        position,
                     ],
                 )
                 .value,
