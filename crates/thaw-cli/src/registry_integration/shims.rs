@@ -160,6 +160,7 @@ fn jit_numeric_export(
                         call.args.is_empty()
                     }
                     "charAt" => call.args.len() <= 1,
+                    "at" => call.args.len() <= 1,
                     "repeat" => call.args.len() == 1,
                     "padStart" | "padEnd" => (1..=2).contains(&call.args.len()),
                     "slice" | "substring" => call.args.len() <= 2,
@@ -204,6 +205,8 @@ fn jit_numeric_export(
             "repeat" => "repeat",
             "charAt" => "charat",
             "charCodeAt" => "charcodeat",
+            "at" => "at",
+            "codePointAt" => "codepointat",
             "padStart" => "padstart",
             "padEnd" => "padend",
             "slice" => "slice",
@@ -370,7 +373,7 @@ fn jit_numeric_export(
                         return None;
                     };
                     encode_expression(count.expr.as_ref(), parameters, locals, output)?;
-                } else if matches!(operation, "charat" | "charcodeat") {
+                } else if matches!(operation, "charat" | "charcodeat" | "at" | "codepointat") {
                     match call.args.as_slice() {
                         [] => output.push("c0000000000000000".into()),
                         [index] => {
@@ -813,12 +816,15 @@ fn jit_numeric_export(
                     )
                 )
             })
-        || !matches!(
-            &function.ret,
+        || !match &function.ret {
             thaw_bridge::DtsType::Native(
-                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
-            )
-        )
+                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str,
+            ) => true,
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
+                matches!(payload.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Str)
+            }
+            _ => false,
+        }
     {
         return None;
     }
@@ -1027,10 +1033,13 @@ fn jit_numeric_export(
     encode_numeric_body(body, &parameters, &locals, &mut expression)?;
     validated_jit_expression(
         expression,
-        matches!(
-            function.ret,
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str)
-        ),
+        match &function.ret {
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => true,
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
+                **payload == thaw_hir::HirType::Str
+            }
+            _ => false,
+        },
     )
 }
 
@@ -1101,11 +1110,14 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
                 return None;
             }
             stack.push(true);
-        } else if matches!(token.as_str(), "charat" | "charcodeat") {
+        } else if matches!(
+            token.as_str(),
+            "charat" | "charcodeat" | "at" | "codepointat"
+        ) {
             if stack.pop()? || !stack.pop()? {
                 return None;
             }
-            stack.push(token == "charat");
+            stack.push(matches!(token.as_str(), "charat" | "at"));
         } else if matches!(token.as_str(), "slice2" | "substring2") {
             if stack.pop()? || stack.pop()? || !stack.pop()? {
                 return None;
@@ -1204,6 +1216,16 @@ fn jit_numeric_declaration(
     let ret = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "string",
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if **payload == thaw_hir::HirType::Str =>
+        {
+            "string | undefined"
+        }
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if **payload == thaw_hir::HirType::F64 =>
+        {
+            "number | undefined"
+        }
         _ => "number",
     };
     let declaration = format!("declare function {symbol}({params}): {ret};\n");
