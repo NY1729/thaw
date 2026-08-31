@@ -1991,6 +1991,9 @@ QuickJS. Hoisted top-level function declarations can be exported through
 named assignments, object aliases, or object shorthand and reuse the same
 body analysis. Function-valued `const` declarations and aliases resolve
 through the same table.
+Required string parameters can enter the typed JIT ABI for UTF-16 `.length`
+and relational/equality comparisons returning number or boolean; these
+exports also avoid QuickJS entirely.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,

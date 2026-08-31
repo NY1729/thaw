@@ -35,9 +35,13 @@ fn specialized_jit_runs_without_quickjs() {
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("main.ts");
     let output = dir.join("app");
+    let string_symbol = "expr:s0,strlen:test"
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     std::fs::write(
         &source,
-        "declare function __thaw_typed_jit_6164643a74657374(left: number, right: number): number;\nfunction main(): void { console.log(__thaw_typed_jit_6164643a74657374(20, 22)); }\n",
+        format!("declare function __thaw_typed_jit_6164643a74657374(left: number, right: number): number;\ndeclare function __thaw_typed_jit_{string_symbol}(value: string): number;\nfunction main(): void {{ console.log(__thaw_typed_jit_6164643a74657374(20, 22) + __thaw_typed_jit_{string_symbol}('😀') - 2); }}\n"),
     )
     .unwrap();
     build(
