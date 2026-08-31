@@ -21,8 +21,8 @@ fn jit_numeric_export(
     function: &thaw_bridge::DtsFunction,
 ) -> Option<String> {
     use thaw_parser::ast::{
-        AssignOp, AssignTarget, BinaryOp, Decl, Expr, Ident, Lit, ModuleItem, Pat, Prop, PropName,
-        PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp,
+        AssignOp, AssignTarget, BinaryOp, Callee, Decl, Expr, Ident, Lit, MemberProp, ModuleItem,
+        Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp,
     };
 
     fn encode_expression(
@@ -53,7 +53,11 @@ fn jit_numeric_export(
             Expr::Bin(binary)
                 if matches!(
                     binary.op,
-                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
                 ) =>
             {
                 encode_expression(binary.left.as_ref(), parameters, locals, output)?;
@@ -64,10 +68,24 @@ fn jit_numeric_export(
                         BinaryOp::Sub => "-",
                         BinaryOp::Mul => "*",
                         BinaryOp::Div => "/",
+                        BinaryOp::Mod => "%",
                         _ => unreachable!(),
                     }
                     .into(),
                 );
+            }
+            Expr::Call(call)
+                if call.args.len() == 1
+                    && call.args[0].spread.is_none()
+                    && !parameters.contains_key("Math")
+                    && !locals.contains_key("Math")
+                    && matches!(&call.callee, Callee::Expr(callee)
+                        if matches!(callee.as_ref(), Expr::Member(member)
+                            if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Math")
+                                && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "abs"))) =>
+            {
+                encode_expression(call.args[0].expr.as_ref(), parameters, locals, output)?;
+                output.push("abs".into());
             }
             Expr::Cond(conditional) => {
                 encode_condition(conditional.test.as_ref(), parameters, locals, output)?;
@@ -336,7 +354,12 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 return None;
             }
             depth -= 2;
-        } else if token == "neg" {
+        } else if token == "%" {
+            if depth != 2 {
+                return None;
+            }
+            depth = 1;
+        } else if matches!(token.as_str(), "neg" | "abs") {
             if depth == 0 {
                 return None;
             }
