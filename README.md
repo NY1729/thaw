@@ -2454,8 +2454,11 @@ Packages containing both `bundle.js` and `native.node` initialize the addon
 first and then the JavaScript wrapper. Bundled CommonJS `require` functions
 inherit `require.addon()`, whose primitive function exports use the shared
 QuickJS/N-API JSON bridge. A standalone E2E removes the registry and runs a JS
-wrapper which calls a bundled native `add` export. Constructor and object-handle
-exports still require the handle bridge described below.
+wrapper which calls a bundled native `add` export. Class exports also support
+`new`, instance methods, and instance getters/setters through a persistent N-API
+handle Proxy; the same E2E constructs a native class and calls its method.
+Passing QuickJS object/function identity into native constructors remains a
+separate bridge boundary.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
