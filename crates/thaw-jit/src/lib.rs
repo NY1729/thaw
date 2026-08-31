@@ -378,6 +378,32 @@ extern "C" fn string_repeat(value: f64, count: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn string_suffix(value: f64, start: f64, negative_from_end: bool) -> f64 {
+    let Some(value) = string_argument(value) else {
+        return f64::from_bits(0);
+    };
+    let value = value.encode_utf16().collect::<Vec<_>>();
+    let length = value.len() as f64;
+    let start = if start.is_nan() { 0.0 } else { start.trunc() };
+    let start = if negative_from_end && start < 0.0 {
+        (length + start).max(0.0)
+    } else {
+        start.clamp(0.0, length)
+    } as usize;
+    arena_string(String::from_utf16_lossy(&value[start..]))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_slice(value: f64, start: f64) -> f64 {
+    unsafe { string_suffix(value, start, true) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_substring(value: f64, start: f64) -> f64 {
+    unsafe { string_suffix(value, start, false) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_concat(left: f64, right: f64) -> f64 {
     unsafe {
         let left = left.to_bits() as usize as *const c_char;
@@ -690,6 +716,8 @@ enum NumericValue {
     StringLength,
     StringStartsWith,
     StringRepeat,
+    StringSlice,
+    StringSubstring,
     StringToLowerCase,
     StringToUpperCase,
     StringTrim,
@@ -745,6 +773,8 @@ impl NumericProgram {
                     "strlen" => Some(NumericValue::StringLength),
                     "startswith" => Some(NumericValue::StringStartsWith),
                     "repeat" => Some(NumericValue::StringRepeat),
+                    "slice" => Some(NumericValue::StringSlice),
+                    "substring" => Some(NumericValue::StringSubstring),
                     "tolowercase" => Some(NumericValue::StringToLowerCase),
                     "touppercase" => Some(NumericValue::StringToUpperCase),
                     "trim" => Some(NumericValue::StringTrim),
@@ -955,7 +985,9 @@ impl NumericProgram {
                 | NumericValue::StringIncludes
                 | NumericValue::StringIndexOf
                 | NumericValue::StringLastIndexOf
-                | NumericValue::StringRepeat => {
+                | NumericValue::StringRepeat
+                | NumericValue::StringSlice
+                | NumericValue::StringSubstring => {
                     if depth < 2 {
                         return None;
                     }
@@ -966,6 +998,8 @@ impl NumericProgram {
                         NumericValue::StringIndexOf => string_index_of,
                         NumericValue::StringLastIndexOf => string_last_index_of,
                         NumericValue::StringRepeat => string_repeat,
+                        NumericValue::StringSlice => string_slice,
+                        NumericValue::StringSubstring => string_substring,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
@@ -1537,6 +1571,25 @@ mod tests {
         )
         .error
         .is_null());
+        let sliced = CString::new("😀abcd").unwrap();
+        for (operation, start, expected) in [
+            ("slice", -2.0, "cd"),
+            ("slice", 2.0, "abcd"),
+            ("substring", -2.0, "😀abcd"),
+            ("substring", 4.9, "cd"),
+        ] {
+            let suffix = CString::new(format!("expr:s0,a1,{operation}:{operation}")).unwrap();
+            let result = call(
+                &suffix,
+                &[f64::from_bits(sliced.as_ptr() as usize as u64), start],
+            );
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+                expected
+            );
+            unsafe { libc::free(result.cast()) };
+        }
         let combined = CString::new("expr:s0,t707265,startswith,s0,t666978,endswith,s0,t707265,startswith,?,s0,t726566,includes,s0,t707265,startswith,s0,t666978,endswith,s0,t707265,startswith,?,?:combined_string_predicates").unwrap();
         assert_eq!(
             call(&combined, &[f64::from_bits(value.as_ptr() as usize as u64)]).value,
