@@ -85,6 +85,36 @@ fn jit_numeric_export(
         }
     }
 
+    fn math_constant(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<f64> {
+        if parameters.contains_key("Math") || locals.contains_key("Math") {
+            return None;
+        }
+        let Expr::Member(member) = expression else {
+            return None;
+        };
+        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Math") {
+            return None;
+        }
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        match property.sym.as_ref() {
+            "E" => Some(std::f64::consts::E),
+            "LN2" => Some(std::f64::consts::LN_2),
+            "LN10" => Some(std::f64::consts::LN_10),
+            "LOG2E" => Some(std::f64::consts::LOG2_E),
+            "LOG10E" => Some(std::f64::consts::LOG10_E),
+            "PI" => Some(std::f64::consts::PI),
+            "SQRT1_2" => Some(std::f64::consts::FRAC_1_SQRT_2),
+            "SQRT2" => Some(std::f64::consts::SQRT_2),
+            _ => None,
+        }
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -105,6 +135,12 @@ fn jit_numeric_export(
                 output.push(format!(
                     "c{:016x}",
                     f64::from(u8::from(boolean.value)).to_bits()
+                ));
+            }
+            Expr::Member(_) => {
+                output.push(format!(
+                    "c{:016x}",
+                    math_constant(expression, parameters, locals)?.to_bits()
                 ));
             }
             Expr::Unary(unary)
