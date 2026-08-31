@@ -61,14 +61,25 @@ use wasmi_wasi::WasiCtx;
 
 type NapiBridgeCallback = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
 type NapiBridgeExports = unsafe extern "C" fn() -> *const c_char;
-static NAPI_BRIDGE: Mutex<Option<(NapiBridgeExports, NapiBridgeCallback)>> = Mutex::new(None);
+type NapiBridgeHandle = unsafe extern "C" fn(
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+) -> *const c_char;
+static NAPI_BRIDGE: Mutex<Option<(NapiBridgeExports, NapiBridgeCallback, NapiBridgeHandle)>> =
+    Mutex::new(None);
 
-pub fn register_napi_bridge(exports: NapiBridgeExports, call: NapiBridgeCallback) {
-    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call));
+pub fn register_napi_bridge(
+    exports: NapiBridgeExports,
+    call: NapiBridgeCallback,
+    handle: NapiBridgeHandle,
+) {
+    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call, handle));
 }
 
 fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-    let Some((exports, call)) = *NAPI_BRIDGE.lock().unwrap() else {
+    let Some((exports, call, handle)) = *NAPI_BRIDGE.lock().unwrap() else {
         return Ok(());
     };
     let exports = Function::new(ctx.clone(), move || unsafe { to_str(exports()) })?;
@@ -79,6 +90,22 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     })?;
     ctx.globals().set("__thaw_napi_bridge_exports", exports)?;
     ctx.globals().set("__thaw_napi_bridge_call", call)?;
+    let handle = Function::new(
+        ctx.clone(),
+        move |operation: String, target: String, name: String, args: String| unsafe {
+            let operation = CString::new(operation).unwrap_or_default();
+            let target = CString::new(target).unwrap_or_default();
+            let name = CString::new(name).unwrap_or_default();
+            let args = CString::new(args).unwrap_or_default();
+            to_str(handle(
+                operation.as_ptr(),
+                target.as_ptr(),
+                name.as_ptr(),
+                args.as_ptr(),
+            ))
+        },
+    )?;
+    ctx.globals().set("__thaw_napi_bridge_handle", handle)?;
     Ok(())
 }
 type TlsStream = StreamOwned<ClientConnection, TcpStream>;
