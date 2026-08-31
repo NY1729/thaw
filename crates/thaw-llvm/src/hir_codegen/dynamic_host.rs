@@ -973,18 +973,23 @@ impl<'ctx> HirCompiler<'ctx> {
             return self.compile_typed_napi_method(signature, args);
         }
         if signature.backend == DynamicBackend::Jit {
-            if signature.params != [HirType::F64, HirType::F64]
+            if !(1..=2).contains(&signature.params.len())
+                || !signature.params.iter().all(|ty| *ty == HirType::F64)
                 || signature.ret != HirType::F64
-                || args.len() != 2
+                || args.len() != signature.params.len()
             {
-                return Err("JIT calls currently require (number, number) => number".into());
+                return Err("JIT calls currently require one or two numbers and return number".into());
             }
             let name = self
                 .builder
                 .build_global_string_ptr(&signature.symbol, "jit_symbol")
                 .map_err(|error| error.to_string())?;
             let left = self.compile_expr(&args[0])?;
-            let right = self.compile_expr(&args[1])?;
+            let right = if let Some(argument) = args.get(1) {
+                self.compile_expr(argument)?
+            } else {
+                self.context.f64_type().const_zero().into()
+            };
             let result = self
                 .builder
                 .build_call(

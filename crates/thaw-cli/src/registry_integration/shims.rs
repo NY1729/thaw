@@ -171,9 +171,34 @@ fn jit_numeric_export(
         Some((locals, numeric_body(&statements[offset..])?))
     }
 
+    fn encode_numeric_body(
+        body: NumericBody<'_>,
+        left: &str,
+        right: &str,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        match body {
+            NumericBody::Expression(body) => {
+                encode_expression(body, left, right, locals, output)?;
+            }
+            NumericBody::Conditional {
+                test,
+                consequent,
+                alternate,
+            } => {
+                encode_condition(test, left, right, locals, output)?;
+                encode_expression(consequent, left, right, locals, output)?;
+                encode_expression(alternate, left, right, locals, output)?;
+                output.push("?".into());
+            }
+        }
+        Some(())
+    }
+
     if function.generic.is_some()
-        || function.required_params != 2
-        || function.params.len() != 2
+        || function.required_params != function.params.len()
+        || !(1..=2).contains(&function.params.len())
         || function.rest_param.is_some()
         || !function
             .params
@@ -278,12 +303,14 @@ fn jit_numeric_export(
         }
         _ => return None,
     };
-    let [Pat::Ident(left_param), Pat::Ident(right_param)] = params.as_slice() else {
-        return None;
+    let (left, right) = match params.as_slice() {
+        [Pat::Ident(left)] => (left.id.sym.as_ref(), ""),
+        [Pat::Ident(left), Pat::Ident(right)] => {
+            (left.id.sym.as_ref(), right.id.sym.as_ref())
+        }
+        _ => return None,
     };
     let mut expression = Vec::new();
-    let left = left_param.id.sym.as_ref();
-    let right = right_param.id.sym.as_ref();
     let mut locals = std::collections::HashMap::new();
     for (name, initializer) in local_initializers {
         if name.sym == left || name.sym == right || locals.contains_key(name.sym.as_ref()) {
@@ -293,21 +320,11 @@ fn jit_numeric_export(
         encode_expression(initializer, left, right, &locals, &mut encoded)?;
         locals.insert(name.sym.to_string(), encoded);
     }
-    match body {
-        NumericBody::Expression(body) => {
-            encode_expression(body, left, right, &locals, &mut expression)?
-        }
-        NumericBody::Conditional {
-            test,
-            consequent,
-            alternate,
-        } => {
-            encode_condition(test, left, right, &locals, &mut expression)?;
-            encode_expression(consequent, left, right, &locals, &mut expression)?;
-            encode_expression(alternate, left, right, &locals, &mut expression)?;
-            expression.push("?".into());
-        }
-    }
+    encode_numeric_body(body, left, right, &locals, &mut expression)?;
+    validated_jit_expression(expression)
+}
+
+fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
     let mut depth = 0usize;
     let mut maximum_depth = 0usize;
     for token in &expression {
@@ -347,11 +364,13 @@ fn jit_numeric_declaration(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let symbol = format!("__thaw_typed_jit_{encoded}");
-    let left = &function.params[0].0;
-    let right = &function.params[1].0;
-    let declaration = format!(
-        "declare function {symbol}({left}: number, {right}: number): number;\n"
-    );
+    let params = function
+        .params
+        .iter()
+        .map(|(name, _)| format!("{name}: number"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let declaration = format!("declare function {symbol}({params}): number;\n");
     (symbol, declaration)
 }
 
