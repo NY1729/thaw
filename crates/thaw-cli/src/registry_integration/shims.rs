@@ -493,8 +493,35 @@ fn jit_numeric_export(
     let module = thaw_parser::parse_javascript(source).ok()?;
     let mut style = None;
     let mut callable = None;
+    let mut module_locals = std::collections::HashMap::new();
+    let no_parameters = std::collections::HashMap::new();
     for item in &module.body {
-        let ModuleItem::Stmt(Stmt::Expr(statement)) = item else {
+        let ModuleItem::Stmt(statement) = item else {
+            return None;
+        };
+        if let Stmt::Decl(Decl::Var(declaration)) = statement {
+            if declaration.kind != VarDeclKind::Const {
+                return None;
+            }
+            for declarator in &declaration.decls {
+                let Pat::Ident(name) = &declarator.name else {
+                    return None;
+                };
+                if module_locals.contains_key(name.id.sym.as_ref()) {
+                    return None;
+                }
+                let mut encoded = Vec::new();
+                encode_expression(
+                    declarator.init.as_deref()?,
+                    &no_parameters,
+                    &module_locals,
+                    &mut encoded,
+                )?;
+                module_locals.insert(name.id.sym.to_string(), encoded);
+            }
+            continue;
+        }
+        let Stmt::Expr(statement) = statement else {
             return None;
         };
         if matches!(statement.expr.as_ref(), Expr::Lit(Lit::Str(_))) {
@@ -555,7 +582,10 @@ fn jit_numeric_export(
         }
     }
     let mut expression = Vec::new();
-    let mut locals = std::collections::HashMap::new();
+    let mut locals = module_locals;
+    for parameter in parameters.keys() {
+        locals.remove(parameter);
+    }
     let mut mutable = std::collections::HashSet::new();
     for step in local_steps {
         match step {
