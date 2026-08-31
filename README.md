@@ -1433,7 +1433,10 @@ The workspace crates have narrow responsibilities:
   layout error because their result element type is not statically fixed
 - `Array.of()` constructs homogeneous native arrays for every supported
   element layout, preserves scalar/spread evaluation order and accepts awaited
-  spreads. Explicit element type arguments support empty construction
+  spreads. Explicit element type arguments support empty construction.
+  A spread source gets the same string/`Map`/`Set` snapshot conversion
+  array literals and `Array.from` already apply, rather than requiring an
+  already-typed array
 - `Array.from()` copies homogeneous native arrays or iterates strings by
   Unicode code point, and can map either source through a typed zero-to-two-
   argument callback into a new element type. Explicit input/output type
