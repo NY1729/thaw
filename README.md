@@ -2033,10 +2033,13 @@ normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,
 numeric compound assignments, and standalone increments/decrements are
 expanded in statement order. Calls, property mutation, and forward references
-remain on the QuickJS path. Numeric exports with 0-16 required arguments use a
-single argument-array runtime ABI; generated code loads only the `aN` slots
-referenced by its IR. Numeric/boolean predicates may accept and return
-`boolean`; LLVM converts boolean arguments to JIT slots and comparison results
+to mutable values remain on the QuickJS path. Calls to side-effect-free function
+declarations and arrow aliases in the same bundle are inlined into the typed IR,
+including nested calls and forward function declarations; dynamic, shadowed, or
+recursive calls deliberately fall back instead. Numeric exports with 0-16
+required arguments use a single argument-array runtime ABI; generated code loads
+only the `aN` slots referenced by its IR. Numeric/boolean predicates may accept
+and return `boolean`; LLVM converts boolean arguments to JIT slots and comparison results
 back to the native boolean representation. Boolean literals and logical
 negation use the same IR, including ECMAScript's falsey `NaN` behavior.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
