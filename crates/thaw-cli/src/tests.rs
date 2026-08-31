@@ -135,6 +135,39 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "function add(left, right) { return left + right; } module.exports = { add };",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,+".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "function sum(left, right) { return left + right; } module.exports = { add: sum };",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,+".into())
+    );
+    for (source, allow_default) in [
+        (
+            "function add(left, right) { return left + right; } exports.add = add;",
+            false,
+        ),
+        (
+            "function add(left, right) { return left + right; } module.exports = add;",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "add", allow_default, &function),
+            Some("expr:a0,a1,+".into())
+        );
+    }
+    assert_eq!(
+        jit_numeric_export(
             "const left = 99; exports.add = (left, right) => left + right;",
             "add",
             false,
@@ -257,6 +290,10 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &function,
         ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export("module.exports = { add };", "add", false, &function,),
         None
     );
     assert_eq!(
