@@ -161,6 +161,7 @@ fn jit_numeric_export(
                     }
                     "charAt" => call.args.len() <= 1,
                     "repeat" => call.args.len() == 1,
+                    "padStart" | "padEnd" => (1..=2).contains(&call.args.len()),
                     "slice" | "substring" => call.args.len() <= 2,
                     _ => false,
                 };
@@ -203,6 +204,8 @@ fn jit_numeric_export(
             "repeat" => "repeat",
             "charAt" => "charat",
             "charCodeAt" => "charcodeat",
+            "padStart" => "padstart",
+            "padEnd" => "padend",
             "slice" => "slice",
             "substring" => "substring",
             _ => return None,
@@ -372,6 +375,18 @@ fn jit_numeric_export(
                         [] => output.push("c0000000000000000".into()),
                         [index] => {
                             encode_expression(index.expr.as_ref(), parameters, locals, output)?
+                        }
+                        _ => return None,
+                    }
+                } else if matches!(operation, "padstart" | "padend") {
+                    let [target, pad @ ..] = call.args.as_slice() else {
+                        return None;
+                    };
+                    encode_expression(target.expr.as_ref(), parameters, locals, output)?;
+                    match pad {
+                        [] => output.push("t20".into()),
+                        [pad] if is_string_expression(pad.expr.as_ref(), parameters) => {
+                            encode_expression(pad.expr.as_ref(), parameters, locals, output)?
                         }
                         _ => return None,
                     }
@@ -1093,6 +1108,11 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
             stack.push(token == "charat");
         } else if matches!(token.as_str(), "slice2" | "substring2") {
             if stack.pop()? || stack.pop()? || !stack.pop()? {
+                return None;
+            }
+            stack.push(true);
+        } else if matches!(token.as_str(), "padstart" | "padend") {
+            if !stack.pop()? || stack.pop()? || !stack.pop()? {
                 return None;
             }
             stack.push(true);

@@ -455,6 +455,41 @@ extern "C" fn string_substring_range(value: f64, start: f64, end: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn string_pad(value: f64, target_length: f64, pad: f64, at_start: bool) -> f64 {
+    let (Some(value), Some(pad)) = (string_argument(value), string_argument(pad)) else {
+        return f64::from_bits(0);
+    };
+    let units = value.encode_utf16().collect::<Vec<_>>();
+    let target_length = if target_length.is_finite() && target_length > 0.0 {
+        target_length as usize
+    } else {
+        0
+    };
+    let pad = pad.encode_utf16().collect::<Vec<_>>();
+    if target_length <= units.len() || pad.is_empty() {
+        return arena_string(value);
+    }
+    let needed = target_length - units.len();
+    let filler = pad.into_iter().cycle().take(needed);
+    let combined = if at_start {
+        filler.chain(units).collect::<Vec<_>>()
+    } else {
+        units.into_iter().chain(filler).collect()
+    };
+    arena_string(String::from_utf16_lossy(&combined))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_pad_start(value: f64, target_length: f64, pad: f64) -> f64 {
+    unsafe { string_pad(value, target_length, pad, true) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_pad_end(value: f64, target_length: f64, pad: f64) -> f64 {
+    unsafe { string_pad(value, target_length, pad, false) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_concat(left: f64, right: f64) -> f64 {
     unsafe {
         let left = left.to_bits() as usize as *const c_char;
@@ -767,6 +802,8 @@ enum NumericValue {
     StringIndexOf,
     StringLastIndexOf,
     StringLength,
+    StringPadEnd,
+    StringPadStart,
     StringStartsWith,
     StringRepeat,
     StringSlice,
@@ -828,6 +865,8 @@ impl NumericProgram {
                     "indexof" => Some(NumericValue::StringIndexOf),
                     "lastindexof" => Some(NumericValue::StringLastIndexOf),
                     "strlen" => Some(NumericValue::StringLength),
+                    "padend" => Some(NumericValue::StringPadEnd),
+                    "padstart" => Some(NumericValue::StringPadStart),
                     "startswith" => Some(NumericValue::StringStartsWith),
                     "repeat" => Some(NumericValue::StringRepeat),
                     "slice" => Some(NumericValue::StringSlice),
@@ -1076,14 +1115,19 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::StringSliceRange | NumericValue::StringSubstringRange => {
+                NumericValue::StringSliceRange
+                | NumericValue::StringSubstringRange
+                | NumericValue::StringPadStart
+                | NumericValue::StringPadEnd => {
                     if depth < 3 {
                         return None;
                     }
-                    let function = if matches!(value, NumericValue::StringSliceRange) {
-                        string_slice_range
-                    } else {
-                        string_substring_range
+                    let function = match value {
+                        NumericValue::StringSliceRange => string_slice_range,
+                        NumericValue::StringSubstringRange => string_substring_range,
+                        NumericValue::StringPadStart => string_pad_start,
+                        NumericValue::StringPadEnd => string_pad_end,
+                        _ => unreachable!(),
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
                     depth -= 2;
@@ -1720,6 +1764,25 @@ mod tests {
             let result = call(
                 &range,
                 &[f64::from_bits(sliced.as_ptr() as usize as u64), start, end],
+            );
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+                expected
+            );
+            unsafe { libc::free(result.cast()) };
+        }
+        let padded = CString::new("😀").unwrap();
+        let padding = CString::new("ab").unwrap();
+        for (operation, expected) in [("padstart", "a😀"), ("padend", "😀a")] {
+            let pad = CString::new(format!("expr:s0,a1,s2,{operation}:{operation}")).unwrap();
+            let result = call(
+                &pad,
+                &[
+                    f64::from_bits(padded.as_ptr() as usize as u64),
+                    3.0,
+                    f64::from_bits(padding.as_ptr() as usize as u64),
+                ],
             );
             let result = result.value.to_bits() as usize as *mut c_char;
             assert_eq!(
