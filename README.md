@@ -1890,10 +1890,11 @@ An experimental QuickJS-independent residual JIT backend is now linked as a
 separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
 HIR through LLVM to a small W^X runtime which specializes and caches
 `add/sub/mul/div` number operations on first use. Its end-to-end test produces
-`42` with the artifact's `quickjs` flag still false. Automatic extraction of
-eligible functions from npm `bundle.js` and non-numeric Dynamic IR remain the
-next migration steps; ordinary fallback bundles continue to use QuickJS for
-now.
+`42` with the artifact's `quickjs` flag still false. Registry integration also
+extracts a side-effect-free, single CommonJS export whose body is one binary
+number operation, routes it to this backend, and omits its bundle from QuickJS.
+Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
+to use QuickJS for now.
 
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections, multi-capture export keys and the
