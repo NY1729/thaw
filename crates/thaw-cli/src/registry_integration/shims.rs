@@ -50,14 +50,34 @@ fn jit_numeric_export(
             return None;
         };
         match property.sym.as_ref() {
+            "acos" => Some("acos"),
+            "acosh" => Some("acosh"),
             "abs" => Some("abs"),
+            "asin" => Some("asin"),
+            "asinh" => Some("asinh"),
+            "atan" => Some("atan"),
+            "atanh" => Some("atanh"),
+            "cbrt" => Some("cbrt"),
             "ceil" => Some("ceil"),
+            "cos" => Some("cos"),
+            "cosh" => Some("cosh"),
+            "exp" => Some("exp"),
+            "expm1" => Some("expm1"),
             "floor" => Some("floor"),
+            "log" => Some("log"),
+            "log1p" => Some("log1p"),
+            "log2" => Some("log2"),
+            "log10" => Some("log10"),
             "min" => Some("min"),
             "max" => Some("max"),
             "pow" => Some("pow"),
             "round" => Some("round"),
+            "sign" => Some("sign"),
+            "sin" => Some("sin"),
+            "sinh" => Some("sinh"),
             "sqrt" => Some("sqrt"),
+            "tan" => Some("tan"),
+            "tanh" => Some("tanh"),
             "trunc" => Some("trunc"),
             _ => None,
         }
@@ -174,7 +194,35 @@ fn jit_numeric_export(
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
-                if matches!(method, "abs" | "ceil" | "floor" | "round" | "sqrt" | "trunc") {
+                if matches!(
+                    method,
+                    "abs"
+                        | "acos"
+                        | "acosh"
+                        | "asin"
+                        | "asinh"
+                        | "atan"
+                        | "atanh"
+                        | "cbrt"
+                        | "ceil"
+                        | "cos"
+                        | "cosh"
+                        | "exp"
+                        | "expm1"
+                        | "floor"
+                        | "log"
+                        | "log1p"
+                        | "log2"
+                        | "log10"
+                        | "round"
+                        | "sign"
+                        | "sin"
+                        | "sinh"
+                        | "sqrt"
+                        | "tan"
+                        | "tanh"
+                        | "trunc"
+                ) {
                     let [argument] = call.args.as_slice() else {
                         return None;
                     };
@@ -738,7 +786,34 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 return None;
             }
             depth = 1;
-        } else if matches!(token.as_str(), "ceil" | "floor" | "round" | "trunc" | "bnot") {
+        } else if matches!(
+            token.as_str(),
+            "acos"
+                | "acosh"
+                | "asin"
+                | "asinh"
+                | "atan"
+                | "atanh"
+                | "cbrt"
+                | "ceil"
+                | "cos"
+                | "cosh"
+                | "exp"
+                | "expm1"
+                | "floor"
+                | "log"
+                | "log1p"
+                | "log2"
+                | "log10"
+                | "round"
+                | "sign"
+                | "sin"
+                | "sinh"
+                | "tan"
+                | "tanh"
+                | "trunc"
+                | "bnot"
+        ) {
             if depth != 1 {
                 return None;
             }
