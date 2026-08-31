@@ -1962,8 +1962,9 @@ extracts side-effect-free CommonJS function exports, including
 export assignments, whose bodies fit this numeric IR, routes them to this
 backend, and omits fully extracted bundles from QuickJS.
 Single-return bodies and the common `if (...) return ...; return ...;` form are
-normalized to the same IR. Side-effect-free local numeric declarations are
-expanded in declaration order, while calls, mutation, and forward references
+normalized to the same IR. Side-effect-free local declarations, assignments,
+numeric compound assignments, and standalone increments/decrements are
+expanded in statement order. Calls, property mutation, and forward references
 remain on the QuickJS path. Numeric exports with 0-16 required arguments use a
 single argument-array runtime ABI; generated code loads only the `aN` slots
 referenced by its IR. Numeric/boolean predicates may accept and return
