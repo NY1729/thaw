@@ -422,7 +422,7 @@ fn value_from_json_with_undefined(
                     return *value;
                 }
                 let bridge = Arc::new(ThawCallbackBridge {
-                    callback: ThawCallback::Value(thaw_quickjs::thaw_js_call_reference),
+                    callback: ThawCallback::QuickJs(thaw_quickjs::thaw_js_call_reference),
                     context: reference as usize,
                 });
                 let function = env.alloc(Value::Function(Function {
@@ -1090,13 +1090,27 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
     let Some(bridge) = (info.data as *const ThawCallbackBridge).as_ref() else {
         return ptr::null_mut();
     };
-    if let ThawCallback::Value(callback) = bridge.callback {
-        let args = info
+    if let ThawCallback::Value(callback) | ThawCallback::QuickJs(callback) = bridge.callback {
+        let mut args = info
             .args
             .iter()
             .map(|value| json_from_value_with_undefined(*value, true))
-            .collect::<Result<Vec<_>, _>>()
-            .and_then(|args| serde_json::to_string(&args).map_err(|error| error.to_string()));
+            .collect::<Result<Vec<_>, _>>();
+        if matches!(bridge.callback, ThawCallback::QuickJs(_)) {
+            let receiver = value_ref(info.this_arg)
+                .ok()
+                .filter(|value| is_object_value(value))
+                .map(|_| serde_json::json!({
+                    "__thaw_napi_this_handle__": (info.this_arg as u64).to_string()
+                }))
+                .unwrap_or(JsonValue::Null);
+            if let Ok(args) = &mut args {
+                args.insert(0, receiver);
+            }
+        }
+        let args = args.and_then(|args| {
+            serde_json::to_string(&args).map_err(|error| error.to_string())
+        });
         let Ok(args) = args.and_then(|args| CString::new(args).map_err(|error| error.to_string()))
         else {
             return ptr::null_mut();
