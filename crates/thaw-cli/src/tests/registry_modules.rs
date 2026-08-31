@@ -101,18 +101,18 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function add(left: number, right: number): number;\n",
+        "export declare function add(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.add = (left, right) => (left + right) * 2;\n",
+        "module.exports = { add: (left, right) => (left + right) * 2, sub: (left, right) => left - right };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { add } from 'jit-math';\nfunction main(): void { console.log(add(19, 2)); }\n",
+        "import { add, sub } from 'jit-math';\nfunction main(): void { console.log(add(19, 2) + sub(1, 1)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
