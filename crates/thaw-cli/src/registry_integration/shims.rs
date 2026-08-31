@@ -159,6 +159,7 @@ fn jit_numeric_export(
                     "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimEnd" => {
                         call.args.is_empty()
                     }
+                    "charAt" => call.args.len() <= 1,
                     "repeat" => call.args.len() == 1,
                     "slice" | "substring" => call.args.len() <= 2,
                     _ => false,
@@ -200,6 +201,8 @@ fn jit_numeric_export(
             "trimStart" => "trimstart",
             "trimEnd" => "trimend",
             "repeat" => "repeat",
+            "charAt" => "charat",
+            "charCodeAt" => "charcodeat",
             "slice" => "slice",
             "substring" => "substring",
             _ => return None,
@@ -364,6 +367,14 @@ fn jit_numeric_export(
                         return None;
                     };
                     encode_expression(count.expr.as_ref(), parameters, locals, output)?;
+                } else if matches!(operation, "charat" | "charcodeat") {
+                    match call.args.as_slice() {
+                        [] => output.push("c0000000000000000".into()),
+                        [index] => {
+                            encode_expression(index.expr.as_ref(), parameters, locals, output)?
+                        }
+                        _ => return None,
+                    }
                 } else if matches!(operation, "slice" | "substring") {
                     match call.args.as_slice() {
                         [] => output.push("c0000000000000000".into()),
@@ -1075,6 +1086,11 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
                 return None;
             }
             stack.push(true);
+        } else if matches!(token.as_str(), "charat" | "charcodeat") {
+            if stack.pop()? || !stack.pop()? {
+                return None;
+            }
+            stack.push(token == "charat");
         } else if matches!(token.as_str(), "slice2" | "substring2") {
             if stack.pop()? || stack.pop()? || !stack.pop()? {
                 return None;

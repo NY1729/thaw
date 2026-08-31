@@ -520,6 +520,35 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:s0,a1,c4010000000000000,{operation}2"))
         );
     }
+    let mut char_code = string_repeat.clone();
+    char_code.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::F64);
+    for (method, operation, signature) in [
+        ("charAt", "charat", &string_repeat),
+        ("charCodeAt", "charcodeat", &char_code),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.repeat = (value, count) => value.{method}(count);"),
+                "repeat",
+                false,
+                signature,
+            ),
+            Some(format!("expr:s0,a1,{operation}"))
+        );
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.repeat = value => value.{method}();"),
+                "repeat",
+                false,
+                &thaw_bridge::DtsFunction {
+                    params: signature.params[..1].to_vec(),
+                    required_params: 1,
+                    ..signature.clone()
+                },
+            ),
+            Some(format!("expr:s0,c0000000000000000,{operation}"))
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "module.exports.length = value => value + 1;",
