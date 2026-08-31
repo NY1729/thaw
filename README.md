@@ -1921,8 +1921,13 @@ Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
 
 - Contextual TypeScript inference, overload resolution, decorators,
-  non-top-level class expressions, incompatible/non-object intersections, multi-capture export keys and the
-  complete JavaScript expression/statement set. Anonymous default functions
+  non-top-level class expressions, incompatible/non-object intersections and the
+  complete JavaScript expression/statement set. A bare `export { a, b as c };`
+  list, with or without `from './other'`, is not one of these gaps: the
+  relative-module bundler resolves and renames every specifier -- local or
+  re-exported, aliased or not -- before HIR ever sees the module, the same way
+  it already does for `export default`, `export *`, and namespace imports.
+  Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
   reflection and heterogeneous enums remain outside the native constant
   subset. Compatible declarations merge in source order, with duplicate

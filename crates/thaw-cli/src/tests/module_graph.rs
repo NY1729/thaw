@@ -85,6 +85,51 @@ fn builds_relative_typescript_module_graph_with_generics_and_aliases() {
 }
 
 #[test]
+fn builds_and_runs_a_local_named_export_list_with_an_alias() {
+    // `export { a, b as c } from '...'` (a re-export) is already covered
+    // above; this is the bare form with no `from`, capturing multiple
+    // same-file declarations -- including an aliasing rename -- in one
+    // statement rather than one `export` per declaration.
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-local-named-export-list-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.ts"),
+        r#"
+                const one = 1;
+                function two(): number {
+                    return 2;
+                }
+                export { one, two as second };
+            "#,
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"
+                import { one, second } from "./lib";
+                function main(): void {
+                    console.log(one + second());
+                }
+            "#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn builds_and_runs_classes_across_user_modules() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-user-module-classes-{}",
