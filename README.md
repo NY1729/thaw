@@ -1956,8 +1956,10 @@ normalized to the same IR. Side-effect-free local numeric declarations are
 expanded in declaration order, while calls, mutation, and forward references
 remain on the QuickJS path. Numeric exports with 0-16 required arguments use a
 single argument-array runtime ABI; generated code loads only the `aN` slots
-referenced by its IR. Numeric predicates may return `boolean`; LLVM converts
-the JIT's comparison result directly to the native boolean representation.
+referenced by its IR. Numeric/boolean predicates may accept and return
+`boolean`; LLVM converts boolean arguments to JIT slots and comparison results
+back to the native boolean representation. Boolean literals and logical
+negation use the same IR, including ECMAScript's falsey `NaN` behavior.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
 
