@@ -15,6 +15,12 @@ static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 static ALLOCATION_FAILED: &[u8] = b"failed to allocate JIT code\0";
 
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+#[link(name = "m")]
+extern "C" {
+    fn fmod(left: f64, right: f64) -> f64;
+}
+
 #[repr(C)]
 pub struct ThawJitResult {
     pub value: f64,
@@ -67,7 +73,9 @@ enum NumericValue {
     Constant(f64),
     Operation(NumericOp),
     Compare(CompareOp),
+    Absolute,
     Negate,
+    Remainder,
     Select,
 }
 
@@ -92,7 +100,9 @@ impl NumericProgram {
                     ">=" => Some(NumericValue::Compare(CompareOp::GreaterEqual)),
                     "==" => Some(NumericValue::Compare(CompareOp::Equal)),
                     "!=" => Some(NumericValue::Compare(CompareOp::NotEqual)),
+                    "abs" => Some(NumericValue::Absolute),
                     "neg" => Some(NumericValue::Negate),
+                    "%" => Some(NumericValue::Remainder),
                     "?" => Some(NumericValue::Select),
                     value => value
                         .strip_prefix('a')
@@ -164,28 +174,28 @@ impl NumericProgram {
                     emit_compare(&mut code, left, right, *operation);
                     depth -= 1;
                 }
+                NumericValue::Absolute => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let value = depth - 1;
+                    emit_bit_operation(&mut code, value, 0xf0);
+                }
                 NumericValue::Negate => {
                     if depth == 0 {
                         return None;
                     }
                     let value = depth - 1;
-                    code.extend_from_slice(&[
-                        0x66,
-                        0x48,
-                        0x0f,
-                        0x7e,
-                        0xc0 | (value << 3),
-                        0x48,
-                        0x0f,
-                        0xba,
-                        0xf8,
-                        0x3f,
-                        0x66,
-                        0x48,
-                        0x0f,
-                        0x6e,
-                        0xc0 | (value << 3),
-                    ]);
+                    emit_bit_operation(&mut code, value, 0xf8);
+                }
+                NumericValue::Remainder => {
+                    if depth != 2 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x08, 0x48, 0xb8]);
+                    code.extend_from_slice(&(fmod as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x08]);
+                    depth = 1;
                 }
                 NumericValue::Select => {
                     if depth < 3 {
@@ -239,6 +249,27 @@ impl NumericProgram {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn emit_move(code: &mut Vec<u8>, destination: u8, source: u8) {
     code.extend_from_slice(&[0x66, 0x0f, 0x28, 0xc0 | (destination << 3) | source]);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_bit_operation(code: &mut Vec<u8>, value: u8, operation: u8) {
+    code.extend_from_slice(&[
+        0x66,
+        0x48,
+        0x0f,
+        0x7e,
+        0xc0 | (value << 3),
+        0x48,
+        0x0f,
+        0xba,
+        operation,
+        0x3f,
+        0x66,
+        0x48,
+        0x0f,
+        0x6e,
+        0xc0 | (value << 3),
+    ]);
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -436,5 +467,15 @@ mod tests {
 
         let symbol = CString::new("expr:c4045000000000000:constant").unwrap();
         assert_eq!(call(&symbol, &[]).value, 42.0);
+
+        let symbol = CString::new("expr:a0,a1,%:remainder").unwrap();
+        assert_eq!(call(&symbol, &[5.5, 2.0]).value, 1.5);
+        assert_eq!(call(&symbol, &[-5.5, 2.0]).value, -1.5);
+        assert!(call(&symbol, &[f64::INFINITY, 2.0]).value.is_nan());
+
+        let symbol = CString::new("expr:a0,abs:absolute").unwrap();
+        assert_eq!(call(&symbol, &[-42.0]).value, 42.0);
+        assert_eq!(call(&symbol, &[-0.0]).value.to_bits(), 0.0f64.to_bits());
+        assert!(call(&symbol, &[f64::NAN]).value.is_nan());
     }
 }
