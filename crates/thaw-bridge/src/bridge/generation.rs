@@ -372,8 +372,17 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          if (typeof globalThis.__filename === 'undefined') {{ globalThis.__filename = '/thaw_modules/package/index.js'; }}\n\
          if (typeof globalThis.__thaw_napi_bridge_exports === 'function') {{\n\
          \x20\x20var __thaw_addon = {{}};\n\
+         \x20\x20var __thaw_napi_reference_id = 0;\n\
+         \x20\x20var __thaw_napi_reference_ids = new WeakMap();\n\
+         \x20\x20var __thaw_napi_argument = function(value) {{\n\
+         \x20\x20\x20\x20if (typeof value !== 'function') return value;\n\
+         \x20\x20\x20\x20var id = __thaw_napi_reference_ids.get(value);\n\
+         \x20\x20\x20\x20if (!id) {{ id = ++__thaw_napi_reference_id; __thaw_napi_reference_ids.set(value, id); globalThis['__thaw_napi_reference_' + id] = value; }}\n\
+         \x20\x20\x20\x20return {{ __thaw_napi_function__: id }};\n\
+         \x20\x20}};\n\
+         \x20\x20var __thaw_napi_arguments = function(args) {{ return Array.prototype.map.call(args, __thaw_napi_argument); }};\n\
          \x20\x20var __thaw_napi_handle = function(operation, target, name, args) {{\n\
-         \x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_handle(operation, String(target), name || '', JSON.stringify(args || [])));\n\
+         \x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_handle(operation, String(target), name || '', JSON.stringify(__thaw_napi_arguments(args || []))));\n\
          \x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\
          \x20\x20\x20\x20return result;\n\
          \x20\x20}};\n\
@@ -387,7 +396,7 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          \x20\x20JSON.parse(globalThis.__thaw_napi_bridge_exports()).forEach(function(name) {{\n\
          \x20\x20\x20\x20__thaw_addon[name] = function() {{\n\
          \x20\x20\x20\x20\x20\x20if (new.target) {{ var created = __thaw_napi_handle('construct', name, '', Array.prototype.slice.call(arguments)); return __thaw_napi_proxy(created.value); }}\n\
-         \x20\x20\x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_call(name, JSON.stringify(Array.prototype.slice.call(arguments))));\n\
+         \x20\x20\x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_call(name, JSON.stringify(__thaw_napi_arguments(arguments))));\n\
          \x20\x20\x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\
          \x20\x20\x20\x20\x20\x20return result;\n\
          \x20\x20\x20\x20}};\n\

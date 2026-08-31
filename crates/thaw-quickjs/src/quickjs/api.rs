@@ -81,6 +81,44 @@ pub extern "C" fn thaw_js_call(
     CString::new(text).unwrap_or_default().into_raw() as *const c_char
 }
 
+#[no_mangle]
+/// Calls a QuickJS function retained by the N-API argument bridge.
+///
+/// # Safety
+///
+/// `context` must contain a reference identifier previously issued by the
+/// bridge and `args_json` must point to a live NUL-terminated string.
+pub unsafe extern "C" fn thaw_js_call_reference(
+    context: *mut std::ffi::c_void,
+    args_json: *const c_char,
+) -> *const c_char {
+    let name = format!("__thaw_napi_reference_{}", context as usize);
+    let args_json = to_str(args_json);
+    let text = ACTIVE_NAPI_CONTEXT.with(|active| {
+        let active = active.get();
+        if active.is_null() {
+            with_context(|ctx| match call_impl(ctx, &name, &args_json) {
+                Ok(text) => text,
+                Err(reason) => {
+                    format!("{{\"__thaw_error__\":{}}}", json_escape_string(&reason))
+                }
+            })
+        } else {
+            match call_impl(
+                (*(active as *const Ctx<'static>)).clone(),
+                &name,
+                &args_json,
+            ) {
+                Ok(text) => text,
+                Err(reason) => {
+                    format!("{{\"__thaw_error__\":{}}}", json_escape_string(&reason))
+                }
+            }
+        }
+    });
+    CString::new(text).unwrap_or_default().into_raw()
+}
+
 /// Result-ABI companion to [`thaw_js_call`]. Unlike the legacy JSON error
 /// object API, failures occupy the error channel so generated Thaw code can
 /// route JavaScript throws and Promise rejections through `try`/`catch`.
