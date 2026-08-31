@@ -1852,7 +1852,16 @@ The workspace crates have narrow responsibilities:
   actually reclaimed early just because its key became otherwise
   unreachable -- this runtime has no fine-grained GC to do that with,
   every allocation lives until the whole arena resets at the next Lambda
-  invocation regardless
+  invocation regardless. For the same reason, every `Map`/`Set` method
+  added since (`Array.from`/`Array.of` spreads, `Map.groupBy`, the `Set`
+  relational family) also works unmodified on a `WeakMap`/`WeakSet`
+  receiver or argument, sharing the identical `HirType::Map`/`Set`
+  representation. `structuredClone` is the one exception that stays
+  consistent with the specification here (if by construction rather than
+  intent): a `WeakMap`/`WeakSet` key is always a reference type, and
+  `structuredClone`'s own `Map`/`Set` support requires a `number`/`string`
+  key, so cloning either reports the same "not supported yet" error a
+  reference-keyed ordinary `Map`/`Set` would
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags`/
   `lastIndex` fields (also the `RegExp` type annotation), backed by the
@@ -1963,8 +1972,9 @@ extracts side-effect-free CommonJS function exports, including
 `module.exports = { ... }` packages and directive-prefixed sequences of named
 export assignments, whose bodies fit this numeric IR, routes them to this
 backend, and omits fully extracted bundles from QuickJS.
-Single-return bodies and the common `if (...) return ...; return ...;` form are
-normalized to the same IR. Side-effect-free local declarations, assignments,
+Single-return bodies and nested return-only `if`/`else if`/`else` trees are
+normalized to the same IR, including direct boolean/numeric conditions.
+Side-effect-free local declarations, assignments,
 numeric compound assignments, and standalone increments/decrements are
 expanded in statement order. Calls, property mutation, and forward references
 remain on the QuickJS path. Numeric exports with 0-16 required arguments use a
