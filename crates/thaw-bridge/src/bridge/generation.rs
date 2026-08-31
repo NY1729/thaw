@@ -374,11 +374,17 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          \x20\x20var __thaw_addon = {{}};\n\
          \x20\x20var __thaw_napi_reference_id = 0;\n\
          \x20\x20var __thaw_napi_reference_ids = new WeakMap();\n\
+         \x20\x20var __thaw_napi_reference_values = new Map();\n\
          \x20\x20var __thaw_napi_argument = function(value) {{\n\
-         \x20\x20\x20\x20if (typeof value !== 'function') return value;\n\
+         \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
+         \x20\x20\x20\x20if (Array.isArray(value)) return value.map(__thaw_napi_argument);\n\
          \x20\x20\x20\x20var id = __thaw_napi_reference_ids.get(value);\n\
-         \x20\x20\x20\x20if (!id) {{ id = ++__thaw_napi_reference_id; __thaw_napi_reference_ids.set(value, id); globalThis['__thaw_napi_reference_' + id] = value; }}\n\
-         \x20\x20\x20\x20return {{ __thaw_napi_function__: id }};\n\
+         \x20\x20\x20\x20if (id) return typeof value === 'function' ? {{ __thaw_napi_function__: id }} : {{ __thaw_napi_object__: id, value: __thaw_napi_reference_values.get(id) }};\n\
+         \x20\x20\x20\x20id = ++__thaw_napi_reference_id; __thaw_napi_reference_ids.set(value, id);\n\
+         \x20\x20\x20\x20if (typeof value === 'function') {{ globalThis['__thaw_napi_reference_' + id] = value; return {{ __thaw_napi_function__: id }}; }}\n\
+         \x20\x20\x20\x20var properties = {{}}; Object.keys(value).forEach(function(key) {{ properties[key] = __thaw_napi_argument(value[key]); }});\n\
+         \x20\x20\x20\x20__thaw_napi_reference_values.set(id, properties);\n\
+         \x20\x20\x20\x20return {{ __thaw_napi_object__: id, value: properties }};\n\
          \x20\x20}};\n\
          \x20\x20var __thaw_napi_arguments = function(args) {{ return Array.prototype.map.call(args, __thaw_napi_argument); }};\n\
          \x20\x20var __thaw_napi_handle = function(operation, target, name, args) {{\n\
