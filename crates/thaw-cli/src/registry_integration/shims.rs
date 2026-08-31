@@ -73,8 +73,38 @@ fn jit_numeric_export(
                     .into(),
                 );
             }
+            Expr::Cond(conditional) => {
+                encode_condition(conditional.test.as_ref(), left, right, output)?;
+                encode_expression(conditional.cons.as_ref(), left, right, output)?;
+                encode_expression(conditional.alt.as_ref(), left, right, output)?;
+                output.push("?".into());
+            }
             _ => return None,
         }
+        (output.len() <= 128).then_some(())
+    }
+
+    fn encode_condition(
+        expression: &Expr,
+        left: &str,
+        right: &str,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let Expr::Bin(binary) = expression else {
+            return None;
+        };
+        let operator = match binary.op {
+            BinaryOp::Lt => "<",
+            BinaryOp::LtEq => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::GtEq => ">=",
+            BinaryOp::EqEq | BinaryOp::EqEqEq => "==",
+            BinaryOp::NotEq | BinaryOp::NotEqEq => "!=",
+            _ => return None,
+        };
+        encode_expression(binary.left.as_ref(), left, right, output)?;
+        encode_expression(binary.right.as_ref(), left, right, output)?;
+        output.push(operator.into());
         (output.len() <= 128).then_some(())
     }
 
@@ -199,11 +229,19 @@ fn jit_numeric_export(
     let mut depth = 0usize;
     let mut maximum_depth = 0usize;
     for token in &expression {
-        if matches!(token.as_str(), "+" | "-" | "*" | "/") {
+        if matches!(
+            token.as_str(),
+            "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "==" | "!="
+        ) {
             if depth < 2 {
                 return None;
             }
             depth -= 1;
+        } else if token == "?" {
+            if depth < 3 {
+                return None;
+            }
+            depth -= 2;
         } else {
             depth += 1;
             maximum_depth = maximum_depth.max(depth);
