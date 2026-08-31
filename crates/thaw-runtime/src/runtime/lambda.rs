@@ -6,6 +6,13 @@ struct InvocationArenaReset;
 impl Drop for InvocationArenaReset {
     fn drop(&mut self) {
         thaw_runtime_drain_detached();
+        // Anything still pending here belongs to work this invocation is
+        // abandoning (a deadline timeout, or a genuine deadlock with no
+        // possible progress) rather than work `drain_detached` already
+        // finished. Its frames live in the arena reset below, so leaving it
+        // registered would let a timer or fd event fire during a later
+        // invocation and resume a pointer into since-reused memory.
+        purge_pending_async_state();
         thaw_arena::thaw_arena_reset();
     }
 }
@@ -44,6 +51,23 @@ fn handle_one_invocation(
         .header("lambda-runtime-aws-request-id")
         .ok_or("response from .../invocation/next is missing the request id header")?
         .to_string();
+
+    // `Lambda-Runtime-Deadline-Ms` is an absolute epoch timestamp; convert it
+    // to a countdown so the event-loop drivers in lib.rs only need a
+    // monotonic clock. A missing/unparsable header (e.g. a local test
+    // harness that never sent one) leaves no deadline active, matching
+    // today's behavior of running the handler to completion.
+    let deadline_remaining_ms = next
+        .header("lambda-runtime-deadline-ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|deadline_epoch_ms| {
+            let now_epoch_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0);
+            deadline_epoch_ms.saturating_sub(now_epoch_ms)
+        });
+    set_invocation_deadline(deadline_remaining_ms);
 
     let event_cstring = CString::new(next.body).map_err(|e| e.to_string())?;
     if !error_slot.is_null() {
