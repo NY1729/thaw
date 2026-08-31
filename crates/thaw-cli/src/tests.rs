@@ -330,7 +330,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &predicate,
         ),
-        Some("expr:b0,c0000000000000000,c3ff0000000000000,?".into())
+        Some("expr:b0,c0000000000000000,c3ff0000000000000,?,asbool".into())
     );
     let string_length = thaw_bridge::DtsFunction {
         name: "length".into(),
@@ -458,6 +458,41 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:b0,boolstr".into())
     );
+    let mut mixed_concat = string_concat.clone();
+    mixed_concat.params = vec![
+        (
+            "label".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        ),
+        (
+            "count".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ),
+        (
+            "flag".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ),
+    ];
+    mixed_concat.required_params = 3;
+    for (source, expected) in [
+        (
+            "module.exports.greet = (label, count, flag) => label + count + ':' + flag;",
+            "expr:s0,a1,numstr,concat,t3a,concat,b2,boolstr,concat",
+        ),
+        (
+            "module.exports.greet = (label, count, flag) => count + flag + label;",
+            "expr:a1,b2,+,numstr,s0,concat",
+        ),
+        (
+            "module.exports.greet = function(label, count, flag) { let result = label; result += count; result += flag; return result; };",
+            "expr:s0,a1,numstr,concat,b2,boolstr,concat",
+        ),
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "greet", false, &mixed_concat),
+            Some(expected.into())
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "module.exports.greet = value => '\\0' + value;",

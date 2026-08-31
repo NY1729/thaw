@@ -979,6 +979,7 @@ enum NumericValue {
     UnaryMath(UnaryMath),
     Remainder,
     Select,
+    AsBoolean,
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -1081,6 +1082,7 @@ impl NumericProgram {
                     "trunc" => Some(NumericValue::UnaryMath(UnaryMath::Truncate)),
                     "%" => Some(NumericValue::Remainder),
                     "?" => Some(NumericValue::Select),
+                    "asbool" => Some(NumericValue::AsBoolean),
                     value => value
                         .strip_prefix('a')
                         .or_else(|| value.strip_prefix('b'))
@@ -1430,6 +1432,11 @@ impl NumericProgram {
                     code.extend_from_slice(&[0xeb, 0x04]);
                     emit_move(&mut code, condition, alternate);
                     depth -= 2;
+                }
+                NumericValue::AsBoolean => {
+                    if depth == 0 {
+                        return None;
+                    }
                 }
             }
         }
