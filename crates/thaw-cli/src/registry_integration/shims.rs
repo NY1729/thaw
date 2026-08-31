@@ -166,6 +166,10 @@ fn jit_numeric_export(
                     }
                     "charAt" => call.args.len() <= 1,
                     "at" => call.args.len() <= 1,
+                    "concat" => call.args.iter().all(|argument| {
+                        argument.spread.is_none()
+                            && is_string_expression(argument.expr.as_ref(), parameters)
+                    }),
                     "repeat" => call.args.len() == 1,
                     "replace" | "replaceAll" => call.args.len() == 2,
                     "padStart" | "padEnd" => (1..=2).contains(&call.args.len()),
@@ -208,6 +212,7 @@ fn jit_numeric_export(
             "trim" => "trim",
             "trimStart" => "trimstart",
             "trimEnd" => "trimend",
+            "concat" => "concat",
             "repeat" => "repeat",
             "replace" => "replace",
             "replaceAll" => "replaceall",
@@ -372,7 +377,16 @@ fn jit_numeric_export(
             Expr::Call(call) if string_method(call, parameters).is_some() => {
                 let (operation, receiver) = string_method(call, parameters)?;
                 encode_expression(receiver, parameters, locals, output)?;
-                if matches!(
+                if operation == "concat" {
+                    for argument in &call.args {
+                        if !is_string_expression(argument.expr.as_ref(), parameters) {
+                            return None;
+                        }
+                        encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                        output.push("concat".into());
+                    }
+                    return (output.len() <= 128).then_some(());
+                } else if matches!(
                     operation,
                     "tolowercase"
                         | "touppercase"
