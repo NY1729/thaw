@@ -239,11 +239,14 @@ pub unsafe extern "C" fn napi_add_finalizer(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    env.finalizers.push(FinalizeRecord {
-        data,
-        finalize,
-        hint,
-    });
+    env.object_finalizers
+        .entry(object as usize)
+        .or_default()
+        .push(FinalizeRecord {
+            data,
+            finalize,
+            hint,
+        });
     if !result.is_null() {
         *result = alloc_reference(env, object, 0);
     }
@@ -708,4 +711,3 @@ pub unsafe extern "C" fn napi_strict_equals(
     };
     NAPI_OK
 }
-
