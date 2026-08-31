@@ -147,13 +147,13 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.describe = function(value, flag) { const rounded = Math.round(value); let text = `value=${rounded}`; text += ':'; text += flag; return text + ':' + String(Math.round(value)) + ':' + String(rounded > 0); };\n",
+        "module.exports.describe = function(value, flag) { const rounded = Math.round(value); const matched = '421'.includes(rounded); const padded = 'x'.padEnd(2, flag); const replaced = '42'.replace(rounded, flag); let text = `value=${rounded}`; text += ':'; text += flag; return text.concat(':', rounded, ':', matched, ':', padded, ':', replaced, ':', String(rounded > 0)); };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { describe } from 'jit-coercion';\nfunction main(): void { console.log(describe(1e21, true)); }\n",
+        "import { describe } from 'jit-coercion';\nfunction main(): void { console.log(describe(42.4, true)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -165,7 +165,7 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "value=1e+21:true:1e+21:true\n"
+        "value=42:true:42:true:xt:true:true\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

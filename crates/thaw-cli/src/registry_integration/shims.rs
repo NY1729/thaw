@@ -172,10 +172,7 @@ fn jit_numeric_export(
                     }
                     "charAt" => call.args.len() <= 1,
                     "at" => call.args.len() <= 1,
-                    "concat" => call.args.iter().all(|argument| {
-                        argument.spread.is_none()
-                            && is_string_expression(argument.expr.as_ref(), parameters)
-                    }),
+                    "concat" => call.args.iter().all(|argument| argument.spread.is_none()),
                     "repeat" => call.args.len() == 1,
                     "replace" | "replaceAll" => call.args.len() == 2,
                     "padStart" | "padEnd" => (1..=2).contains(&call.args.len()),
@@ -191,6 +188,7 @@ fn jit_numeric_export(
     fn string_method<'a>(
         call: &'a CallExpr,
         parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
     ) -> Option<(&'static str, &'a Expr)> {
         if call.args.iter().any(|argument| argument.spread.is_some()) {
             return None;
@@ -201,7 +199,14 @@ fn jit_numeric_export(
         let Expr::Member(member) = callee.as_ref() else {
             return None;
         };
-        if !is_string_expression(member.obj.as_ref(), parameters) {
+        let local_string = match member.obj.as_ref() {
+            Expr::Ident(identifier) => locals
+                .get(identifier.sym.as_ref())
+                .and_then(|expression| jit_expression_kind(expression))
+                .is_some_and(|(kind, _)| kind == JitKind::String),
+            _ => false,
+        };
+        if !local_string && !is_string_expression(member.obj.as_ref(), parameters) {
             return None;
         }
         let MemberProp::Ident(property) = &member.prop else {
@@ -449,15 +454,19 @@ fn jit_numeric_export(
             {
                 encode_condition(expression, parameters, locals, output)?;
             }
-            Expr::Call(call) if string_method(call, parameters).is_some() => {
-                let (operation, receiver) = string_method(call, parameters)?;
+            Expr::Call(call) if string_method(call, parameters, locals).is_some() => {
+                let (operation, receiver) = string_method(call, parameters, locals)?;
                 encode_expression(receiver, parameters, locals, output)?;
                 if operation == "concat" {
                     for argument in &call.args {
-                        if !is_string_expression(argument.expr.as_ref(), parameters) {
-                            return None;
-                        }
-                        encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            &mut encoded,
+                        )?;
+                        append_string(encoded, output)?;
                         output.push("concat".into());
                     }
                     return (output.len() <= 128).then_some(());
@@ -483,13 +492,16 @@ fn jit_numeric_export(
                     let [search, replacement] = call.args.as_slice() else {
                         return None;
                     };
-                    if !is_string_expression(search.expr.as_ref(), parameters)
-                        || !is_string_expression(replacement.expr.as_ref(), parameters)
-                    {
-                        return None;
+                    for argument in [search, replacement] {
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            &mut encoded,
+                        )?;
+                        append_string(encoded, output)?;
                     }
-                    encode_expression(search.expr.as_ref(), parameters, locals, output)?;
-                    encode_expression(replacement.expr.as_ref(), parameters, locals, output)?;
                 } else if matches!(operation, "charat" | "charcodeat" | "at" | "codepointat") {
                     match call.args.as_slice() {
                         [] => output.push("c0000000000000000".into()),
@@ -505,8 +517,15 @@ fn jit_numeric_export(
                     encode_expression(target.expr.as_ref(), parameters, locals, output)?;
                     match pad {
                         [] => output.push("t20".into()),
-                        [pad] if is_string_expression(pad.expr.as_ref(), parameters) => {
-                            encode_expression(pad.expr.as_ref(), parameters, locals, output)?
+                        [pad] => {
+                            let mut encoded = Vec::new();
+                            encode_expression(
+                                pad.expr.as_ref(),
+                                parameters,
+                                locals,
+                                &mut encoded,
+                            )?;
+                            append_string(encoded, output)?;
                         }
                         _ => return None,
                     }
@@ -528,10 +547,9 @@ fn jit_numeric_export(
                     let [search, position @ ..] = call.args.as_slice() else {
                         return None;
                     };
-                    if !is_string_expression(search.expr.as_ref(), parameters) {
-                        return None;
-                    }
-                    encode_expression(search.expr.as_ref(), parameters, locals, output)?;
+                    let mut encoded = Vec::new();
+                    encode_expression(search.expr.as_ref(), parameters, locals, &mut encoded)?;
+                    append_string(encoded, output)?;
                     match position {
                         [] => {}
                         [position] => {
