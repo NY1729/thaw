@@ -2458,8 +2458,11 @@ wrapper which calls a bundled native `add` export. Class exports also support
 `new`, instance methods, and instance getters/setters through a persistent N-API
 handle Proxy; the same E2E constructs a native class and calls its method.
 QuickJS function arguments are retained by reference, deduplicated by identity,
-and callable from native code through the same bridge. Non-function QuickJS
-object identity remains a separate bridge boundary.
+and callable from native code through the same bridge. Plain object arguments
+carry a deduplicated reference ID plus an enumerable-property snapshot, so
+native code observes stable identity within an invocation and persistent class
+environments retain it across method calls. Live bidirectional property updates
+after the snapshot remain unsupported.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
