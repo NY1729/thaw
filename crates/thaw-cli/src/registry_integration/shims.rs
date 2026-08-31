@@ -307,10 +307,11 @@ fn jit_numeric_export(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         let mut encoded = Vec::new();
-        encode_expression(expression, parameters, locals, &mut encoded)?;
+        encode_expression(expression, parameters, locals, context, &mut encoded)?;
         append_number(encoded, output)
     }
 
@@ -329,6 +330,7 @@ fn jit_numeric_export(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         match expression {
@@ -368,7 +370,7 @@ fn jit_numeric_export(
                     }
                     if let Some(expression) = template.exprs.get(index) {
                         let mut encoded = Vec::new();
-                        encode_expression(expression, parameters, locals, &mut encoded)?;
+                        encode_expression(expression, parameters, locals, context, &mut encoded)?;
                         append_string(encoded, output)?;
                         if emitted {
                             output.push("concat".into());
@@ -400,10 +402,10 @@ fn jit_numeric_export(
             {
                 if unary.op == UnaryOp::Bang {
                     let mut encoded = Vec::new();
-                    encode_expression(unary.arg.as_ref(), parameters, locals, &mut encoded)?;
+                    encode_expression(unary.arg.as_ref(), parameters, locals, context, &mut encoded)?;
                     append_boolean(encoded, output)?;
                 } else {
-                    encode_number(unary.arg.as_ref(), parameters, locals, output)?;
+                    encode_number(unary.arg.as_ref(), parameters, locals, context, output)?;
                 }
                 match unary.op {
                     UnaryOp::Minus => output.push("neg".into()),
@@ -418,13 +420,13 @@ fn jit_numeric_export(
                 }
             }
             Expr::Paren(parenthesized) => {
-                encode_expression(parenthesized.expr.as_ref(), parameters, locals, output)?;
+                encode_expression(parenthesized.expr.as_ref(), parameters, locals, context, output)?;
             }
             Expr::Bin(binary) if binary.op == BinaryOp::Add => {
                 let mut left = Vec::new();
                 let mut right = Vec::new();
-                encode_expression(binary.left.as_ref(), parameters, locals, &mut left)?;
-                encode_expression(binary.right.as_ref(), parameters, locals, &mut right)?;
+                encode_expression(binary.left.as_ref(), parameters, locals, context, &mut left)?;
+                encode_expression(binary.right.as_ref(), parameters, locals, context, &mut right)?;
                 append_add(left, right, output)?;
             }
             Expr::Bin(binary)
@@ -444,7 +446,7 @@ fn jit_numeric_export(
                 ) =>
             {
                 for operand in [&binary.left, &binary.right] {
-                    encode_number(operand.as_ref(), parameters, locals, output)?;
+                    encode_number(operand.as_ref(), parameters, locals, context, output)?;
                 }
                 output.push(
                     match binary.op {
@@ -469,8 +471,8 @@ fn jit_numeric_export(
             {
                 let mut left = Vec::new();
                 let mut right = Vec::new();
-                encode_expression(binary.left.as_ref(), parameters, locals, &mut left)?;
-                encode_expression(binary.right.as_ref(), parameters, locals, &mut right)?;
+                encode_expression(binary.left.as_ref(), parameters, locals, context, &mut left)?;
+                encode_expression(binary.right.as_ref(), parameters, locals, context, &mut right)?;
                 append_boolean(left.clone(), output)?;
                 if binary.op == BinaryOp::LogicalAnd {
                     output.extend(right);
@@ -494,11 +496,11 @@ fn jit_numeric_export(
                         | BinaryOp::NotEqEq
                 ) =>
             {
-                encode_condition(expression, parameters, locals, output)?;
+                encode_condition(expression, parameters, locals, context, output)?;
             }
             Expr::Call(call) if string_method(call, parameters, locals).is_some() => {
                 let (operation, receiver) = string_method(call, parameters, locals)?;
-                encode_expression(receiver, parameters, locals, output)?;
+                encode_expression(receiver, parameters, locals, context, output)?;
                 if operation == "concat" {
                     for argument in &call.args {
                         let mut encoded = Vec::new();
@@ -506,6 +508,7 @@ fn jit_numeric_export(
                             argument.expr.as_ref(),
                             parameters,
                             locals,
+                            context,
                             &mut encoded,
                         )?;
                         append_string(encoded, output)?;
@@ -529,7 +532,7 @@ fn jit_numeric_export(
                     let [count] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_number(count.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(count.expr.as_ref(), parameters, locals, context, output)?;
                 } else if matches!(operation, "replace" | "replaceall") {
                     let [search, replacement] = call.args.as_slice() else {
                         return None;
@@ -540,6 +543,7 @@ fn jit_numeric_export(
                             argument.expr.as_ref(),
                             parameters,
                             locals,
+                            context,
                             &mut encoded,
                         )?;
                         append_string(encoded, output)?;
@@ -548,7 +552,7 @@ fn jit_numeric_export(
                     match call.args.as_slice() {
                         [] => output.push("c0000000000000000".into()),
                         [index] => {
-                            encode_number(index.expr.as_ref(), parameters, locals, output)?
+                            encode_number(index.expr.as_ref(), parameters, locals, context, output)?
                         }
                         _ => return None,
                     }
@@ -556,7 +560,7 @@ fn jit_numeric_export(
                     let [target, pad @ ..] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_number(target.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(target.expr.as_ref(), parameters, locals, context, output)?;
                     match pad {
                         [] => output.push("t20".into()),
                         [pad] => {
@@ -565,6 +569,7 @@ fn jit_numeric_export(
                                 pad.expr.as_ref(),
                                 parameters,
                                 locals,
+                                context,
                                 &mut encoded,
                             )?;
                             append_string(encoded, output)?;
@@ -575,11 +580,11 @@ fn jit_numeric_export(
                     match call.args.as_slice() {
                         [] => output.push("c0000000000000000".into()),
                         [start] => {
-                            encode_number(start.expr.as_ref(), parameters, locals, output)?
+                            encode_number(start.expr.as_ref(), parameters, locals, context, output)?
                         }
                         [start, end] => {
-                            encode_number(start.expr.as_ref(), parameters, locals, output)?;
-                            encode_number(end.expr.as_ref(), parameters, locals, output)?;
+                            encode_number(start.expr.as_ref(), parameters, locals, context, output)?;
+                            encode_number(end.expr.as_ref(), parameters, locals, context, output)?;
                             output.push(format!("{operation}2"));
                             return Some(());
                         }
@@ -590,12 +595,12 @@ fn jit_numeric_export(
                         return None;
                     };
                     let mut encoded = Vec::new();
-                    encode_expression(search.expr.as_ref(), parameters, locals, &mut encoded)?;
+                    encode_expression(search.expr.as_ref(), parameters, locals, context, &mut encoded)?;
                     append_string(encoded, output)?;
                     match position {
                         [] => {}
                         [position] => {
-                            encode_number(position.expr.as_ref(), parameters, locals, output)?;
+                            encode_number(position.expr.as_ref(), parameters, locals, context, output)?;
                             output.push(format!("{operation}2"));
                             return Some(());
                         }
@@ -621,7 +626,7 @@ fn jit_numeric_export(
                     return None;
                 }
                 let mut encoded = Vec::new();
-                encode_expression(argument.expr.as_ref(), parameters, locals, &mut encoded)?;
+                encode_expression(argument.expr.as_ref(), parameters, locals, context, &mut encoded)?;
                 append_string(encoded, output)?;
             }
             Expr::Call(call)
@@ -641,7 +646,7 @@ fn jit_numeric_export(
                     return None;
                 }
                 let mut encoded = Vec::new();
-                encode_expression(argument.expr.as_ref(), parameters, locals, &mut encoded)?;
+                encode_expression(argument.expr.as_ref(), parameters, locals, context, &mut encoded)?;
                 append_number(encoded, output)?;
             }
             Expr::Call(call)
@@ -661,7 +666,7 @@ fn jit_numeric_export(
                     return None;
                 }
                 let mut encoded = Vec::new();
-                encode_expression(argument.expr.as_ref(), parameters, locals, &mut encoded)?;
+                encode_expression(argument.expr.as_ref(), parameters, locals, context, &mut encoded)?;
                 append_boolean(encoded, output)?;
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
@@ -700,21 +705,21 @@ fn jit_numeric_export(
                     let [argument] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_number(argument.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(argument.expr.as_ref(), parameters, locals, context, output)?;
                     output.push(method.into());
                 } else if method == "pow" {
                     let [base, exponent] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_number(base.expr.as_ref(), parameters, locals, output)?;
-                    encode_number(exponent.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(base.expr.as_ref(), parameters, locals, context, output)?;
+                    encode_number(exponent.expr.as_ref(), parameters, locals, context, output)?;
                     output.push("pow".into());
                 } else if matches!(method, "atan2" | "imul") {
                     let [y, x] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_number(y.expr.as_ref(), parameters, locals, output)?;
-                    encode_number(x.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(y.expr.as_ref(), parameters, locals, context, output)?;
+                    encode_number(x.expr.as_ref(), parameters, locals, context, output)?;
                     output.push(method.into());
                 } else if method == "hypot" {
                     if call.args.is_empty() {
@@ -724,10 +729,11 @@ fn jit_numeric_export(
                             call.args[0].expr.as_ref(),
                             parameters,
                             locals,
+                            context,
                             output,
                         )?;
                         for argument in &call.args[1..] {
-                            encode_number(argument.expr.as_ref(), parameters, locals, output)?;
+                            encode_number(argument.expr.as_ref(), parameters, locals, context, output)?;
                             output.push("hypot".into());
                         }
                     }
@@ -743,18 +749,22 @@ fn jit_numeric_export(
                         call.args[0].expr.as_ref(),
                         parameters,
                         locals,
+                        context,
                         output,
                     )?;
                     for argument in &call.args[1..] {
-                        encode_number(argument.expr.as_ref(), parameters, locals, output)?;
+                        encode_number(argument.expr.as_ref(), parameters, locals, context, output)?;
                         output.push(method.into());
                     }
                 }
             }
+            Expr::Call(call) => {
+                encode_helper_call(call, parameters, locals, context, output)?;
+            }
             Expr::Cond(conditional) => {
-                encode_condition(conditional.test.as_ref(), parameters, locals, output)?;
-                encode_expression(conditional.cons.as_ref(), parameters, locals, output)?;
-                encode_expression(conditional.alt.as_ref(), parameters, locals, output)?;
+                encode_condition(conditional.test.as_ref(), parameters, locals, context, output)?;
+                encode_expression(conditional.cons.as_ref(), parameters, locals, context, output)?;
+                encode_expression(conditional.alt.as_ref(), parameters, locals, context, output)?;
                 output.push("?".into());
             }
             _ => return None,
@@ -781,6 +791,7 @@ fn jit_numeric_export(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         if let Expr::Bin(binary) = expression {
@@ -796,8 +807,8 @@ fn jit_numeric_export(
             if let Some(operator) = operator {
                 let mut left = Vec::new();
                 let mut right = Vec::new();
-                encode_expression(binary.left.as_ref(), parameters, locals, &mut left)?;
-                encode_expression(binary.right.as_ref(), parameters, locals, &mut right)?;
+                encode_expression(binary.left.as_ref(), parameters, locals, context, &mut left)?;
+                encode_expression(binary.right.as_ref(), parameters, locals, context, &mut right)?;
                 let left_kind = jit_expression_kind(&left)?.0;
                 let right_kind = jit_expression_kind(&right)?.0;
                 let strict = matches!(binary.op, BinaryOp::EqEqEq | BinaryOp::NotEqEq);
@@ -827,7 +838,7 @@ fn jit_numeric_export(
             }
         }
         let mut encoded = Vec::new();
-        encode_expression(expression, parameters, locals, &mut encoded)?;
+        encode_expression(expression, parameters, locals, context, &mut encoded)?;
         append_boolean(encoded, output)?;
         (output.len() <= 128).then_some(())
     }
@@ -841,6 +852,7 @@ fn jit_numeric_export(
         statement: &Stmt,
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         match statement {
@@ -848,15 +860,17 @@ fn jit_numeric_export(
                 returned.arg.as_deref()?,
                 parameters,
                 locals,
+                context,
                 output,
             ),
             Stmt::Block(block) => {
-                encode_returning_statements(&block.stmts, parameters, locals, output)
+                encode_returning_statements(&block.stmts, parameters, locals, context, output)
             }
             Stmt::If(_) => encode_returning_statements(
                 std::slice::from_ref(statement),
                 parameters,
                 locals,
+                context,
                 output,
             ),
             _ => None,
@@ -867,6 +881,7 @@ fn jit_numeric_export(
         statements: &[Stmt],
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         let (first, rest) = statements.split_first()?;
@@ -874,20 +889,20 @@ fn jit_numeric_export(
             if !rest.is_empty() {
                 return None;
             }
-            return encode_returning_statement(first, parameters, locals, output);
+            return encode_returning_statement(first, parameters, locals, context, output);
         }
         let Stmt::If(branch) = first else {
             return None;
         };
-        encode_condition(branch.test.as_ref(), parameters, locals, output)?;
-        encode_returning_statement(branch.cons.as_ref(), parameters, locals, output)?;
+        encode_condition(branch.test.as_ref(), parameters, locals, context, output)?;
+        encode_returning_statement(branch.cons.as_ref(), parameters, locals, context, output)?;
         if let Some(alternate) = branch.alt.as_deref() {
             if !rest.is_empty() {
                 return None;
             }
-            encode_returning_statement(alternate, parameters, locals, output)?;
+            encode_returning_statement(alternate, parameters, locals, context, output)?;
         } else {
-            encode_returning_statements(rest, parameters, locals, output)?;
+            encode_returning_statements(rest, parameters, locals, context, output)?;
         }
         output.push("?".into());
         (output.len() <= 128).then_some(())
@@ -959,18 +974,111 @@ fn jit_numeric_export(
             .then_some((steps, NumericBody::Statements(&statements[offset..])))
     }
 
+    fn encode_steps_and_body(
+        steps: Vec<LocalStep<'_>>,
+        body: NumericBody<'_>,
+        parameters: &std::collections::HashMap<String, String>,
+        mut locals: std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut mutable = std::collections::HashSet::new();
+        for step in steps {
+            match step {
+                LocalStep::Declare {
+                    name,
+                    initializer,
+                    mutable: is_mutable,
+                } => {
+                    if parameters.contains_key(name.sym.as_ref())
+                        || locals.contains_key(name.sym.as_ref())
+                    {
+                        return None;
+                    }
+                    let mut encoded = Vec::new();
+                    encode_expression(initializer, parameters, &locals, context, &mut encoded)?;
+                    locals.insert(name.sym.to_string(), encoded);
+                    if is_mutable {
+                        mutable.insert(name.sym.to_string());
+                    }
+                }
+                LocalStep::Assign {
+                    name,
+                    operation,
+                    value,
+                } => {
+                    if !mutable.contains(name.sym.as_ref()) {
+                        return None;
+                    }
+                    let mut encoded = Vec::new();
+                    if operation == AssignOp::AddAssign {
+                        let mut right = Vec::new();
+                        encode_expression(value, parameters, &locals, context, &mut right)?;
+                        append_add(
+                            locals.get(name.sym.as_ref())?.clone(),
+                            right,
+                            &mut encoded,
+                        )?;
+                    } else {
+                        if operation != AssignOp::Assign {
+                            encoded.extend(locals.get(name.sym.as_ref())?.iter().cloned());
+                        }
+                        encode_expression(value, parameters, &locals, context, &mut encoded)?;
+                    }
+                    if operation != AssignOp::Assign && operation != AssignOp::AddAssign {
+                        encoded.push(
+                            match operation {
+                                AssignOp::SubAssign => "-",
+                                AssignOp::MulAssign => "*",
+                                AssignOp::DivAssign => "/",
+                                AssignOp::ModAssign => "%",
+                                AssignOp::LShiftAssign => "shl",
+                                AssignOp::RShiftAssign => "shr",
+                                AssignOp::ZeroFillRShiftAssign => "ushr",
+                                AssignOp::BitOrAssign => "bor",
+                                AssignOp::BitXorAssign => "bxor",
+                                AssignOp::BitAndAssign => "band",
+                                AssignOp::ExpAssign => "pow",
+                                _ => return None,
+                            }
+                            .into(),
+                        );
+                    }
+                    locals.insert(name.sym.to_string(), encoded);
+                }
+                LocalStep::Update { name, operation } => {
+                    if !mutable.contains(name.sym.as_ref()) {
+                        return None;
+                    }
+                    let mut encoded = locals.get(name.sym.as_ref())?.clone();
+                    encoded.push(format!("c{:016x}", 1.0f64.to_bits()));
+                    encoded.push(
+                        match operation {
+                            UpdateOp::PlusPlus => "+",
+                            UpdateOp::MinusMinus => "-",
+                        }
+                        .into(),
+                    );
+                    locals.insert(name.sym.to_string(), encoded);
+                }
+            }
+        }
+        encode_numeric_body(body, parameters, &locals, context, output)
+    }
+
     fn encode_numeric_body(
         body: NumericBody<'_>,
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         match body {
             NumericBody::Expression(body) => {
-                encode_expression(body, parameters, locals, output)?;
+                encode_expression(body, parameters, locals, context, output)?;
             }
             NumericBody::Statements(statements) => {
-                encode_returning_statements(statements, parameters, locals, output)?;
+                encode_returning_statements(statements, parameters, locals, context, output)?;
             }
         }
         Some(())
@@ -986,6 +1094,102 @@ fn jit_numeric_export(
     enum NumericCallable<'a> {
         Function(&'a Function),
         Arrow(&'a ArrowExpr),
+    }
+
+    struct InlineContext<'a> {
+        helpers: &'a std::collections::HashMap<String, NumericCallable<'a>>,
+        module_locals: std::collections::HashMap<String, Vec<String>>,
+        active: Vec<String>,
+    }
+
+    fn callable_parts(callable: NumericCallable<'_>) -> Option<(Vec<&Pat>, Vec<LocalStep<'_>>, NumericBody<'_>)> {
+        match callable {
+            NumericCallable::Function(function)
+                if !function.is_async && !function.is_generator =>
+            {
+                let body = function.body.as_ref()?;
+                let (locals, body) = split_numeric_body(&body.stmts)?;
+                Some((
+                    function.params.iter().map(|parameter| &parameter.pat).collect(),
+                    locals,
+                    body,
+                ))
+            }
+            NumericCallable::Arrow(function)
+                if !function.is_async && !function.is_generator =>
+            {
+                let (locals, body) = match function.body.as_ref() {
+                    thaw_parser::ast::ArrowFunctionBody::Expr(body) => {
+                        (Vec::new(), NumericBody::Expression(body.as_ref()))
+                    }
+                    thaw_parser::ast::ArrowFunctionBody::FunctionBody(body) => {
+                        split_numeric_body(&body.stmts)?
+                    }
+                };
+                Some((function.params.iter().collect(), locals, body))
+            }
+            _ => None,
+        }
+    }
+
+    fn encode_helper_call(
+        call: &CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Ident(identifier) = callee.as_ref() else {
+            return None;
+        };
+        let name = identifier.sym.as_ref();
+        if parameters.contains_key(name)
+            || locals.contains_key(name)
+            || context.active.len() >= 16
+            || context.active.iter().any(|active| active == name)
+        {
+            return None;
+        }
+        let callable = *context.helpers.get(name)?;
+        let (helper_parameters, steps, body) = callable_parts(callable)?;
+        if helper_parameters.len() != call.args.len()
+            || call.args.iter().any(|argument| argument.spread.is_some())
+        {
+            return None;
+        }
+        let mut helper_locals = context.module_locals.clone();
+        let mut bound_parameters = std::collections::HashSet::new();
+        for (parameter, argument) in helper_parameters.iter().zip(&call.args) {
+            let Pat::Ident(parameter) = parameter else {
+                return None;
+            };
+            if !bound_parameters.insert(parameter.id.sym.to_string()) {
+                return None;
+            }
+            let mut encoded = Vec::new();
+            encode_expression(
+                argument.expr.as_ref(),
+                parameters,
+                locals,
+                context,
+                &mut encoded,
+            )?;
+            helper_locals.insert(parameter.id.sym.to_string(), encoded);
+        }
+        context.active.push(name.to_string());
+        let result = encode_steps_and_body(
+            steps,
+            body,
+            &std::collections::HashMap::new(),
+            helper_locals,
+            context,
+            output,
+        );
+        context.active.pop();
+        result
     }
 
     fn resolve_callable<'a>(
@@ -1159,10 +1363,17 @@ fn jit_numeric_export(
                     continue;
                 }
                 let mut encoded = Vec::new();
+                let empty_helpers = std::collections::HashMap::new();
+                let mut context = InlineContext {
+                    helpers: &empty_helpers,
+                    module_locals: module_locals.clone(),
+                    active: Vec::new(),
+                };
                 encode_expression(
                     initializer,
                     &no_parameters,
                     &module_locals,
+                    &mut context,
                     &mut encoded,
                 )?;
                 module_locals.insert(name.id.sym.to_string(), encoded);
@@ -1193,30 +1404,7 @@ fn jit_numeric_export(
     }
     let callable = callable?;
 
-    let (params, local_steps, body): (Vec<&Pat>, Vec<LocalStep<'_>>, NumericBody<'_>) =
-        match callable {
-        NumericCallable::Function(function) if !function.is_async && !function.is_generator => {
-            let body = function.body.as_ref()?;
-            let (locals, body) = split_numeric_body(&body.stmts)?;
-            (
-                function.params.iter().map(|param| &param.pat).collect(),
-                locals,
-                body,
-            )
-        }
-        NumericCallable::Arrow(function) if !function.is_async && !function.is_generator => {
-            let (locals, body) = match function.body.as_ref() {
-                thaw_parser::ast::ArrowFunctionBody::Expr(body) => {
-                    (Vec::new(), NumericBody::Expression(body.as_ref()))
-                }
-                thaw_parser::ast::ArrowFunctionBody::FunctionBody(body) => {
-                    split_numeric_body(&body.stmts)?
-                }
-            };
-            (function.params.iter().collect(), locals, body)
-        }
-        _ => return None,
-    };
+    let (params, local_steps, body) = callable_parts(callable)?;
     let mut parameters = std::collections::HashMap::new();
     for (index, (parameter, (_, ty))) in params.iter().zip(&function.params).enumerate() {
         let Pat::Ident(parameter) = parameter else {
@@ -1235,92 +1423,24 @@ fn jit_numeric_export(
         }
     }
     let mut expression = Vec::new();
+    let helper_module_locals = module_locals.clone();
     let mut locals = module_locals;
     for parameter in parameters.keys() {
         locals.remove(parameter);
     }
-    let mut mutable = std::collections::HashSet::new();
-    for step in local_steps {
-        match step {
-            LocalStep::Declare {
-                name,
-                initializer,
-                mutable: is_mutable,
-            } => {
-                if parameters.contains_key(name.sym.as_ref())
-                    || locals.contains_key(name.sym.as_ref())
-                {
-                    return None;
-                }
-                let mut encoded = Vec::new();
-                encode_expression(initializer, &parameters, &locals, &mut encoded)?;
-                locals.insert(name.sym.to_string(), encoded);
-                if is_mutable {
-                    mutable.insert(name.sym.to_string());
-                }
-            }
-            LocalStep::Assign {
-                name,
-                operation,
-                value,
-            } => {
-                if !mutable.contains(name.sym.as_ref()) {
-                    return None;
-                }
-                let mut encoded = Vec::new();
-                if operation == AssignOp::AddAssign {
-                    let mut right = Vec::new();
-                    encode_expression(value, &parameters, &locals, &mut right)?;
-                    append_add(
-                        locals.get(name.sym.as_ref())?.clone(),
-                        right,
-                        &mut encoded,
-                    )?;
-                } else {
-                    if operation != AssignOp::Assign {
-                        encoded.extend(locals.get(name.sym.as_ref())?.iter().cloned());
-                    }
-                    encode_expression(value, &parameters, &locals, &mut encoded)?;
-                }
-                if operation != AssignOp::Assign && operation != AssignOp::AddAssign {
-                    encoded.push(
-                        match operation {
-                            AssignOp::SubAssign => "-",
-                            AssignOp::MulAssign => "*",
-                            AssignOp::DivAssign => "/",
-                            AssignOp::ModAssign => "%",
-                            AssignOp::LShiftAssign => "shl",
-                            AssignOp::RShiftAssign => "shr",
-                            AssignOp::ZeroFillRShiftAssign => "ushr",
-                            AssignOp::BitOrAssign => "bor",
-                            AssignOp::BitXorAssign => "bxor",
-                            AssignOp::BitAndAssign => "band",
-                            AssignOp::ExpAssign => "pow",
-                            _ => return None,
-                        }
-                        .into(),
-                    );
-                }
-                locals.insert(name.sym.to_string(), encoded);
-            }
-            LocalStep::Update { name, operation } => {
-                if !mutable.contains(name.sym.as_ref()) {
-                    return None;
-                }
-                let mut encoded = locals.get(name.sym.as_ref())?.clone();
-                encoded.push(format!("c{:016x}", 1.0f64.to_bits()));
-                encoded.push(
-                    match operation {
-                        UpdateOp::PlusPlus => "+",
-                        UpdateOp::MinusMinus => "-",
-                    }
-                    .into(),
-                );
-                locals.insert(name.sym.to_string(), encoded);
-            }
-        }
-    }
-    encode_numeric_body(body, &parameters, &locals, &mut expression)?;
+    let mut context = InlineContext {
+        helpers: &module_functions,
+        module_locals: helper_module_locals,
+        active: Vec::new(),
+    };
+    encode_steps_and_body(
+        local_steps,
+        body,
+        &parameters,
+        locals,
+        &mut context,
+        &mut expression,
+    )?;
     validated_jit_expression(
         expression,
         match &function.ret {
