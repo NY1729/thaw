@@ -1888,8 +1888,9 @@ The workspace crates have narrow responsibilities:
 
 An experimental QuickJS-independent residual JIT backend is now linked as a
 separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
-HIR through LLVM to a small W^X runtime which specializes and caches
-`add/sub/mul/div` number operations on first use. Its end-to-end test produces
+HIR through LLVM to a small W^X runtime which specializes and caches numeric
+expressions containing arguments, constants, and nested `add/sub/mul/div`
+operations on first use. Its end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
 extracts a side-effect-free, single CommonJS export whose body is one binary
 number operation, routes it to this backend, and omits its bundle from QuickJS.

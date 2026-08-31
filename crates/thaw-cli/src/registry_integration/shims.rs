@@ -19,10 +19,64 @@ fn jit_numeric_export(
     export_name: &str,
     allow_default: bool,
     function: &thaw_bridge::DtsFunction,
-) -> Option<&'static str> {
+) -> Option<String> {
     use thaw_parser::ast::{
-        AssignOp, AssignTarget, BinaryOp, Expr, ModuleItem, Pat, SimpleAssignTarget, Stmt,
+        AssignOp, AssignTarget, BinaryOp, Expr, Lit, ModuleItem, Pat, SimpleAssignTarget, Stmt,
+        UnaryOp,
     };
+
+    fn encode_expression(
+        expression: &Expr,
+        left: &str,
+        right: &str,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        match expression {
+            Expr::Ident(identifier) if identifier.sym == left => output.push("x".into()),
+            Expr::Ident(identifier) if identifier.sym == right => output.push("y".into()),
+            Expr::Lit(Lit::Num(number)) => {
+                output.push(format!("c{:016x}", number.value.to_bits()));
+            }
+            Expr::Unary(unary)
+                if matches!(unary.op, UnaryOp::Plus | UnaryOp::Minus)
+                    && matches!(unary.arg.as_ref(), Expr::Lit(Lit::Num(_))) =>
+            {
+                let Expr::Lit(Lit::Num(number)) = unary.arg.as_ref() else {
+                    unreachable!()
+                };
+                let value = if unary.op == UnaryOp::Minus {
+                    -number.value
+                } else {
+                    number.value
+                };
+                output.push(format!("c{:016x}", value.to_bits()));
+            }
+            Expr::Paren(parenthesized) => {
+                encode_expression(parenthesized.expr.as_ref(), left, right, output)?;
+            }
+            Expr::Bin(binary)
+                if matches!(
+                    binary.op,
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+                ) =>
+            {
+                encode_expression(binary.left.as_ref(), left, right, output)?;
+                encode_expression(binary.right.as_ref(), left, right, output)?;
+                output.push(
+                    match binary.op {
+                        BinaryOp::Add => "+",
+                        BinaryOp::Sub => "-",
+                        BinaryOp::Mul => "*",
+                        BinaryOp::Div => "/",
+                        _ => unreachable!(),
+                    }
+                    .into(),
+                );
+            }
+            _ => return None,
+        }
+        (output.len() <= 128).then_some(())
+    }
 
     if function.generic.is_some()
         || function.required_params != 2
@@ -108,21 +162,30 @@ fn jit_numeric_export(
     let [Pat::Ident(left_param), Pat::Ident(right_param)] = params.as_slice() else {
         return None;
     };
-    let Expr::Bin(binary) = body else {
-        return None;
-    };
-    if !matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == left_param.id.sym)
-        || !matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == right_param.id.sym)
-    {
+    let mut expression = Vec::new();
+    encode_expression(
+        body,
+        left_param.id.sym.as_ref(),
+        right_param.id.sym.as_ref(),
+        &mut expression,
+    )?;
+    let mut depth = 0usize;
+    let mut maximum_depth = 0usize;
+    for token in &expression {
+        if matches!(token.as_str(), "+" | "-" | "*" | "/") {
+            if depth < 2 {
+                return None;
+            }
+            depth -= 1;
+        } else {
+            depth += 1;
+            maximum_depth = maximum_depth.max(depth);
+        }
+    }
+    if depth != 1 || maximum_depth > 6 {
         return None;
     }
-    match binary.op {
-        BinaryOp::Add => Some("add"),
-        BinaryOp::Sub => Some("sub"),
-        BinaryOp::Mul => Some("mul"),
-        BinaryOp::Div => Some("div"),
-        _ => None,
-    }
+    Some(format!("expr:{}", expression.join(",")))
 }
 
 fn jit_numeric_declaration(
@@ -1396,6 +1459,7 @@ fn generate_registry_shims(
                         )
                     });
                 let declaration = jit_operation
+                    .as_deref()
                     .map(|operation| jit_numeric_declaration(&pkg.name, function, operation))
                     .or_else(|| {
                         typed_dynamic_declaration(
