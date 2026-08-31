@@ -1889,7 +1889,7 @@ The workspace crates have narrow responsibilities:
 An experimental QuickJS-independent residual JIT backend is now linked as a
 separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
 HIR through LLVM to a small W^X runtime which specializes and caches numeric
-expressions containing arguments, constants, unary negation, `Math.abs`, and
+expressions containing arguments, constants, unary negation, `Math.abs/min/max`, and
 nested `add/sub/mul/div/remainder` operations, comparisons, and conditional
 selection on first use. Its
 end-to-end test produces

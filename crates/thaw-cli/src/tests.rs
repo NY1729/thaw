@@ -104,6 +104,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (left, right) => Math.max(left, right, 42);",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,max,c4045000000000000,max".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (Math, right) => Math.abs(Math % right);",
             "add",
             false,
