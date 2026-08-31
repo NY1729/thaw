@@ -408,13 +408,22 @@ fn jit_numeric_export(
                         _ => return None,
                     }
                 } else {
-                    let [search] = call.args.as_slice() else {
+                    let [search, position @ ..] = call.args.as_slice() else {
                         return None;
                     };
                     if !is_string_expression(search.expr.as_ref(), parameters) {
                         return None;
                     }
                     encode_expression(search.expr.as_ref(), parameters, locals, output)?;
+                    match position {
+                        [] => {}
+                        [position] => {
+                            encode_expression(position.expr.as_ref(), parameters, locals, output)?;
+                            output.push(format!("{operation}2"));
+                            return Some(());
+                        }
+                        _ => return None,
+                    }
                 }
                 output.push(operation.into());
             }
@@ -1128,6 +1137,14 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
                 return None;
             }
             stack.push(true);
+        } else if matches!(
+            token.as_str(),
+            "startswith2" | "endswith2" | "includes2" | "indexof2" | "lastindexof2"
+        ) {
+            if stack.pop()? || !stack.pop()? || !stack.pop()? {
+                return None;
+            }
+            stack.push(false);
         } else if token == "strlen" {
             if !stack.pop()? {
                 return None;

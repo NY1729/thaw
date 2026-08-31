@@ -422,6 +422,22 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
                     .collect::<String>()
             ))
         );
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.matches = value => value.{method}('{search}', 2);"),
+                "matches",
+                false,
+                &string_predicate,
+            ),
+            Some(format!(
+                "expr:s0,t{},c4000000000000000,{operation}2",
+                search
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ))
+        );
     }
     let mut string_index = string_length.clone();
     string_index.name = "find".into();
@@ -434,6 +450,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
                 &string_index,
             ),
             Some(format!("expr:s0,tf09f9880,{operation}"))
+        );
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.find = value => value.{method}('😀', 2);"),
+                "find",
+                false,
+                &string_index,
+            ),
+            Some(format!("expr:s0,tf09f9880,c4000000000000000,{operation}2"))
         );
     }
     let mut string_case = string_concat.clone();
