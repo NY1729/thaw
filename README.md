@@ -2462,7 +2462,11 @@ and callable from native code through the same bridge. Plain object arguments
 carry a deduplicated reference ID plus an enumerable-property snapshot, so
 native code observes stable identity within an invocation and persistent class
 environments retain it across method calls. Live bidirectional property updates
-after the snapshot remain unsupported.
+after the snapshot remain unsupported. N-API instance Proxies carry a private
+handle marker, allowing one native constructor or method to receive an instance
+created by another without degrading it to a plain-object snapshot. The real
+`weak-napi` addon now constructs both `ObjectInfo` and `WeakTag` through its
+bundled JavaScript wrapper.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against

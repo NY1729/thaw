@@ -759,4 +759,3 @@ pub unsafe extern "C" fn napi_get_new_target(
     *result = info.new_target;
     NAPI_OK
 }
-
