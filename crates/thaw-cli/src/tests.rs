@@ -124,6 +124,26 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "const SCALE = 2, OFFSET = 1; exports.add = (left, right) => (left + right) * SCALE + OFFSET;",
+            "add",
+            false,
+            &function,
+        ),
+        Some(
+            "expr:a0,a1,+,c4000000000000000,*,c3ff0000000000000,+".into()
+        )
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const left = 99; exports.add = (left, right) => left + right;",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,+".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (left, right) => Math.abs(left % right);",
             "add",
             false,
@@ -215,6 +235,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     assert_eq!(
         jit_numeric_export(
             "console.log('side effect'); module.exports.add = (left, right) => left + right;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "let SCALE = 2; module.exports.add = (left, right) => (left + right) * SCALE;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const SCALE = sideEffect(); module.exports.add = (left, right) => (left + right) * SCALE;",
             "add",
             false,
             &function,
