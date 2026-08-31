@@ -21,10 +21,12 @@ static INVALID_REPEAT_COUNT: &[u8] = b"invalid string repeat count\0";
 
 pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 pub type NumberToString = unsafe extern "C" fn(f64) -> *const c_char;
+pub type StringToNumber = unsafe extern "C" fn(*const c_char) -> f64;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
     static NUMBER_TO_STRING: Cell<Option<NumberToString>> = const { Cell::new(None) };
+    static STRING_TO_NUMBER: Cell<Option<StringToNumber>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -432,6 +434,21 @@ extern "C" fn number_to_string(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn boolean_to_string(value: f64) -> f64 {
     arena_string(if value != 0.0 { "true" } else { "false" }.into())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_to_number(value: f64) -> f64 {
+    let Some(parse) = STRING_TO_NUMBER.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return f64::NAN;
+    };
+    let value = value.to_bits() as usize as *const c_char;
+    if value.is_null() {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        f64::NAN
+    } else {
+        unsafe { parse(value) }
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -947,6 +964,7 @@ enum NumericValue {
     StringConcat,
     NumberToString,
     BooleanToString,
+    StringToNumber,
     StringConstant(*const c_char),
     StringEndsWith,
     StringEndsWithAt,
@@ -1025,6 +1043,7 @@ impl NumericProgram {
                     "concat" => Some(NumericValue::StringConcat),
                     "numstr" => Some(NumericValue::NumberToString),
                     "boolstr" => Some(NumericValue::BooleanToString),
+                    "strnum" => Some(NumericValue::StringToNumber),
                     "endswith" => Some(NumericValue::StringEndsWith),
                     "endswith2" => Some(NumericValue::StringEndsWithAt),
                     "includes" => Some(NumericValue::StringIncludes),
@@ -1271,14 +1290,17 @@ impl NumericProgram {
                     emit_binary_call(&mut code, string_concat as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::NumberToString | NumericValue::BooleanToString => {
+                NumericValue::NumberToString
+                | NumericValue::BooleanToString
+                | NumericValue::StringToNumber => {
                     if depth == 0 {
                         return None;
                     }
-                    let function = if matches!(value, NumericValue::NumberToString) {
-                        number_to_string
-                    } else {
-                        boolean_to_string
+                    let function = match value {
+                        NumericValue::NumberToString => number_to_string,
+                        NumericValue::BooleanToString => boolean_to_string,
+                        NumericValue::StringToNumber => string_to_number,
+                        _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
@@ -1638,7 +1660,8 @@ fn compile(_symbol: &str, _program: &NumericProgram) -> Result<*mut libc::c_void
 /// `arg_count` is nonzero, `args` must reference at least that many `f64`s.
 /// `arena_alloc`, when supplied for a string-returning program, must return a
 /// writable allocation of the requested size and alignment. `number_to_string`
-/// must return an arena-backed NUL-terminated string when numeric coercion is used.
+/// must return an arena-backed NUL-terminated string when numeric coercion is
+/// used. `string_to_number` must accept a live NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_jit_call_f64(
     symbol: *const c_char,
@@ -1646,6 +1669,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     arg_count: usize,
     arena_alloc: Option<ArenaAlloc>,
     number_to_string: Option<NumberToString>,
+    string_to_number: Option<StringToNumber>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -1675,6 +1699,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let function = std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code);
     let previous_allocator = ARENA_ALLOC.with(|allocator| allocator.replace(arena_alloc));
     let previous_formatter = NUMBER_TO_STRING.with(|formatter| formatter.replace(number_to_string));
+    let previous_parser = STRING_TO_NUMBER.with(|parser| parser.replace(string_to_number));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let value = function(args);
@@ -1682,6 +1707,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let present = CALL_PRESENT.with(|state| state.replace(previous_present));
     ARENA_ALLOC.with(|allocator| allocator.set(previous_allocator));
     NUMBER_TO_STRING.with(|formatter| formatter.set(previous_formatter));
+    STRING_TO_NUMBER.with(|parser| parser.set(previous_parser));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -1709,6 +1735,9 @@ mod tests {
         unsafe extern "C" fn format_number(_: f64) -> *const c_char {
             c"42".as_ptr()
         }
+        unsafe extern "C" fn parse_string(_: *const c_char) -> f64 {
+            42.0
+        }
         unsafe {
             thaw_jit_call_f64(
                 symbol.as_ptr(),
@@ -1716,6 +1745,7 @@ mod tests {
                 args.len(),
                 Some(allocate),
                 Some(format_number),
+                Some(parse_string),
             )
         }
     }
@@ -2126,8 +2156,9 @@ mod tests {
         );
         unsafe { libc::free(result.cast()) };
         let argument = [f64::from_bits(name.as_ptr() as usize as u64)];
-        let missing_allocator =
-            unsafe { thaw_jit_call_f64(concatenate.as_ptr(), argument.as_ptr(), 1, None, None) };
+        let missing_allocator = unsafe {
+            thaw_jit_call_f64(concatenate.as_ptr(), argument.as_ptr(), 1, None, None, None)
+        };
         assert!(!missing_allocator.error.is_null());
 
         for (expression, args, expected) in [
@@ -2173,5 +2204,9 @@ mod tests {
                 expected
             );
         }
+        let symbol = CString::new("expr:s0,strnum:string-number").unwrap();
+        let result = call(&symbol, &[1.0]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 42.0);
     }
 }

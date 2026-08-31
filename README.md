@@ -2018,7 +2018,10 @@ String-search `replace` and `replaceAll` with string replacement values use
 the arena-backed three-string JIT path as well. Primitive and computed
 arguments to `concat`, search, padding, comparison, `replace`, and `replaceAll`
 are string-coerced by the same typed IR; expanded string locals can be method
-receivers without returning to QuickJS.
+receivers without returning to QuickJS. Conversely, `Number(string)`, unary
+numeric conversion, arithmetic/Math operands, and string method indexes,
+positions, lengths, and counts reuse the runtime's JavaScript-compatible
+string-number parser through the JIT callback ABI.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,

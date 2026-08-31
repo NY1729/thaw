@@ -352,6 +352,37 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:s0,strlen".into())
     );
+    for (source, expected) in [
+        (
+            "module.exports.length = value => Number(value);",
+            "expr:s0,strnum",
+        ),
+        ("module.exports.length = value => +value;", "expr:s0,strnum"),
+        (
+            "module.exports.length = value => value * '2';",
+            "expr:s0,strnum,t32,strnum,*",
+        ),
+        (
+            "module.exports.length = value => Math.round(value);",
+            "expr:s0,strnum,round",
+        ),
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "length", false, &string_length),
+            Some(expected.into())
+        );
+    }
+    let mut shadowed_number = string_length.clone();
+    shadowed_number.params[0].0 = "Number".into();
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.length = Number => Number('2');",
+            "length",
+            false,
+            &shadowed_number,
+        ),
+        None
+    );
     let string_less = thaw_bridge::DtsFunction {
         name: "less".into(),
         params: vec![
@@ -702,6 +733,17 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &string_repeat,
         ),
         Some("expr:s0,a1,repeat".into())
+    );
+    let mut string_count = string_repeat.clone();
+    string_count.params[1].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.repeat = (value, count) => value.repeat(count);",
+            "repeat",
+            false,
+            &string_count,
+        ),
+        Some("expr:s0,s1,strnum,repeat".into())
     );
     for (method, operation) in [("slice", "slice"), ("substring", "substring")] {
         assert_eq!(

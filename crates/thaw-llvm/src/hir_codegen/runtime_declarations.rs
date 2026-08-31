@@ -1071,6 +1071,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         i64_type.into(),
                         i8_ptr.into(),
                         i8_ptr.into(),
+                        i8_ptr.into(),
                     ],
                     false,
                 ),
