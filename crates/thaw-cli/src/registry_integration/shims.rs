@@ -224,65 +224,86 @@ fn jit_numeric_export(
         locals: &std::collections::HashMap<String, Vec<String>>,
         output: &mut Vec<String>,
     ) -> Option<()> {
-        let Expr::Bin(binary) = expression else {
-            return None;
-        };
-        let operator = match binary.op {
-            BinaryOp::Lt => "<",
-            BinaryOp::LtEq => "<=",
-            BinaryOp::Gt => ">",
-            BinaryOp::GtEq => ">=",
-            BinaryOp::EqEq | BinaryOp::EqEqEq => "==",
-            BinaryOp::NotEq | BinaryOp::NotEqEq => "!=",
-            _ => return None,
-        };
-        encode_expression(binary.left.as_ref(), parameters, locals, output)?;
-        encode_expression(binary.right.as_ref(), parameters, locals, output)?;
-        output.push(operator.into());
+        if let Expr::Bin(binary) = expression {
+            let operator = match binary.op {
+                BinaryOp::Lt => Some("<"),
+                BinaryOp::LtEq => Some("<="),
+                BinaryOp::Gt => Some(">"),
+                BinaryOp::GtEq => Some(">="),
+                BinaryOp::EqEq | BinaryOp::EqEqEq => Some("=="),
+                BinaryOp::NotEq | BinaryOp::NotEqEq => Some("!="),
+                _ => None,
+            };
+            if let Some(operator) = operator {
+                encode_expression(binary.left.as_ref(), parameters, locals, output)?;
+                encode_expression(binary.right.as_ref(), parameters, locals, output)?;
+                output.push(operator.into());
+                return (output.len() <= 128).then_some(());
+            }
+        }
+        encode_expression(expression, parameters, locals, output)?;
         (output.len() <= 128).then_some(())
     }
 
     enum NumericBody<'a> {
         Expression(&'a Expr),
-        Conditional {
-            test: &'a Expr,
-            consequent: &'a Expr,
-            alternate: &'a Expr,
-        },
+        Statements(&'a [Stmt]),
     }
 
-    fn returned_expression(statement: &Stmt) -> Option<&Expr> {
+    fn encode_returning_statement(
+        statement: &Stmt,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
         match statement {
-            Stmt::Return(returned) => returned.arg.as_deref(),
+            Stmt::Return(returned) => encode_expression(
+                returned.arg.as_deref()?,
+                parameters,
+                locals,
+                output,
+            ),
             Stmt::Block(block) => {
-                let [statement] = block.stmts.as_slice() else {
-                    return None;
-                };
-                returned_expression(statement)
+                encode_returning_statements(&block.stmts, parameters, locals, output)
             }
+            Stmt::If(_) => encode_returning_statements(
+                std::slice::from_ref(statement),
+                parameters,
+                locals,
+                output,
+            ),
             _ => None,
         }
     }
 
-    fn numeric_body(statements: &[Stmt]) -> Option<NumericBody<'_>> {
-        match statements {
-            [Stmt::Return(returned)] => {
-                Some(NumericBody::Expression(returned.arg.as_deref()?))
+    fn encode_returning_statements(
+        statements: &[Stmt],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (first, rest) = statements.split_first()?;
+        if let Stmt::Return(_) = first {
+            if !rest.is_empty() {
+                return None;
             }
-            [Stmt::If(branch), Stmt::Return(alternate)] if branch.alt.is_none() => {
-                Some(NumericBody::Conditional {
-                    test: branch.test.as_ref(),
-                    consequent: returned_expression(branch.cons.as_ref())?,
-                    alternate: alternate.arg.as_deref()?,
-                })
-            }
-            [Stmt::If(branch)] => Some(NumericBody::Conditional {
-                test: branch.test.as_ref(),
-                consequent: returned_expression(branch.cons.as_ref())?,
-                alternate: returned_expression(branch.alt.as_deref()?)?,
-            }),
-            _ => None,
+            return encode_returning_statement(first, parameters, locals, output);
         }
+        let Stmt::If(branch) = first else {
+            return None;
+        };
+        encode_condition(branch.test.as_ref(), parameters, locals, output)?;
+        encode_returning_statement(branch.cons.as_ref(), parameters, locals, output)?;
+        if let Some(alternate) = branch.alt.as_deref() {
+            if !rest.is_empty() {
+                return None;
+            }
+            encode_returning_statement(alternate, parameters, locals, output)?;
+        } else {
+            encode_returning_statements(rest, parameters, locals, output)?;
+        }
+        output.push("?".into());
+        (output.len() <= 128).then_some(())
     }
 
     enum LocalStep<'a> {
@@ -347,7 +368,8 @@ fn jit_numeric_export(
             }
             offset += 1;
         }
-        Some((steps, numeric_body(&statements[offset..])?))
+        (!statements[offset..].is_empty())
+            .then_some((steps, NumericBody::Statements(&statements[offset..])))
     }
 
     fn encode_numeric_body(
@@ -360,15 +382,8 @@ fn jit_numeric_export(
             NumericBody::Expression(body) => {
                 encode_expression(body, parameters, locals, output)?;
             }
-            NumericBody::Conditional {
-                test,
-                consequent,
-                alternate,
-            } => {
-                encode_condition(test, parameters, locals, output)?;
-                encode_expression(consequent, parameters, locals, output)?;
-                encode_expression(alternate, parameters, locals, output)?;
-                output.push("?".into());
+            NumericBody::Statements(statements) => {
+                encode_returning_statements(statements, parameters, locals, output)?;
             }
         }
         Some(())
