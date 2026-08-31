@@ -39,6 +39,15 @@ fn sanitize_identifier_replaces_non_alphanumerics() {
 }
 
 #[test]
+fn reads_commonjs_export_assignment_target() {
+    let declarations = "declare function weak<T extends object>(value: T): T; export = weak;";
+    assert_eq!(
+        commonjs_export_name(declarations).unwrap(),
+        Some("weak".to_string())
+    );
+}
+
+#[test]
 fn reads_versioned_ffi_error_abi_metadata() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-ffi-metadata-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -216,4 +225,3 @@ fn reads_version_four_explicit_aggregate_layout() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
-

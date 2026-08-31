@@ -487,7 +487,8 @@ functionそのものを返すため、単一関数の`.d.ts`名をroot export名
 `prebuilds/<platform>-<arch>/`を探索し、現在のOS、CPU、libcに一致する
 `.node`を`native.node`としてregistryへコピーする。Linuxではglibc用と
 `.musl.node`を区別し、macOSのRust target名`macos`はnpm慣習の`darwin`へ、
-`x86_64`/`aarch64`は`x64`/`arm64`へ対応付ける。
+`x86_64`/`aarch64`は`x64`/`arm64`へ対応付ける。同じtargetにNode用と
+Electron用が同梱されている場合は`node.*`を優先する。
 
 選択結果は`native-addon.json`へ元package内の相対path、SHA-256、platform、
 arch、libcとともに保存する。再追加時は以前の`native.node`とmetadataを先に
