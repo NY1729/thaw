@@ -188,6 +188,11 @@ fn jit_numeric_export(
             {
                 Some("numstr")
             }
+            Expr::Bin(binary) if binary.op == BinaryOp::Add => {
+                let left = primitive_string_coercion(binary.left.as_ref(), parameters)?;
+                let right = primitive_string_coercion(binary.right.as_ref(), parameters)?;
+                (left != "identity" && right != "identity").then_some("numstr")
+            }
             _ => None,
         }
     }
@@ -213,8 +218,13 @@ fn jit_numeric_export(
                 is_string_expression(parenthesized.expr.as_ref(), parameters)
             }
             Expr::Bin(binary) if binary.op == BinaryOp::Add => {
-                is_string_expression(binary.left.as_ref(), parameters)
-                    && is_string_expression(binary.right.as_ref(), parameters)
+                let left_string = is_string_expression(binary.left.as_ref(), parameters);
+                let right_string = is_string_expression(binary.right.as_ref(), parameters);
+                (left_string
+                    && (right_string
+                        || primitive_string_coercion(binary.right.as_ref(), parameters).is_some()))
+                    || (right_string
+                        && primitive_string_coercion(binary.left.as_ref(), parameters).is_some())
             }
             Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else {
@@ -312,6 +322,46 @@ fn jit_numeric_export(
         Some((operation, member.obj.as_ref()))
     }
 
+    fn append_add(
+        mut left: Vec<String>,
+        mut right: Vec<String>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let left_kind = jit_expression_kind(&left)?.0;
+        let right_kind = jit_expression_kind(&right)?.0;
+        output.append(&mut left);
+        if left_kind != JitKind::String && right_kind == JitKind::String {
+            output.push(
+                if left_kind == JitKind::Boolean {
+                    "boolstr"
+                } else {
+                    "numstr"
+                }
+                .into(),
+            );
+        }
+        output.append(&mut right);
+        if right_kind != JitKind::String && left_kind == JitKind::String {
+            output.push(
+                if right_kind == JitKind::Boolean {
+                    "boolstr"
+                } else {
+                    "numstr"
+                }
+                .into(),
+            );
+        }
+        output.push(
+            if left_kind == JitKind::String || right_kind == JitKind::String {
+                "concat"
+            } else {
+                "+"
+            }
+            .into(),
+        );
+        Some(())
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -394,6 +444,7 @@ fn jit_numeric_export(
                         output.push(format!("c{:016x}", 0.0f64.to_bits()));
                         output.push(format!("c{:016x}", 1.0f64.to_bits()));
                         output.push("?".into());
+                        output.push("asbool".into());
                     }
                     _ => {}
                 }
@@ -401,11 +452,17 @@ fn jit_numeric_export(
             Expr::Paren(parenthesized) => {
                 encode_expression(parenthesized.expr.as_ref(), parameters, locals, output)?;
             }
+            Expr::Bin(binary) if binary.op == BinaryOp::Add => {
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                encode_expression(binary.left.as_ref(), parameters, locals, &mut left)?;
+                encode_expression(binary.right.as_ref(), parameters, locals, &mut right)?;
+                append_add(left, right, output)?;
+            }
             Expr::Bin(binary)
                 if matches!(
                     binary.op,
-                    BinaryOp::Add
-                        | BinaryOp::Sub
+                    BinaryOp::Sub
                         | BinaryOp::Mul
                         | BinaryOp::Div
                         | BinaryOp::Mod
@@ -420,16 +477,8 @@ fn jit_numeric_export(
             {
                 encode_expression(binary.left.as_ref(), parameters, locals, output)?;
                 encode_expression(binary.right.as_ref(), parameters, locals, output)?;
-                if binary.op == BinaryOp::Add
-                    && is_string_expression(binary.left.as_ref(), parameters)
-                    && is_string_expression(binary.right.as_ref(), parameters)
-                {
-                    output.push("concat".into());
-                    return (output.len() <= 128).then_some(());
-                }
                 output.push(
                     match binary.op {
-                        BinaryOp::Add => "+",
                         BinaryOp::Sub => "-",
                         BinaryOp::Mul => "*",
                         BinaryOp::Div => "/",
@@ -1173,16 +1222,24 @@ fn jit_numeric_export(
                 if !mutable.contains(name.sym.as_ref()) {
                     return None;
                 }
-                let mut encoded = if operation == AssignOp::Assign {
-                    Vec::new()
+                let mut encoded = Vec::new();
+                if operation == AssignOp::AddAssign {
+                    let mut right = Vec::new();
+                    encode_expression(value, &parameters, &locals, &mut right)?;
+                    append_add(
+                        locals.get(name.sym.as_ref())?.clone(),
+                        right,
+                        &mut encoded,
+                    )?;
                 } else {
-                    locals.get(name.sym.as_ref())?.clone()
-                };
-                encode_expression(value, &parameters, &locals, &mut encoded)?;
-                if operation != AssignOp::Assign {
+                    if operation != AssignOp::Assign {
+                        encoded.extend(locals.get(name.sym.as_ref())?.iter().cloned());
+                    }
+                    encode_expression(value, &parameters, &locals, &mut encoded)?;
+                }
+                if operation != AssignOp::Assign && operation != AssignOp::AddAssign {
                     encoded.push(
                         match operation {
-                            AssignOp::AddAssign => "+",
                             AssignOp::SubAssign => "-",
                             AssignOp::MulAssign => "*",
                             AssignOp::DivAssign => "/",
@@ -1231,24 +1288,23 @@ fn jit_numeric_export(
     )
 }
 
-fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Option<String> {
-    // `true` marks an opaque string pointer; every emitted operation must
-    // consume the right kinds before the IR reaches the native JIT.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JitKind {
+    Number,
+    Boolean,
+    String,
+}
+
+fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let mut stack = Vec::new();
-    let mut maximum_depth = 0usize;
-    for token in &expression {
+    let mut maximum_depth = 0;
+    for token in expression {
         if matches!(
             token.as_str(),
             "+"
                 | "-"
                 | "*"
                 | "/"
-                | "<"
-                | "<="
-                | ">"
-                | ">="
-                | "=="
-                | "!="
                 | "%"
                 | "min"
                 | "max"
@@ -1263,87 +1319,131 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
                 | "shr"
                 | "ushr"
         ) {
-            if stack.pop()? || stack.pop()? {
+            if stack.pop()? == JitKind::String || stack.pop()? == JitKind::String {
                 return None;
             }
-            stack.push(false);
+            stack.push(JitKind::Number);
+        } else if matches!(token.as_str(), "<" | "<=" | ">" | ">=" | "==" | "!=") {
+            if stack.pop()? == JitKind::String || stack.pop()? == JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if token == "?" {
-            if stack.pop()? || stack.pop()? || stack.pop()? {
+            let alternative = stack.pop()?;
+            let consequent = stack.pop()?;
+            if stack.pop()? == JitKind::String || consequent != alternative {
                 return None;
             }
-            stack.push(false);
-        } else if matches!(
-            token.as_str(),
-            "strcmp" | "startswith" | "endswith" | "includes" | "indexof" | "lastindexof"
-        ) {
-            if !stack.pop()? || !stack.pop()? {
+            stack.push(consequent);
+        } else if token == "strcmp" {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
                 return None;
             }
-            stack.push(false);
+            stack.push(JitKind::Number);
+        } else if matches!(token.as_str(), "startswith" | "endswith" | "includes") {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
+        } else if matches!(token.as_str(), "indexof" | "lastindexof") {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Number);
         } else if token == "concat" {
-            if !stack.pop()? || !stack.pop()? {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
                 return None;
             }
-            stack.push(true);
-        } else if matches!(token.as_str(), "numstr" | "boolstr") {
-            if stack.pop()? {
+            stack.push(JitKind::String);
+        } else if token == "numstr" {
+            if stack.pop()? != JitKind::Number {
                 return None;
             }
-            stack.push(true);
+            stack.push(JitKind::String);
+        } else if token == "boolstr" {
+            if stack.pop()? != JitKind::Boolean {
+                return None;
+            }
+            stack.push(JitKind::String);
+        } else if token == "asbool" {
+            if *stack.last()? == JitKind::String {
+                return None;
+            }
+            *stack.last_mut()? = JitKind::Boolean;
         } else if matches!(
             token.as_str(),
             "tolowercase" | "touppercase" | "towellformed" | "trim" | "trimstart" | "trimend"
         ) {
-            if !stack.pop()? {
+            if stack.pop()? != JitKind::String {
                 return None;
             }
-            stack.push(true);
+            stack.push(JitKind::String);
         } else if token == "iswellformed" {
-            if !stack.pop()? {
+            if stack.pop()? != JitKind::String {
                 return None;
             }
-            stack.push(false);
+            stack.push(JitKind::Boolean);
         } else if matches!(token.as_str(), "repeat" | "slice" | "substring") {
-            if stack.pop()? || !stack.pop()? {
+            if stack.pop()? == JitKind::String || stack.pop()? != JitKind::String {
                 return None;
             }
-            stack.push(true);
+            stack.push(JitKind::String);
         } else if matches!(
             token.as_str(),
             "charat" | "charcodeat" | "at" | "codepointat"
         ) {
-            if stack.pop()? || !stack.pop()? {
+            if stack.pop()? == JitKind::String || stack.pop()? != JitKind::String {
                 return None;
             }
-            stack.push(matches!(token.as_str(), "charat" | "at"));
+            stack.push(if matches!(token.as_str(), "charat" | "at") {
+                JitKind::String
+            } else {
+                JitKind::Number
+            });
         } else if matches!(token.as_str(), "slice2" | "substring2") {
-            if stack.pop()? || stack.pop()? || !stack.pop()? {
+            if stack.pop()? == JitKind::String
+                || stack.pop()? == JitKind::String
+                || stack.pop()? != JitKind::String
+            {
                 return None;
             }
-            stack.push(true);
+            stack.push(JitKind::String);
         } else if matches!(token.as_str(), "padstart" | "padend") {
-            if !stack.pop()? || stack.pop()? || !stack.pop()? {
+            if stack.pop()? != JitKind::String
+                || stack.pop()? == JitKind::String
+                || stack.pop()? != JitKind::String
+            {
                 return None;
             }
-            stack.push(true);
+            stack.push(JitKind::String);
         } else if matches!(token.as_str(), "replace" | "replaceall") {
-            if !stack.pop()? || !stack.pop()? || !stack.pop()? {
+            if stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::String
+            {
                 return None;
             }
-            stack.push(true);
+            stack.push(JitKind::String);
         } else if matches!(
             token.as_str(),
             "startswith2" | "endswith2" | "includes2" | "indexof2" | "lastindexof2"
         ) {
-            if stack.pop()? || !stack.pop()? || !stack.pop()? {
+            if stack.pop()? == JitKind::String
+                || stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::String
+            {
                 return None;
             }
-            stack.push(false);
+            stack.push(if matches!(token.as_str(), "indexof2" | "lastindexof2") {
+                JitKind::Number
+            } else {
+                JitKind::Boolean
+            });
         } else if token == "strlen" {
-            if !stack.pop()? {
+            if stack.pop()? != JitKind::String {
                 return None;
             }
-            stack.push(false);
+            stack.push(JitKind::Number);
         } else if matches!(
             token.as_str(),
             "acos"
@@ -1377,15 +1477,30 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
                 | "abs"
                 | "sqrt"
         ) {
-            if *stack.last()? {
+            if *stack.last()? == JitKind::String {
                 return None;
             }
+            *stack.last_mut()? = JitKind::Number;
         } else {
-            stack.push(token.starts_with('s') || token.starts_with('t'));
+            stack.push(if token.starts_with('s') || token.starts_with('t') {
+                JitKind::String
+            } else if token.starts_with('b') {
+                JitKind::Boolean
+            } else {
+                JitKind::Number
+            });
             maximum_depth = maximum_depth.max(stack.len());
         }
     }
-    if stack != [returns_string] || maximum_depth > 8 {
+    let [kind] = stack.as_slice() else {
+        return None;
+    };
+    Some((*kind, maximum_depth))
+}
+
+fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Option<String> {
+    let (kind, maximum_depth) = jit_expression_kind(&expression)?;
+    if (kind == JitKind::String) != returns_string || maximum_depth > 8 {
         return None;
     }
     Some(format!("expr:{}", expression.join(",")))

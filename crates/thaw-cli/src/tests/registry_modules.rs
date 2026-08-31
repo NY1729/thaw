@@ -147,7 +147,7 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.describe = (value, flag) => `${value}:${flag}:${String(value)}`;\n",
+        "module.exports.describe = function(value, flag) { let text = 'value='; text += value; text += ':'; text += flag; return text + ':' + String(value); };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -163,7 +163,7 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "1e+21:true:1e+21\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "value=1e+21:true:1e+21\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
