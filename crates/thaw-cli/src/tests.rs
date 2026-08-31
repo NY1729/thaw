@@ -332,6 +332,60 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,c0000000000000000,c3ff0000000000000,?".into())
     );
+    let string_length = thaw_bridge::DtsFunction {
+        name: "length".into(),
+        generic: None,
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        )],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.length = value => value.length;",
+            "length",
+            false,
+            &string_length,
+        ),
+        Some("expr:s0,strlen".into())
+    );
+    let string_less = thaw_bridge::DtsFunction {
+        name: "less".into(),
+        params: vec![
+            (
+                "left".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+            (
+                "right".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+        ],
+        required_params: 2,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ..string_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.less = (left, right) => left < right;",
+            "less",
+            false,
+            &string_less,
+        ),
+        Some("expr:s0,s1,strcmp,c0000000000000000,<".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.length = value => value + 1;",
+            "length",
+            false,
+            &string_length,
+        ),
+        None
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = (Math, right) => Math.abs(Math % right);",

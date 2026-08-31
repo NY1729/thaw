@@ -166,6 +166,38 @@ extern "C" fn imul_number(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn string_argument(value: f64) -> Option<String> {
+    let pointer = value.to_bits() as usize as *const c_char;
+    (!pointer.is_null()).then(|| CStr::from_ptr(pointer).to_string_lossy().into_owned())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_length(value: f64) -> f64 {
+    unsafe {
+        string_argument(value)
+            .map(|value| value.encode_utf16().count() as f64)
+            .unwrap_or(0.0)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_compare(left: f64, right: f64) -> f64 {
+    unsafe {
+        let Some(left) = string_argument(left) else {
+            return 0.0;
+        };
+        let Some(right) = string_argument(right) else {
+            return 0.0;
+        };
+        match left.encode_utf16().cmp(right.encode_utf16()) {
+            std::cmp::Ordering::Less => -1.0,
+            std::cmp::Ordering::Equal => 0.0,
+            std::cmp::Ordering::Greater => 1.0,
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn bit_and(left: f64, right: f64) -> f64 {
     (to_uint32(left) & to_uint32(right)) as i32 as f64
 }
@@ -415,6 +447,8 @@ enum NumericValue {
     Atan2,
     Hypot,
     Imul,
+    StringCompare,
+    StringLength,
     Power,
     UnaryMath(UnaryMath),
     Remainder,
@@ -456,6 +490,8 @@ impl NumericProgram {
                     "atan2" => Some(NumericValue::Atan2),
                     "hypot" => Some(NumericValue::Hypot),
                     "imul" => Some(NumericValue::Imul),
+                    "strcmp" => Some(NumericValue::StringCompare),
+                    "strlen" => Some(NumericValue::StringLength),
                     "pow" => Some(NumericValue::Power),
                     "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
                     "acosh" => Some(NumericValue::UnaryMath(UnaryMath::Acosh)),
@@ -488,6 +524,7 @@ impl NumericProgram {
                     "?" => Some(NumericValue::Select),
                     value => value
                         .strip_prefix('a')
+                        .or_else(|| value.strip_prefix('s'))
                         .and_then(|index| index.parse::<u8>().ok())
                         .filter(|index| *index < 16)
                         .map(NumericValue::Argument)
@@ -625,6 +662,19 @@ impl NumericProgram {
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
+                }
+                NumericValue::StringCompare => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(&mut code, string_compare as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::StringLength => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, string_length as *const () as u64, depth - 1);
                 }
                 NumericValue::UnaryMath(operation) => {
                     if depth == 0 {
@@ -1050,6 +1100,25 @@ mod tests {
         assert_eq!(call(&fround, &[-0.0]).value.to_bits(), (-0.0f64).to_bits());
         let imul = CString::new("expr:a0,a1,imul:imul").unwrap();
         assert_eq!(call(&imul, &[4_294_967_295.0, 5.0]).value, -5.0);
+        let text = CString::new("a😀").unwrap();
+        let text_argument = f64::from_bits(text.as_ptr() as usize as u64);
+        let string_length = CString::new("expr:s0,strlen:string_length").unwrap();
+        assert_eq!(call(&string_length, &[text_argument]).value, 3.0);
+        let supplementary = CString::new("𐀀").unwrap();
+        let bmp = CString::new("\u{e000}").unwrap();
+        let string_less =
+            CString::new("expr:s0,s1,strcmp,c0000000000000000,<:string_utf16_comparison").unwrap();
+        assert_eq!(
+            call(
+                &string_less,
+                &[
+                    f64::from_bits(supplementary.as_ptr() as usize as u64),
+                    f64::from_bits(bmp.as_ptr() as usize as u64),
+                ],
+            )
+            .value,
+            1.0
+        );
 
         for (expression, args, expected) in [
             ("a0,a1,bor", [4_294_967_297.0, 0.0], 1.0),

@@ -118,6 +118,19 @@ fn jit_numeric_export(
         }
     }
 
+    fn string_parameter<'a>(
+        expression: &Expr,
+        parameters: &'a std::collections::HashMap<String, String>,
+    ) -> Option<&'a str> {
+        let Expr::Ident(identifier) = expression else {
+            return None;
+        };
+        parameters
+            .get(identifier.sym.as_ref())
+            .filter(|token| token.starts_with('s'))
+            .map(String::as_str)
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -140,11 +153,17 @@ fn jit_numeric_export(
                     f64::from(u8::from(boolean.value)).to_bits()
                 ));
             }
-            Expr::Member(_) => {
-                output.push(format!(
-                    "c{:016x}",
-                    math_constant(expression, parameters, locals)?.to_bits()
-                ));
+            Expr::Member(member) => {
+                if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "length")
+                {
+                    output.push(string_parameter(member.obj.as_ref(), parameters)?.into());
+                    output.push("strlen".into());
+                } else {
+                    output.push(format!(
+                        "c{:016x}",
+                        math_constant(expression, parameters, locals)?.to_bits()
+                    ));
+                }
             }
             Expr::Unary(unary)
                 if matches!(
@@ -348,6 +367,16 @@ fn jit_numeric_export(
                 _ => None,
             };
             if let Some(operator) = operator {
+                let left_string = string_parameter(binary.left.as_ref(), parameters);
+                let right_string = string_parameter(binary.right.as_ref(), parameters);
+                if left_string.is_some() || right_string.is_some() {
+                    output.push(left_string?.into());
+                    output.push(right_string?.into());
+                    output.push("strcmp".into());
+                    output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                    output.push(operator.into());
+                    return (output.len() <= 128).then_some(());
+                }
                 encode_expression(binary.left.as_ref(), parameters, locals, output)?;
                 encode_expression(binary.right.as_ref(), parameters, locals, output)?;
                 output.push(operator.into());
@@ -617,7 +646,7 @@ fn jit_numeric_export(
                 matches!(
                     ty,
                     thaw_bridge::DtsType::Native(
-                        thaw_hir::HirType::F64 | thaw_hir::HirType::Bool
+                        thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
                     )
                 )
             })
@@ -733,12 +762,20 @@ fn jit_numeric_export(
         _ => return None,
     };
     let mut parameters = std::collections::HashMap::new();
-    for (index, parameter) in params.iter().enumerate() {
+    for (index, (parameter, (_, ty))) in params.iter().zip(&function.params).enumerate() {
         let Pat::Ident(parameter) = parameter else {
             return None;
         };
+        let prefix = if matches!(
+            ty,
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str)
+        ) {
+            's'
+        } else {
+            'a'
+        };
         if parameters
-            .insert(parameter.id.sym.to_string(), format!("a{index}"))
+            .insert(parameter.id.sym.to_string(), format!("{prefix}{index}"))
             .is_some()
         {
             return None;
@@ -827,25 +864,24 @@ fn jit_numeric_export(
 }
 
 fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
-    let mut depth = 0usize;
+    // `true` marks an opaque string pointer; every emitted operation must
+    // consume the right kinds before the IR reaches the native JIT.
+    let mut stack = Vec::new();
     let mut maximum_depth = 0usize;
     for token in &expression {
         if matches!(
             token.as_str(),
-            "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "==" | "!="
-        ) {
-            if depth < 2 {
-                return None;
-            }
-            depth -= 1;
-        } else if token == "?" {
-            if depth < 3 {
-                return None;
-            }
-            depth -= 2;
-        } else if matches!(
-            token.as_str(),
-            "%"
+            "+"
+                | "-"
+                | "*"
+                | "/"
+                | "<"
+                | "<="
+                | ">"
+                | ">="
+                | "=="
+                | "!="
+                | "%"
                 | "min"
                 | "max"
                 | "pow"
@@ -859,10 +895,25 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 | "shr"
                 | "ushr"
         ) {
-            if depth < 2 {
+            if stack.pop()? || stack.pop()? {
                 return None;
             }
-            depth -= 1;
+            stack.push(false);
+        } else if token == "?" {
+            if stack.pop()? || stack.pop()? || stack.pop()? {
+                return None;
+            }
+            stack.push(false);
+        } else if token == "strcmp" {
+            if !stack.pop()? || !stack.pop()? {
+                return None;
+            }
+            stack.push(false);
+        } else if token == "strlen" {
+            if !stack.pop()? {
+                return None;
+            }
+            stack.push(false);
         } else if matches!(
             token.as_str(),
             "acos"
@@ -896,15 +947,15 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 | "abs"
                 | "sqrt"
         ) {
-            if depth == 0 {
+            if *stack.last()? {
                 return None;
             }
         } else {
-            depth += 1;
-            maximum_depth = maximum_depth.max(depth);
+            stack.push(token.starts_with('s'));
+            maximum_depth = maximum_depth.max(stack.len());
         }
     }
-    if depth != 1 || maximum_depth > 8 {
+    if stack != [false] || maximum_depth > 8 {
         return None;
     }
     Some(format!("expr:{}", expression.join(",")))
@@ -931,6 +982,11 @@ fn jit_numeric_declaration(
                 thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool)
             ) {
                 "boolean"
+            } else if matches!(
+                ty,
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str)
+            ) {
+                "string"
             } else {
                 "number"
             };
