@@ -1970,8 +1970,9 @@ An experimental QuickJS-independent residual JIT backend is now linked as a
 separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
 HIR through LLVM to a small W^X runtime which specializes and caches numeric
 expressions containing arguments, constants, unary negation,
-`Math.abs/min/max/floor/ceil/trunc/round/sqrt`, `cbrt/sign`, logarithmic and
-exponential functions, and trigonometric/hyperbolic functions, plus nested
+`Math.abs/min/max/floor/ceil/trunc/round/sqrt`, `cbrt/sign/hypot`, logarithmic
+and exponential functions, and trigonometric/hyperbolic functions (including
+`atan2`), plus nested
 `add/sub/mul/div/remainder` operations, JavaScript `ToInt32`/`ToUint32`
 bitwise and shift operations, ECMAScript exponentiation (`**`/`Math.pow`),
 comparisons, and conditional selection on first use. Pure numeric `&&`/`||`
