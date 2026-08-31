@@ -1899,8 +1899,9 @@ them to this backend, and omits fully extracted bundles from QuickJS.
 Single-return bodies and the common `if (...) return ...; return ...;` form are
 normalized to the same IR. Side-effect-free local numeric declarations are
 expanded in declaration order, while calls, mutation, and forward references
-remain on the QuickJS path. Both unary and binary numeric exports use the same
-runtime ABI; unary calls pass an unused zero-valued second register.
+remain on the QuickJS path. Numeric exports with 1-16 required arguments use a
+single argument-array runtime ABI; generated code loads only the `aN` slots
+referenced by its IR.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
 

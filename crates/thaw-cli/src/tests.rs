@@ -81,7 +81,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &function,
         ),
         Some(
-            "expr:x,y,<,x,y,+,c4000000000000000,*,x,y,-,?".into()
+            "expr:a0,a1,<,a0,a1,+,c4000000000000000,*,a0,a1,-,?".into()
         )
     );
     assert_eq!(
@@ -91,7 +91,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &function,
         ),
-        Some("expr:x,y,+".into())
+        Some("expr:a0,a1,+".into())
     );
     assert_eq!(
         jit_numeric_export(

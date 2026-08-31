@@ -27,8 +27,7 @@ fn jit_numeric_export(
 
     fn encode_expression(
         expression: &Expr,
-        left: &str,
-        right: &str,
+        parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
         output: &mut Vec<String>,
     ) -> Option<()> {
@@ -36,8 +35,9 @@ fn jit_numeric_export(
             Expr::Ident(identifier) if locals.contains_key(identifier.sym.as_ref()) => {
                 output.extend(locals.get(identifier.sym.as_ref())?.iter().cloned());
             }
-            Expr::Ident(identifier) if identifier.sym == left => output.push("x".into()),
-            Expr::Ident(identifier) if identifier.sym == right => output.push("y".into()),
+            Expr::Ident(identifier) if parameters.contains_key(identifier.sym.as_ref()) => {
+                output.push(parameters.get(identifier.sym.as_ref())?.clone());
+            }
             Expr::Lit(Lit::Num(number)) => {
                 output.push(format!("c{:016x}", number.value.to_bits()));
             }
@@ -56,7 +56,7 @@ fn jit_numeric_export(
                 output.push(format!("c{:016x}", value.to_bits()));
             }
             Expr::Paren(parenthesized) => {
-                encode_expression(parenthesized.expr.as_ref(), left, right, locals, output)?;
+                encode_expression(parenthesized.expr.as_ref(), parameters, locals, output)?;
             }
             Expr::Bin(binary)
                 if matches!(
@@ -64,8 +64,8 @@ fn jit_numeric_export(
                     BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
                 ) =>
             {
-                encode_expression(binary.left.as_ref(), left, right, locals, output)?;
-                encode_expression(binary.right.as_ref(), left, right, locals, output)?;
+                encode_expression(binary.left.as_ref(), parameters, locals, output)?;
+                encode_expression(binary.right.as_ref(), parameters, locals, output)?;
                 output.push(
                     match binary.op {
                         BinaryOp::Add => "+",
@@ -78,9 +78,9 @@ fn jit_numeric_export(
                 );
             }
             Expr::Cond(conditional) => {
-                encode_condition(conditional.test.as_ref(), left, right, locals, output)?;
-                encode_expression(conditional.cons.as_ref(), left, right, locals, output)?;
-                encode_expression(conditional.alt.as_ref(), left, right, locals, output)?;
+                encode_condition(conditional.test.as_ref(), parameters, locals, output)?;
+                encode_expression(conditional.cons.as_ref(), parameters, locals, output)?;
+                encode_expression(conditional.alt.as_ref(), parameters, locals, output)?;
                 output.push("?".into());
             }
             _ => return None,
@@ -90,8 +90,7 @@ fn jit_numeric_export(
 
     fn encode_condition(
         expression: &Expr,
-        left: &str,
-        right: &str,
+        parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
         output: &mut Vec<String>,
     ) -> Option<()> {
@@ -107,8 +106,8 @@ fn jit_numeric_export(
             BinaryOp::NotEq | BinaryOp::NotEqEq => "!=",
             _ => return None,
         };
-        encode_expression(binary.left.as_ref(), left, right, locals, output)?;
-        encode_expression(binary.right.as_ref(), left, right, locals, output)?;
+        encode_expression(binary.left.as_ref(), parameters, locals, output)?;
+        encode_expression(binary.right.as_ref(), parameters, locals, output)?;
         output.push(operator.into());
         (output.len() <= 128).then_some(())
     }
@@ -173,23 +172,22 @@ fn jit_numeric_export(
 
     fn encode_numeric_body(
         body: NumericBody<'_>,
-        left: &str,
-        right: &str,
+        parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         match body {
             NumericBody::Expression(body) => {
-                encode_expression(body, left, right, locals, output)?;
+                encode_expression(body, parameters, locals, output)?;
             }
             NumericBody::Conditional {
                 test,
                 consequent,
                 alternate,
             } => {
-                encode_condition(test, left, right, locals, output)?;
-                encode_expression(consequent, left, right, locals, output)?;
-                encode_expression(alternate, left, right, locals, output)?;
+                encode_condition(test, parameters, locals, output)?;
+                encode_expression(consequent, parameters, locals, output)?;
+                encode_expression(alternate, parameters, locals, output)?;
                 output.push("?".into());
             }
         }
@@ -198,7 +196,7 @@ fn jit_numeric_export(
 
     if function.generic.is_some()
         || function.required_params != function.params.len()
-        || !(1..=2).contains(&function.params.len())
+        || !(1..=16).contains(&function.params.len())
         || function.rest_param.is_some()
         || !function
             .params
@@ -303,24 +301,29 @@ fn jit_numeric_export(
         }
         _ => return None,
     };
-    let (left, right) = match params.as_slice() {
-        [Pat::Ident(left)] => (left.id.sym.as_ref(), ""),
-        [Pat::Ident(left), Pat::Ident(right)] => {
-            (left.id.sym.as_ref(), right.id.sym.as_ref())
+    let mut parameters = std::collections::HashMap::new();
+    for (index, parameter) in params.iter().enumerate() {
+        let Pat::Ident(parameter) = parameter else {
+            return None;
+        };
+        if parameters
+            .insert(parameter.id.sym.to_string(), format!("a{index}"))
+            .is_some()
+        {
+            return None;
         }
-        _ => return None,
-    };
+    }
     let mut expression = Vec::new();
     let mut locals = std::collections::HashMap::new();
     for (name, initializer) in local_initializers {
-        if name.sym == left || name.sym == right || locals.contains_key(name.sym.as_ref()) {
+        if parameters.contains_key(name.sym.as_ref()) || locals.contains_key(name.sym.as_ref()) {
             return None;
         }
         let mut encoded = Vec::new();
-        encode_expression(initializer, left, right, &locals, &mut encoded)?;
+        encode_expression(initializer, &parameters, &locals, &mut encoded)?;
         locals.insert(name.sym.to_string(), encoded);
     }
-    encode_numeric_body(body, left, right, &locals, &mut expression)?;
+    encode_numeric_body(body, &parameters, &locals, &mut expression)?;
     validated_jit_expression(expression)
 }
 
@@ -346,7 +349,7 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
             maximum_depth = maximum_depth.max(depth);
         }
     }
-    if depth != 1 || maximum_depth > 6 {
+    if depth != 1 || maximum_depth > 8 {
         return None;
     }
     Some(format!("expr:{}", expression.join(",")))

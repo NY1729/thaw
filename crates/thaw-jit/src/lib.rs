@@ -63,8 +63,7 @@ impl NumericOp {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum NumericValue {
-    Left,
-    Right,
+    Argument(u8),
     Constant(f64),
     Operation(NumericOp),
     Compare(CompareOp),
@@ -80,8 +79,8 @@ impl NumericProgram {
             let values = encoded
                 .split(',')
                 .map(|token| match token {
-                    "x" => Some(NumericValue::Left),
-                    "y" => Some(NumericValue::Right),
+                    "x" => Some(NumericValue::Argument(0)),
+                    "y" => Some(NumericValue::Argument(1)),
                     "+" => Some(NumericValue::Operation(NumericOp::Add)),
                     "-" => Some(NumericValue::Operation(NumericOp::Subtract)),
                     "*" => Some(NumericValue::Operation(NumericOp::Multiply)),
@@ -93,19 +92,26 @@ impl NumericProgram {
                     "==" => Some(NumericValue::Compare(CompareOp::Equal)),
                     "!=" => Some(NumericValue::Compare(CompareOp::NotEqual)),
                     "?" => Some(NumericValue::Select),
-                    constant => constant
-                        .strip_prefix('c')
-                        .filter(|bits| bits.len() == 16)
-                        .and_then(|bits| u64::from_str_radix(bits, 16).ok())
-                        .map(|bits| NumericValue::Constant(f64::from_bits(bits))),
+                    value => value
+                        .strip_prefix('a')
+                        .and_then(|index| index.parse::<u8>().ok())
+                        .filter(|index| *index < 16)
+                        .map(NumericValue::Argument)
+                        .or_else(|| {
+                            value
+                                .strip_prefix('c')
+                                .filter(|bits| bits.len() == 16)
+                                .and_then(|bits| u64::from_str_radix(bits, 16).ok())
+                                .map(|bits| NumericValue::Constant(f64::from_bits(bits)))
+                        }),
                 })
                 .collect::<Option<Vec<_>>>()?;
             (!values.is_empty() && values.len() <= 128).then_some(Self(values))
         } else {
             let operation = symbol.split_once(':').map_or(symbol, |pair| pair.0);
             Some(Self(vec![
-                NumericValue::Left,
-                NumericValue::Right,
+                NumericValue::Argument(0),
+                NumericValue::Argument(1),
                 NumericValue::Operation(NumericOp::parse(operation)?),
             ]))
         }
@@ -114,25 +120,18 @@ impl NumericProgram {
     #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
     fn machine_code(&self) -> Option<Vec<u8>> {
         let mut code = Vec::with_capacity(self.0.len() * 12 + 8);
-        // Preserve both arguments because expression temporaries use xmm0..xmm5.
-        emit_move(&mut code, 6, 0);
-        emit_move(&mut code, 7, 1);
         let mut depth = 0u8;
         for value in &self.0 {
             match value {
-                NumericValue::Left | NumericValue::Right => {
-                    if depth == 6 {
+                NumericValue::Argument(index) => {
+                    if depth == 8 {
                         return None;
                     }
-                    emit_move(
-                        &mut code,
-                        depth,
-                        if *value == NumericValue::Left { 6 } else { 7 },
-                    );
+                    code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x47 | (depth << 3), index * 8]);
                     depth += 1;
                 }
                 NumericValue::Constant(value) => {
-                    if depth == 6 {
+                    if depth == 8 {
                         return None;
                     }
                     code.extend_from_slice(&[0x48, 0xb8]);
@@ -198,6 +197,17 @@ impl NumericProgram {
             code.push(0xc3);
             code
         })
+    }
+
+    fn required_args(&self) -> usize {
+        self.0
+            .iter()
+            .filter_map(|value| match value {
+                NumericValue::Argument(index) => Some(*index as usize + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -300,12 +310,13 @@ fn compile(_symbol: &str, _program: &NumericProgram) -> Result<*mut libc::c_void
 ///
 /// # Safety
 ///
-/// `symbol` must point to a live NUL-terminated string for this call.
+/// `symbol` must point to a live NUL-terminated string for this call. When
+/// `arg_count` is nonzero, `args` must reference at least that many `f64`s.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_jit_call_f64(
     symbol: *const c_char,
-    left: f64,
-    right: f64,
+    args: *const f64,
+    arg_count: usize,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -322,13 +333,19 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
             error: INVALID_SYMBOL.as_ptr().cast(),
         };
     };
+    if program.required_args() > arg_count || (arg_count != 0 && args.is_null()) {
+        return ThawJitResult {
+            value: 0.0,
+            error: INVALID_SYMBOL.as_ptr().cast(),
+        };
+    }
     let code = match compile(symbol, &program) {
         Ok(code) => code,
         Err(error) => return ThawJitResult { value: 0.0, error },
     };
-    let function = std::mem::transmute::<*mut libc::c_void, extern "C" fn(f64, f64) -> f64>(code);
+    let function = std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code);
     ThawJitResult {
-        value: function(left, right),
+        value: function(args),
         error: ptr::null(),
     }
 }
@@ -337,6 +354,10 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
+        unsafe { thaw_jit_call_f64(symbol.as_ptr(), args.as_ptr(), args.len()) }
+    }
 
     #[test]
     fn specializes_numeric_operations_and_reuses_code() {
@@ -347,50 +368,41 @@ mod tests {
             ("div:test", 1.0),
         ] {
             let symbol = CString::new(symbol).unwrap();
-            let result = unsafe { thaw_jit_call_f64(symbol.as_ptr(), 21.0, 21.0) };
+            let result = call(&symbol, &[21.0, 21.0]);
             assert!(result.error.is_null());
             assert_eq!(result.value, expected);
-            let repeated = unsafe { thaw_jit_call_f64(symbol.as_ptr(), 20.0, 22.0) };
+            let repeated = call(&symbol, &[20.0, 22.0]);
             assert!(repeated.error.is_null());
         }
 
         let symbol = CString::new("expr:x,y,+,c4000000000000000,*:compound").unwrap();
-        let result = unsafe { thaw_jit_call_f64(symbol.as_ptr(), 19.0, 2.0) };
+        let result = call(&symbol, &[19.0, 2.0]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 42.0);
+
+        let symbol = CString::new("expr:a0,a1,+,a2,+:three_args").unwrap();
+        let result = call(&symbol, &[10.0, 11.0, 21.0]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 42.0);
+        assert!(!call(&symbol, &[10.0, 11.0]).error.is_null());
 
         let symbol =
             CString::new("expr:x,y,<,c4045000000000000,cc000000000000000,?:conditional").unwrap();
         let comparison = CString::new("expr:x,y,<:comparison").unwrap();
-        assert_eq!(
-            unsafe { thaw_jit_call_f64(comparison.as_ptr(), 2.0, 3.0) }.value,
-            1.0
-        );
-        assert_eq!(
-            unsafe { thaw_jit_call_f64(symbol.as_ptr(), 2.0, 3.0) }.value,
-            42.0
-        );
-        assert_eq!(
-            unsafe { thaw_jit_call_f64(symbol.as_ptr(), 3.0, 2.0) }.value,
-            -2.0
-        );
+        assert_eq!(call(&comparison, &[2.0, 3.0]).value, 1.0);
+        assert_eq!(call(&symbol, &[2.0, 3.0]).value, 42.0);
+        assert_eq!(call(&symbol, &[3.0, 2.0]).value, -2.0);
 
         for (operator, expected) in [("<", 0.0), ("==", 0.0), ("!=", 1.0)] {
             let symbol = CString::new(format!("expr:x,y,{operator}:nan")).unwrap();
-            let result = unsafe { thaw_jit_call_f64(symbol.as_ptr(), f64::NAN, 1.0) };
+            let result = call(&symbol, &[f64::NAN, 1.0]);
             assert!(result.error.is_null());
             assert_eq!(result.value, expected);
         }
 
         let symbol =
             CString::new("expr:x,c4045000000000000,cc000000000000000,?:truthiness").unwrap();
-        assert_eq!(
-            unsafe { thaw_jit_call_f64(symbol.as_ptr(), -0.0, 0.0) }.value,
-            -2.0
-        );
-        assert_eq!(
-            unsafe { thaw_jit_call_f64(symbol.as_ptr(), f64::NAN, 0.0) }.value,
-            42.0
-        );
+        assert_eq!(call(&symbol, &[-0.0]).value, -2.0);
+        assert_eq!(call(&symbol, &[f64::NAN]).value, 42.0);
     }
 }
