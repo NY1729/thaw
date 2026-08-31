@@ -96,7 +96,15 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
         host.libraries.push(handle);
         host.module_envs.push(env);
     });
+    thaw_quickjs::register_napi_bridge(thaw_napi_export_names, thaw_napi_call);
     Ok(())
+}
+
+unsafe extern "C" fn thaw_napi_export_names() -> *const c_char {
+    let names = HOST.with(|host| host.borrow().functions.keys().cloned().collect::<Vec<_>>());
+    CString::new(serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()))
+        .unwrap_or_default()
+        .into_raw()
 }
 
 #[no_mangle]

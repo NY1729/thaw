@@ -58,6 +58,29 @@ use wasmi::{Memory as WasmMemory, MemoryType as WasmMemoryType, Module as WasmMo
 use wasmi::{Store as WasmStore, Val as WasmVal, ValType as WasmValType};
 use wasmi_wasi::sync::{ambient_authority, Dir as WasiDir, WasiCtxBuilder};
 use wasmi_wasi::WasiCtx;
+
+type NapiBridgeCallback = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
+type NapiBridgeExports = unsafe extern "C" fn() -> *const c_char;
+static NAPI_BRIDGE: Mutex<Option<(NapiBridgeExports, NapiBridgeCallback)>> = Mutex::new(None);
+
+pub fn register_napi_bridge(exports: NapiBridgeExports, call: NapiBridgeCallback) {
+    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call));
+}
+
+fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    let Some((exports, call)) = *NAPI_BRIDGE.lock().unwrap() else {
+        return Ok(());
+    };
+    let exports = Function::new(ctx.clone(), move || unsafe { to_str(exports()) })?;
+    let call = Function::new(ctx.clone(), move |name: String, args: String| unsafe {
+        let name = CString::new(name).unwrap_or_default();
+        let args = CString::new(args).unwrap_or_default();
+        to_str(call(name.as_ptr(), args.as_ptr()))
+    })?;
+    ctx.globals().set("__thaw_napi_bridge_exports", exports)?;
+    ctx.globals().set("__thaw_napi_bridge_call", call)?;
+    Ok(())
+}
 type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 type TlsStreamTable = (u32, HashMap<u32, TlsStream>);
 type TlsServerStream = StreamOwned<ServerConnection, TcpStream>;

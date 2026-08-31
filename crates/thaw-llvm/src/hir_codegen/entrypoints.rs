@@ -82,8 +82,8 @@ impl<'ctx> HirCompiler<'ctx> {
     /// registry packages that ship a `bundle.js`.
     fn call_module_init_if_present(&self, cleanup: BasicBlock<'ctx>) {
         for (symbol, call_name) in [
-            (MODULE_INIT_SYMBOL, "call_thaw_module_init"),
             (NATIVE_MODULE_INIT_SYMBOL, "call_thaw_native_module_init"),
+            (MODULE_INIT_SYMBOL, "call_thaw_module_init"),
             (TOP_LEVEL_INIT_SYMBOL, "call_thaw_top_level_init"),
         ] {
             if let Some(init_fn) = self.module.get_function(symbol) {

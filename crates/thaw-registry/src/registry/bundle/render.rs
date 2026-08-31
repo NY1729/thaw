@@ -72,6 +72,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20\x20\x20if (target) return __thaw_bundle_require(target.key, target.factory);\n\
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
          \x20\x20\x20\x20};\n\
+         \x20\x20\x20\x20localRequire.addon = require.addon;\n\
          \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
          \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
          \x20\x20\x20\x20\x20\x20if (!target) return Promise.resolve().then(function() { return require(spec); });\n\
@@ -90,6 +91,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20var factoryKey = keys.indexOf(text) >= 0 ? text : keys.find(function(key) { return text.endsWith('/' + key) || text.endsWith(key); });\n\
          \x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
          \x20\x20var created = function(spec) { var target = __thaw_bundle_target(map, String(spec)); if (target) return __thaw_bundle_require(target.key, target.factory); return require(String(spec)); };\n\
+         \x20\x20created.addon = require.addon;\n\
          \x20\x20created.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
          }\n\
