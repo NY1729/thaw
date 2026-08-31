@@ -549,6 +549,26 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:s0,c0000000000000000,{operation}"))
         );
     }
+    for (method, operation) in [("padStart", "padstart"), ("padEnd", "padend")] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.repeat = (value, count) => value.{method}(count, '0');"),
+                "repeat",
+                false,
+                &string_repeat,
+            ),
+            Some(format!("expr:s0,a1,t30,{operation}"))
+        );
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.repeat = (value, count) => value.{method}(count);"),
+                "repeat",
+                false,
+                &string_repeat,
+            ),
+            Some(format!("expr:s0,a1,t20,{operation}"))
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "module.exports.length = value => value + 1;",
