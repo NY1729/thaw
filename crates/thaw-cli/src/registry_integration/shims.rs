@@ -21,9 +21,40 @@ fn jit_numeric_export(
     function: &thaw_bridge::DtsFunction,
 ) -> Option<String> {
     use thaw_parser::ast::{
-        AssignOp, AssignTarget, BinaryOp, Callee, Decl, Expr, Ident, Lit, MemberProp, ModuleItem,
-        Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp,
+        AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr, Ident, Lit, MemberProp,
+        ModuleItem, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp,
     };
+
+    fn math_method(
+        call: &CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<&'static str> {
+        if parameters.contains_key("Math")
+            || locals.contains_key("Math")
+            || call.args.iter().any(|argument| argument.spread.is_some())
+        {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Math") {
+            return None;
+        }
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        match property.sym.as_ref() {
+            "abs" => Some("abs"),
+            "min" => Some("min"),
+            "max" => Some("max"),
+            _ => None,
+        }
+    }
 
     fn encode_expression(
         expression: &Expr,
@@ -74,18 +105,33 @@ fn jit_numeric_export(
                     .into(),
                 );
             }
-            Expr::Call(call)
-                if call.args.len() == 1
-                    && call.args[0].spread.is_none()
-                    && !parameters.contains_key("Math")
-                    && !locals.contains_key("Math")
-                    && matches!(&call.callee, Callee::Expr(callee)
-                        if matches!(callee.as_ref(), Expr::Member(member)
-                            if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Math")
-                                && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "abs"))) =>
-            {
-                encode_expression(call.args[0].expr.as_ref(), parameters, locals, output)?;
-                output.push("abs".into());
+            Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
+                let method = math_method(call, parameters, locals)?;
+                if method == "abs" {
+                    let [argument] = call.args.as_slice() else {
+                        return None;
+                    };
+                    encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                    output.push("abs".into());
+                } else if call.args.is_empty() {
+                    let value = if method == "min" {
+                        f64::INFINITY
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    output.push(format!("c{:016x}", value.to_bits()));
+                } else {
+                    encode_expression(
+                        call.args[0].expr.as_ref(),
+                        parameters,
+                        locals,
+                        output,
+                    )?;
+                    for argument in &call.args[1..] {
+                        encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                        output.push(method.into());
+                    }
+                }
             }
             Expr::Cond(conditional) => {
                 encode_condition(conditional.test.as_ref(), parameters, locals, output)?;
@@ -354,7 +400,7 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 return None;
             }
             depth -= 2;
-        } else if token == "%" {
+        } else if matches!(token.as_str(), "%" | "min" | "max") {
             if depth != 2 {
                 return None;
             }
