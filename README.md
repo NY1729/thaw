@@ -1750,6 +1750,15 @@ The workspace crates have narrow responsibilities:
   or `null` for a non-finite timestamp -- the specification has `toJSON`
   return `null` rather than throwing in that case, unlike `toISOString`
   itself
+- `performance.now()` returns milliseconds elapsed since process start from a
+  `thaw-runtime` `Instant`, recognized as this exact call-expression pattern
+  the same way `Math`/`Date`/`JSON` static calls are rather than as a real
+  `performance` global value. Unlike `Date.now()`, it's a monotonic clock
+  unaffected by wall-clock adjustments, matching the Web/Node contract; the
+  reference point (process start) is implementation-defined by the
+  specification, and there's no meaningful "request start" to anchor to
+  instead, since a warm Lambda execution environment reuses one process
+  across many invocations
 - `Map<K, V>`/`Set<T>` in the native compilation path (thaw-hir/thaw-llvm;
   the QuickJS-interpreted fallback already had them via
   `structuredClone`), backed by a from-scratch arena-allocated,

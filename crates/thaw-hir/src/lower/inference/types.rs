@@ -676,9 +676,9 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, value, "RegExp.test value")?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_date_now" => {
+                    "__thaw_date_now" | "__thaw_performance_now" => {
                         if !args.is_empty() {
-                            return Err("Date.now expects no operands".into());
+                            return Err(format!("{name} expects no operands"));
                         }
                         return Ok(HirType::F64);
                     }

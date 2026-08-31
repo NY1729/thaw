@@ -1980,6 +1980,27 @@ fn compiles_date_getters_and_iso_string() {
 }
 
 #[test]
+fn compiles_performance_now_as_a_monotonic_clock() {
+    // Recognized as this exact `performance.now()` call-expression pattern
+    // the same way `Math`/`Date`/`JSON` static calls are, backed by a
+    // process-start `Instant` in thaw-runtime -- unlike `Date.now()`, it
+    // never observes a wall-clock adjustment.
+    let source = r#"
+        async function main(): Promise<void> {
+            const start = performance.now();
+            await sleep(20);
+            const end = performance.now();
+            console.log(end > start);
+            console.log(end - start >= 15);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "performance_now"),
+        "true\ntrue\n"
+    );
+}
+
+#[test]
 fn compiles_date_setters() {
     let source = r#"
         async function main(): Promise<void> {

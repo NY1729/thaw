@@ -180,6 +180,7 @@ impl<'a> FnLowerer<'a> {
                 | ("String", "fromCharCode" | "fromCodePoint")
                 | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
                 | ("Date", "now" | "UTC" | "parse")
+                | ("performance", "now")
         )
     }
 
@@ -1101,6 +1102,22 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_date_now".to_string())),
+                            Vec::new(),
+                        ));
+                    }
+                    if object.sym == *"performance" && property.sym == *"now" {
+                        if !call.args.is_empty() {
+                            return Err("`performance.now` expects no arguments".into());
+                        }
+                        // Milliseconds since process start, not the Unix
+                        // epoch `Date.now` reports -- a monotonic clock
+                        // unaffected by wall-clock adjustments, matching the
+                        // Web/Node `performance.now()` contract. Recognized
+                        // as this exact call-expression pattern the same way
+                        // `Math`/`Date`/`JSON` are, rather than as a real
+                        // `performance` global value.
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_performance_now".to_string())),
                             Vec::new(),
                         ));
                     }
