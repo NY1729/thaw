@@ -1172,6 +1172,36 @@ fn compiles_map_group_by_a_native_array() {
 }
 
 #[test]
+fn compiles_set_union_intersection_and_difference() {
+    // Each builds a fresh Set from `__thaw_map_snapshot_keys` snapshots of
+    // its operand(s), the same conversion `[...set]`/`Array.from(set)`
+    // already use -- neither operand is mutated.
+    let source = r#"
+        async function main(): Promise<void> {
+            const a = new Set<number>([1, 2, 3]);
+            const b = new Set<number>([2, 3, 4]);
+            console.log(Array.from(a.union(b)).join(","));
+            console.log(Array.from(a.intersection(b)).join(","));
+            console.log(Array.from(a.difference(b)).join(","));
+            console.log(a.size, b.size);
+
+            const empty = new Set<number>();
+            console.log(Array.from(a.union(empty)).join(","));
+            console.log(Array.from(a.intersection(empty)).join(","));
+            console.log(Array.from(a.difference(empty)).join(","));
+            console.log(Array.from(empty.union(a)).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_union_intersection_difference"),
+        concat!(
+            "1,2,3,4\n", "2,3\n", "1\n", "3 3\n",
+            "1,2,3\n", "\n", "1,2,3\n", "1,2,3\n",
+        )
+    );
+}
+
+#[test]
 fn compiles_variadic_string_concat() {
     let source = r#"
         function receiver(): string {
