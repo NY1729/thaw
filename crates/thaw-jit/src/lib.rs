@@ -59,6 +59,34 @@ extern "C" fn maximum(left: f64, right: f64) -> f64 {
     }
 }
 
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn floor_number(value: f64) -> f64 {
+    value.floor()
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn ceil_number(value: f64) -> f64 {
+    value.ceil()
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn truncate_number(value: f64) -> f64 {
+    value.trunc()
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn round_number(value: f64) -> f64 {
+    if !value.is_finite() || value == 0.0 {
+        return value;
+    }
+    let rounded = (value + 0.5).floor();
+    if rounded == 0.0 && value.is_sign_negative() {
+        -0.0
+    } else {
+        rounded
+    }
+}
+
 #[repr(C)]
 pub struct ThawJitResult {
     pub value: f64,
@@ -81,6 +109,28 @@ enum CompareOp {
     GreaterEqual,
     Equal,
     NotEqual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnaryMath {
+    Ceil,
+    Floor,
+    Round,
+    SquareRoot,
+    Truncate,
+}
+
+impl UnaryMath {
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    fn function(self) -> extern "C" fn(f64) -> f64 {
+        match self {
+            Self::Ceil => ceil_number,
+            Self::Floor => floor_number,
+            Self::Round => round_number,
+            Self::SquareRoot => unreachable!("square root emits SSE2 directly"),
+            Self::Truncate => truncate_number,
+        }
+    }
 }
 
 impl NumericOp {
@@ -115,6 +165,7 @@ enum NumericValue {
     Negate,
     Maximum,
     Minimum,
+    UnaryMath(UnaryMath),
     Remainder,
     Select,
 }
@@ -144,6 +195,11 @@ impl NumericProgram {
                     "neg" => Some(NumericValue::Negate),
                     "max" => Some(NumericValue::Maximum),
                     "min" => Some(NumericValue::Minimum),
+                    "ceil" => Some(NumericValue::UnaryMath(UnaryMath::Ceil)),
+                    "floor" => Some(NumericValue::UnaryMath(UnaryMath::Floor)),
+                    "round" => Some(NumericValue::UnaryMath(UnaryMath::Round)),
+                    "sqrt" => Some(NumericValue::UnaryMath(UnaryMath::SquareRoot)),
+                    "trunc" => Some(NumericValue::UnaryMath(UnaryMath::Truncate)),
                     "%" => Some(NumericValue::Remainder),
                     "?" => Some(NumericValue::Select),
                     value => value
@@ -234,7 +290,7 @@ impl NumericProgram {
                     if depth != 2 {
                         return None;
                     }
-                    emit_binary_call(&mut code, fmod as *const () as u64);
+                    emit_call(&mut code, fmod as *const () as u64);
                     depth = 1;
                 }
                 NumericValue::Minimum | NumericValue::Maximum => {
@@ -246,8 +302,27 @@ impl NumericProgram {
                     } else {
                         maximum
                     };
-                    emit_binary_call(&mut code, function as *const () as u64);
+                    emit_call(&mut code, function as *const () as u64);
                     depth = 1;
+                }
+                NumericValue::UnaryMath(operation) => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    if *operation == UnaryMath::SquareRoot {
+                        let register = depth - 1;
+                        code.extend_from_slice(&[
+                            0xf2,
+                            0x0f,
+                            0x51,
+                            0xc0 | (register << 3) | register,
+                        ]);
+                    } else {
+                        if depth != 1 {
+                            return None;
+                        }
+                        emit_call(&mut code, operation.function() as *const () as u64);
+                    }
                 }
                 NumericValue::Select => {
                     if depth < 3 {
@@ -325,7 +400,7 @@ fn emit_bit_operation(code: &mut Vec<u8>, value: u8, operation: u8) {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn emit_binary_call(code: &mut Vec<u8>, function: u64) {
+fn emit_call(code: &mut Vec<u8>, function: u64) {
     code.extend_from_slice(&[0x48, 0x83, 0xec, 0x08, 0x48, 0xb8]);
     code.extend_from_slice(&function.to_le_bytes());
     code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x08]);
@@ -551,5 +626,20 @@ mod tests {
             call(&maximum, &[-0.0, 0.0]).value.to_bits(),
             0.0f64.to_bits()
         );
+
+        for (operation, input, expected) in [
+            ("floor", -1.2, -2.0),
+            ("ceil", -1.2, -1.0),
+            ("trunc", -1.2, -1.0),
+            ("round", -1.5, -1.0),
+            ("sqrt", 9.0, 3.0),
+        ] {
+            let symbol = CString::new(format!("expr:a0,{operation}:{operation}")).unwrap();
+            assert_eq!(call(&symbol, &[input]).value, expected);
+        }
+        let round = CString::new("expr:a0,round:round_zero").unwrap();
+        assert_eq!(call(&round, &[-0.5]).value.to_bits(), (-0.0f64).to_bits());
+        let square_root = CString::new("expr:a0,sqrt:sqrt_nan").unwrap();
+        assert!(call(&square_root, &[-1.0]).value.is_nan());
     }
 }
