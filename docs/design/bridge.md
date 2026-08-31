@@ -358,7 +358,13 @@ extern "C" fn thaw_dynamic_call(
   持つC structからThaw内部表現へ再帰的に復元する。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
   booleanおよび符号付き／符号なし整数bitfieldも明示できる。
-  scalar、number/boolean/string/handle配列、タグ付きnullable、これらから再帰構成した固定object以外のvariadicは未対応。
+scalar、number/boolean/string/handle配列、タグ付きnullable、これらから再帰構成した固定object以外のvariadicは未対応。
+
+制約付きのfunction type parameterは、制約がnative ABI型へ分類できる場合にその型を
+parameter／return位置へ代入する。`nanoid<Type extends string>(size?: number): Type`は
+この規則で`(number) -> string`となる。制約なしgenericは従来どおりFallbackに残す。
+実`nanoid@5.1.5`のESM bundleを単一実行ファイル化し、`node:crypto`のWeb Crypto乱数で
+12文字IDを2つ生成してregistry削除後にも実行できることを確認する。
 
 TypeScript callback型のoptional parameterと末尾rest parameterは
 `CallableFunction`として分類する。固定prefixのomittable maskとrest

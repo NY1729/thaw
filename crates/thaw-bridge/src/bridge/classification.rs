@@ -112,66 +112,6 @@ fn supports_variadic_element(ty: &HirType) -> bool {
     }
 }
 
-fn classify_variadic_ts_type(
-    ty: &TsType,
-    interfaces: &HashMap<String, DtsType>,
-    generic_interfaces: &GenericInterfaces,
-) -> DtsType {
-    if let TsType::TsParenthesizedType(parenthesized) = ty {
-        return classify_variadic_ts_type(&parenthesized.type_ann, interfaces, generic_interfaces);
-    }
-    if let TsType::TsArrayType(array) = ty {
-        return match classify_ts_type(&array.elem_type, interfaces, generic_interfaces) {
-            DtsType::Native(
-                element @ (HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue),
-            ) => DtsType::Native(HirType::Array(Box::new(element))),
-            DtsType::Native(other) => DtsType::Unsupported(format!(
-                "variadic array element type {other:?} requires explicit marshalling"
-            )),
-            unsupported => unsupported,
-        };
-    }
-    let TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) = ty
-    else {
-        return classify_ts_type(ty, interfaces, generic_interfaces);
-    };
-    let mut payload = None;
-    let mut has_null = false;
-    let mut has_undefined = false;
-    for element in &union.types {
-        match element.as_ref() {
-            TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsNullKeyword => {
-                has_null = true;
-            }
-            TsType::TsKeywordType(keyword)
-                if keyword.kind == TsKeywordTypeKind::TsUndefinedKeyword =>
-            {
-                has_undefined = true;
-            }
-            other => match classify_ts_type(other, interfaces, generic_interfaces) {
-                DtsType::Native(ty) if payload.is_none() => payload = Some(ty),
-                DtsType::Native(_) => {
-                    return DtsType::Unsupported(
-                        "variadic tagged union requires exactly one payload type".into(),
-                    )
-                }
-                unsupported => return unsupported,
-            },
-        }
-    }
-    let Some(payload) = payload else {
-        return DtsType::Unsupported("variadic tagged union has no payload type".into());
-    };
-    match (has_null, has_undefined) {
-        (false, true) => DtsType::Native(HirType::Optional(Box::new(payload))),
-        (true, false) => DtsType::Native(HirType::Nullable(Box::new(payload))),
-        (true, true) => DtsType::Native(HirType::Nullish(Box::new(payload))),
-        (false, false) => DtsType::Unsupported(
-            "variadic union must include null or undefined in addition to its payload".into(),
-        ),
-    }
-}
-
 /// Classifies every function in `functions`, but only once per distinct
 /// name: a `.d.ts` overload set (multiple `declare function foo(...)`
 /// signatures sharing a name -- common in real npm packages, e.g. `ms`'s
