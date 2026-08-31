@@ -142,18 +142,18 @@ fn numeric_predicates_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function safe(value: number): boolean;\nexport declare function stringNan(value: string): boolean;\n",
+        "export declare function safe(value: number): boolean;\nexport declare function stringNan(value: string): boolean;\nexport declare function float(value: string): number;\nexport declare function integer(value: string, radix: number): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports = { safe: value => Number.isSafeInteger(value), stringNan: value => Number.isNaN(value) || isNaN(value) };\n",
+        "module.exports = { safe: value => Number.isSafeInteger(value), stringNan: value => Number.isNaN(value) || isNaN(value), float: value => Number.parseFloat(value), integer: (value, radix) => parseInt(value, radix) };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { safe, stringNan } from 'jit-predicates';\nfunction main(): void { console.log(safe(42)); console.log(stringNan('x')); }\n",
+        "import { safe, stringNan, float, integer } from 'jit-predicates';\nfunction main(): void { console.log(safe(42)); console.log(stringNan('x')); console.log(float('  -12.5px')); console.log(integer('11', 2)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -167,7 +167,10 @@ fn numeric_predicates_use_jit_without_quickjs() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\ntrue\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\ntrue\n-12.5\n3\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

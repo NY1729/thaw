@@ -457,6 +457,78 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(expected.into())
         );
     }
+    for source in [
+        "module.exports.length = value => parseFloat(value);",
+        "module.exports.length = value => Number.parseFloat(value);",
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "length", false, &string_length),
+            Some("expr:s0,parsefloat".into())
+        );
+    }
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.length = value => parseInt(value);",
+            "length",
+            false,
+            &string_length,
+        ),
+        Some("expr:s0,c0000000000000000,parseint".into())
+    );
+    let parse_int = thaw_bridge::DtsFunction {
+        name: "parse".into(),
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+            (
+                "radix".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        ..string_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.parse = (value, radix) => Number.parseInt(value, radix);",
+            "parse",
+            false,
+            &parse_int,
+        ),
+        Some("expr:s0,a1,parseint".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const parseFloat = value => 1; module.exports.length = value => parseFloat(value);",
+            "length",
+            false,
+            &string_length,
+        ),
+        Some("expr:c3ff0000000000000".into())
+    );
+    let no_arguments = thaw_bridge::DtsFunction {
+        name: "parse".into(),
+        params: Vec::new(),
+        required_params: 0,
+        ..string_length.clone()
+    };
+    for (source, expected) in [
+        (
+            "module.exports.parse = () => parseFloat();",
+            "expr:t756e646566696e6564,parsefloat",
+        ),
+        (
+            "module.exports.parse = () => parseInt();",
+            "expr:t756e646566696e6564,c0000000000000000,parseint",
+        ),
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "parse", false, &no_arguments),
+            Some(expected.into())
+        );
+    }
     let mut shadowed_number = string_length.clone();
     shadowed_number.params[0].0 = "Number".into();
     assert_eq!(
