@@ -5,6 +5,7 @@
 /// intermediate step rather than folded into one pass.
 struct ResolvedPackage {
     name: String,
+    commonjs_export_name: Option<String>,
     functions: Vec<thaw_bridge::DtsFunction>,
     classes: Vec<thaw_bridge::DtsClass>,
     classifications: Vec<(String, thaw_bridge::Classification)>,
@@ -799,6 +800,22 @@ fn observed_member_call_arities(
     Ok(finder.arities)
 }
 
+fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
+    use thaw_parser::ast::{Expr, ModuleDecl, ModuleItem};
+
+    let module = thaw_parser::parse_typescript(source)?;
+    Ok(module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+            if let Expr::Ident(identifier) = export.expr.as_ref() {
+                Some(identifier.sym.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }))
+}
+
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -827,6 +844,8 @@ fn generate_registry_shims(
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
         let classes = thaw_bridge::parse_dts_classes(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
+        let commonjs_export_name = commonjs_export_name(&package.dts_source)
+            .map_err(|e| format!("failed to parse `{name}`'s CommonJS export: {e}"))?;
         // Whether there's actually a `native.a` to link a FastPath
         // signature against -- without one, a fully-primitive real npm
         // function (e.g. date-fns's `daysToWeeks(days: number): number`)
@@ -839,6 +858,7 @@ fn generate_registry_shims(
             thaw_bridge::effective_classifications(&functions, native_lib_available);
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
+            commonjs_export_name,
             functions,
             classes,
             classifications,
@@ -1294,7 +1314,14 @@ fn generate_registry_shims(
                 package_exports.insert(class.name.clone(), target.clone());
             }
         }
-        if package_exports.len() == 1 {
+        if let Some(target) = pkg
+            .commonjs_export_name
+            .as_ref()
+            .and_then(|name| package_exports.get(name))
+            .cloned()
+        {
+            package_exports.insert("default".to_string(), target);
+        } else if package_exports.len() == 1 {
             let target = package_exports.values().next().unwrap().clone();
             package_exports.insert("default".to_string(), target);
         }
