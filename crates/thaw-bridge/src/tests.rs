@@ -728,6 +728,18 @@ fn classifies_generic_function_as_fallback() {
 }
 
 #[test]
+fn classifies_primitive_constrained_generic_function_as_fast_path() {
+    let funcs =
+        parse_dts("export declare function nanoid<Type extends string>(size?: number): Type;")
+            .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::FastPath(signature)
+            if signature.params == vec![HirType::F64] && signature.ret == HirType::Str
+    ));
+}
+
+#[test]
 fn classifies_union_parameter_as_fallback() {
     let funcs = parse_dts("export declare function f(x: string | number): void;").unwrap();
     assert!(matches!(

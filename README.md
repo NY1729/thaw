@@ -2591,6 +2591,10 @@ mistaken for type declarations. The opt-in npm suite installs `date-fns@4.1.0`
 and follows root declaration `export *` barrels to run `weeksToDays` after
 removing the registry. Star barrels retain function overloads, aliases and
 cycle protection without expanding class or value declarations.
+Function type parameters with a native primitive constraint use that constraint
+for bridge ABI classification. The opt-in npm suite compiles the ESM-only
+`nanoid@5.1.5`, exercises `node:crypto` Web Crypto randomness, and runs the
+standalone result after removing the registry.
 
 Each step must include an end-to-end native execution test in addition to unit
 tests for its individual lowering/runtime layers.

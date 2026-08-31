@@ -637,6 +637,32 @@ fn lower_dts_function(
     generic_interfaces: &GenericInterfaces,
 ) -> DtsFunction {
     let name = name.to_string();
+    let mut substitution = HashMap::new();
+    if let Some(type_params) = &func.type_params {
+        for parameter in &type_params.params {
+            let Some(constraint) = &parameter.constraint else {
+                continue;
+            };
+            if let DtsType::Native(constraint) = resolve_ts_type_with_substitution(
+                constraint,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            ) {
+                substitution.insert(parameter.name.sym.to_string(), constraint);
+            }
+        }
+    }
+    let classify = |ty: &TsType| {
+        resolve_ts_type_with_substitution(
+            ty,
+            &substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )
+    };
 
     let rest_param = func.params.last().and_then(|param| {
         let Pat::Rest(rest) = &param.pat else {
@@ -649,7 +675,7 @@ fn lower_dts_function(
         let ty = match rest.type_ann.as_ref() {
             Some(annotation) => match annotation.type_ann.as_ref() {
                 TsType::TsArrayType(array) => {
-                    classify_variadic_ts_type(&array.elem_type, interfaces, generic_interfaces)
+                    classify(&array.elem_type)
                 }
                 other => DtsType::Unsupported(format!(
                     "rest parameter must have an array type, found {}",
@@ -675,7 +701,7 @@ fn lower_dts_function(
             };
             let param_name = binding.id.sym.to_string();
             let ty = match &binding.type_ann {
-                Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
+                Some(ann) => classify(&ann.type_ann),
                 None => DtsType::Unsupported("missing type annotation".to_string()),
             };
             (param_name, ty)
@@ -683,7 +709,7 @@ fn lower_dts_function(
         .collect::<Vec<_>>();
 
     let ret = match &func.return_type {
-        Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
+        Some(ann) => classify(&ann.type_ann),
         None => DtsType::Native(HirType::Void),
     };
 
