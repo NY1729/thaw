@@ -2414,8 +2414,13 @@ methods whose final argument is a zero-to-two argument dynamic callback also
 use the receiver's persistent N-API environment and retain `this`; callback
 arguments such as `Error | null` and `any` cross this boundary as `Json`, and
 both `Json` and `void` callback returns are supported. The same E2E exercises
-`box.getLater(callback)`. The generated process now drives the default libuv
-loop alongside N-API async work; a real libuv timer regression test verifies
+`box.getLater(callback)`. Typed top-level N-API calls can also pass one
+ordinary value-returning function argument at any declared position. LLVM
+generates a JSON/native adapter, the host retains the function in the addon's
+environment, and values flow in both directions; the native-factory E2E retains
+`(number) => number` in C and invokes it after the original call returns. The
+generated process drives the default libuv loop alongside N-API async work; a
+real libuv timer regression test verifies
 delivery. Native shims which own a private/non-default loop can register it with
 `thaw_napi_register_uv_loop` and unregister it before `uv_loop_close`; the same
 drain loop drives every registered loop and includes it in liveness checks. An

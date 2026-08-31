@@ -840,3 +840,12 @@ lifecycle・queue操作の失敗は対応するstatus codeとprocess lifetimeで
 成功呼び出しは直前の失敗を消去しない。公開APIの早期returnも監査し、result pointerがnullの
 `napi_strict_equals`と`node_api_get_module_file_name`を含め、有効なEnvを受け取った失敗経路では
 extended errorを更新する。
+
+## 24. 値を返すfunction引数
+
+型付きtop-level N-API呼び出しは、宣言上の任意位置にある1個の通常function引数を渡せる。
+LLVMはclosureごとにJSON引数をnative型へ戻し、native戻り値をJSONへ変換するadapterを生成する。
+hostはadapterとclosure contextをaddonのEnvに属するFunctionとして保持し、addonが同期中または
+元呼び出し後にFunctionを呼び出しても同じidentityを利用する。実C addon E2Eは
+`(number) => number`を受け取ってそのまま返し、生成実行ファイルが返されたFunctionを呼んで
+`42`を得るところまで検証する。複数function引数とoptional/rest callbackは未対応である。

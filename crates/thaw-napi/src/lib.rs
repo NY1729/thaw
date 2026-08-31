@@ -26,6 +26,7 @@ type NapiCallback = unsafe extern "C" fn(NapiEnv, NapiCallbackInfo) -> NapiValue
 type NapiAsyncExecuteCallback = unsafe extern "C" fn(NapiEnv, *mut c_void);
 type NapiAsyncCompleteCallback = unsafe extern "C" fn(NapiEnv, NapiStatus, *mut c_void);
 type ThawNativeCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
+type ThawNativeValueCallback = unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_char;
 type NapiFinalize = unsafe extern "C" fn(NapiEnv, *mut c_void, *mut c_void);
 type NodeApiNoEnvFinalize = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type NapiCleanupHook = unsafe extern "C" fn(*mut c_void);
@@ -276,8 +277,13 @@ impl From<&str> for PropertyKey {
 }
 
 struct ThawCallbackBridge {
-    callback: ThawNativeCallback,
+    callback: ThawCallback,
     context: usize,
+}
+
+enum ThawCallback {
+    Event(ThawNativeCallback),
+    Value(ThawNativeValueCallback),
 }
 
 pub enum Value {

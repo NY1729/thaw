@@ -25,6 +25,114 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
 }
 
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_napi_value_callback(
+        &mut self,
+        callback: &HirExpr,
+        params: &[HirType],
+        ret: &HirType,
+    ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>), String> {
+        let closure = self.compile_expr(callback)?.into_pointer_value();
+        let callback_name = format!("__thaw_napi_value_callback_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let adapter_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let adapter = self
+            .module
+            .add_function(&callback_name, adapter_type, Some(Linkage::Internal));
+        let return_block = self.builder.get_insert_block().unwrap();
+        let entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(entry);
+        let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
+        let args_string = adapter.get_nth_param(1).unwrap();
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[args_string.into()],
+                "napi_value_callback_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let null_key = ptr_type.const_null();
+        let mut callback_args = vec![context.into()];
+        for (index, param) in params.iter().enumerate() {
+            let argument = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_index").unwrap(),
+                    &[
+                        args_json.into(),
+                        self.context.f64_type().const_float(index as f64).into(),
+                        null_key.into(),
+                    ],
+                    "napi_value_callback_argument",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap();
+            callback_args.push(self.compile_json_value_to_native(argument, param)?.into());
+        }
+        let code = self
+            .builder
+            .build_load(ptr_type, context, "napi_value_callback_code")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let closure_type = self.function_type(params, ret)?;
+        let result = self
+            .builder
+            .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("N-API value callback must return a value")?;
+        let result_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_new").unwrap(),
+                &[],
+                "napi_value_callback_result_array",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        self.compile_json_array_push_native(result_json, result, ret)?;
+        let result_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_index").unwrap(),
+                &[
+                    result_json.into(),
+                    self.context.f64_type().const_zero().into(),
+                    null_key.into(),
+                ],
+                "napi_value_callback_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[result_json.into()],
+                "napi_value_callback_result_string",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        self.builder
+            .build_return(Some(&result))
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(return_block);
+        Ok((adapter.as_global_value().as_pointer_value(), closure))
+    }
+
     fn compile_napi_undefined_json(&mut self) -> Result<BasicValueEnum<'ctx>, String> {
         let json = self
             .builder
@@ -864,6 +972,18 @@ impl<'ctx> HirCompiler<'ctx> {
         {
             return self.compile_typed_napi_method(signature, args);
         }
+        let function_argument = signature
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, ty)| match ty {
+                HirType::Function(params, ret) => Some((index, params.as_slice(), ret.as_ref())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if function_argument.len() > 1 {
+            return Err("typed N-API calls support at most one function argument".into());
+        }
         let array = self
             .builder
             .build_call(
@@ -876,6 +996,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
+            if function_argument
+                .first()
+                .is_some_and(|(function_index, _, _)| *function_index == index)
+            {
+                continue;
+            }
             let value = self.compile_expr(arg)?;
             self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("typed dynamic argument {}: {error}", index + 1))?;
@@ -897,15 +1023,31 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
-                let result = self
-                    .builder
-                    .build_call(
+                let result = if let Some((index, params, ret)) = function_argument.first() {
+                    let (callback, context) =
+                        self.compile_napi_value_callback(&args[*index], params, ret)?;
+                    self.builder.build_call(
+                        self.module
+                            .get_function("thaw_napi_call_export_handle_with_function_typed_result")
+                            .unwrap(),
+                        &[
+                            name.as_pointer_value().into(),
+                            args_json.into(),
+                            self.context.i64_type().const_int(*index as u64, false).into(),
+                            callback.into(),
+                            context.into(),
+                        ],
+                        "napi_export_function_handle_result",
+                    )
+                } else {
+                    self.builder.build_call(
                         self.module
                             .get_function("thaw_napi_call_export_handle_typed_result")
                             .unwrap(),
                         &[name.as_pointer_value().into(), args_json.into()],
                         "napi_export_handle_result",
                     )
+                }
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()

@@ -65,7 +65,7 @@ fn registry_native_addon_returned_function_runs_end_to_end() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function multiplier(factor: number): (value: number) => number;\n",
+        "export declare function multiplier(factor: number): (value: number) => number;\nexport declare function retain(callback: (value: number) => number): (value: number) => number;\n",
     )
     .unwrap();
     let addon_c = dir.join("addon.c");
@@ -80,6 +80,7 @@ fn registry_native_addon_returned_function_runs_end_to_end() {
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
             extern napi_status napi_create_double(napi_env, double, napi_value*);
             extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
             static napi_value multiply(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value arg, result; double value; void* data;
                 napi_get_cb_info(env, info, &argc, &arg, 0, &data);
@@ -92,9 +93,16 @@ fn registry_native_addon_returned_function_runs_end_to_end() {
                 napi_get_value_double(env, arg, &factor);
                 napi_create_function(env, "multiply", 8, multiply, &factor, &result); return result;
             }
+            static napi_value retain(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value callback;
+                napi_get_cb_info(env, info, &argc, &callback, 0, 0); return callback;
+            }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
-                (void)exports; napi_value fn;
-                napi_create_function(env, "multiplier", 10, multiplier, 0, &fn); return fn;
+                napi_value fn;
+                napi_create_function(env, "multiplier", 10, multiplier, 0, &fn);
+                napi_set_named_property(env, exports, "multiplier", fn);
+                napi_create_function(env, "retain", 6, retain, 0, &fn);
+                napi_set_named_property(env, exports, "retain", fn); return exports;
             }
         "#,
     )
@@ -111,7 +119,7 @@ fn registry_native_addon_returned_function_runs_end_to_end() {
     let output = dir.join("app");
     std::fs::write(
         &source,
-        "import { multiplier } from \"native-factory\"; function main(): void { const triple = multiplier(3); console.log(triple(14)); }\n",
+        "import { multiplier, retain } from \"native-factory\"; function double(value: number): number { return value * 2; } function main(): void { const triple = multiplier(3); console.log(triple(14)); const retained = retain(double); console.log(retained(21)); }\n",
     )
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -122,7 +130,7 @@ fn registry_native_addon_returned_function_runs_end_to_end() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

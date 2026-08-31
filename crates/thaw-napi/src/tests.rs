@@ -13,6 +13,16 @@ static POSTED_FINALIZER_RAN: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "linux")]
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
+unsafe extern "C" fn double_json_callback(
+    _context: *mut c_void,
+    args: *const c_char,
+) -> *const c_char {
+    let args: Vec<f64> = serde_json::from_str(CStr::from_ptr(args).to_str().unwrap()).unwrap();
+    CString::new((args[0] * 2.0).to_string())
+        .unwrap()
+        .into_raw()
+}
+
 #[cfg(target_os = "linux")]
 unsafe extern "C" fn test_uv_timer_callback(timer: *mut c_void) {
     type UvTimerStop = unsafe extern "C" fn(*mut c_void) -> i32;
@@ -151,6 +161,12 @@ fn loads_and_calls_a_real_napi_addon() {
                 napi_get_value_double(env, arg, &factory_factor);
                 napi_create_function(env, "multiply", 8, multiply, &factory_factor, &result); return result;
             }
+            static napi_value apply(napi_env env, napi_callback_info info) {
+                size_t argc = 2; napi_value argv[2], result, self;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_get_undefined(env, &self);
+                napi_call_function(env, self, argv[0], 1, &argv[1], &result); return result;
+            }
             static napi_value negate(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value arg, result; _Bool value;
                 napi_get_cb_info(env, info, &argc, &arg, 0, 0);
@@ -186,6 +202,7 @@ fn loads_and_calls_a_real_napi_addon() {
                 napi_create_function(env, "finalized", 9, finalized, 0, &fn); napi_set_named_property(env, exports, "finalized", fn);
                 napi_create_function(env, "add", 3, add, 0, &fn); napi_set_named_property(env, exports, "add", fn);
                 napi_create_function(env, "multiplier", 10, multiplier, 0, &fn); napi_set_named_property(env, exports, "multiplier", fn);
+                napi_create_function(env, "apply", 5, apply, 0, &fn); napi_set_named_property(env, exports, "apply", fn);
                 napi_create_function(env, "negate", 6, negate, 0, &fn); napi_set_named_property(env, exports, "negate", fn);
                 napi_create_function(env, "echo", 4, echo, 0, &fn); napi_set_named_property(env, exports, "echo", fn);
                 napi_create_function(env, "isUndefined", 11, is_undefined, 0, &fn); napi_set_named_property(env, exports, "isUndefined", fn);
@@ -217,6 +234,18 @@ fn loads_and_calls_a_real_napi_addon() {
         let result = thaw_napi_call_handle_typed_result(multiplier.value, c"[14]".as_ptr());
         assert!(result.error.is_null());
         assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "42.0");
+        let applied = thaw_napi_call_export_handle_with_function_typed_result(
+            c"apply".as_ptr(),
+            c"[21]".as_ptr(),
+            0,
+            Some(double_json_callback),
+            ptr::null_mut(),
+        );
+        assert!(applied.error.is_null());
+        match value_ref(applied.value as NapiValue).unwrap() {
+            Value::Number(value) => assert_eq!(*value, 42.0),
+            _ => panic!("apply returned a non-number"),
+        }
         let negate = CString::new("negate").unwrap();
         let boolean = CString::new("[true]").unwrap();
         let result = thaw_napi_call_result(negate.as_ptr(), boolean.as_ptr());
