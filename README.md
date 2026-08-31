@@ -2594,7 +2594,9 @@ cycle protection without expanding class or value declarations.
 Function type parameters with a native primitive constraint use that constraint
 for bridge ABI classification. The opt-in npm suite compiles the ESM-only
 `nanoid@5.1.5`, exercises `node:crypto` Web Crypto randomness, and runs the
-standalone result after removing the registry.
+standalone result after removing the registry. Typed QuickJS/N-API package
+functions expose every trailing-optional arity through small generated
+wrappers, so both `nanoid()` and `nanoid(12)` preserve JavaScript defaults.
 
 Each step must include an end-to-end native execution test in addition to unit
 tests for its individual lowering/runtime layers.

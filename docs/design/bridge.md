@@ -364,7 +364,10 @@ scalar、number/boolean/string/handle配列、タグ付きnullable、これら�
 parameter／return位置へ代入する。`nanoid<Type extends string>(size?: number): Type`は
 この規則で`(number) -> string`となる。制約なしgenericは従来どおりFallbackに残す。
 実`nanoid@5.1.5`のESM bundleを単一実行ファイル化し、`node:crypto`のWeb Crypto乱数で
-12文字IDを2つ生成してregistry削除後にも実行できることを確認する。
+defaultの21文字IDと明示した12文字IDを生成してregistry削除後にも実行できることを確認する。
+typed dynamic関数の末尾optional parameterはrequired arityからfull arityまで別symbolを宣言し、
+通常のtyped wrapperが末尾の`undefined`を見て振り分ける。各symbolは同じruntime export keyへ
+decodeされるため、QuickJS／N-API側の呼び出しABIを増やさずJavaScriptの既定値を保つ。
 
 TypeScript callback型のoptional parameterと末尾rest parameterは
 `CallableFunction`として分類する。固定prefixのomittable maskとrest

@@ -687,6 +687,12 @@ fn lower_dts_function(
         Some((name, ty))
     });
     let fixed_param_count = func.params.len() - usize::from(rest_param.is_some());
+    let required_params = func
+        .params
+        .iter()
+        .take(fixed_param_count)
+        .take_while(|param| matches!(&param.pat, Pat::Ident(binding) if !binding.optional))
+        .count();
     let params = func
         .params
         .iter()
@@ -716,6 +722,7 @@ fn lower_dts_function(
     DtsFunction {
         name,
         params,
+        required_params,
         rest_param,
         ret,
     }
