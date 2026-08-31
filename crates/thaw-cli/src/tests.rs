@@ -452,6 +452,45 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:s0,{operation}"))
         );
     }
+    for (method, operation) in [
+        ("trim", "trim"),
+        ("trimStart", "trimstart"),
+        ("trimEnd", "trimend"),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.normalize = value => value.{method}();"),
+                "normalize",
+                false,
+                &string_case,
+            ),
+            Some(format!("expr:s0,{operation}"))
+        );
+    }
+    let string_repeat = thaw_bridge::DtsFunction {
+        name: "repeat".into(),
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+            (
+                "count".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        ..string_case
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.repeat = (value, count) => value.repeat(count);",
+            "repeat",
+            false,
+            &string_repeat,
+        ),
+        Some("expr:s0,a1,repeat".into())
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.length = value => value + 1;",
