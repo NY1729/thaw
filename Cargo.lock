@@ -1765,6 +1765,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "thaw-jit"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "thaw-llvm"
 version = "0.1.0"
 dependencies = [

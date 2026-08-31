@@ -29,6 +29,40 @@ fn static_toolchain_check_is_actionable_or_complete() {
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn specialized_jit_runs_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-jit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "declare function __thaw_typed_jit_6164643a74657374(left: number, right: number): number;\nfunction main(): void { console.log(__thaw_typed_jit_6164643a74657374(20, 22)); }\n",
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &dir.join("registry"),
+        &[],
+    )
+    .unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn builds_and_runs_a_fully_static_elf() {
     if ensure_static_system_libraries().is_err() {
@@ -153,4 +187,3 @@ fn fully_static_binary_runs_in_an_isolated_container_when_enabled() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
-
