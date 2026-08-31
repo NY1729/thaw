@@ -366,7 +366,8 @@ parameter／return位置へ代入する。`nanoid<Type extends string>(size?: nu
 実`nanoid@5.1.5`のESM bundleを単一実行ファイル化し、`node:crypto`のWeb Crypto乱数で
 defaultの21文字IDと明示した12文字IDを生成してregistry削除後にも実行できることを確認する。
 制約置換は返却callback型の引数・戻り値にも再帰し、`customAlphabet<Type extends string>`の
-返却関数を`JsValue`として保持して0引数・1引数で呼び出せることも同じ実パッケージで確認する。
+返却関数を`JsValue`として保持し、生成した型付きclosure adapterを介して通常の
+`makeId()`／`makeId(5)`構文で呼び出せることも同じ実パッケージで確認する。
 typed dynamic関数の末尾optional parameterはrequired arityからfull arityまで別symbolを宣言し、
 通常のtyped wrapperが末尾の`undefined`を見て振り分ける。各symbolは同じruntime export keyへ
 decodeされるため、QuickJS／N-API側の呼び出しABIを増やさずJavaScriptの既定値を保つ。

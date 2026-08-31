@@ -16,6 +16,40 @@ include!("tests/ffi_metadata.rs");
 include!("tests/native_addons.rs");
 
 #[test]
+fn adapts_typed_dynamic_callable_results_to_natural_calls() {
+    let function = thaw_bridge::DtsFunction {
+        name: "customAlphabet".into(),
+        params: vec![
+            (
+                "alphabet".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+            (
+                "defaultSize".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                    thaw_hir::HirType::F64,
+                ))),
+            ),
+        ],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::CallableFunction(
+            vec![thaw_hir::HirType::Optional(Box::new(
+                thaw_hir::HirType::F64,
+            ))],
+            thaw_hir::HirOptionalMask::from_bools(&[true]),
+            None,
+            Box::new(thaw_hir::HirType::Str),
+        )),
+    };
+    let (target, shim) = typed_dynamic_declaration("nanoid", &function, false).unwrap();
+    assert!(target.starts_with("__thaw_typed_callable_"));
+    assert!(shim.contains("defaultSize?: number | undefined"));
+    assert!(shim.contains("const invoke: (arg0?: number | undefined) => string"));
+    assert!(shim.contains("callDynamicValue(callable"));
+}
+
+#[test]
 fn rewrite_qualified_calls_is_a_no_op_with_no_rewrites() {
     let source = "function main(): void { console.log(qs.stringify(x)); }";
     assert_eq!(rewrite_qualified_calls(source, &[]).unwrap(), source);

@@ -2598,8 +2598,9 @@ standalone result after removing the registry. Typed QuickJS/N-API package
 functions expose every trailing-optional arity through small generated
 wrappers, so both `nanoid()` and `nanoid(12)` preserve JavaScript defaults.
 Constraint substitution also reaches returned callback signatures. The same
-standalone test retains `customAlphabet("ab", 8)` as a `JsValue` and invokes
-the returned generator with both its default size and an explicit size.
+standalone test retains `customAlphabet("ab", 8)` as a `JsValue` behind a
+generated typed closure and invokes it naturally as `makeId()` and `makeId(5)`.
+It also covers the omitted outer `defaultSize` argument.
 
 Each step must include an end-to-end native execution test in addition to unit
 tests for its individual lowering/runtime layers.

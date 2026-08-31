@@ -734,14 +734,17 @@ fn registry_add_builds_and_runs_nanoid_when_enabled() {
                 function main(): void {
                     const first: string = nanoid();
                     const second: string = nanoid(12);
-                    const makeId: JsValue = customAlphabet("ab", 8);
-                    const third: string = String(callDynamicValue(makeId, JSON.parse("[]")));
-                    const fourth: string = String(callDynamicValue(makeId, JSON.parse("[5]")));
+                    const makeId = customAlphabet("ab", 8);
+                    const third: string = makeId();
+                    const fourth: string = makeId(5);
+                    const defaultMaker = customAlphabet("ab");
+                    const fifth: string = defaultMaker();
                     console.log(first.length);
                     console.log(second.length);
                     console.log(first === second);
                     console.log(third.length);
                     console.log(fourth.length);
+                    console.log(fifth.length);
                 }"#,
     )
     .unwrap();
@@ -755,7 +758,7 @@ fn registry_add_builds_and_runs_nanoid_when_enabled() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "21\n12\nfalse\n8\n5\n"
+        "21\n12\nfalse\n8\n5\n21\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
