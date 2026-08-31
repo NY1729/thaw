@@ -286,6 +286,11 @@ extern "C" fn string_compare(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_is_well_formed(_: f64) -> f64 {
+    1.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn clamped_string_position(position: f64, length: usize) -> usize {
     if position.is_nan() || position == f64::NEG_INFINITY {
         0
@@ -897,6 +902,7 @@ enum NumericValue {
     StringEndsWithAt,
     StringIncludes,
     StringIncludesAt,
+    StringIsWellFormed,
     StringIndexOf,
     StringIndexOfAt,
     StringLastIndexOf,
@@ -912,6 +918,7 @@ enum NumericValue {
     StringSubstring,
     StringSubstringRange,
     StringToLowerCase,
+    StringToWellFormed,
     StringToUpperCase,
     StringTrim,
     StringTrimEnd,
@@ -967,6 +974,7 @@ impl NumericProgram {
                     "endswith2" => Some(NumericValue::StringEndsWithAt),
                     "includes" => Some(NumericValue::StringIncludes),
                     "includes2" => Some(NumericValue::StringIncludesAt),
+                    "iswellformed" => Some(NumericValue::StringIsWellFormed),
                     "indexof" => Some(NumericValue::StringIndexOf),
                     "indexof2" => Some(NumericValue::StringIndexOfAt),
                     "lastindexof" => Some(NumericValue::StringLastIndexOf),
@@ -982,6 +990,7 @@ impl NumericProgram {
                     "substring" => Some(NumericValue::StringSubstring),
                     "substring2" => Some(NumericValue::StringSubstringRange),
                     "tolowercase" => Some(NumericValue::StringToLowerCase),
+                    "towellformed" => Some(NumericValue::StringToWellFormed),
                     "touppercase" => Some(NumericValue::StringToUpperCase),
                     "trim" => Some(NumericValue::StringTrim),
                     "trimend" => Some(NumericValue::StringTrimEnd),
@@ -1278,6 +1287,21 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, string_length as *const () as u64, depth - 1);
+                }
+                NumericValue::StringIsWellFormed => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(
+                        &mut code,
+                        string_is_well_formed as *const () as u64,
+                        depth - 1,
+                    );
+                }
+                NumericValue::StringToWellFormed => {
+                    if depth == 0 {
+                        return None;
+                    }
                 }
                 NumericValue::UnaryMath(operation) => {
                     if depth == 0 {
@@ -1872,6 +1896,10 @@ mod tests {
             );
             unsafe { libc::free(result.cast()) };
         }
+        let well_formed = CString::new("expr:s0,iswellformed:iswellformed").unwrap();
+        assert_eq!(call(&well_formed, &[text_argument]).value, 1.0);
+        let preserve = CString::new("expr:s0,towellformed:towellformed").unwrap();
+        assert_eq!(call(&preserve, &[text_argument]).value, text_argument);
         let whitespace = CString::new("\u{feff}  value\u{3000}").unwrap();
         for (operation, expected) in [
             ("trim", "value"),

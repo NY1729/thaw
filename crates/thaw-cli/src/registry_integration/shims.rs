@@ -156,7 +156,12 @@ fn jit_numeric_export(
                     return false;
                 };
                 let arity_matches = match property.sym.as_ref() {
-                    "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimEnd" => {
+                    "toLowerCase"
+                    | "toUpperCase"
+                    | "toWellFormed"
+                    | "trim"
+                    | "trimStart"
+                    | "trimEnd" => {
                         call.args.is_empty()
                     }
                     "charAt" => call.args.len() <= 1,
@@ -205,6 +210,9 @@ fn jit_numeric_export(
             "repeat" => "repeat",
             "charAt" => "charat",
             "charCodeAt" => "charcodeat",
+            "localeCompare" => "strcmp",
+            "isWellFormed" => "iswellformed",
+            "toWellFormed" => "towellformed",
             "at" => "at",
             "codePointAt" => "codepointat",
             "padStart" => "padstart",
@@ -363,7 +371,13 @@ fn jit_numeric_export(
                 encode_expression(receiver, parameters, locals, output)?;
                 if matches!(
                     operation,
-                    "tolowercase" | "touppercase" | "trim" | "trimstart" | "trimend"
+                    "tolowercase"
+                        | "touppercase"
+                        | "iswellformed"
+                        | "towellformed"
+                        | "trim"
+                        | "trimstart"
+                        | "trimend"
                 ) {
                     if !call.args.is_empty() {
                         return None;
@@ -1108,12 +1122,17 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
             stack.push(true);
         } else if matches!(
             token.as_str(),
-            "tolowercase" | "touppercase" | "trim" | "trimstart" | "trimend"
+            "tolowercase" | "touppercase" | "towellformed" | "trim" | "trimstart" | "trimend"
         ) {
             if !stack.pop()? {
                 return None;
             }
             stack.push(true);
+        } else if token == "iswellformed" {
+            if !stack.pop()? {
+                return None;
+            }
+            stack.push(false);
         } else if matches!(token.as_str(), "repeat" | "slice" | "substring") {
             if stack.pop()? || !stack.pop()? {
                 return None;
