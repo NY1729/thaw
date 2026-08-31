@@ -101,12 +101,12 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function add(left: number, right: number): number;\nexport declare function accumulate(left: number, right: number): number;\nexport declare function choose(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\nexport declare function double(value: number): number;\nexport declare function negate(value: number): number;\nexport declare function mask(value: number): number;\nexport declare function fallbackOr(value: number, fallback: number): number;\nexport declare function guard(value: number, result: number): number;\nexport declare function magnitude(value: number): number;\nexport declare function roundedRoot(value: number): number;\nexport declare function logarithm(value: number): number;\nexport declare function integerMath(left: number, right: number): number;\nexport declare function stringLength(value: string): number;\nexport declare function stringLess(left: string, right: string): boolean;\nexport declare function greet(value: string): string;\nexport declare function matches(value: string): boolean;\nexport declare function find(value: string): number;\nexport declare function transform(value: string): string;\nexport declare function clean(value: string): string;\nexport declare function first(value: string, index: number): string;\nexport declare function code(value: string, index: number): number;\nexport declare function power(base: number, exponent: number): number;\nexport declare function less(left: number, right: number): boolean;\nexport declare function negateFlag(value: boolean): boolean;\nexport declare function remainder(left: number, right: number): number;\nexport declare function minimum(a: number, b: number, c: number): number;\nexport declare function maximum(a: number, b: number, c: number): number;\nexport declare function sum3(a: number, b: number, c: number): number;\nexport declare function answer(): number;\n",
+        "export declare function add(left: number, right: number): number;\nexport declare function accumulate(left: number, right: number): number;\nexport declare function choose(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\nexport declare function double(value: number): number;\nexport declare function negate(value: number): number;\nexport declare function mask(value: number): number;\nexport declare function fallbackOr(value: number, fallback: number): number;\nexport declare function guard(value: number, result: number): number;\nexport declare function magnitude(value: number): number;\nexport declare function roundedRoot(value: number): number;\nexport declare function logarithm(value: number): number;\nexport declare function integerMath(left: number, right: number): number;\nexport declare function numericPredicates(value: number): boolean;\nexport declare function stringPredicate(value: string): boolean;\nexport declare function stringLength(value: string): number;\nexport declare function stringLess(left: string, right: string): boolean;\nexport declare function greet(value: string): string;\nexport declare function matches(value: string): boolean;\nexport declare function find(value: string): number;\nexport declare function transform(value: string): string;\nexport declare function clean(value: string): string;\nexport declare function first(value: string, index: number): string;\nexport declare function code(value: string, index: number): number;\nexport declare function power(base: number, exponent: number): number;\nexport declare function less(left: number, right: number): boolean;\nexport declare function negateFlag(value: boolean): boolean;\nexport declare function remainder(left: number, right: number): number;\nexport declare function minimum(a: number, b: number, c: number): number;\nexport declare function maximum(a: number, b: number, c: number): number;\nexport declare function sum3(a: number, b: number, c: number): number;\nexport declare function answer(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "'use strict'; const SCALE = 2; const double = value => value * SCALE; module.exports = { add: function(left, right) { const sum = left + right; const doubled = sum * SCALE; const delta = left - right; if (left < right) return doubled; return delta; }, accumulate: function(left, right) { let total = left; total += right; total *= SCALE; total--; return total; }, choose: function(left, right) { if (left) { if (right < 0) return 1; return 2; } else if (right) return 3; else return 4; }, sub: (left, right) => left - right, double, negate: value => -value, mask: value => (value & 255) ^ 42, fallbackOr: (value, fallback) => value || fallback, guard: (value, result) => value && result, magnitude: value => Math.abs(value), roundedRoot: value => finish(Math.sqrt(value)), logarithm: value => value + Math.round(Math.PI), integerMath: (left, right) => Math.imul(left, right) + Math.clz32(1) + Math.fround(1), stringLength: value => value.length, stringLess: (left, right) => left.localeCompare(right) < 0, greet: value => `hello, ${value}!`, matches: value => value.isWellFormed() && value.startsWith('pre', 0) && value.endsWith('fix', 6) && value.includes('ref', 1), find: value => value.indexOf('😀', 1) + value.lastIndexOf('😀', 3), transform: value => value.toWellFormed().toLowerCase().toUpperCase(), clean: value => value.trim().repeat(2).slice(0, 2).substring(1, 0).padStart(3, '0').padEnd(4, '1').replace('0', 'a').replaceAll('1', 'b'), first: (value, index) => value.charAt(index), code: (value, index) => value.charCodeAt(index), power: (base, exponent) => Math.pow(base, exponent), less: (left, right) => left < right, negateFlag: value => !value, remainder: (left, right) => left % right, minimum: (a, b, c) => Math.min(a, b, c), maximum: (a, b, c) => Math.max(a, b, c), sum3: (a, b, c) => a + b + c, answer: () => Math.round(Math.PI) + 39 }; function finish(value) { return Math.round(value); }\n",
+        "'use strict'; const SCALE = 2; const double = value => value * SCALE; module.exports = { add: function(left, right) { const sum = left + right; const doubled = sum * SCALE; const delta = left - right; if (left < right) return doubled; return delta; }, accumulate: function(left, right) { let total = left; total += right; total *= SCALE; total--; return total; }, choose: function(left, right) { if (left) { if (right < 0) return 1; return 2; } else if (right) return 3; else return 4; }, sub: (left, right) => left - right, double, negate: value => -value, mask: value => (value & 255) ^ 42, fallbackOr: (value, fallback) => value || fallback, guard: (value, result) => value && result, magnitude: value => Math.abs(value), roundedRoot: value => finish(Math.sqrt(value)), logarithm: value => value + Math.round(Math.PI), integerMath: (left, right) => Math.imul(left, right) + Math.clz32(1) + Math.fround(1), numericPredicates: value => Number.isSafeInteger(value), stringPredicate: value => Number.isNaN(value) || isNaN(value), stringLength: value => value.length, stringLess: (left, right) => left.localeCompare(right) < 0, greet: value => `hello, ${value}!`, matches: value => value.isWellFormed() && value.startsWith('pre', 0) && value.endsWith('fix', 6) && value.includes('ref', 1), find: value => value.indexOf('😀', 1) + value.lastIndexOf('😀', 3), transform: value => value.toWellFormed().toLowerCase().toUpperCase(), clean: value => value.trim().repeat(2).slice(0, 2).substring(1, 0).padStart(3, '0').padEnd(4, '1').replace('0', 'a').replaceAll('1', 'b'), first: (value, index) => value.charAt(index), code: (value, index) => value.charCodeAt(index), power: (base, exponent) => Math.pow(base, exponent), less: (left, right) => left < right, negateFlag: value => !value, remainder: (left, right) => left % right, minimum: (a, b, c) => Math.min(a, b, c), maximum: (a, b, c) => Math.max(a, b, c), sum3: (a, b, c) => a + b + c, answer: () => Math.round(Math.PI) + 39 }; function finish(value) { return Math.round(value); }\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -128,6 +128,46 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn numeric_predicates_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-predicates-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-predicates");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function safe(value: number): boolean;\nexport declare function stringNan(value: string): boolean;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { safe: value => Number.isSafeInteger(value), stringNan: value => Number.isNaN(value) || isNaN(value) };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { safe, stringNan } from 'jit-predicates';\nfunction main(): void { console.log(safe(42)); console.log(stringNan('x')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\ntrue\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -88,6 +88,54 @@ fn jit_numeric_export(
         }
     }
 
+    fn number_predicate(
+        call: &CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<(&'static str, bool)> {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        match callee.as_ref() {
+            Expr::Ident(identifier)
+                if !parameters.contains_key(identifier.sym.as_ref())
+                    && !locals.contains_key(identifier.sym.as_ref())
+                    && !helpers.contains_key(identifier.sym.as_ref()) =>
+            {
+                match identifier.sym.as_ref() {
+                    "isNaN" => Some(("isnan", true)),
+                    "isFinite" => Some(("isfinite", true)),
+                    _ => None,
+                }
+            }
+            Expr::Member(member)
+                if !parameters.contains_key("Number") && !locals.contains_key("Number") =>
+            {
+                let Expr::Ident(receiver) = member.obj.as_ref() else {
+                    return None;
+                };
+                if receiver.sym != "Number" {
+                    return None;
+                }
+                let MemberProp::Ident(property) = &member.prop else {
+                    return None;
+                };
+                match property.sym.as_ref() {
+                    "isNaN" => Some(("isnan", false)),
+                    "isFinite" => Some(("isfinite", false)),
+                    "isInteger" => Some(("isinteger", false)),
+                    "isSafeInteger" => Some(("issafeinteger", false)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn math_constant(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -608,6 +656,34 @@ fn jit_numeric_export(
                     }
                 }
                 output.push(operation.into());
+            }
+            Expr::Call(call)
+                if number_predicate(call, parameters, locals, context.helpers).is_some() =>
+            {
+                let (operation, coercive) =
+                    number_predicate(call, parameters, locals, context.helpers)?;
+                let [argument] = call.args.as_slice() else {
+                    return None;
+                };
+                let mut encoded = Vec::new();
+                encode_expression(
+                    argument.expr.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut encoded,
+                )?;
+                if coercive {
+                    append_number(encoded, output)?;
+                    output.push(operation.into());
+                } else if jit_expression_kind(&encoded)?.0 == JitKind::Number {
+                    output.extend(encoded);
+                    output.push(operation.into());
+                } else {
+                    output.extend(encoded);
+                    output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                    output.push("strictfalse".into());
+                }
             }
             Expr::Call(call)
                 if matches!(
@@ -1549,6 +1625,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             *stack.last_mut()? = JitKind::Boolean;
+        } else if matches!(token.as_str(), "isnan" | "isfinite" | "isinteger" | "issafeinteger") {
+            if stack.pop()? != JitKind::Number {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if matches!(
             token.as_str(),
             "tolowercase" | "touppercase" | "towellformed" | "trim" | "trimstart" | "trimend"

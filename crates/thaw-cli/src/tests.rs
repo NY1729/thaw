@@ -356,6 +356,52 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,a1,<".into())
     );
+    predicate.params.truncate(1);
+    predicate.required_params = 1;
+    for (name, source, operation) in [
+        ("finite", "value => Number.isFinite(value)", "isfinite"),
+        ("integer", "value => Number.isInteger(value)", "isinteger"),
+        (
+            "safeInteger",
+            "value => Number.isSafeInteger(value)",
+            "issafeinteger",
+        ),
+        ("nan", "value => Number.isNaN(value)", "isnan"),
+        ("globalFinite", "value => isFinite(value)", "isfinite"),
+        ("globalNan", "value => isNaN(value)", "isnan"),
+    ] {
+        predicate.name = name.into();
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.{name} = {source};"),
+                name,
+                false,
+                &predicate,
+            ),
+            Some(format!("expr:a0,{operation}"))
+        );
+    }
+    predicate.name = "shadowedNan".into();
+    assert_eq!(
+        jit_numeric_export(
+            "const isNaN = value => false; module.exports.shadowedNan = value => isNaN(value);",
+            "shadowedNan",
+            false,
+            &predicate,
+        ),
+        Some("expr:c0000000000000000".into())
+    );
+    predicate.name = "stringNan".into();
+    predicate.params[0].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.stringNan = value => Number.isNaN(value);",
+            "stringNan",
+            false,
+            &predicate,
+        ),
+        Some("expr:s0,c0000000000000000,strictfalse".into())
+    );
     predicate.name = "negateFlag".into();
     predicate.params = vec![(
         "value".into(),

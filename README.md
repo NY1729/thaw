@@ -2024,6 +2024,9 @@ positions, lengths, and counts reuse the runtime's JavaScript-compatible
 string-number parser through the JIT callback ABI. `Boolean(value)`, unary
 `!`, logical `&&`/`||`, and conditional tests use typed truthiness IR; native
 strings test their contents so empty strings remain false without QuickJS.
+Global `isNaN`/`isFinite` preserve their numeric coercion, while
+`Number.isNaN`, `Number.isFinite`, `Number.isInteger`, and
+`Number.isSafeInteger` use strict typed predicates in the same JIT IR.
 Relational and equality comparisons inspect those IR types as well:
 string/string stays on UTF-16 ordering, mixed loose/relational comparisons use
 numeric coercion, and strict mismatched primitives evaluate both operands
