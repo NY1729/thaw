@@ -1970,8 +1970,10 @@ end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
 extracts side-effect-free CommonJS function exports, including
 `module.exports = { ... }` packages and directive-prefixed sequences of named
-export assignments, whose bodies fit this numeric IR, routes them to this
-backend, and omits fully extracted bundles from QuickJS.
+export assignments, whose bodies fit this numeric IR. Side-effect-free
+module-scope `const` expressions are expanded into exported functions, after
+which the functions route to this backend and fully extracted bundles omit
+QuickJS.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,
