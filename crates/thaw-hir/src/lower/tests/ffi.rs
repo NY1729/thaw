@@ -63,6 +63,26 @@ fn lowers_ambient_declaration_call_to_ffi_call() {
 }
 
 #[test]
+fn specializes_generic_dynamic_ambient_arguments_per_call() {
+    let program = lower(
+        r#"declare function __thaw_typed_napi_7765616b<T extends object>(value: T): JsValue;
+           function double(value: number): number { return value * 2; }
+           function main(): void {
+               const reference = __thaw_typed_napi_7765616b(double);
+               console.log(reference);
+           }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    let lowered = format!("{:?}", main.body);
+    assert!(lowered.contains("DynamicCall"), "{lowered}");
+    assert!(lowered.contains("Function([F64], F64)"), "{lowered}");
+}
+
+#[test]
 fn rejects_unsupported_ambient_variadic_element_types() {
     let module = thaw_parser::parse_typescript(
         r#"declare function native_merge(...values: (boolean | undefined)[][]): number;
@@ -86,4 +106,3 @@ fn variadic_ambient_calls_still_require_every_fixed_argument() {
         "{error}"
     );
 }
-

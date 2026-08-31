@@ -1200,7 +1200,18 @@ impl<'a> FnLowerer<'a> {
 
         if let Some(params) = &param_types {
             let variadic = signature.as_ref().and_then(|sig| sig.variadic.as_ref());
-            let wrong_count = if variadic.is_some() {
+            let generic_optional = signature.as_ref().filter(|signature| {
+                !signature.generic_type_params.is_empty()
+                    && signature.generic_param_optional.iter().any(|optional| *optional)
+            });
+            let wrong_count = if let Some(signature) = generic_optional {
+                let required = signature
+                    .generic_param_optional
+                    .iter()
+                    .take_while(|optional| !**optional)
+                    .count();
+                lowered_arguments.len() < required || lowered_arguments.len() > params.len()
+            } else if variadic.is_some() {
                 lowered_arguments.len() < params.len()
             } else {
                 lowered_arguments.len() != params.len()
@@ -1320,12 +1331,37 @@ impl<'a> FnLowerer<'a> {
 
         if let Some(sig) = signature.clone().filter(|sig| sig.is_extern) {
             if let Some((backend, symbol)) = dynamic_symbol(&callee_name) {
+                let (params, ret) = if let Some(types) = &generic_types {
+                    let substitution = sig
+                        .generic_type_params
+                        .iter()
+                        .cloned()
+                        .zip(types.iter().cloned())
+                        .collect::<HashMap<_, _>>();
+                    let params = sig
+                        .generic_param_patterns
+                        .iter()
+                        .map(|pattern| instantiate_generic_pattern(pattern, &substitution))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let ret = resolve_ts_type_with_substitution(
+                        sig.generic_return_type
+                            .as_ref()
+                            .expect("generic function return type"),
+                        &substitution,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        &mut Vec::new(),
+                    )?;
+                    (params, ret)
+                } else {
+                    (sig.params, sig.ret)
+                };
                 let result = HirExpr::DynamicCall(
                     DynamicSignature {
                         backend,
                         symbol,
-                        params: sig.params,
-                        ret: sig.ret,
+                        params,
+                        ret,
                     },
                     args,
                 );

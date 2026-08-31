@@ -217,6 +217,60 @@ fn typed_dynamic_declaration(
     function: &thaw_bridge::DtsFunction,
     napi: bool,
 ) -> Option<(String, String)> {
+    let runtime_key = if napi {
+        function.name.clone()
+    } else {
+        format!("{package}::{}", function.name)
+    };
+    let encoded = runtime_key
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let base_symbol = format!(
+        "__thaw_typed_{}_{}",
+        if napi { "napi" } else { "js" },
+        encoded
+    );
+    if let Some(generic) = &function.generic {
+        if !generic.param_types.iter().all(|ty| {
+            generic.type_params.iter().any(|(name, _)| name == ty)
+                || ty.starts_with('(')
+                || matches!(ty.as_str(), "number" | "string" | "boolean" | "Json" | "JsValue")
+        }) {
+            return None;
+        }
+        let type_params = generic
+            .type_params
+            .iter()
+            .map(|(name, constraint)| match constraint {
+                Some(constraint) => format!("{name} extends {constraint}"),
+                None => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params = function
+            .params
+            .iter()
+            .zip(&generic.param_types)
+            .enumerate()
+            .map(|(index, ((name, _), ty))| {
+                format!(
+                    "{name}{}: {ty}",
+                    if index >= function.required_params {
+                        "?"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some((
+            base_symbol.clone(),
+            format!("declare function {base_symbol}<{type_params}>({params}): JsValue;\n"),
+        ));
+    }
     let params = function
         .params
         .iter()
@@ -241,21 +295,6 @@ fn typed_dynamic_declaration(
     } else {
         render_dynamic_type(ret)?
     };
-    let runtime_key = if napi {
-        function.name.clone()
-    } else {
-        format!("{package}::{}", function.name)
-    };
-    let encoded = runtime_key
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let base_symbol = format!(
-        "__thaw_typed_{}_{}",
-        if napi { "napi" } else { "js" },
-        encoded
-    );
     let render_params = |arity: usize| {
         params[..arity]
             .iter()
@@ -1245,7 +1284,9 @@ fn generate_registry_shims(
             native_addons.push((
                 pkg.name.clone(),
                 bytes,
-                (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone()),
+                pkg.commonjs_export_name.clone().or_else(|| {
+                    (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone())
+                }),
             ));
         } else if let Some(bundle_js) = &pkg.bundle_js {
             // Only Fallback functions need binding inside the loaded

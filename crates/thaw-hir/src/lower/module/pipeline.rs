@@ -58,11 +58,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 if is_extern && func.is_async {
                     return Err(format!("ambient function `{name}` cannot be async"));
                 }
-                if is_extern && func.type_params.is_some() {
-                    return Err(format!(
-                        "ambient generic function `{name}` needs an explicitly monomorphic native ABI"
-                    ));
-                }
                 let type_substitution = function_type_substitution(func);
                 let generic_type_params = validate_generic_function(fn_decl)?;
                 let generic_type_constraints = func
@@ -1103,6 +1098,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             match constraint {
                 CallConstraint::Generic(callee, types) => {
                     if types.contains(&HirType::Dynamic) {
+                        continue;
+                    }
+                    if signatures
+                        .get(&callee)
+                        .is_some_and(|signature| signature.is_extern)
+                    {
                         continue;
                     }
                     let instances = generic_instantiations.entry(callee).or_default();

@@ -86,6 +86,10 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         HirType::Object(fields) => fields
             .iter()
             .all(|(_, ty)| supports_generic_native_layout(ty)),
+        HirType::Function(params, ret) => {
+            params.iter().all(supports_generic_native_layout)
+                && supports_generic_native_layout(ret)
+        }
         _ => false,
     }
 }

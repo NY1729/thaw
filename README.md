@@ -2602,7 +2602,11 @@ and follows root declaration `export *` barrels to run `weeksToDays` after
 removing the registry. Star barrels retain function overloads, aliases and
 cycle protection without expanding class or value declarations.
 Function type parameters with a native primitive constraint use that constraint
-for bridge ABI classification. The opt-in npm suite compiles the ESM-only
+for bridge ABI classification. Generic fallback declarations now preserve type
+parameters, constraints, parameter patterns and optional arity. Ambient dynamic
+calls infer a concrete tuple per call and substitute it into the N-API/QuickJS
+signature; function-valued `T extends object` arguments therefore reach the
+value-callback ABI without being narrowed to `Json`. The opt-in npm suite compiles the ESM-only
 `nanoid@5.1.5`, exercises `node:crypto` Web Crypto randomness, and runs the
 standalone result after removing the registry. Typed QuickJS/N-API package
 functions expose every trailing-optional arity through small generated
