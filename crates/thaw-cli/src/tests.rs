@@ -138,6 +138,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,a0,a1,?,a0,a1,a0,?,+".into())
     );
+    for source in [
+        "module.exports.add = (left, right) => left ** right;",
+        "module.exports.add = (left, right) => Math.pow(left, right);",
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "add", false, &function),
+            Some("expr:a0,a1,pow".into())
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = (Math, right) => Math.abs(Math % right);",
