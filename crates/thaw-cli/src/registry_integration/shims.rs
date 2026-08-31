@@ -14,6 +14,137 @@ struct ResolvedPackage {
     bundle_js: Option<String>,
 }
 
+fn jit_numeric_export(
+    source: &str,
+    export_name: &str,
+    allow_default: bool,
+    function: &thaw_bridge::DtsFunction,
+) -> Option<&'static str> {
+    use thaw_parser::ast::{
+        AssignOp, AssignTarget, BinaryOp, Expr, ModuleItem, Pat, SimpleAssignTarget, Stmt,
+    };
+
+    if function.generic.is_some()
+        || function.required_params != 2
+        || function.params.len() != 2
+        || function.rest_param.is_some()
+        || !function
+            .params
+            .iter()
+            .all(|(_, ty)| matches!(ty, thaw_bridge::DtsType::Native(thaw_hir::HirType::F64)))
+        || !matches!(
+            &function.ret,
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64)
+        )
+    {
+        return None;
+    }
+
+    let module = thaw_parser::parse_javascript(source).ok()?;
+    let [ModuleItem::Stmt(Stmt::Expr(statement))] = module.body.as_slice() else {
+        return None;
+    };
+    let Expr::Assign(assignment) = statement.expr.as_ref() else {
+        return None;
+    };
+    if assignment.op != AssignOp::Assign {
+        return None;
+    }
+    let AssignTarget::Simple(SimpleAssignTarget::Member(target)) = &assignment.left else {
+        return None;
+    };
+    let target_name = if matches!(target.obj.as_ref(), Expr::Ident(module) if module.sym == "module")
+        && matches!(&target.prop, thaw_parser::ast::MemberProp::Ident(property) if property.sym == "exports")
+    {
+        allow_default.then_some("default")?
+    } else if let Expr::Member(object) = target.obj.as_ref() {
+        if matches!(object.obj.as_ref(), Expr::Ident(module) if module.sym == "module")
+            && matches!(&object.prop, thaw_parser::ast::MemberProp::Ident(property) if property.sym == "exports")
+        {
+            match &target.prop {
+                thaw_parser::ast::MemberProp::Ident(property) => property.sym.as_ref(),
+                _ => return None,
+            }
+        } else {
+            return None;
+        }
+    } else if matches!(target.obj.as_ref(), Expr::Ident(exports) if exports.sym == "exports") {
+        match &target.prop {
+            thaw_parser::ast::MemberProp::Ident(property) => property.sym.as_ref(),
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+    if target_name != export_name && target_name != "default" {
+        return None;
+    }
+
+    let (params, body): (Vec<&Pat>, &Expr) = match assignment.right.as_ref() {
+        Expr::Fn(function) if !function.function.is_async && !function.function.is_generator => {
+            let body = function.function.body.as_ref()?;
+            let [Stmt::Return(returned)] = body.stmts.as_slice() else {
+                return None;
+            };
+            (
+                function.function.params.iter().map(|param| &param.pat).collect(),
+                returned.arg.as_deref()?,
+            )
+        }
+        Expr::Arrow(function) if !function.is_async && !function.is_generator => {
+            let body = match function.body.as_ref() {
+                thaw_parser::ast::ArrowFunctionBody::Expr(body) => body.as_ref(),
+                thaw_parser::ast::ArrowFunctionBody::FunctionBody(body) => {
+                    let [Stmt::Return(returned)] = body.stmts.as_slice() else {
+                        return None;
+                    };
+                    returned.arg.as_deref()?
+                }
+            };
+            (function.params.iter().collect(), body)
+        }
+        _ => return None,
+    };
+    let [Pat::Ident(left_param), Pat::Ident(right_param)] = params.as_slice() else {
+        return None;
+    };
+    let Expr::Bin(binary) = body else {
+        return None;
+    };
+    if !matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == left_param.id.sym)
+        || !matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == right_param.id.sym)
+    {
+        return None;
+    }
+    match binary.op {
+        BinaryOp::Add => Some("add"),
+        BinaryOp::Sub => Some("sub"),
+        BinaryOp::Mul => Some("mul"),
+        BinaryOp::Div => Some("div"),
+        _ => None,
+    }
+}
+
+fn jit_numeric_declaration(
+    package: &str,
+    function: &thaw_bridge::DtsFunction,
+    operation: &str,
+) -> (String, String) {
+    let runtime_key = format!("{operation}:{package}::{}", function.name);
+    let encoded = runtime_key
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let symbol = format!("__thaw_typed_jit_{encoded}");
+    let left = &function.params[0].0;
+    let right = &function.params[1].0;
+    let declaration = format!(
+        "declare function {symbol}({left}: number, {right}: number): number;\n"
+    );
+    (symbol, declaration)
+}
+
 /// A valid JS/Thaw identifier fragment from an arbitrary package name --
 /// `@hapi/hoek` -> `_hapi_hoek`. Used to build a package-qualified alias
 /// identifier (`generate_registry_shims`'s collision resolution); doesn't
@@ -1001,6 +1132,7 @@ fn generate_registry_shims(
     let mut shim = String::new();
     let mut typed_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
+    let mut jit_targets = std::collections::HashSet::new();
     let mut class_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     let mut class_rewrites = Vec::new();
@@ -1250,15 +1382,34 @@ fn generate_registry_shims(
                     && matches!(classification, thaw_bridge::Classification::Fallback { .. })
             });
             if is_fallback {
-                if let Some((symbol, declaration)) =
-                    typed_dynamic_declaration(
+                let jit_operation = pkg
+                    .bundle_js
+                    .as_deref()
+                    .filter(|_| pkg.native_addon.is_none())
+                    .and_then(|source| {
+                        jit_numeric_export(
+                            source,
+                            &function.name,
+                            pkg.commonjs_export_name.as_deref() == Some(&function.name)
+                                || pkg.functions.len() == 1,
+                            function,
+                        )
+                    });
+                let declaration = jit_operation
+                    .map(|operation| jit_numeric_declaration(&pkg.name, function, operation))
+                    .or_else(|| {
+                        typed_dynamic_declaration(
                         &pkg.name,
                         function,
                         pkg.native_addon.is_some() && pkg.bundle_js.is_none(),
                     )
-                {
+                    });
+                if let Some((symbol, declaration)) = declaration {
                     shim.push_str(&declaration);
                     typed_targets.insert((pkg.name.clone(), function.name.clone()), symbol);
+                    if jit_operation.is_some() {
+                        jit_targets.insert((pkg.name.clone(), function.name.clone()));
+                    }
                 }
             }
         }
@@ -1298,24 +1449,31 @@ fn generate_registry_shims(
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
             // QuickJS-NG at all.
-            let fallback_names = pkg
+            let fallback_names: Vec<String> = pkg
                 .classifications
                 .iter()
                 .filter_map(|(name, classification)| match classification {
-                    thaw_bridge::Classification::Fallback { .. } => Some(name.clone()),
+                    thaw_bridge::Classification::Fallback { .. }
+                        if !jit_targets.contains(&(pkg.name.clone(), name.clone())) =>
+                    {
+                        Some(name.clone())
+                    }
                     thaw_bridge::Classification::FastPath(_) => None,
+                    thaw_bridge::Classification::Fallback { .. } => None,
                 })
                 .collect();
             let qualified_aliases = qualified
                 .iter()
                 .map(|q| (q.name.clone(), q.qualified_key.clone()))
                 .collect();
-            bundles.push((
-                pkg.name.clone(),
-                bundle_js.clone(),
-                fallback_names,
-                qualified_aliases,
-            ));
+            if !fallback_names.is_empty() || pkg.native_addon.is_some() {
+                bundles.push((
+                    pkg.name.clone(),
+                    bundle_js.clone(),
+                    fallback_names,
+                    qualified_aliases,
+                ));
+            }
         }
     }
 

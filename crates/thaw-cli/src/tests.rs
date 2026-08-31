@@ -54,6 +54,55 @@ fn adapts_typed_dynamic_callable_results_to_natural_calls() {
 }
 
 #[test]
+fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        name: "add".into(),
+        generic: None,
+        params: vec![
+            (
+                "left".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "right".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (left, right) => left + right;",
+            "add",
+            false,
+            &function,
+        ),
+        Some("add")
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "console.log('side effect'); module.exports.add = (left, right) => left + right;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports = (left, right) => left + right;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+}
+
+#[test]
 fn rewrite_qualified_calls_is_a_no_op_with_no_rewrites() {
     let source = "function main(): void { console.log(qs.stringify(x)); }";
     assert_eq!(rewrite_qualified_calls(source, &[]).unwrap(), source);
