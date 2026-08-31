@@ -75,8 +75,116 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
             let ret = render_dynamic_type(ret)?;
             Some(format!("({}) => {ret}", params.join(", ")))
         }
+        thaw_hir::HirType::CallableFunction(params, optional, None, ret) => {
+            let params = params
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    render_dynamic_type(ty).map(|ty| {
+                        format!(
+                            "arg{index}{}: {ty}",
+                            if optional.contains(index) { "?" } else { "" }
+                        )
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let ret = render_dynamic_type(ret)?;
+            Some(format!("({}) => {ret}", params.join(", ")))
+        }
         _ => None,
     }
+}
+
+fn typed_dynamic_callable_adapter(
+    encoded: &str,
+    target: String,
+    mut declarations: String,
+    params: &[(String, String)],
+    required_params: usize,
+    ret: &thaw_hir::HirType,
+) -> Option<(String, String)> {
+    let (callback_params, optional, callback_ret) = match ret {
+        thaw_hir::HirType::Function(params, ret) => {
+            (params, thaw_hir::HirOptionalMask::default(), ret.as_ref())
+        }
+        thaw_hir::HirType::CallableFunction(params, optional, None, ret) => {
+            (params, optional.clone(), ret.as_ref())
+        }
+        _ => return Some((target, declarations)),
+    };
+    let convert = match callback_ret {
+        thaw_hir::HirType::Str => "String",
+        thaw_hir::HirType::F64 => "Number",
+        thaw_hir::HirType::Bool => "Boolean",
+        thaw_hir::HirType::Json => "",
+        _ => return Some((target, declarations)),
+    };
+    let callback_types = callback_params
+        .iter()
+        .map(render_dynamic_type)
+        .collect::<Option<Vec<_>>>()?;
+    let adapter = format!("__thaw_typed_callable_{encoded}");
+    let outer_params = params
+        .iter()
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            format!(
+                "{name}{}: {ty}",
+                if index >= required_params { "?" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let outer_args = params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let callback_signature = callback_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            format!(
+                "arg{index}{}: {ty}",
+                if optional.contains(index) { "?" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let callback_type = render_dynamic_type(ret)?;
+    let required = (0..callback_params.len())
+        .take_while(|index| !optional.contains(*index))
+        .count();
+    declarations.push_str(&format!(
+        "function {adapter}({outer_params}): {callback_type} {{\n    const callable: JsValue = {target}({outer_args});\n    const invoke: {callback_type} = ({callback_signature}): {} => {{\n",
+        render_dynamic_type(callback_ret)?
+    ));
+    for arity in (required + 1..=callback_params.len()).rev() {
+        let condition = format!("arg{} !== undefined", arity - 1);
+        let args = (0..arity)
+            .map(|index| format!("arg{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let call = format!(
+            "callDynamicValue(callable, JSON.parse(JSON.stringify([{args}])))"
+        );
+        declarations.push_str(&format!(
+            "        if ({condition}) return {convert}({call});\n"
+        ));
+    }
+    let args = (0..required)
+        .map(|index| format!("arg{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let json_args = if required == 0 {
+        "JSON.parse(\"[]\")".to_string()
+    } else {
+        format!("JSON.parse(JSON.stringify([{args}]))")
+    };
+    declarations.push_str(&format!(
+        "        return {convert}(callDynamicValue(callable, {json_args}));\n    }};\n    return invoke;\n}}\n"
+    ));
+    Some((adapter, declarations))
 }
 
 fn supported_json_collection_element(ty: &thaw_hir::HirType) -> bool {
@@ -151,13 +259,24 @@ fn typed_dynamic_declaration(
             .join(", ")
     };
     if function.required_params == params.len() {
-        return Some((
-            base_symbol.clone(),
-            format!(
-                "declare function {base_symbol}({}): {ret};\n",
-                render_params(params.len())
-            ),
-        ));
+        let declarations = format!(
+            "declare function {base_symbol}({}): {ret};\n",
+            render_params(params.len())
+        );
+        if napi {
+            return Some((base_symbol, declarations));
+        }
+        return typed_dynamic_callable_adapter(
+            &encoded,
+            base_symbol,
+            declarations,
+            &params,
+            function.required_params,
+            match &function.ret {
+                thaw_bridge::DtsType::Native(ret) => ret,
+                thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+            },
+        );
     }
     let wrapper = format!(
         "__thaw_typed_wrapper_{}_{}",
@@ -207,7 +326,20 @@ fn typed_dynamic_declaration(
         "    return {base_symbol}__arity_{}({arguments});\n}}\n",
         function.required_params
     ));
-    Some((wrapper, declarations))
+    if napi {
+        return Some((wrapper, declarations));
+    }
+    typed_dynamic_callable_adapter(
+        &encoded,
+        wrapper,
+        declarations,
+        &params,
+        function.required_params,
+        match &function.ret {
+            thaw_bridge::DtsType::Native(ret) => ret,
+            thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+        },
+    )
 }
 
 /// `(package, name, alias)` -- see `rewrite_qualified_calls`. `package`
