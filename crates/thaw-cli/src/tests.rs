@@ -47,6 +47,9 @@ fn adapts_typed_dynamic_callable_results_to_natural_calls() {
     assert!(shim.contains("defaultSize?: number | undefined"));
     assert!(shim.contains("const invoke: (arg0?: number | undefined) => string"));
     assert!(shim.contains("callDynamicValue(callable"));
+
+    let (_, napi_shim) = typed_dynamic_declaration("native", &function, true).unwrap();
+    assert!(napi_shim.contains("callNativeAddonValue(callable"));
 }
 
 #[test]

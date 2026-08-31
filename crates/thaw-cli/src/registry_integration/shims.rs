@@ -101,6 +101,7 @@ fn typed_dynamic_callable_adapter(
     mut declarations: String,
     params: &[(String, String)],
     required_params: usize,
+    napi: bool,
     ret: &thaw_hir::HirType,
 ) -> Option<(String, String)> {
     let (callback_params, optional, callback_ret) = match ret {
@@ -152,6 +153,11 @@ fn typed_dynamic_callable_adapter(
         .collect::<Vec<_>>()
         .join(", ");
     let callback_type = render_dynamic_type(ret)?;
+    let call_value = if napi {
+        "callNativeAddonValue"
+    } else {
+        "callDynamicValue"
+    };
     let required = (0..callback_params.len())
         .take_while(|index| !optional.contains(*index))
         .count();
@@ -165,9 +171,7 @@ fn typed_dynamic_callable_adapter(
             .map(|index| format!("arg{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let call = format!(
-            "callDynamicValue(callable, JSON.parse(JSON.stringify([{args}])))"
-        );
+        let call = format!("{call_value}(callable, JSON.parse(JSON.stringify([{args}])))");
         declarations.push_str(&format!(
             "        if ({condition}) return {convert}({call});\n"
         ));
@@ -182,7 +186,7 @@ fn typed_dynamic_callable_adapter(
         format!("JSON.parse(JSON.stringify([{args}]))")
     };
     declarations.push_str(&format!(
-        "        return {convert}(callDynamicValue(callable, {json_args}));\n    }};\n    return invoke;\n}}\n"
+        "        return {convert}({call_value}(callable, {json_args}));\n    }};\n    return invoke;\n}}\n"
     ));
     Some((adapter, declarations))
 }
@@ -263,15 +267,13 @@ fn typed_dynamic_declaration(
             "declare function {base_symbol}({}): {ret};\n",
             render_params(params.len())
         );
-        if napi {
-            return Some((base_symbol, declarations));
-        }
         return typed_dynamic_callable_adapter(
             &encoded,
             base_symbol,
             declarations,
             &params,
             function.required_params,
+            napi,
             match &function.ret {
                 thaw_bridge::DtsType::Native(ret) => ret,
                 thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
@@ -326,15 +328,13 @@ fn typed_dynamic_declaration(
         "    return {base_symbol}__arity_{}({arguments});\n}}\n",
         function.required_params
     ));
-    if napi {
-        return Some((wrapper, declarations));
-    }
     typed_dynamic_callable_adapter(
         &encoded,
         wrapper,
         declarations,
         &params,
         function.required_params,
+        napi,
         match &function.ret {
             thaw_bridge::DtsType::Native(ret) => ret,
             thaw_bridge::DtsType::Unsupported(_) => unreachable!(),

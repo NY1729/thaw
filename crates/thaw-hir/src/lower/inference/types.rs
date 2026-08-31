@@ -1216,6 +1216,7 @@ impl<'a> FnLowerer<'a> {
                     "callDynamic" => return Ok(HirType::Json),
                     "getDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValue" => return Ok(HirType::Json),
+                    "callNativeAddonValue" => return Ok(HirType::Json),
                     "callDynamicValueHandle" => return Ok(HirType::JsValue),
                     "callDynamicValueWithValue" => return Ok(HirType::Json),
                     "releaseDynamicValue" => return Ok(HirType::Bool),

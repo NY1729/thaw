@@ -457,6 +457,18 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_backend_call(args, "thaw_js_call_handle_result", "callDynamicValue")
     }
 
+    fn compile_call_native_addon_value(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_napi = true;
+        self.compile_json_backend_call(
+            args,
+            "thaw_napi_call_handle_typed_result",
+            "callNativeAddonValue",
+        )
+    }
+
     fn compile_call_dynamic_value_handle(
         &mut self,
         args: &[HirExpr],
@@ -873,9 +885,46 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_global_string_ptr(&signature.symbol, "dynamic_symbol")
             .map_err(|error| error.to_string())?;
         if signature.backend == DynamicBackend::Napi && signature.ret == HirType::JsValue {
-            let constructor_name = napi_constructor_export_name(&signature.symbol).ok_or_else(|| {
-                "N-API JsValue return is reserved for class constructors".to_string()
-            })?;
+            let Some(constructor_name) = napi_constructor_export_name(&signature.symbol) else {
+                let args_json = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_stringify").unwrap(),
+                        &[array.into()],
+                        "napi_handle_args",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_napi_call_export_handle_typed_result")
+                            .unwrap(),
+                        &[name.as_pointer_value().into(), args_json.into()],
+                        "napi_export_handle_result",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_struct_value();
+                let value = self
+                    .builder
+                    .build_extract_value(result, 0, "napi_export_handle")
+                    .map_err(|error| error.to_string())?;
+                let error = self
+                    .builder
+                    .build_extract_value(result, 1, "napi_export_handle_error")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(self.pending_exception().as_pointer_value(), error)
+                    .map_err(|error| error.to_string())?;
+                self.branch_on_pending_exception()?;
+                return Ok(value);
+            };
             let constructor_name = self
                 .builder
                 .build_global_string_ptr(constructor_name, "napi_constructor_name")
