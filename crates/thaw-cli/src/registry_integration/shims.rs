@@ -159,7 +159,7 @@ fn jit_numeric_export(
                     "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimEnd" => {
                         call.args.is_empty()
                     }
-                    "repeat" => call.args.len() == 1,
+                    "repeat" | "slice" | "substring" => call.args.len() == 1,
                     _ => false,
                 };
                 arity_matches && is_string_expression(member.obj.as_ref(), parameters)
@@ -199,6 +199,8 @@ fn jit_numeric_export(
             "trimStart" => "trimstart",
             "trimEnd" => "trimend",
             "repeat" => "repeat",
+            "slice" => "slice",
+            "substring" => "substring",
             _ => return None,
         };
         Some((operation, member.obj.as_ref()))
@@ -356,7 +358,7 @@ fn jit_numeric_export(
                     if !call.args.is_empty() {
                         return None;
                     }
-                } else if operation == "repeat" {
+                } else if matches!(operation, "repeat" | "slice" | "substring") {
                     let [count] = call.args.as_slice() else {
                         return None;
                     };
@@ -1053,7 +1055,7 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
                 return None;
             }
             stack.push(true);
-        } else if token == "repeat" {
+        } else if matches!(token.as_str(), "repeat" | "slice" | "substring") {
             if stack.pop()? || !stack.pop()? {
                 return None;
             }
