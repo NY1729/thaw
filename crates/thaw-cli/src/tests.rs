@@ -330,7 +330,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &predicate,
         ),
-        Some("expr:a0,c0000000000000000,c3ff0000000000000,?".into())
+        Some("expr:b0,c0000000000000000,c3ff0000000000000,?".into())
     );
     let string_length = thaw_bridge::DtsFunction {
         name: "length".into(),
@@ -423,7 +423,40 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &string_concat,
         ),
+        Some("expr:t76616c75653a20,c3ff0000000000000,numstr,concat".into())
+    );
+    let mut number_string = string_concat.clone();
+    number_string.params[0].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::F64);
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.greet = value => String(value);",
+            "greet",
+            false,
+            &number_string,
+        ),
+        Some("expr:a0,numstr".into())
+    );
+    let mut shadowed_string = number_string.clone();
+    shadowed_string.params[0].0 = "String".into();
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.greet = String => String(1);",
+            "greet",
+            false,
+            &shadowed_string,
+        ),
         None
+    );
+    let mut boolean_string = string_concat.clone();
+    boolean_string.params[0].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool);
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.greet = value => `${value}`;",
+            "greet",
+            false,
+            &boolean_string,
+        ),
+        Some("expr:b0,boolstr".into())
     );
     assert_eq!(
         jit_numeric_export(
