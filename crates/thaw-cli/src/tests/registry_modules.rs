@@ -101,18 +101,18 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function add(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\nexport declare function double(value: number): number;\nexport declare function negate(value: number): number;\nexport declare function magnitude(value: number): number;\nexport declare function remainder(left: number, right: number): number;\nexport declare function minimum(a: number, b: number, c: number): number;\nexport declare function maximum(a: number, b: number, c: number): number;\nexport declare function sum3(a: number, b: number, c: number): number;\nexport declare function answer(): number;\n",
+        "export declare function add(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\nexport declare function double(value: number): number;\nexport declare function negate(value: number): number;\nexport declare function magnitude(value: number): number;\nexport declare function roundedRoot(value: number): number;\nexport declare function remainder(left: number, right: number): number;\nexport declare function minimum(a: number, b: number, c: number): number;\nexport declare function maximum(a: number, b: number, c: number): number;\nexport declare function sum3(a: number, b: number, c: number): number;\nexport declare function answer(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports = { add: function(left, right) { const sum = left + right; const doubled = sum * 2; const delta = left - right; if (left < right) return doubled; return delta; }, sub: (left, right) => left - right, double: value => value * 2, negate: value => -value, magnitude: value => Math.abs(value), remainder: (left, right) => left % right, minimum: (a, b, c) => Math.min(a, b, c), maximum: (a, b, c) => Math.max(a, b, c), sum3: (a, b, c) => a + b + c, answer: () => 42 };\n",
+        "module.exports = { add: function(left, right) { const sum = left + right; const doubled = sum * 2; const delta = left - right; if (left < right) return doubled; return delta; }, sub: (left, right) => left - right, double: value => value * 2, negate: value => -value, magnitude: value => Math.abs(value), roundedRoot: value => Math.round(Math.sqrt(value)), remainder: (left, right) => left % right, minimum: (a, b, c) => Math.min(a, b, c), maximum: (a, b, c) => Math.max(a, b, c), sum3: (a, b, c) => a + b + c, answer: () => 42 };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { add, sub, double, negate, magnitude, remainder, minimum, maximum, sum3, answer } from 'jit-math';\nfunction main(): void { console.log(add(2, 19) + sub(1, 1) + double(0) + negate(0) + magnitude(-1) + remainder(5, 2) + minimum(-1, 0, 1) + maximum(-1, 0, 1) + sum3(0, 0, 0) + answer() - 44); }\n",
+        "import { add, sub, double, negate, magnitude, roundedRoot, remainder, minimum, maximum, sum3, answer } from 'jit-math';\nfunction main(): void { console.log(add(2, 19) + sub(1, 1) + double(0) + negate(0) + magnitude(-1) + roundedRoot(0) + remainder(5, 2) + minimum(-1, 0, 1) + maximum(-1, 0, 1) + sum3(0, 0, 0) + answer() - 44); }\n",
     )
     .unwrap();
     let output = dir.join("app");
