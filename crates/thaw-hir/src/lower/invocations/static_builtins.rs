@@ -172,6 +172,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             (object, property),
             ("Array", "of" | "from" | "isArray")
+                | ("Map", "groupBy")
                 | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
                 | ("JSON", "stringify")
                 | ("Reflect", "ownKeys")
@@ -542,6 +543,66 @@ impl<'a> FnLowerer<'a> {
                             callback,
                             this_arg,
                         )?;
+                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                    }
+                    if object.sym == *"Map" && property.sym == *"groupBy" {
+                        let has_spread = call.args.iter().any(|argument| argument.spread.is_some());
+                        let (arguments, spread_bindings) = if has_spread {
+                            self.lower_native_spread_values(&call.args, "Map.groupBy")?
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
+                        let argument_count = if has_spread {
+                            arguments.len()
+                        } else {
+                            call.args.len()
+                        };
+                        if argument_count != 2 {
+                            return Err("`Map.groupBy` expects exactly two arguments".into());
+                        }
+                        let items = if has_spread {
+                            arguments[0].clone()
+                        } else {
+                            self.lower_expr(&call.args[0].expr)?
+                        };
+                        let items_type = self.infer_expr_type(&items)?;
+                        let HirType::Array(item_type) = &items_type else {
+                            return Err(format!(
+                                "`Map.groupBy` requires a homogeneous array, got {items_type:?}"
+                            ));
+                        };
+                        let item_type = item_type.as_ref().clone();
+                        let key_fn = if has_spread {
+                            let key_fn = arguments[1].clone();
+                            let params = match self.infer_expr_type(&key_fn)? {
+                                HirType::Function(params, _)
+                                | HirType::CallableFunction(params, _, _, _) => params,
+                                _ => {
+                                    return Err(
+                                        "Map.groupBy key function is not a function value".into()
+                                    )
+                                }
+                            };
+                            if params.len() > 2 {
+                                return Err(format!(
+                                    "Map.groupBy key function accepts at most two parameters, got {}",
+                                    params.len()
+                                ));
+                            }
+                            let available = [item_type.clone(), HirType::F64];
+                            self.validate_promise_callback_value(
+                                &key_fn,
+                                &available[..params.len()],
+                                None,
+                            )?;
+                            key_fn
+                        } else {
+                            // Reuses `Array.from`'s own contextual-typing helper: its
+                            // "zero-to-two-argument (element, index)" shape is exactly
+                            // `Map.groupBy`'s own `(item, index) => key` callback.
+                            self.lower_array_from_callback(&call.args[1].expr, &item_type)?
+                        };
+                        let result = self.lower_map_group_by(items, item_type, key_fn)?;
                         return self.wrap_call_argument_bindings(result, &spread_bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"isArray" {
