@@ -142,6 +142,21 @@ fn jit_numeric_export(
                 }
                 output.push("?".into());
             }
+            Expr::Bin(binary)
+                if matches!(
+                    binary.op,
+                    BinaryOp::Lt
+                        | BinaryOp::LtEq
+                        | BinaryOp::Gt
+                        | BinaryOp::GtEq
+                        | BinaryOp::EqEq
+                        | BinaryOp::EqEqEq
+                        | BinaryOp::NotEq
+                        | BinaryOp::NotEqEq
+                ) =>
+            {
+                encode_condition(expression, parameters, locals, output)?;
+            }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
                 if matches!(method, "abs" | "ceil" | "floor" | "round" | "sqrt" | "trunc") {
@@ -304,7 +319,7 @@ fn jit_numeric_export(
             .all(|(_, ty)| matches!(ty, thaw_bridge::DtsType::Native(thaw_hir::HirType::F64)))
         || !matches!(
             &function.ret,
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64)
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64 | thaw_hir::HirType::Bool)
         )
     {
         return None;
@@ -489,7 +504,11 @@ fn jit_numeric_declaration(
         .map(|(name, _)| format!("{name}: number"))
         .collect::<Vec<_>>()
         .join(", ");
-    let declaration = format!("declare function {symbol}({params}): number;\n");
+    let ret = match &function.ret {
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
+        _ => "number",
+    };
+    let declaration = format!("declare function {symbol}({params}): {ret};\n");
     (symbol, declaration)
 }
 

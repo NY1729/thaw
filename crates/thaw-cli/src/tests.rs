@@ -147,6 +147,18 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some("expr:a0,a1,pow".into())
         );
     }
+    let mut predicate = function.clone();
+    predicate.name = "less".into();
+    predicate.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool);
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.less = (left, right) => left < right;",
+            "less",
+            false,
+            &predicate,
+        ),
+        Some("expr:a0,a1,<".into())
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = (Math, right) => Math.abs(Math % right);",

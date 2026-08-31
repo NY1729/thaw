@@ -975,10 +975,12 @@ impl<'ctx> HirCompiler<'ctx> {
         if signature.backend == DynamicBackend::Jit {
             if signature.params.len() > 16
                 || !signature.params.iter().all(|ty| *ty == HirType::F64)
-                || signature.ret != HirType::F64
+                || !matches!(signature.ret, HirType::F64 | HirType::Bool)
                 || args.len() != signature.params.len()
             {
-                return Err("JIT calls currently require 0-16 numbers and return number".into());
+                return Err(
+                    "JIT calls currently require 0-16 numbers and return number or boolean".into(),
+                );
             }
             let name = self
                 .builder
@@ -1038,7 +1040,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(self.pending_exception().as_pointer_value(), error)
                 .map_err(|error| error.to_string())?;
             self.branch_on_pending_exception()?;
-            return Ok(value);
+            return if signature.ret == HirType::Bool {
+                self.builder
+                    .build_float_compare(
+                        FloatPredicate::ONE,
+                        value.into_float_value(),
+                        self.context.f64_type().const_zero(),
+                        "jit_boolean_value",
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| error.to_string())
+            } else {
+                Ok(value)
+            };
         }
         let function_argument = signature
             .params
