@@ -58,6 +58,75 @@ fn registry_native_addon_builds_and_runs_end_to_end() {
 }
 
 #[test]
+fn registry_native_addon_returned_function_runs_end_to_end() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-native-factory-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let package = registry.join("native-factory");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function multiplier(factor: number): (value: number) => number;\n",
+    )
+    .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(
+        &addon_c,
+        r#"
+            #include <stddef.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef int napi_status;
+            static double factor;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_get_value_double(napi_env, napi_value, double*);
+            extern napi_status napi_create_double(napi_env, double, napi_value*);
+            extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            static napi_value multiply(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, result; double value; void* data;
+                napi_get_cb_info(env, info, &argc, &arg, 0, &data);
+                napi_get_value_double(env, arg, &value);
+                napi_create_double(env, value * *(double*)data, &result); return result;
+            }
+            static napi_value multiplier(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, result;
+                napi_get_cb_info(env, info, &argc, &arg, 0, 0);
+                napi_get_value_double(env, arg, &factor);
+                napi_create_function(env, "multiply", 8, multiply, &factor, &result); return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                (void)exports; napi_value fn;
+                napi_create_function(env, "multiplier", 10, multiplier, 0, &fn); return fn;
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&addon_c)
+        .arg("-o")
+        .arg(package.join("native.node"))
+        .status()
+        .unwrap()
+        .success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "import { multiplier } from \"native-factory\"; function main(): void { const triple = multiplier(3); console.log(triple(14)); }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-native-addon-class-{}",

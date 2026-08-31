@@ -537,6 +537,73 @@ unsafe fn module_arguments(
         .collect())
 }
 
+unsafe fn call_function_handle(
+    callable: u64,
+    args: *const c_char,
+    preserve_undefined: bool,
+) -> Result<NapiValue, String> {
+    let env = module_env_for_handle(callable)?;
+    let values = module_arguments(env, args, preserve_undefined)?;
+    let function = match value_ref(callable as NapiValue).map_err(|_| "invalid function handle")? {
+        Value::Function(function) => function.clone(),
+        _ => return Err(format!("native addon handle {callable} is not callable")),
+    };
+    let this_arg = env_mut(env)
+        .map_err(|_| "invalid native addon environment")?
+        .alloc(Value::Undefined);
+    let mut info = CallbackInfo {
+        args: values,
+        this_arg,
+        new_target: ptr::null_mut(),
+        data: function.data,
+    };
+    let value = (function.callback)(env, &mut info);
+    take_env_exception(env)?;
+    wait_for_promise(value)
+}
+
+unsafe fn call_export_handle_impl(
+    name: *const c_char,
+    args: *const c_char,
+    preserve_undefined: bool,
+) -> ThawNapiHandleResult {
+    let result = (|| -> Result<u64, String> {
+        let name = text(name)?;
+        let callable = thaw_napi_get_export(CString::new(name).unwrap().as_ptr());
+        if callable == 0 {
+            return Err("unknown native addon export".into());
+        }
+        Ok(call_function_handle(callable, args, preserve_undefined)? as u64)
+    })();
+    match result {
+        Ok(value) => ThawNapiHandleResult {
+            value,
+            error: ptr::null_mut(),
+        },
+        Err(error) => handle_error(error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_export_handle_typed_result(
+    name: *const c_char,
+    args: *const c_char,
+) -> ThawNapiHandleResult {
+    call_export_handle_impl(name, args, true)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_handle_typed_result(
+    callable: u64,
+    args: *const c_char,
+) -> ThawResult {
+    let result = call_function_handle(callable, args, true).and_then(|value| {
+        serde_json::to_string(&json_from_value_with_undefined(value, true)?)
+            .map_err(|error| error.to_string())
+    });
+    text_result(result)
+}
+
 unsafe fn take_env_exception(env: NapiEnv) -> Result<(), String> {
     let Some(exception) = env_mut(env)
         .map_err(|_| "invalid native addon environment")?
