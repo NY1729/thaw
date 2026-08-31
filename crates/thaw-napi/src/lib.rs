@@ -432,6 +432,7 @@ pub struct Env {
     prototypes: HashMap<usize, usize>,
     accessors: HashMap<(usize, PropertyKey), Accessor>,
     finalizers: Vec<FinalizeRecord>,
+    object_finalizers: HashMap<usize, Vec<FinalizeRecord>>,
     noenv_finalizers: Vec<NoEnvFinalizeRecord>,
     posted_finalizers: Vec<FinalizeRecord>,
     instance_data: Option<FinalizeRecord>,
@@ -524,6 +525,7 @@ impl Env {
             prototypes: HashMap::new(),
             accessors: HashMap::new(),
             finalizers: Vec::new(),
+            object_finalizers: HashMap::new(),
             noenv_finalizers: Vec::new(),
             posted_finalizers: Vec::new(),
             instance_data: None,
@@ -717,6 +719,14 @@ impl Drop for Env {
             }
         }
         for record in std::mem::take(&mut self.finalizers) {
+            if let Some(finalize) = record.finalize {
+                unsafe { finalize(self, record.data, record.hint) };
+            }
+        }
+        for record in std::mem::take(&mut self.object_finalizers)
+            .into_values()
+            .flatten()
+        {
             if let Some(finalize) = record.finalize {
                 unsafe { finalize(self, record.data, record.hint) };
             }
