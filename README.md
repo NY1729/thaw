@@ -1998,7 +1998,8 @@ are specialized by the same W^X cache, with returned UTF-8 strings allocated
 directly in the caller-provided Thaw arena. One-argument `startsWith`,
 `endsWith`, `includes`, `indexOf`, and `lastIndexOf`, plus zero-argument
 `toLowerCase`, `toUpperCase`, `trim`, `trimStart`, and `trimEnd`, and numeric
-`repeat(count)`, use the same typed string IR.
+`repeat(count)`, and the one-argument forms of `slice(start)` and
+`substring(start)`, use the same typed string IR.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,
