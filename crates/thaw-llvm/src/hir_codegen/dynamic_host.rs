@@ -977,12 +977,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 || !signature
                     .params
                     .iter()
-                    .all(|ty| matches!(ty, HirType::F64 | HirType::Bool))
+                    .all(|ty| matches!(ty, HirType::F64 | HirType::Bool | HirType::Str))
                 || !matches!(signature.ret, HirType::F64 | HirType::Bool)
                 || args.len() != signature.params.len()
             {
                 return Err(
-                    "JIT calls currently require 0-16 numbers and return number or boolean".into(),
+                    "JIT calls currently require 0-16 number, boolean, or string arguments and return number or boolean".into(),
                 );
             }
             let name = self
