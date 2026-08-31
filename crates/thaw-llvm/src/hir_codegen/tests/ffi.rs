@@ -973,11 +973,21 @@ fn compiles_native_array_of() {
             console.log(empty.length);
             console.log(Array.of(first(), ...middle(), last()).join(","));
             console.log(Array.of(5, ...(await delayed()), 8).join(","));
+            // Spread sources get the same string/Map/Set snapshot
+            // conversion array literals and `Array.from` already do.
+            console.log(Array.of(...new Set<number>([1, 2, 2, 3])).join(","));
+            console.log(Array.of(..."ab").join("|"));
+            const entries = Array.of(
+                ...new Map<string, number>([["x", 1], ["y", 2]]),
+            );
+            for (const [k, v] of entries) {
+                console.log(k, v);
+            }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_of"),
-        "1,2,3\na|b\ntrue-false\n9\n3\n0\nfirst\nmiddle\nlast\n1,2,3,4\nawaited\n5,6,7,8\n"
+        "1,2,3\na|b\ntrue-false\n9\n3\n0\nfirst\nmiddle\nlast\n1,2,3,4\nawaited\n5,6,7,8\n1,2,3\na|b\nx 1\ny 2\n"
     );
 }
 

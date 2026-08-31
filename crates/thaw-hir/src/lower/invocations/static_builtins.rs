@@ -309,15 +309,52 @@ impl<'a> FnLowerer<'a> {
                         let mut parts = Vec::new();
                         let mut pending = Vec::new();
                         for argument in &call.args {
-                            let value = self.lower_expr(&argument.expr)?;
+                            let mut value = self.lower_expr(&argument.expr)?;
                             if argument.spread.is_some() {
                                 if !pending.is_empty() {
                                     parts.push(HirExpr::ArrayLit(std::mem::take(&mut pending)));
                                 }
+                                // Same snapshot conversion array-literal spreads
+                                // (`[...str]`/`[...map]`/`[...set]`) already use.
+                                let spread_source_type = self.infer_expr_type(&value)?;
+                                if spread_source_type == HirType::Str {
+                                    value = HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_string_to_array".into())),
+                                        vec![value],
+                                    );
+                                } else if let HirType::Map(key_type, value_type) =
+                                    &spread_source_type
+                                {
+                                    let pair_type = HirType::Tuple(vec![
+                                        key_type.as_ref().clone(),
+                                        value_type.as_ref().clone(),
+                                    ]);
+                                    let array_type = HirType::Array(Box::new(pair_type));
+                                    value = HirExpr::TypedClosure(
+                                        array_type,
+                                        Box::new(HirExpr::Call(
+                                            Box::new(HirExpr::Var(
+                                                "__thaw_map_snapshot_entries".into(),
+                                            )),
+                                            vec![value],
+                                        )),
+                                    );
+                                } else if let HirType::Set(set_element) = &spread_source_type {
+                                    let array_type = HirType::Array(set_element.clone());
+                                    value = HirExpr::TypedClosure(
+                                        array_type,
+                                        Box::new(HirExpr::Call(
+                                            Box::new(HirExpr::Var(
+                                                "__thaw_map_snapshot_keys".into(),
+                                            )),
+                                            vec![value],
+                                        )),
+                                    );
+                                }
                                 let ty = self.infer_expr_type(&value)?;
                                 let HirType::Array(element) = ty else {
                                     return Err(
-                                        "`Array.of` spread requires a homogeneous array".into()
+                                        "`Array.of` spread requires a homogeneous array, string, Map, or Set".into()
                                     );
                                 };
                                 if let Some(expected) = &element_type {
