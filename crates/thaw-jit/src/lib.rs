@@ -21,6 +21,44 @@ extern "C" {
     fn fmod(left: f64, right: f64) -> f64;
 }
 
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn minimum(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        return f64::NAN;
+    }
+    if left == right {
+        return if left == 0.0 {
+            f64::from_bits(left.to_bits() | right.to_bits())
+        } else {
+            left
+        };
+    }
+    if left < right {
+        left
+    } else {
+        right
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn maximum(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        return f64::NAN;
+    }
+    if left == right {
+        return if left == 0.0 {
+            f64::from_bits(left.to_bits() & right.to_bits())
+        } else {
+            left
+        };
+    }
+    if left > right {
+        left
+    } else {
+        right
+    }
+}
+
 #[repr(C)]
 pub struct ThawJitResult {
     pub value: f64,
@@ -75,6 +113,8 @@ enum NumericValue {
     Compare(CompareOp),
     Absolute,
     Negate,
+    Maximum,
+    Minimum,
     Remainder,
     Select,
 }
@@ -102,6 +142,8 @@ impl NumericProgram {
                     "!=" => Some(NumericValue::Compare(CompareOp::NotEqual)),
                     "abs" => Some(NumericValue::Absolute),
                     "neg" => Some(NumericValue::Negate),
+                    "max" => Some(NumericValue::Maximum),
+                    "min" => Some(NumericValue::Minimum),
                     "%" => Some(NumericValue::Remainder),
                     "?" => Some(NumericValue::Select),
                     value => value
@@ -192,9 +234,19 @@ impl NumericProgram {
                     if depth != 2 {
                         return None;
                     }
-                    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x08, 0x48, 0xb8]);
-                    code.extend_from_slice(&(fmod as *const () as u64).to_le_bytes());
-                    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x08]);
+                    emit_binary_call(&mut code, fmod as *const () as u64);
+                    depth = 1;
+                }
+                NumericValue::Minimum | NumericValue::Maximum => {
+                    if depth != 2 {
+                        return None;
+                    }
+                    let function = if matches!(value, NumericValue::Minimum) {
+                        minimum
+                    } else {
+                        maximum
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64);
                     depth = 1;
                 }
                 NumericValue::Select => {
@@ -270,6 +322,13 @@ fn emit_bit_operation(code: &mut Vec<u8>, value: u8, operation: u8) {
         0x6e,
         0xc0 | (value << 3),
     ]);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_binary_call(code: &mut Vec<u8>, function: u64) {
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x08, 0x48, 0xb8]);
+    code.extend_from_slice(&function.to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x08]);
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -477,5 +536,20 @@ mod tests {
         assert_eq!(call(&symbol, &[-42.0]).value, 42.0);
         assert_eq!(call(&symbol, &[-0.0]).value.to_bits(), 0.0f64.to_bits());
         assert!(call(&symbol, &[f64::NAN]).value.is_nan());
+
+        let minimum = CString::new("expr:a0,a1,min:minimum").unwrap();
+        let maximum = CString::new("expr:a0,a1,max:maximum").unwrap();
+        assert_eq!(call(&minimum, &[42.0, 43.0]).value, 42.0);
+        assert_eq!(call(&maximum, &[41.0, 42.0]).value, 42.0);
+        assert!(call(&minimum, &[f64::NAN, 42.0]).value.is_nan());
+        assert!(call(&maximum, &[42.0, f64::NAN]).value.is_nan());
+        assert_eq!(
+            call(&minimum, &[0.0, -0.0]).value.to_bits(),
+            (-0.0f64).to_bits()
+        );
+        assert_eq!(
+            call(&maximum, &[-0.0, 0.0]).value.to_bits(),
+            0.0f64.to_bits()
+        );
     }
 }
