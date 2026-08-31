@@ -732,9 +732,10 @@ fn registry_add_builds_and_runs_nanoid_when_enabled() {
         &source,
         r#"import { nanoid } from "nanoid";
                 function main(): void {
-                    const first: string = nanoid(12);
+                    const first: string = nanoid();
                     const second: string = nanoid(12);
                     console.log(first.length);
+                    console.log(second.length);
                     console.log(first === second);
                 }"#,
     )
@@ -747,7 +748,7 @@ fn registry_add_builds_and_runs_nanoid_when_enabled() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "12\nfalse\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "21\n12\nfalse\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

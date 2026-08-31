@@ -38,6 +38,7 @@ use thaw_hir::{
 pub struct DtsFunction {
     pub name: String,
     pub params: Vec<(String, DtsType)>,
+    pub required_params: usize,
     pub rest_param: Option<(String, DtsType)>,
     pub ret: DtsType,
 }

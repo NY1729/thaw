@@ -732,6 +732,7 @@ fn classifies_primitive_constrained_generic_function_as_fast_path() {
     let funcs =
         parse_dts("export declare function nanoid<Type extends string>(size?: number): Type;")
             .unwrap();
+    assert_eq!(funcs[0].required_params, 0);
     assert!(matches!(
         classify(&funcs[0]),
         Classification::FastPath(signature)
