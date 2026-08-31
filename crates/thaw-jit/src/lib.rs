@@ -497,8 +497,15 @@ impl NumericProgram {
                     let condition = depth - 3;
                     let consequent = depth - 2;
                     let alternate = depth - 1;
-                    // Remove the sign bit before testing so both +0 and -0 are false;
-                    // all other values, including NaN, retain JavaScript truthiness.
+                    // JavaScript ToBoolean treats NaN and both signed zeroes as false.
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x0f,
+                        0x2e,
+                        0xc0 | (condition << 3) | condition,
+                        0x7a,
+                        0x13,
+                    ]);
                     code.extend_from_slice(&[
                         0x66,
                         0x48,
@@ -759,7 +766,7 @@ mod tests {
         let symbol =
             CString::new("expr:x,c4045000000000000,cc000000000000000,?:truthiness").unwrap();
         assert_eq!(call(&symbol, &[-0.0]).value, -2.0);
-        assert_eq!(call(&symbol, &[f64::NAN]).value, 42.0);
+        assert_eq!(call(&symbol, &[f64::NAN]).value, -2.0);
 
         let symbol = CString::new("expr:a0,neg:negate").unwrap();
         assert_eq!(call(&symbol, &[42.0]).value, -42.0);
