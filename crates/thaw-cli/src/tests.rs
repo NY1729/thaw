@@ -151,6 +151,45 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,a1,+".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "const alias = double; module.exports.add = (left, right) => alias(sum(left, right)); function sum(left, right) { return left + right; } function double(value) { return value * 2; }",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,+,c4000000000000000,*".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (left, right) => normalize(left + right); function normalize(value) { const rounded = Math.round(value); if (rounded > 0) return rounded; return 0; }",
+            "add",
+            false,
+            &function,
+        ),
+        Some(
+            "expr:a0,a1,+,round,c0000000000000000,>,a0,a1,+,round,c0000000000000000,?"
+                .into()
+        )
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "function add(left, right) { return add(left, right); } module.exports.add = add;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "function helper(value) { return value * 2; } module.exports.add = (helper, right) => helper(right);",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
     for (source, allow_default) in [
         (
             "function add(left, right) { return left + right; } exports.add = add;",
