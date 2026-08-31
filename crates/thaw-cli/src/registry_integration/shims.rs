@@ -159,7 +159,8 @@ fn jit_numeric_export(
                     "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimEnd" => {
                         call.args.is_empty()
                     }
-                    "repeat" | "slice" | "substring" => call.args.len() == 1,
+                    "repeat" => call.args.len() == 1,
+                    "slice" | "substring" => call.args.len() <= 2,
                     _ => false,
                 };
                 arity_matches && is_string_expression(member.obj.as_ref(), parameters)
@@ -358,11 +359,25 @@ fn jit_numeric_export(
                     if !call.args.is_empty() {
                         return None;
                     }
-                } else if matches!(operation, "repeat" | "slice" | "substring") {
+                } else if operation == "repeat" {
                     let [count] = call.args.as_slice() else {
                         return None;
                     };
                     encode_expression(count.expr.as_ref(), parameters, locals, output)?;
+                } else if matches!(operation, "slice" | "substring") {
+                    match call.args.as_slice() {
+                        [] => output.push("c0000000000000000".into()),
+                        [start] => {
+                            encode_expression(start.expr.as_ref(), parameters, locals, output)?
+                        }
+                        [start, end] => {
+                            encode_expression(start.expr.as_ref(), parameters, locals, output)?;
+                            encode_expression(end.expr.as_ref(), parameters, locals, output)?;
+                            output.push(format!("{operation}2"));
+                            return Some(());
+                        }
+                        _ => return None,
+                    }
                 } else {
                     let [search] = call.args.as_slice() else {
                         return None;
@@ -1057,6 +1072,11 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
             stack.push(true);
         } else if matches!(token.as_str(), "repeat" | "slice" | "substring") {
             if stack.pop()? || !stack.pop()? {
+                return None;
+            }
+            stack.push(true);
+        } else if matches!(token.as_str(), "slice2" | "substring2") {
+            if stack.pop()? || stack.pop()? || !stack.pop()? {
                 return None;
             }
             stack.push(true);
