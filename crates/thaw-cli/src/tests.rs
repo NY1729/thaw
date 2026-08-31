@@ -75,7 +75,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
 
     assert_eq!(
         jit_numeric_export(
-            "module.exports.add = function(left, right) { if (left < right) return (left + right) * 2; return left - right; };",
+            "module.exports.add = function(left, right) { const sum = left + right; const doubled = sum * 2; const delta = left - right; if (left < right) return doubled; return delta; };",
             "add",
             false,
             &function,
@@ -96,6 +96,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     assert_eq!(
         jit_numeric_export(
             "console.log('side effect'); module.exports.add = (left, right) => left + right;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = function(left, right) { const value = sideEffect(left); return value + right; };",
             "add",
             false,
             &function,

@@ -21,17 +21,21 @@ fn jit_numeric_export(
     function: &thaw_bridge::DtsFunction,
 ) -> Option<String> {
     use thaw_parser::ast::{
-        AssignOp, AssignTarget, BinaryOp, Expr, Lit, ModuleItem, Pat, Prop, PropName, PropOrSpread,
-        SimpleAssignTarget, Stmt, UnaryOp,
+        AssignOp, AssignTarget, BinaryOp, Decl, Expr, Ident, Lit, ModuleItem, Pat, Prop, PropName,
+        PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp,
     };
 
     fn encode_expression(
         expression: &Expr,
         left: &str,
         right: &str,
+        locals: &std::collections::HashMap<String, Vec<String>>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         match expression {
+            Expr::Ident(identifier) if locals.contains_key(identifier.sym.as_ref()) => {
+                output.extend(locals.get(identifier.sym.as_ref())?.iter().cloned());
+            }
             Expr::Ident(identifier) if identifier.sym == left => output.push("x".into()),
             Expr::Ident(identifier) if identifier.sym == right => output.push("y".into()),
             Expr::Lit(Lit::Num(number)) => {
@@ -52,7 +56,7 @@ fn jit_numeric_export(
                 output.push(format!("c{:016x}", value.to_bits()));
             }
             Expr::Paren(parenthesized) => {
-                encode_expression(parenthesized.expr.as_ref(), left, right, output)?;
+                encode_expression(parenthesized.expr.as_ref(), left, right, locals, output)?;
             }
             Expr::Bin(binary)
                 if matches!(
@@ -60,8 +64,8 @@ fn jit_numeric_export(
                     BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
                 ) =>
             {
-                encode_expression(binary.left.as_ref(), left, right, output)?;
-                encode_expression(binary.right.as_ref(), left, right, output)?;
+                encode_expression(binary.left.as_ref(), left, right, locals, output)?;
+                encode_expression(binary.right.as_ref(), left, right, locals, output)?;
                 output.push(
                     match binary.op {
                         BinaryOp::Add => "+",
@@ -74,9 +78,9 @@ fn jit_numeric_export(
                 );
             }
             Expr::Cond(conditional) => {
-                encode_condition(conditional.test.as_ref(), left, right, output)?;
-                encode_expression(conditional.cons.as_ref(), left, right, output)?;
-                encode_expression(conditional.alt.as_ref(), left, right, output)?;
+                encode_condition(conditional.test.as_ref(), left, right, locals, output)?;
+                encode_expression(conditional.cons.as_ref(), left, right, locals, output)?;
+                encode_expression(conditional.alt.as_ref(), left, right, locals, output)?;
                 output.push("?".into());
             }
             _ => return None,
@@ -88,6 +92,7 @@ fn jit_numeric_export(
         expression: &Expr,
         left: &str,
         right: &str,
+        locals: &std::collections::HashMap<String, Vec<String>>,
         output: &mut Vec<String>,
     ) -> Option<()> {
         let Expr::Bin(binary) = expression else {
@@ -102,8 +107,8 @@ fn jit_numeric_export(
             BinaryOp::NotEq | BinaryOp::NotEqEq => "!=",
             _ => return None,
         };
-        encode_expression(binary.left.as_ref(), left, right, output)?;
-        encode_expression(binary.right.as_ref(), left, right, output)?;
+        encode_expression(binary.left.as_ref(), left, right, locals, output)?;
+        encode_expression(binary.right.as_ref(), left, right, locals, output)?;
         output.push(operator.into());
         (output.len() <= 128).then_some(())
     }
@@ -149,6 +154,21 @@ fn jit_numeric_export(
             }),
             _ => None,
         }
+    }
+
+    fn split_numeric_body(statements: &[Stmt]) -> Option<(Vec<(&Ident, &Expr)>, NumericBody<'_>)> {
+        let mut locals = Vec::new();
+        let mut offset = 0;
+        while let Some(Stmt::Decl(Decl::Var(declaration))) = statements.get(offset) {
+            for declarator in &declaration.decls {
+                let Pat::Ident(name) = &declarator.name else {
+                    return None;
+                };
+                locals.push((&name.id, declarator.init.as_deref()?));
+            }
+            offset += 1;
+        }
+        Some((locals, numeric_body(&statements[offset..])?))
     }
 
     if function.generic.is_some()
@@ -234,24 +254,27 @@ fn jit_numeric_export(
         return None;
     };
 
-    let (params, body): (Vec<&Pat>, NumericBody<'_>) = match callable {
+    let (params, local_initializers, body): (Vec<&Pat>, Vec<(&Ident, &Expr)>, NumericBody<'_>) =
+        match callable {
         Expr::Fn(function) if !function.function.is_async && !function.function.is_generator => {
             let body = function.function.body.as_ref()?;
+            let (locals, body) = split_numeric_body(&body.stmts)?;
             (
                 function.function.params.iter().map(|param| &param.pat).collect(),
-                numeric_body(&body.stmts)?,
+                locals,
+                body,
             )
         }
         Expr::Arrow(function) if !function.is_async && !function.is_generator => {
-            let body = match function.body.as_ref() {
+            let (locals, body) = match function.body.as_ref() {
                 thaw_parser::ast::ArrowFunctionBody::Expr(body) => {
-                    NumericBody::Expression(body.as_ref())
+                    (Vec::new(), NumericBody::Expression(body.as_ref()))
                 }
                 thaw_parser::ast::ArrowFunctionBody::FunctionBody(body) => {
-                    numeric_body(&body.stmts)?
+                    split_numeric_body(&body.stmts)?
                 }
             };
-            (function.params.iter().collect(), body)
+            (function.params.iter().collect(), locals, body)
         }
         _ => return None,
     };
@@ -261,16 +284,27 @@ fn jit_numeric_export(
     let mut expression = Vec::new();
     let left = left_param.id.sym.as_ref();
     let right = right_param.id.sym.as_ref();
+    let mut locals = std::collections::HashMap::new();
+    for (name, initializer) in local_initializers {
+        if name.sym == left || name.sym == right || locals.contains_key(name.sym.as_ref()) {
+            return None;
+        }
+        let mut encoded = Vec::new();
+        encode_expression(initializer, left, right, &locals, &mut encoded)?;
+        locals.insert(name.sym.to_string(), encoded);
+    }
     match body {
-        NumericBody::Expression(body) => encode_expression(body, left, right, &mut expression)?,
+        NumericBody::Expression(body) => {
+            encode_expression(body, left, right, &locals, &mut expression)?
+        }
         NumericBody::Conditional {
             test,
             consequent,
             alternate,
         } => {
-            encode_condition(test, left, right, &mut expression)?;
-            encode_expression(consequent, left, right, &mut expression)?;
-            encode_expression(alternate, left, right, &mut expression)?;
+            encode_condition(test, left, right, &locals, &mut expression)?;
+            encode_expression(consequent, left, right, &locals, &mut expression)?;
+            encode_expression(alternate, left, right, &locals, &mut expression)?;
             expression.push("?".into());
         }
     }

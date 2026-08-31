@@ -106,7 +106,7 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports = { add: function(left, right) { if (left < right) return (left + right) * 2; return left - right; }, sub: (left, right) => left - right };\n",
+        "module.exports = { add: function(left, right) { const sum = left + right; const doubled = sum * 2; const delta = left - right; if (left < right) return doubled; return delta; }, sub: (left, right) => left - right };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");

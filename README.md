@@ -1897,7 +1897,9 @@ extracts side-effect-free CommonJS function exports, including
 `module.exports = { ... }` packages, whose bodies fit this numeric IR, routes
 them to this backend, and omits fully extracted bundles from QuickJS.
 Single-return bodies and the common `if (...) return ...; return ...;` form are
-normalized to the same IR.
+normalized to the same IR. Side-effect-free local numeric declarations are
+expanded in declaration order, while calls, mutation, and forward references
+remain on the QuickJS path.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
 
