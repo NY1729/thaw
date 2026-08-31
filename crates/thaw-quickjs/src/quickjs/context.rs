@@ -11,6 +11,7 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         format!("{:?}", std::thread::current().id()),
                     )
                     .expect("failed to install OS thread identity");
+                install_napi_bridge(&ctx).expect("failed to install N-API bridge");
                 let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
                 install_shared_environment_functions(&ctx, shared_env)
                     .expect("failed to install shared Worker environment accessors");
@@ -835,4 +836,3 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
         context.with(f)
     })
 }
-

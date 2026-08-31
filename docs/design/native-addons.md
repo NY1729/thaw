@@ -855,3 +855,12 @@ generated ambient declarationへ保持する。HIRは呼び出しごとに具体
 signatureへ代入する。これにより`T extends object`へ渡された通常functionは`Json`へ狭められず、
 上記function引数ABIへ接続される。外部genericの実体はdynamic backendにあるため、通常のユーザー定義
 generic関数と異なりAOT bodyのmonomorphizationは生成しない。
+
+## 25. JavaScript wrapperとnative addonの複合package
+
+`bundle.js`と`native.node`を両方持つpackageはnative初期化を先、QuickJS module初期化を後に行う。
+N-API hostはexport名一覧とJSON call callbackをQuickJSへ登録し、bundle内のlocal `require`は
+global `require.addon()`を継承する。これにより`node-gyp-build`が提供する高速経路と同じ形で
+JavaScript wrapperからprimitive native functionを呼べる。実C addon E2Eはwrapper経由で
+`add(41, 1)`を呼び、registry削除後の単一実行ファイルが`42`を出力するところまで検証する。
+class constructor、object handle、QuickJS object/function identityのN-API変換は次段階とする。

@@ -370,6 +370,17 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          // accurate, only present as a string.\n\
          if (typeof globalThis.__dirname === 'undefined') {{ globalThis.__dirname = '/thaw_modules/package'; }}\n\
          if (typeof globalThis.__filename === 'undefined') {{ globalThis.__filename = '/thaw_modules/package/index.js'; }}\n\
+         if (typeof globalThis.__thaw_napi_bridge_exports === 'function') {{\n\
+         \x20\x20var __thaw_addon = {{}};\n\
+         \x20\x20JSON.parse(globalThis.__thaw_napi_bridge_exports()).forEach(function(name) {{\n\
+         \x20\x20\x20\x20__thaw_addon[name] = function() {{\n\
+         \x20\x20\x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_call(name, JSON.stringify(Array.prototype.slice.call(arguments))));\n\
+         \x20\x20\x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\
+         \x20\x20\x20\x20\x20\x20return result;\n\
+         \x20\x20\x20\x20}};\n\
+         \x20\x20}});\n\
+         \x20\x20globalThis.require.addon = function() {{ return __thaw_addon; }};\n\
+         }}\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
          \x20\x20if (typeof module.exports === 'object' && module.exports !== null) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
@@ -431,4 +442,3 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
     out.push_str("}\n");
     out
 }
-
