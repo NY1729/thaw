@@ -50,8 +50,13 @@ fn jit_numeric_export(
         };
         match property.sym.as_ref() {
             "abs" => Some("abs"),
+            "ceil" => Some("ceil"),
+            "floor" => Some("floor"),
             "min" => Some("min"),
             "max" => Some("max"),
+            "round" => Some("round"),
+            "sqrt" => Some("sqrt"),
+            "trunc" => Some("trunc"),
             _ => None,
         }
     }
@@ -107,12 +112,12 @@ fn jit_numeric_export(
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
-                if method == "abs" {
+                if matches!(method, "abs" | "ceil" | "floor" | "round" | "sqrt" | "trunc") {
                     let [argument] = call.args.as_slice() else {
                         return None;
                     };
                     encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
-                    output.push("abs".into());
+                    output.push(method.into());
                 } else if call.args.is_empty() {
                     let value = if method == "min" {
                         f64::INFINITY
@@ -405,7 +410,11 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 return None;
             }
             depth = 1;
-        } else if matches!(token.as_str(), "neg" | "abs") {
+        } else if matches!(token.as_str(), "ceil" | "floor" | "round" | "trunc") {
+            if depth != 1 {
+                return None;
+            }
+        } else if matches!(token.as_str(), "neg" | "abs" | "sqrt") {
             if depth == 0 {
                 return None;
             }
