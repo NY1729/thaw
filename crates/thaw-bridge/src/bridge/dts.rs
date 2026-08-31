@@ -2273,6 +2273,101 @@ fn resolve_ts_type_with_substitution(
                 Err(reason) => DtsType::Unsupported(reason),
             }
         }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            if function.type_params.is_some() {
+                return DtsType::Unsupported("generic callback types are not supported".into());
+            }
+            let mut params = Vec::with_capacity(function.params.len());
+            let mut optional = Vec::with_capacity(function.params.len());
+            let mut rest = None;
+            for (index, parameter) in function.params.iter().enumerate() {
+                let (annotation, is_optional) = match parameter {
+                    TsFnParam::Ident(parameter) => {
+                        let Some(annotation) = &parameter.type_ann else {
+                            return DtsType::Unsupported(format!(
+                                "callback parameter `{}` has no type annotation",
+                                parameter.id.sym
+                            ));
+                        };
+                        (annotation.type_ann.as_ref(), parameter.id.optional)
+                    }
+                    TsFnParam::Rest(parameter) if index + 1 == function.params.len() => {
+                        let Some(annotation) = &parameter.type_ann else {
+                            return DtsType::Unsupported(
+                                "callback rest parameter has no type annotation".into(),
+                            );
+                        };
+                        let TsType::TsArrayType(array) = annotation.type_ann.as_ref() else {
+                            return DtsType::Unsupported(
+                                "callback rest parameter must use an array type".into(),
+                            );
+                        };
+                        match resolve_ts_type_with_substitution(
+                            &array.elem_type,
+                            substitution,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        ) {
+                            DtsType::Native(ty) => rest = Some(ty),
+                            DtsType::Unsupported(reason) => {
+                                return DtsType::Unsupported(format!(
+                                    "callback rest element type: {reason}"
+                                ));
+                            }
+                        }
+                        continue;
+                    }
+                    TsFnParam::Rest(_) => {
+                        return DtsType::Unsupported("callback rest parameter must be last".into());
+                    }
+                    _ => {
+                        return DtsType::Unsupported(
+                            "callback parameters must be identifiers or a trailing rest parameter"
+                                .into(),
+                        );
+                    }
+                };
+                let mut ty = match resolve_ts_type_with_substitution(
+                    annotation,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                ) {
+                    DtsType::Native(ty) => ty,
+                    DtsType::Unsupported(_) => HirType::Json,
+                };
+                if is_optional {
+                    ty = optional_hir_type(ty);
+                }
+                params.push(ty);
+                optional.push(is_optional);
+            }
+            match resolve_ts_type_with_substitution(
+                &function.type_ann.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            ) {
+                DtsType::Native(ret) => {
+                    DtsType::Native(if rest.is_some() || optional.iter().any(|value| *value) {
+                        HirType::CallableFunction(
+                            params,
+                            HirOptionalMask::from_bools(&optional),
+                            rest.map(Box::new),
+                            Box::new(ret),
+                        )
+                    } else {
+                        HirType::Function(params, Box::new(ret))
+                    })
+                }
+                DtsType::Unsupported(reason) => {
+                    DtsType::Unsupported(format!("callback return type: {reason}"))
+                }
+            }
+        }
         TsType::TsTypeLit(type_lit) => {
             let mut fields = Vec::with_capacity(type_lit.members.len());
             for member in &type_lit.members {
