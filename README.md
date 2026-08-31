@@ -1439,7 +1439,12 @@ The workspace crates have narrow responsibilities:
   argument callback into a new element type. Explicit input/output type
   arguments, shallow object identity, empty and awaited sources, named
   callbacks, captures and optional `thisArg` evaluation are supported. Its
-  full one-to-three argument list also accepts statically sized tuple spreads
+  full one-to-three argument list also accepts statically sized tuple spreads.
+  `Map`/`Set` sources reuse the exact same `__thaw_map_snapshot_entries`/
+  `__thaw_map_snapshot_keys` conversion array-literal spreads (`[...map]`/
+  `[...set]`) already use, matching each container's own default iterator
+  shape: `[key, value]` pairs for a `Map`, deduplicated insertion-order
+  elements for a `Set`
 - `Array.from({ length })` supports the array-like-object overload alongside
   the real-array/string source above. A plain `{ length }` object has no
   indexed properties in this compiler's fixed-layout object model, so every
