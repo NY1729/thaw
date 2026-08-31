@@ -1066,6 +1066,18 @@ impl<'ctx> HirCompiler<'ctx> {
                             .as_global_value()
                             .as_pointer_value()
                             .into(),
+                        self.module
+                            .get_function("thaw_parse_float")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
+                        self.module
+                            .get_function("thaw_parse_int")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
                     ],
                     "jit_numeric_result",
                 )

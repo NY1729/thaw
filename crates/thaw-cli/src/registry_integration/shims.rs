@@ -136,6 +136,46 @@ fn jit_numeric_export(
         }
     }
 
+    fn number_parser(
+        call: &CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<&'static str> {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let name = match callee.as_ref() {
+            Expr::Ident(identifier)
+                if !parameters.contains_key(identifier.sym.as_ref())
+                    && !locals.contains_key(identifier.sym.as_ref())
+                    && !helpers.contains_key(identifier.sym.as_ref()) =>
+            {
+                identifier.sym.as_ref()
+            }
+            Expr::Member(member)
+                if !parameters.contains_key("Number") && !locals.contains_key("Number") =>
+            {
+                let Expr::Ident(receiver) = member.obj.as_ref() else {
+                    return None;
+                };
+                let MemberProp::Ident(property) = &member.prop else {
+                    return None;
+                };
+                (receiver.sym == "Number").then_some(property.sym.as_ref())?
+            }
+            _ => return None,
+        };
+        match name {
+            "parseFloat" => Some("parsefloat"),
+            "parseInt" => Some("parseint"),
+            _ => None,
+        }
+    }
+
     fn math_constant(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -652,6 +692,42 @@ fn jit_numeric_export(
                             output.push(format!("{operation}2"));
                             return Some(());
                         }
+                        _ => return None,
+                    }
+                }
+                output.push(operation.into());
+            }
+            Expr::Call(call) if number_parser(call, parameters, locals, context.helpers).is_some() => {
+                let operation = number_parser(call, parameters, locals, context.helpers)?;
+                let radix = if let Some((value, radix)) = call.args.split_first() {
+                    let mut encoded = Vec::new();
+                    encode_expression(
+                        value.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut encoded,
+                    )?;
+                    append_string(encoded, output)?;
+                    radix
+                } else {
+                    encode_string("undefined", output)?;
+                    &[]
+                };
+                if operation == "parsefloat" {
+                    if !radix.is_empty() {
+                        return None;
+                    }
+                } else {
+                    match radix {
+                        [] => output.push(format!("c{:016x}", 0.0f64.to_bits())),
+                        [radix] => encode_number(
+                            radix.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?,
                         _ => return None,
                     }
                 }
@@ -1610,8 +1686,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::String);
-        } else if token == "strnum" {
+        } else if matches!(token.as_str(), "strnum" | "parsefloat") {
             if stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if token == "parseint" {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::String {
                 return None;
             }
             stack.push(JitKind::Number);
