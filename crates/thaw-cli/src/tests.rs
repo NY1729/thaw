@@ -122,6 +122,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (left, right) => ((left & 255) ^ right) >>> 0;",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,c406fe00000000000,band,a1,bxor,c0000000000000000,ushr".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (Math, right) => Math.abs(Math % right);",
             "add",
             false,

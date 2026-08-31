@@ -1903,8 +1903,9 @@ separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
 HIR through LLVM to a small W^X runtime which specializes and caches numeric
 expressions containing arguments, constants, unary negation,
 `Math.abs/min/max/floor/ceil/trunc/round/sqrt`, and nested
-`add/sub/mul/div/remainder` operations, comparisons, and conditional selection
-on first use. Its
+`add/sub/mul/div/remainder` operations, JavaScript `ToInt32`/`ToUint32`
+bitwise and shift operations, comparisons, and conditional selection on first
+use. Its
 end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
 extracts side-effect-free CommonJS function exports, including
