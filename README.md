@@ -1793,6 +1793,19 @@ The workspace crates have narrow responsibilities:
   unlikely, and unlike those six, chaining onto a fresh method-call result
   (`arr.filter(...).entries()`) is common enough that requiring
   already-known receiver type information would break the common case
+- `Map.groupBy(items, keyfn)` groups a homogeneous native array's elements
+  by a typed zero-to-two-argument `(item, index) => key` callback (the
+  specification's key function takes no third "receiver array" argument,
+  unlike `Array.prototype`'s own callbacks) into a new `Map<K, T[]>`. Built
+  entirely from the same generic primitives `.get()`/`.set()`/`.push()`
+  already lower to, plus `__thaw_map_new` for the fresh map and
+  `ArrayAlloc`/`ArrayLen`/`TypedIndex` for the source array, so it needed no
+  new runtime function or codegen. Each key's bucket starts as a fresh
+  empty array and grows via `.push()`'s own in-place handle mutation, so
+  repeated keys accumulate correctly rather than replacing the bucket on
+  every match. Named callbacks, captures, empty sources and the statically
+  sized tuple spread form (with a fully-typed named callback, matching
+  every other spread-argument builtin) are supported
 - `Array.prototype.keys()`/`.values()`/`.entries()` -- previously only
   `Map`/`Set` had these -- return a real, eagerly-built array the same
   way (`0..length` indices, the array itself since it's already iterable,
