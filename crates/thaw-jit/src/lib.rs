@@ -1005,6 +1005,7 @@ enum NumericValue {
     Remainder,
     Select,
     AsBoolean,
+    StrictMismatch(bool),
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -1110,6 +1111,8 @@ impl NumericProgram {
                     "%" => Some(NumericValue::Remainder),
                     "?" => Some(NumericValue::Select),
                     "asbool" => Some(NumericValue::AsBoolean),
+                    "strictfalse" => Some(NumericValue::StrictMismatch(false)),
+                    "stricttrue" => Some(NumericValue::StrictMismatch(true)),
                     value => value
                         .strip_prefix('a')
                         .or_else(|| value.strip_prefix('b'))
@@ -1473,6 +1476,16 @@ impl NumericProgram {
                     if depth == 0 {
                         return None;
                     }
+                }
+                NumericValue::StrictMismatch(result) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let destination = depth - 2;
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(u8::from(*result)).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (destination << 3)]);
+                    depth -= 1;
                 }
             }
         }

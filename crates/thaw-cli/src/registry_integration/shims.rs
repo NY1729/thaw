@@ -794,19 +794,35 @@ fn jit_numeric_export(
                 _ => None,
             };
             if let Some(operator) = operator {
-                let left_string = string_parameter(binary.left.as_ref(), parameters);
-                let right_string = string_parameter(binary.right.as_ref(), parameters);
-                if left_string.is_some() || right_string.is_some() {
-                    output.push(left_string?.into());
-                    output.push(right_string?.into());
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                encode_expression(binary.left.as_ref(), parameters, locals, &mut left)?;
+                encode_expression(binary.right.as_ref(), parameters, locals, &mut right)?;
+                let left_kind = jit_expression_kind(&left)?.0;
+                let right_kind = jit_expression_kind(&right)?.0;
+                let strict = matches!(binary.op, BinaryOp::EqEqEq | BinaryOp::NotEqEq);
+                if strict && left_kind != right_kind {
+                    output.extend(left);
+                    output.extend(right);
+                    output.push(
+                        if binary.op == BinaryOp::NotEqEq {
+                            "stricttrue"
+                        } else {
+                            "strictfalse"
+                        }
+                        .into(),
+                    );
+                } else if left_kind == JitKind::String && right_kind == JitKind::String {
+                    output.extend(left);
+                    output.extend(right);
                     output.push("strcmp".into());
                     output.push(format!("c{:016x}", 0.0f64.to_bits()));
                     output.push(operator.into());
-                    return (output.len() <= 128).then_some(());
+                } else {
+                    append_number(left, output)?;
+                    append_number(right, output)?;
+                    output.push(operator.into());
                 }
-                encode_expression(binary.left.as_ref(), parameters, locals, output)?;
-                encode_expression(binary.right.as_ref(), parameters, locals, output)?;
-                output.push(operator.into());
                 return (output.len() <= 128).then_some(());
             }
         }
@@ -1364,6 +1380,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(consequent);
+        } else if matches!(token.as_str(), "strictfalse" | "stricttrue") {
+            stack.pop()?;
+            stack.pop()?;
+            stack.push(JitKind::Boolean);
         } else if token == "strcmp" {
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
                 return None;

@@ -408,6 +408,35 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:s0,s1,strcmp,c0000000000000000,<".into())
     );
+    let mut mixed_compare = string_less.clone();
+    mixed_compare.params[1].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::F64);
+    for (source, expected) in [
+        (
+            "module.exports.less = (left, right) => left < right;",
+            "expr:s0,strnum,a1,<",
+        ),
+        (
+            "module.exports.less = (left, right) => left == right;",
+            "expr:s0,strnum,a1,==",
+        ),
+        (
+            "module.exports.less = (left, right) => left === right;",
+            "expr:s0,a1,strictfalse",
+        ),
+        (
+            "module.exports.less = (left, right) => left !== right;",
+            "expr:s0,a1,stricttrue",
+        ),
+        (
+            "module.exports.less = function(left, right) { const normalized = left.trim(); return normalized == right; };",
+            "expr:s0,trim,strnum,a1,==",
+        ),
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "less", false, &mixed_compare),
+            Some(expected.into())
+        );
+    }
     let mut string_concat = string_length.clone();
     string_concat.name = "greet".into();
     string_concat.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);
