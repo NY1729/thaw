@@ -2008,6 +2008,8 @@ The typed JIT also accepts the optional UTF-16 position argument of
 `startsWith`, `endsWith`, `includes`, `indexOf`, and `lastIndexOf`.
 `localeCompare`, `isWellFormed`, and `toWellFormed` likewise stay on the typed
 JIT path; the latter two use Thaw's valid-UTF-8 native string invariant.
+String-search `replace` and `replaceAll` with string replacement values use
+the arena-backed three-string JIT path as well.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,

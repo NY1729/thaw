@@ -626,6 +626,38 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:s0,a1,t20,{operation}"))
         );
     }
+    let string_replace = thaw_bridge::DtsFunction {
+        name: "replace".into(),
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+            (
+                "search".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+            (
+                "replacement".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+        ],
+        required_params: 3,
+        ..string_repeat.clone()
+    };
+    for (method, operation) in [("replace", "replace"), ("replaceAll", "replaceall")] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!(
+                    "module.exports.replace = (value, search, replacement) => value.{method}(search, replacement);"
+                ),
+                "replace",
+                false,
+                &string_replace,
+            ),
+            Some(format!("expr:s0,s1,s2,{operation}"))
+        );
+    }
     let optional_string = thaw_bridge::DtsFunction {
         name: "at".into(),
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
