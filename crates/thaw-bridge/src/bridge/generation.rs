@@ -372,8 +372,21 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          if (typeof globalThis.__filename === 'undefined') {{ globalThis.__filename = '/thaw_modules/package/index.js'; }}\n\
          if (typeof globalThis.__thaw_napi_bridge_exports === 'function') {{\n\
          \x20\x20var __thaw_addon = {{}};\n\
+         \x20\x20var __thaw_napi_handle = function(operation, target, name, args) {{\n\
+         \x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_handle(operation, String(target), name || '', JSON.stringify(args || [])));\n\
+         \x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\
+         \x20\x20\x20\x20return result;\n\
+         \x20\x20}};\n\
+         \x20\x20var __thaw_napi_proxy = function(handle) {{ return new Proxy({{}}, {{\n\
+         \x20\x20\x20\x20get: function(_, name) {{\n\
+         \x20\x20\x20\x20\x20\x20var result = __thaw_napi_handle('get', handle, String(name), []);\n\
+         \x20\x20\x20\x20\x20\x20return result.kind === 'method' ? function() {{ return __thaw_napi_handle('call', handle, String(name), Array.prototype.slice.call(arguments)).value; }} : result.value;\n\
+         \x20\x20\x20\x20}},\n\
+         \x20\x20\x20\x20set: function(_, name, value) {{ __thaw_napi_handle('set', handle, String(name), [value]); return true; }}\n\
+         \x20\x20}}); }};\n\
          \x20\x20JSON.parse(globalThis.__thaw_napi_bridge_exports()).forEach(function(name) {{\n\
          \x20\x20\x20\x20__thaw_addon[name] = function() {{\n\
+         \x20\x20\x20\x20\x20\x20if (new.target) {{ var created = __thaw_napi_handle('construct', name, '', Array.prototype.slice.call(arguments)); return __thaw_napi_proxy(created.value); }}\n\
          \x20\x20\x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_call(name, JSON.stringify(Array.prototype.slice.call(arguments))));\n\
          \x20\x20\x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\
          \x20\x20\x20\x20\x20\x20return result;\n\

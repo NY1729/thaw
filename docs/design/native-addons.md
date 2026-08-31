@@ -863,4 +863,7 @@ N-API hostはexport名一覧とJSON call callbackをQuickJSへ登録し、bundle
 global `require.addon()`を継承する。これにより`node-gyp-build`が提供する高速経路と同じ形で
 JavaScript wrapperからprimitive native functionを呼べる。実C addon E2Eはwrapper経由で
 `add(41, 1)`を呼び、registry削除後の単一実行ファイルが`42`を出力するところまで検証する。
-class constructor、object handle、QuickJS object/function identityのN-API変換は次段階とする。
+class exportは`new.target`をhandle bridgeへ転送し、返されたN-API instanceをQuickJS Proxyとして
+保持する。Proxyのget/setはproperty ABIへ、method呼び出しはreceiver付きmethod ABIへ転送する。
+同じE2Eでnative classをconstructしてmethod結果を取得する。QuickJS object/function identityを
+constructor引数としてN-API valueへ変換する処理は次段階とする。

@@ -96,13 +96,105 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
         host.libraries.push(handle);
         host.module_envs.push(env);
     });
-    thaw_quickjs::register_napi_bridge(thaw_napi_export_names, thaw_napi_call);
+    thaw_quickjs::register_napi_bridge(
+        thaw_napi_export_names,
+        thaw_napi_call,
+        thaw_napi_handle_bridge,
+    );
     Ok(())
 }
 
 unsafe extern "C" fn thaw_napi_export_names() -> *const c_char {
     let names = HOST.with(|host| host.borrow().functions.keys().cloned().collect::<Vec<_>>());
     CString::new(serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()))
+        .unwrap_or_default()
+        .into_raw()
+}
+
+unsafe extern "C" fn thaw_napi_handle_bridge(
+    operation: *const c_char,
+    target: *const c_char,
+    name: *const c_char,
+    args: *const c_char,
+) -> *const c_char {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let operation = text(operation)?;
+        let target = text(target)?;
+        let name = text(name)?;
+        let handle = if operation == "construct" {
+            let target = CString::new(target).map_err(|_| "export contains NUL")?;
+            thaw_napi_get_export(target.as_ptr())
+        } else {
+            target
+                .parse::<u64>()
+                .map_err(|_| "invalid native addon handle")?
+        };
+        if handle == 0 {
+            return Err("unknown native addon export".into());
+        }
+        match operation.as_str() {
+            "construct" => {
+                let value = construct_handle_impl(handle, args, true);
+                if value.error.is_null() {
+                    Ok(serde_json::json!({ "kind": "handle", "value": value.value.to_string() }))
+                } else {
+                    Err(CStr::from_ptr(value.error).to_string_lossy().into_owned())
+                }
+            }
+            "get" => {
+                let env = module_env_for_handle(handle)?;
+                let property = CString::new(name).map_err(|_| "property contains NUL")?;
+                let mut value = ptr::null_mut();
+                let status = napi_get_named_property(
+                    env,
+                    handle as NapiValue,
+                    property.as_ptr(),
+                    &mut value,
+                );
+                take_env_exception(env)?;
+                if status != NAPI_OK || value.is_null() {
+                    return Err(format!("failed to get native property: status {status}"));
+                }
+                if matches!(value_ref(value), Ok(Value::Function(_))) {
+                    Ok(serde_json::json!({ "kind": "method" }))
+                } else {
+                    Ok(serde_json::json!({
+                        "kind": "value",
+                        "value": json_from_value_with_undefined(wait_for_promise(value)?, true)?
+                    }))
+                }
+            }
+            "call" => {
+                let name = CString::new(name).map_err(|_| "method contains NUL")?;
+                let result = call_method_impl(handle, name.as_ptr(), args, true);
+                if result.error.is_null() {
+                    let value = CStr::from_ptr(result.value).to_string_lossy();
+                    Ok(serde_json::json!({
+                        "kind": "value",
+                        "value": serde_json::from_str::<serde_json::Value>(&value)
+                            .map_err(|error| error.to_string())?
+                    }))
+                } else {
+                    Err(CStr::from_ptr(result.error).to_string_lossy().into_owned())
+                }
+            }
+            "set" => {
+                let name = CString::new(name).map_err(|_| "property contains NUL")?;
+                let result = set_property_impl(handle, name.as_ptr(), args, true);
+                if result.error.is_null() {
+                    Ok(serde_json::json!({ "kind": "value", "value": true }))
+                } else {
+                    Err(CStr::from_ptr(result.error).to_string_lossy().into_owned())
+                }
+            }
+            _ => Err(format!("unknown native addon handle operation `{operation}`")),
+        }
+    })();
+    let value = match result {
+        Ok(value) => value,
+        Err(error) => serde_json::json!({ "__thaw_error__": error }),
+    };
+    CString::new(value.to_string())
         .unwrap_or_default()
         .into_raw()
 }
