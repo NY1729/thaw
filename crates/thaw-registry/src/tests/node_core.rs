@@ -93,6 +93,8 @@ fn events_builtin_runs_event_emitter_through_commonjs_require() {
              function Child() { EventEmitter.call(this); }\n\
              Child.prototype = Object.create(EventEmitter.prototype);\n\
              Child.prototype.constructor = Child;\n\
+             function LazyChild() {}\n\
+             LazyChild.prototype = Object.create(EventEmitter.prototype);\n\
              module.exports = function () {\n\
              \x20 var emitter = new Child(); var seen = [];\n\
              \x20 function regular(value) { seen.push('regular:' + value); }\n\
@@ -100,7 +102,8 @@ fn events_builtin_runs_event_emitter_through_commonjs_require() {
              \x20 emitter.prependOnceListener('value', function(value) { seen.push('once:' + value); });\n\
              \x20 var first = emitter.emit('value', 1); var second = emitter.emit('value', 2);\n\
              \x20 emitter.off('value', regular); var third = emitter.emit('value', 3);\n\
-             \x20 return [seen.join(','), first, second, third, emitter.listenerCount('value'), emitter.eventNames().length];\n\
+             \x20 var lazy = new LazyChild(), lazySeen = 0; lazy.on('value', function() { lazySeen++; }); lazy.emit('value');\n\
+             \x20 return [seen.join(','), first, second, third, emitter.listenerCount('value'), emitter.eventNames().length, lazySeen];\n\
              };",
         )
         .unwrap();
@@ -124,7 +127,7 @@ fn events_builtin_runs_event_emitter_through_commonjs_require() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"["once:1,regular:1,regular:2",true,true,false,0,0]"#
+        r#"["once:1,regular:1,regular:2",true,true,false,0,0,1]"#
     );
 
     let _ = fs::remove_dir_all(&dir);

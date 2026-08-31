@@ -24,6 +24,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              }\n\
              EventEmitter.prototype._add = function(event, listener, prepend, once) {\n\
              \x20\x20if (typeof listener !== 'function') throw new TypeError('listener must be a function');\n\
+             \x20\x20if (!this._events) this._events = Object.create(null);\n\
              \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = this._events[name] || (this._events[name] = []);\n\
              \x20\x20var entry = { listener: listener, once: Boolean(once) };\n\
              \x20\x20if (prepend) list.unshift(entry); else list.push(entry);\n\
