@@ -70,6 +70,26 @@ type NapiBridgeHandle = unsafe extern "C" fn(
 static NAPI_BRIDGE: Mutex<Option<(NapiBridgeExports, NapiBridgeCallback, NapiBridgeHandle)>> =
     Mutex::new(None);
 
+thread_local! {
+    static ACTIVE_NAPI_CONTEXT: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
+}
+
+struct ActiveNapiContext(*const ());
+
+impl ActiveNapiContext {
+    fn enter(ctx: &Ctx<'_>) -> Self {
+        let previous =
+            ACTIVE_NAPI_CONTEXT.with(|active| active.replace(ctx as *const Ctx<'_> as *const ()));
+        Self(previous)
+    }
+}
+
+impl Drop for ActiveNapiContext {
+    fn drop(&mut self) {
+        ACTIVE_NAPI_CONTEXT.with(|active| active.set(self.0));
+    }
+}
+
 pub fn register_napi_bridge(
     exports: NapiBridgeExports,
     call: NapiBridgeCallback,
@@ -83,16 +103,21 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         return Ok(());
     };
     let exports = Function::new(ctx.clone(), move || unsafe { to_str(exports()) })?;
-    let call = Function::new(ctx.clone(), move |name: String, args: String| unsafe {
-        let name = CString::new(name).unwrap_or_default();
-        let args = CString::new(args).unwrap_or_default();
-        to_str(call(name.as_ptr(), args.as_ptr()))
-    })?;
+    let call = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'_>, name: String, args: String| unsafe {
+            let _active = ActiveNapiContext::enter(&ctx);
+            let name = CString::new(name).unwrap_or_default();
+            let args = CString::new(args).unwrap_or_default();
+            to_str(call(name.as_ptr(), args.as_ptr()))
+        },
+    )?;
     ctx.globals().set("__thaw_napi_bridge_exports", exports)?;
     ctx.globals().set("__thaw_napi_bridge_call", call)?;
     let handle = Function::new(
         ctx.clone(),
-        move |operation: String, target: String, name: String, args: String| unsafe {
+        move |ctx: Ctx<'_>, operation: String, target: String, name: String, args: String| unsafe {
+            let _active = ActiveNapiContext::enter(&ctx);
             let operation = CString::new(operation).unwrap_or_default();
             let target = CString::new(target).unwrap_or_default();
             let name = CString::new(name).unwrap_or_default();
