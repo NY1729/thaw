@@ -21,8 +21,9 @@ fn jit_numeric_export(
     function: &thaw_bridge::DtsFunction,
 ) -> Option<String> {
     use thaw_parser::ast::{
-        AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr, Ident, Lit, MemberProp,
-        ModuleItem, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp,
+        AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr, Ident, Lit,
+        MemberProp, ModuleItem, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
+        UnaryOp,
     };
 
     fn math_method(
@@ -323,6 +324,84 @@ fn jit_numeric_export(
         Some(())
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ExportStyle {
+        Whole,
+        Named,
+    }
+
+    fn exported_callable<'a>(
+        assignment: &'a AssignExpr,
+        export_name: &str,
+        allow_default: bool,
+    ) -> Option<(ExportStyle, Option<&'a Expr>)> {
+        if assignment.op != AssignOp::Assign {
+            return None;
+        }
+        let AssignTarget::Simple(SimpleAssignTarget::Member(target)) = &assignment.left else {
+            return None;
+        };
+        let is_module_exports = matches!(target.obj.as_ref(), Expr::Ident(module) if module.sym == "module")
+            && matches!(&target.prop, MemberProp::Ident(property) if property.sym == "exports");
+        if is_module_exports {
+            if let Expr::Object(object) = assignment.right.as_ref() {
+                let mut selected = None;
+                for property in &object.props {
+                    let PropOrSpread::Prop(property) = property else {
+                        return None;
+                    };
+                    let Prop::KeyValue(property) = property.as_ref() else {
+                        return None;
+                    };
+                    if !matches!(property.value.as_ref(), Expr::Fn(_) | Expr::Arrow(_)) {
+                        return None;
+                    }
+                    let is_target = match &property.key {
+                        PropName::Ident(identifier) => identifier.sym == export_name,
+                        PropName::Str(string) => string.value.to_string_lossy() == export_name,
+                        _ => return None,
+                    };
+                    if is_target && selected.replace(property.value.as_ref()).is_some() {
+                        return None;
+                    }
+                }
+                return Some((ExportStyle::Whole, selected));
+            }
+            if !matches!(assignment.right.as_ref(), Expr::Fn(_) | Expr::Arrow(_)) {
+                return None;
+            }
+            return Some((
+                ExportStyle::Whole,
+                allow_default.then_some(assignment.right.as_ref()),
+            ));
+        }
+        let name = if let Expr::Member(object) = target.obj.as_ref() {
+            if !matches!(object.obj.as_ref(), Expr::Ident(module) if module.sym == "module")
+                || !matches!(&object.prop, MemberProp::Ident(property) if property.sym == "exports")
+            {
+                return None;
+            }
+            match &target.prop {
+                MemberProp::Ident(property) => property.sym.as_ref(),
+                _ => return None,
+            }
+        } else if matches!(target.obj.as_ref(), Expr::Ident(exports) if exports.sym == "exports") {
+            match &target.prop {
+                MemberProp::Ident(property) => property.sym.as_ref(),
+                _ => return None,
+            }
+        } else {
+            return None;
+        };
+        if !matches!(assignment.right.as_ref(), Expr::Fn(_) | Expr::Arrow(_)) {
+            return None;
+        }
+        Some((
+            ExportStyle::Named,
+            (name == export_name).then_some(assignment.right.as_ref()),
+        ))
+    }
+
     if function.generic.is_some()
         || function.required_params != function.params.len()
         || function.params.len() > 16
@@ -347,71 +426,32 @@ fn jit_numeric_export(
     }
 
     let module = thaw_parser::parse_javascript(source).ok()?;
-    let [ModuleItem::Stmt(Stmt::Expr(statement))] = module.body.as_slice() else {
-        return None;
-    };
-    let Expr::Assign(assignment) = statement.expr.as_ref() else {
-        return None;
-    };
-    if assignment.op != AssignOp::Assign {
-        return None;
-    }
-    let AssignTarget::Simple(SimpleAssignTarget::Member(target)) = &assignment.left else {
-        return None;
-    };
-    let is_module_exports = matches!(target.obj.as_ref(), Expr::Ident(module) if module.sym == "module")
-        && matches!(&target.prop, thaw_parser::ast::MemberProp::Ident(property) if property.sym == "exports")
-    ;
-    let callable = if is_module_exports {
-        if let Expr::Object(object) = assignment.right.as_ref() {
-            let mut selected = None;
-            for property in &object.props {
-                let PropOrSpread::Prop(property) = property else {
-                    return None;
-                };
-                let Prop::KeyValue(property) = property.as_ref() else {
-                    return None;
-                };
-                if !matches!(property.value.as_ref(), Expr::Fn(_) | Expr::Arrow(_)) {
-                    return None;
-                }
-                let is_target = match &property.key {
-                    PropName::Ident(identifier) => identifier.sym == export_name,
-                    PropName::Str(string) => string.value.to_string_lossy() == export_name,
-                    _ => return None,
-                };
-                if is_target {
-                    selected = Some(property.value.as_ref());
-                }
-            }
-            selected?
-        } else {
-            if !allow_default {
-                return None;
-            }
-            assignment.right.as_ref()
+    let mut style = None;
+    let mut callable = None;
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Expr(statement)) = item else {
+            return None;
+        };
+        if matches!(statement.expr.as_ref(), Expr::Lit(Lit::Str(_))) {
+            continue;
         }
-    } else if let Expr::Member(object) = target.obj.as_ref() {
-        if matches!(object.obj.as_ref(), Expr::Ident(module) if module.sym == "module")
-            && matches!(&object.prop, thaw_parser::ast::MemberProp::Ident(property) if property.sym == "exports")
-        {
-            let name = match &target.prop {
-                thaw_parser::ast::MemberProp::Ident(property) => property.sym.as_ref(),
-                _ => return None,
-            };
-            (name == export_name).then_some(assignment.right.as_ref())?
-        } else {
+        let Expr::Assign(assignment) = statement.expr.as_ref() else {
+            return None;
+        };
+        let (assignment_style, selected) =
+            exported_callable(assignment, export_name, allow_default)?;
+        if style.replace(assignment_style).is_some_and(|style| {
+            style != assignment_style || assignment_style == ExportStyle::Whole
+        }) {
             return None;
         }
-    } else if matches!(target.obj.as_ref(), Expr::Ident(exports) if exports.sym == "exports") {
-        let name = match &target.prop {
-            thaw_parser::ast::MemberProp::Ident(property) => property.sym.as_ref(),
-            _ => return None,
-        };
-        (name == export_name).then_some(assignment.right.as_ref())?
-    } else {
-        return None;
-    };
+        if let Some(selected) = selected {
+            if callable.replace(selected).is_some() {
+                return None;
+            }
+        }
+    }
+    let callable = callable?;
 
     let (params, local_initializers, body): (Vec<&Pat>, Vec<(&Ident, &Expr)>, NumericBody<'_>) =
         match callable {
