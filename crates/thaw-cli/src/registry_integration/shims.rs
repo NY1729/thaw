@@ -1251,14 +1251,18 @@ fn generate_registry_shims(
             });
             if is_fallback {
                 if let Some((symbol, declaration)) =
-                    typed_dynamic_declaration(&pkg.name, function, pkg.native_addon.is_some())
+                    typed_dynamic_declaration(
+                        &pkg.name,
+                        function,
+                        pkg.native_addon.is_some() && pkg.bundle_js.is_none(),
+                    )
                 {
                     shim.push_str(&declaration);
                     typed_targets.insert((pkg.name.clone(), function.name.clone()), symbol);
                 }
             }
         }
-        if pkg.native_addon.is_some() {
+        if pkg.native_addon.is_some() && pkg.bundle_js.is_none() {
             shim.push_str(&thaw_bridge::generate_native_addon_shim(
                 &pkg.functions,
                 qualified,
@@ -1288,7 +1292,8 @@ fn generate_registry_shims(
                     (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone())
                 }),
             ));
-        } else if let Some(bundle_js) = &pkg.bundle_js {
+        }
+        if let Some(bundle_js) = &pkg.bundle_js {
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch

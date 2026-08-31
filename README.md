@@ -2450,6 +2450,12 @@ functions. Loading native addons executes unrestricted native code in the
 generated process and is not sandboxed. If bundled prebuilds exist but none
 match the current platform, architecture, or libc, `registry add` reports the
 mismatch and retains the JavaScript fallback.
+Packages containing both `bundle.js` and `native.node` initialize the addon
+first and then the JavaScript wrapper. Bundled CommonJS `require` functions
+inherit `require.addon()`, whose primitive function exports use the shared
+QuickJS/N-API JSON bridge. A standalone E2E removes the registry and runs a JS
+wrapper which calls a bundled native `add` export. Constructor and object-handle
+exports still require the handle bridge described below.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
