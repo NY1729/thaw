@@ -732,6 +732,46 @@ fn compiles_structured_clone_of_native_values() {
 }
 
 #[test]
+fn compiles_structured_clone_of_a_map_or_set() {
+    // Builds a fresh Map/Set and recursively clones each entry, snapshotting
+    // the source via the same conversion `[...map]`/`Array.from(map)` use.
+    // The nested-array case checks that cloning is real and deep (not a
+    // shared reference) at every level: the receiver Map, and each array
+    // stored as one of its values.
+    let source = r#"
+        async function main(): Promise<void> {
+            const originalSet = new Set<number>([1, 2, 3]);
+            const clonedSet = structuredClone(originalSet);
+            clonedSet.add(4);
+            console.log(originalSet.size, clonedSet.size);
+
+            const originalMap = new Map<string, number[]>([
+                ["a", [1, 2]],
+                ["b", [3]],
+            ]);
+            const clonedMap = structuredClone(originalMap);
+            const clonedBucket = clonedMap.get("a");
+            if (clonedBucket !== undefined) {
+                clonedBucket.push(99);
+                console.log(clonedBucket.join(","));
+            }
+            const originalBucket = originalMap.get("a");
+            if (originalBucket !== undefined) {
+                console.log(originalBucket.join(","));
+            }
+            console.log(clonedMap.size);
+
+            const emptyMap = structuredClone(new Map<string, number>());
+            console.log(emptyMap.size);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structured_clone_map_or_set"),
+        "3 4\n1,2,99\n1,2\n2\n0\n"
+    );
+}
+
+#[test]
 fn rejects_json_stringify_function_replacers() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {
