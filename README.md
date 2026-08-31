@@ -2471,7 +2471,11 @@ Plain-object references are registered with QuickJS `FinalizationRegistry`.
 Collection removes the corresponding zero-count N-API references and runs only
 the finalizers attached to that object; an E2E forces GC and verifies exactly
 one native finalizer call. Restoring a native callback's object receiver as the
-QuickJS `this` value remains pending for `weak-napi`'s JavaScript `dead` event.
+QuickJS `this` value is supported through a reverse handle-to-Proxy lookup.
+Class Proxies also retain the JavaScript constructor prototype, so methods added
+with `Object.setPrototypeOf` or direct prototype assignment remain visible. The
+GC E2E verifies that a native finalizer callback can update its receiver through
+that JavaScript prototype-aware Proxy.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
