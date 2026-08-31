@@ -637,6 +637,33 @@ fn lower_dts_function(
     generic_interfaces: &GenericInterfaces,
 ) -> DtsFunction {
     let name = name.to_string();
+    let generic = func.type_params.as_ref().map(|parameters| DtsGenericFunction {
+        type_params: parameters
+            .params
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name.sym.to_string(),
+                    parameter
+                        .constraint
+                        .as_deref()
+                        .map(describe_ts_type),
+                )
+            })
+            .collect(),
+        param_types: func
+            .params
+            .iter()
+            .map(|parameter| match &parameter.pat {
+                Pat::Ident(binding) => binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| describe_ts_type(&annotation.type_ann))
+                    .unwrap_or_else(|| "Json".into()),
+                _ => "Json".into(),
+            })
+            .collect(),
+    });
     let mut substitution = HashMap::new();
     if let Some(type_params) = &func.type_params {
         for parameter in &type_params.params {
@@ -721,6 +748,7 @@ fn lower_dts_function(
 
     DtsFunction {
         name,
+        generic,
         params,
         required_params,
         rest_param,
@@ -743,7 +771,34 @@ fn describe_ts_type(ty: &TsType) -> String {
     match ty {
         TsType::TsKeywordType(kw) => keyword_name(kw.kind).to_string(),
         TsType::TsThisType(_) => "this".to_string(),
-        TsType::TsFnOrConstructorType(_) => "a function type".to_string(),
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            let params = function
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| match parameter {
+                    TsFnParam::Ident(parameter) => format!(
+                        "{}{}: {}",
+                        parameter.id.sym,
+                        if parameter.id.optional { "?" } else { "" },
+                        parameter
+                            .type_ann
+                            .as_ref()
+                            .map(|annotation| describe_ts_type(&annotation.type_ann))
+                            .unwrap_or_else(|| "Json".into())
+                    ),
+                    _ => format!("arg{index}: Json"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "({params}) => {}",
+                describe_ts_type(&function.type_ann.type_ann)
+            )
+        }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsConstructorType(_)) => {
+            "a constructor type".to_string()
+        }
         TsType::TsTypeRef(ty_ref) => {
             let name = match &ty_ref.type_name {
                 TsEntityName::Ident(id) => id.sym.to_string(),

@@ -37,10 +37,17 @@ use thaw_hir::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct DtsFunction {
     pub name: String,
+    pub generic: Option<DtsGenericFunction>,
     pub params: Vec<(String, DtsType)>,
     pub required_params: usize,
     pub rest_param: Option<(String, DtsType)>,
     pub ret: DtsType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DtsGenericFunction {
+    pub type_params: Vec<(String, Option<String>)>,
+    pub param_types: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

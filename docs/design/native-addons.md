@@ -849,3 +849,9 @@ hostはadapterとclosure contextをaddonのEnvに属するFunctionとして保�
 元呼び出し後にFunctionを呼び出しても同じidentityを利用する。実C addon E2Eは
 `(number) => number`を受け取ってそのまま返し、生成実行ファイルが返されたFunctionを呼んで
 `42`を得るところまで検証する。複数function引数とoptional/rest callbackは未対応である。
+
+`.d.ts`のgeneric fallback関数は型parameter、constraint、parameter pattern、optional arityを
+generated ambient declarationへ保持する。HIRは呼び出しごとに具体型tupleを推論し、ambient dynamic
+signatureへ代入する。これにより`T extends object`へ渡された通常functionは`Json`へ狭められず、
+上記function引数ABIへ接続される。外部genericの実体はdynamic backendにあるため、通常のユーザー定義
+generic関数と異なりAOT bodyのmonomorphizationは生成しない。

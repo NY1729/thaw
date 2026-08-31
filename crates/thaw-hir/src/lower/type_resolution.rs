@@ -45,6 +45,7 @@ fn lower_ts_type(
             TsKeywordTypeKind::TsUndefinedKeyword => Ok(HirType::Undefined),
             TsKeywordTypeKind::TsNullKeyword => Ok(HirType::Null),
             TsKeywordTypeKind::TsVoidKeyword => Ok(HirType::Void),
+            TsKeywordTypeKind::TsObjectKeyword => Ok(HirType::Dynamic),
             other => Err(format!(
                 "unsupported type keyword {other:?} (supports number/string/boolean/void)"
             )),

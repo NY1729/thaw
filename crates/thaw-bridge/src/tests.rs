@@ -728,6 +728,19 @@ fn classifies_generic_function_as_fallback() {
 }
 
 #[test]
+fn preserves_generic_function_syntax_for_call_site_specialization() {
+    let functions =
+        parse_dts("declare function weak<T extends object>(object: T, callback?: () => void): T;")
+            .unwrap();
+    let generic = functions[0].generic.as_ref().unwrap();
+    assert_eq!(
+        generic.type_params,
+        vec![("T".to_string(), Some("object".to_string()))]
+    );
+    assert_eq!(generic.param_types, vec!["T", "() => void"]);
+}
+
+#[test]
 fn classifies_primitive_constrained_generic_function_as_fast_path() {
     let funcs =
         parse_dts("export declare function nanoid<Type extends string>(size?: number): Type;")
