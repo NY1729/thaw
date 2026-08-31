@@ -54,6 +54,7 @@ fn jit_numeric_export(
             "floor" => Some("floor"),
             "min" => Some("min"),
             "max" => Some("max"),
+            "pow" => Some("pow"),
             "round" => Some("round"),
             "sqrt" => Some("sqrt"),
             "trunc" => Some("trunc"),
@@ -104,6 +105,7 @@ fn jit_numeric_export(
                         | BinaryOp::LShift
                         | BinaryOp::RShift
                         | BinaryOp::ZeroFillRShift
+                        | BinaryOp::Exp
                 ) =>
             {
                 encode_expression(binary.left.as_ref(), parameters, locals, output)?;
@@ -121,6 +123,7 @@ fn jit_numeric_export(
                         BinaryOp::LShift => "shl",
                         BinaryOp::RShift => "shr",
                         BinaryOp::ZeroFillRShift => "ushr",
+                        BinaryOp::Exp => "pow",
                         _ => unreachable!(),
                     }
                     .into(),
@@ -147,6 +150,13 @@ fn jit_numeric_export(
                     };
                     encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
                     output.push(method.into());
+                } else if method == "pow" {
+                    let [base, exponent] = call.args.as_slice() else {
+                        return None;
+                    };
+                    encode_expression(base.expr.as_ref(), parameters, locals, output)?;
+                    encode_expression(exponent.expr.as_ref(), parameters, locals, output)?;
+                    output.push("pow".into());
                 } else if call.args.is_empty() {
                     let value = if method == "min" {
                         f64::INFINITY
@@ -436,7 +446,7 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
             depth -= 2;
         } else if matches!(
             token.as_str(),
-            "%" | "min" | "max" | "band" | "bor" | "bxor" | "shl" | "shr" | "ushr"
+            "%" | "min" | "max" | "pow" | "band" | "bor" | "bxor" | "shl" | "shr" | "ushr"
         ) {
             if depth != 2 {
                 return None;
