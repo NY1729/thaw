@@ -879,4 +879,7 @@ plain objectの参照tokenはQuickJS `FinalizationRegistry`へ登録する。GC�
 module環境から対応valueを外し、count 0のreferenceをnull化して、そのobjectへ
 `napi_add_finalizer`で関連付けられたcallbackだけを実行する。合成E2Eは複数回GCを駆動し、native
 finalizerが1回だけ実行されることを検証する。native callback receiverをQuickJS `this`へ復元する
-処理は未対応で、`weak-napi`のJavaScript `dead` event通知に残る境界である。
+ため、handleからinstance Proxyへの弱い逆引きを保持する。class Proxyのtargetはconstructorの
+JavaScript prototypeを継承し、prototype側のmethodを先に、存在しないpropertyをN-API側で解決する。
+合成GC E2Eはnative finalizerからのcallbackが元instanceを`this`としてproperty更新できることも
+検証する。これにより`weak-napi`の`onGarbageCollect`が必要とする`this.emit('dead')`経路を満たす。

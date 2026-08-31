@@ -284,6 +284,7 @@ struct ThawCallbackBridge {
 enum ThawCallback {
     Event(ThawNativeCallback),
     Value(ThawNativeValueCallback),
+    QuickJs(ThawNativeValueCallback),
 }
 
 pub enum Value {
