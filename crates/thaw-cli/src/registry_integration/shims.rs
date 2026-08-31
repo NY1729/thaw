@@ -131,6 +131,67 @@ fn jit_numeric_export(
             .map(String::as_str)
     }
 
+    fn primitive_string_coercion(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+    ) -> Option<&'static str> {
+        match expression {
+            Expr::Ident(identifier) => match parameters.get(identifier.sym.as_ref())?.as_bytes()[0]
+            {
+                b's' => Some("identity"),
+                b'b' => Some("boolstr"),
+                b'a' => Some("numstr"),
+                _ => None,
+            },
+            Expr::Lit(Lit::Str(_)) => Some("identity"),
+            Expr::Lit(Lit::Bool(_)) => Some("boolstr"),
+            Expr::Lit(Lit::Num(_)) => Some("numstr"),
+            Expr::Paren(parenthesized) => {
+                primitive_string_coercion(parenthesized.expr.as_ref(), parameters)
+            }
+            Expr::Unary(unary) if unary.op == UnaryOp::Bang => Some("boolstr"),
+            Expr::Unary(unary)
+                if matches!(unary.op, UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Tilde) =>
+            {
+                Some("numstr")
+            }
+            Expr::Bin(binary)
+                if matches!(
+                    binary.op,
+                    BinaryOp::Lt
+                        | BinaryOp::LtEq
+                        | BinaryOp::Gt
+                        | BinaryOp::GtEq
+                        | BinaryOp::EqEq
+                        | BinaryOp::EqEqEq
+                        | BinaryOp::NotEq
+                        | BinaryOp::NotEqEq
+                ) =>
+            {
+                Some("boolstr")
+            }
+            Expr::Bin(binary)
+                if matches!(
+                    binary.op,
+                    BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                        | BinaryOp::LShift
+                        | BinaryOp::RShift
+                        | BinaryOp::ZeroFillRShift
+                        | BinaryOp::Exp
+                ) =>
+            {
+                Some("numstr")
+            }
+            _ => None,
+        }
+    }
+
     fn is_string_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -143,7 +204,10 @@ fn jit_numeric_export(
                     && template
                         .exprs
                         .iter()
-                        .all(|expression| is_string_expression(expression, parameters))
+                        .all(|expression| {
+                            is_string_expression(expression, parameters)
+                                || primitive_string_coercion(expression, parameters).is_some()
+                        })
             }
             Expr::Paren(parenthesized) => {
                 is_string_expression(parenthesized.expr.as_ref(), parameters)
@@ -156,6 +220,15 @@ fn jit_numeric_export(
                 let Callee::Expr(callee) = &call.callee else {
                     return false;
                 };
+                if !parameters.contains_key("String")
+                    && matches!(callee.as_ref(), Expr::Ident(identifier) if identifier.sym == "String")
+                {
+                    let [argument] = call.args.as_slice() else {
+                        return false;
+                    };
+                    return argument.spread.is_none()
+                        && primitive_string_coercion(argument.expr.as_ref(), parameters).is_some();
+                }
                 let Expr::Member(member) = callee.as_ref() else {
                     return false;
                 };
@@ -266,23 +339,33 @@ fn jit_numeric_export(
                 encode_string(&string, output)?;
             }
             Expr::Tpl(template) if template.quasis.len() == template.exprs.len() + 1 => {
+                let mut emitted = false;
                 for (index, quasi) in template.quasis.iter().enumerate() {
                     let value = quasi
                         .cooked
                         .as_ref()
                         .map(|value| value.to_string_lossy())
                         .unwrap_or_else(|| quasi.raw.to_string().into());
-                    encode_string(&value, output)?;
-                    if index > 0 {
-                        output.push("concat".into());
+                    if !value.is_empty() {
+                        encode_string(&value, output)?;
+                        if emitted {
+                            output.push("concat".into());
+                        }
+                        emitted = true;
                     }
                     if let Some(expression) = template.exprs.get(index) {
-                        if !is_string_expression(expression, parameters) {
-                            return None;
-                        }
                         encode_expression(expression, parameters, locals, output)?;
-                        output.push("concat".into());
+                        if !is_string_expression(expression, parameters) {
+                            output.push(primitive_string_coercion(expression, parameters)?.into());
+                        }
+                        if emitted {
+                            output.push("concat".into());
+                        }
+                        emitted = true;
                     }
+                }
+                if !emitted {
+                    output.push("t".into());
                 }
             }
             Expr::Member(member) => {
@@ -485,6 +568,28 @@ fn jit_numeric_export(
                     }
                 }
                 output.push(operation.into());
+            }
+            Expr::Call(call)
+                if matches!(
+                    &call.callee,
+                    Callee::Expr(callee)
+                        if matches!(callee.as_ref(), Expr::Ident(identifier) if identifier.sym == "String")
+                ) =>
+            {
+                if parameters.contains_key("String") || locals.contains_key("String") {
+                    return None;
+                }
+                let [argument] = call.args.as_slice() else {
+                    return None;
+                };
+                if argument.spread.is_some() {
+                    return None;
+                }
+                encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                let operation = primitive_string_coercion(argument.expr.as_ref(), parameters)?;
+                if operation != "identity" {
+                    output.push(operation.into());
+                }
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
@@ -927,6 +1032,9 @@ fn jit_numeric_export(
             }
         }
     }
+    if module_functions.contains_key("String") {
+        return None;
+    }
     let mut style = None;
     let mut callable = None;
     let mut module_locals = std::collections::HashMap::new();
@@ -1020,13 +1128,10 @@ fn jit_numeric_export(
         let Pat::Ident(parameter) = parameter else {
             return None;
         };
-        let prefix = if matches!(
-            ty,
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str)
-        ) {
-            's'
-        } else {
-            'a'
+        let prefix = match ty {
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => 's',
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => 'b',
+            _ => 'a',
         };
         if parameters
             .insert(parameter.id.sym.to_string(), format!("{prefix}{index}"))
@@ -1177,6 +1282,11 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
             stack.push(false);
         } else if token == "concat" {
             if !stack.pop()? || !stack.pop()? {
+                return None;
+            }
+            stack.push(true);
+        } else if matches!(token.as_str(), "numstr" | "boolstr") {
+            if stack.pop()? {
                 return None;
             }
             stack.push(true);
