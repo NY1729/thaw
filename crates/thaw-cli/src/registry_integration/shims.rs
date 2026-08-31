@@ -60,12 +60,15 @@ fn jit_numeric_export(
             "atanh" => Some("atanh"),
             "cbrt" => Some("cbrt"),
             "ceil" => Some("ceil"),
+            "clz32" => Some("clz32"),
             "cos" => Some("cos"),
             "cosh" => Some("cosh"),
             "exp" => Some("exp"),
             "expm1" => Some("expm1"),
             "floor" => Some("floor"),
+            "fround" => Some("fround"),
             "hypot" => Some("hypot"),
+            "imul" => Some("imul"),
             "log" => Some("log"),
             "log1p" => Some("log1p"),
             "log2" => Some("log2"),
@@ -243,11 +246,13 @@ fn jit_numeric_export(
                         | "atanh"
                         | "cbrt"
                         | "ceil"
+                        | "clz32"
                         | "cos"
                         | "cosh"
                         | "exp"
                         | "expm1"
                         | "floor"
+                        | "fround"
                         | "log"
                         | "log1p"
                         | "log2"
@@ -273,13 +278,13 @@ fn jit_numeric_export(
                     encode_expression(base.expr.as_ref(), parameters, locals, output)?;
                     encode_expression(exponent.expr.as_ref(), parameters, locals, output)?;
                     output.push("pow".into());
-                } else if method == "atan2" {
+                } else if matches!(method, "atan2" | "imul") {
                     let [y, x] = call.args.as_slice() else {
                         return None;
                     };
                     encode_expression(y.expr.as_ref(), parameters, locals, output)?;
                     encode_expression(x.expr.as_ref(), parameters, locals, output)?;
-                    output.push("atan2".into());
+                    output.push(method.into());
                 } else if method == "hypot" {
                     if call.args.is_empty() {
                         output.push(format!("c{:016x}", 0.0f64.to_bits()));
@@ -846,6 +851,7 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 | "pow"
                 | "atan2"
                 | "hypot"
+                | "imul"
                 | "band"
                 | "bor"
                 | "bxor"
@@ -867,11 +873,13 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 | "atanh"
                 | "cbrt"
                 | "ceil"
+                | "clz32"
                 | "cos"
                 | "cosh"
                 | "exp"
                 | "expm1"
                 | "floor"
+                | "fround"
                 | "log"
                 | "log1p"
                 | "log2"

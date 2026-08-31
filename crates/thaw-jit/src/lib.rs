@@ -139,6 +139,11 @@ extern "C" fn hypot_number(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn fround_number(value: f64) -> f64 {
+    value as f32 as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn to_uint32(value: f64) -> u32 {
     if !value.is_finite() || value == 0.0 {
         return 0;
@@ -148,6 +153,16 @@ fn to_uint32(value: f64) -> u32 {
         modulo += 4_294_967_296.0;
     }
     modulo as u32
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn clz32_number(value: f64) -> f64 {
+    to_uint32(value).leading_zeros() as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn imul_number(left: f64, right: f64) -> f64 {
+    to_uint32(left).wrapping_mul(to_uint32(right)) as i32 as f64
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -283,11 +298,13 @@ enum UnaryMath {
     Atanh,
     Cbrt,
     Ceil,
+    Clz32,
     Cos,
     Cosh,
     Exp,
     Expm1,
     Floor,
+    Fround,
     Log,
     Log1p,
     Log2,
@@ -338,11 +355,13 @@ impl UnaryMath {
             Self::Atanh => atanh_number,
             Self::Cbrt => cbrt_number,
             Self::Ceil => ceil_number,
+            Self::Clz32 => clz32_number,
             Self::Cos => cos_number,
             Self::Cosh => cosh_number,
             Self::Exp => exp_number,
             Self::Expm1 => expm1_number,
             Self::Floor => floor_number,
+            Self::Fround => fround_number,
             Self::Log => log_number,
             Self::Log1p => log1p_number,
             Self::Log2 => log2_number,
@@ -395,6 +414,7 @@ enum NumericValue {
     Minimum,
     Atan2,
     Hypot,
+    Imul,
     Power,
     UnaryMath(UnaryMath),
     Remainder,
@@ -435,6 +455,7 @@ impl NumericProgram {
                     "min" => Some(NumericValue::Minimum),
                     "atan2" => Some(NumericValue::Atan2),
                     "hypot" => Some(NumericValue::Hypot),
+                    "imul" => Some(NumericValue::Imul),
                     "pow" => Some(NumericValue::Power),
                     "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
                     "acosh" => Some(NumericValue::UnaryMath(UnaryMath::Acosh)),
@@ -444,11 +465,13 @@ impl NumericProgram {
                     "atanh" => Some(NumericValue::UnaryMath(UnaryMath::Atanh)),
                     "cbrt" => Some(NumericValue::UnaryMath(UnaryMath::Cbrt)),
                     "ceil" => Some(NumericValue::UnaryMath(UnaryMath::Ceil)),
+                    "clz32" => Some(NumericValue::UnaryMath(UnaryMath::Clz32)),
                     "cos" => Some(NumericValue::UnaryMath(UnaryMath::Cos)),
                     "cosh" => Some(NumericValue::UnaryMath(UnaryMath::Cosh)),
                     "exp" => Some(NumericValue::UnaryMath(UnaryMath::Exp)),
                     "expm1" => Some(NumericValue::UnaryMath(UnaryMath::Expm1)),
                     "floor" => Some(NumericValue::UnaryMath(UnaryMath::Floor)),
+                    "fround" => Some(NumericValue::UnaryMath(UnaryMath::Fround)),
                     "log" => Some(NumericValue::UnaryMath(UnaryMath::Log)),
                     "log1p" => Some(NumericValue::UnaryMath(UnaryMath::Log1p)),
                     "log2" => Some(NumericValue::UnaryMath(UnaryMath::Log2)),
@@ -590,14 +613,15 @@ impl NumericProgram {
                     emit_binary_call(&mut code, power as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::Atan2 | NumericValue::Hypot => {
+                NumericValue::Atan2 | NumericValue::Hypot | NumericValue::Imul => {
                     if depth < 2 {
                         return None;
                     }
-                    let function = if matches!(value, NumericValue::Atan2) {
-                        atan2_number
-                    } else {
-                        hypot_number
+                    let function = match value {
+                        NumericValue::Atan2 => atan2_number,
+                        NumericValue::Hypot => hypot_number,
+                        NumericValue::Imul => imul_number,
+                        _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
@@ -1017,6 +1041,15 @@ mod tests {
         assert!((call(&nested_unary, &[2.0, 1.0]).value - (2.0 + 1.0f64.sin())).abs() < 1e-12);
         let nested_binary = CString::new("expr:a0,a1,a2,hypot,+:nested_binary").unwrap();
         assert_eq!(call(&nested_binary, &[7.0, 3.0, 4.0]).value, 12.0);
+        let clz32 = CString::new("expr:a0,clz32:clz32").unwrap();
+        assert_eq!(call(&clz32, &[0.0]).value, 32.0);
+        assert_eq!(call(&clz32, &[1.0]).value, 31.0);
+        assert_eq!(call(&clz32, &[-1.0]).value, 0.0);
+        let fround = CString::new("expr:a0,fround:fround").unwrap();
+        assert_eq!(call(&fround, &[1.337]).value, 1.337f64 as f32 as f64);
+        assert_eq!(call(&fround, &[-0.0]).value.to_bits(), (-0.0f64).to_bits());
+        let imul = CString::new("expr:a0,a1,imul:imul").unwrap();
+        assert_eq!(call(&imul, &[4_294_967_295.0, 5.0]).value, -5.0);
 
         for (expression, args, expected) in [
             ("a0,a1,bor", [4_294_967_297.0, 0.0], 1.0),
