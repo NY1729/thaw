@@ -371,7 +371,7 @@ fn value_from_json_with_undefined(
                 .get("__thaw_napi_function__")
                 .and_then(JsonValue::as_u64)
             {
-                if let Some(value) = env.quickjs_functions.get(&reference) {
+                if let Some(value) = env.quickjs_references.get(&reference) {
                     return *value;
                 }
                 let bridge = Arc::new(ThawCallbackBridge {
@@ -384,8 +384,41 @@ fn value_from_json_with_undefined(
                     properties: HashMap::new(),
                     _thaw_bridge: Some(bridge),
                 }));
-                env.quickjs_functions.insert(reference, function);
+                env.quickjs_references.insert(reference, function);
                 return function;
+            }
+            if let Some(reference) = values
+                .get("__thaw_napi_object__")
+                .and_then(JsonValue::as_u64)
+            {
+                if let Some(value) = env.quickjs_references.get(&reference) {
+                    return *value;
+                }
+                let object = env.alloc(Value::Object(HashMap::new()));
+                env.quickjs_references.insert(reference, object);
+                let properties = values
+                    .get("value")
+                    .and_then(JsonValue::as_object)
+                    .map(|properties| {
+                        properties
+                            .iter()
+                            .map(|(key, value)| {
+                                (
+                                    key.clone().into(),
+                                    value_from_json_with_undefined(
+                                        env,
+                                        value,
+                                        preserve_undefined,
+                                    ),
+                                )
+                            })
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                if let Some(Value::Object(target)) = unsafe { object.as_mut() } {
+                    *target = properties;
+                }
+                return object;
             }
             let values = values
                 .iter()
