@@ -1,4 +1,104 @@
 impl<'a> FnLowerer<'a> {
+    /// `Array.from({ length }, mapfn?)` -- the array-like-object overload,
+    /// as opposed to the real-array/string overload `lower_array_map`
+    /// handles. There is no underlying element storage to read (a plain
+    /// `{ length }` object has no indexed properties in this compiler's
+    /// fixed-layout object model), so every per-index value the spec would
+    /// read from the source is always exactly `undefined`, matching
+    /// `Array.from({length: 3})` producing `[undefined, undefined,
+    /// undefined]` for real JavaScript too. `mapfn` may still ignore that
+    /// value and use only the index, which is the overload's common use
+    /// (`Array.from({length: n}, (_, i) => ...)` to build a range).
+    fn lower_array_from_length(
+        &mut self,
+        length: HirExpr,
+        callback: Option<HirExpr>,
+        this_arg: Option<HirExpr>,
+    ) -> Result<HirExpr, String> {
+        let length_name = format!("__thaw_array_from_length_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(length_name.clone(), HirType::F64);
+        let mut bindings = vec![(length_name.clone(), HirType::F64, length)];
+        let Some(callback) = callback else {
+            let result = HirExpr::ArrayAlloc(
+                Box::new(HirExpr::Var(length_name)),
+                HirType::Undefined,
+            );
+            return self.wrap_call_argument_bindings(result, &bindings);
+        };
+        let callback_name = format!("__thaw_array_from_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_type = self.infer_expr_type(&callback)?;
+        let HirType::Function(params, output_type) = &callback_type else {
+            unreachable!("Array.from mapper was validated as a function")
+        };
+        if **output_type == HirType::Void {
+            return Err("Array.from mapper must return a value".into());
+        }
+        let output_type = output_type.as_ref().clone();
+        self.scope
+            .insert(callback_name.clone(), callback_type.clone());
+        let result_name = format!("__thaw_array_from_result_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_array_from_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_type = HirType::Array(Box::new(output_type.clone()));
+        self.scope.insert(result_name.clone(), result_type.clone());
+        self.scope.insert(index_name.clone(), HirType::F64);
+        let available = [
+            HirExpr::Lit(HirLit::Undefined),
+            HirExpr::Var(index_name.clone()),
+        ];
+        let callback_call = HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name.clone())),
+            available[..params.len()].to_vec(),
+        );
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                result_name.clone(),
+                result_type,
+                HirExpr::ArrayAlloc(Box::new(HirExpr::Var(length_name.clone())), output_type),
+            ),
+            HirStmt::Let(
+                index_name.clone(),
+                HirType::F64,
+                HirExpr::Lit(HirLit::F64(0.0)),
+            ),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(HirExpr::Var(length_name)),
+                ),
+                vec![
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(HirExpr::Var(result_name.clone())),
+                        Box::new(HirExpr::Var(index_name.clone())),
+                        Box::new(callback_call),
+                    )),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index_name)),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(HirExpr::Var(result_name))),
+        ]);
+        bindings.push((callback_name, callback_type, callback));
+        if let Some(this_arg) = this_arg {
+            let ty = self.infer_expr_type(&this_arg)?;
+            let name = format!("__thaw_array_from_this_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            bindings.push((name, ty, this_arg));
+        }
+        self.wrap_call_argument_bindings(body, &bindings)
+    }
+
     fn lower_array_map(
         &mut self,
         receiver: HirExpr,

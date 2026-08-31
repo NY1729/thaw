@@ -1440,6 +1440,16 @@ The workspace crates have narrow responsibilities:
   arguments, shallow object identity, empty and awaited sources, named
   callbacks, captures and optional `thisArg` evaluation are supported. Its
   full one-to-three argument list also accepts statically sized tuple spreads
+- `Array.from({ length })` supports the array-like-object overload alongside
+  the real-array/string source above. A plain `{ length }` object has no
+  indexed properties in this compiler's fixed-layout object model, so every
+  per-index value the mapper would receive from the source is `undefined`,
+  matching real JavaScript for a source with no other own properties; the
+  mapper typically ignores it and uses only the index (`Array.from({length:
+  n}, (_, i) => ...)` to build a range). Dynamic lengths, empty sources, a
+  typed zero-to-two-argument mapper, named callbacks and optional `thisArg`
+  evaluation are supported; the spread form requires a fully-typed named
+  mapper, matching the array/string overload's own spread callbacks
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
