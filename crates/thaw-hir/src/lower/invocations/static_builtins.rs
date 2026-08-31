@@ -399,6 +399,63 @@ impl<'a> FnLowerer<'a> {
                             self.lower_expr(&call.args[0].expr)?
                         };
                         let source_type = self.infer_expr_type(&source)?;
+                        if let HirType::Object(fields) = &source_type {
+                            if let [(field_name, HirType::F64)] = fields.as_slice() {
+                                if field_name == "length" {
+                                    let length = HirExpr::PropAccess(
+                                        Box::new(source),
+                                        source_type.clone(),
+                                        "length".to_string(),
+                                    );
+                                    let callback = if argument_count == 1 {
+                                        None
+                                    } else if has_spread {
+                                        let callback = spread_arguments[1].clone();
+                                        let params = match self.infer_expr_type(&callback)? {
+                                            HirType::Function(params, _)
+                                            | HirType::CallableFunction(params, _, _, _) => params,
+                                            _ => {
+                                                return Err(
+                                                    "Array.from mapper is not a function value"
+                                                        .into(),
+                                                )
+                                            }
+                                        };
+                                        if params.len() > 2 {
+                                            return Err(format!(
+                                                "Array.from mapper accepts at most two parameters, got {}",
+                                                params.len()
+                                            ));
+                                        }
+                                        let available = [HirType::Undefined, HirType::F64];
+                                        self.validate_promise_callback_value(
+                                            &callback,
+                                            &available[..params.len()],
+                                            None,
+                                        )?;
+                                        Some(callback)
+                                    } else {
+                                        Some(self.lower_array_from_callback(
+                                            &call.args[1].expr,
+                                            &HirType::Undefined,
+                                        )?)
+                                    };
+                                    let this_arg = if has_spread {
+                                        spread_arguments.get(2).cloned()
+                                    } else {
+                                        call.args
+                                            .get(2)
+                                            .map(|argument| self.lower_expr(&argument.expr))
+                                            .transpose()?
+                                    };
+                                    let result = self.lower_array_from_length(
+                                        length, callback, this_arg,
+                                    )?;
+                                    return self
+                                        .wrap_call_argument_bindings(result, &spread_bindings);
+                                }
+                            }
+                        }
                         let (source, source_type, element_type) = match source_type {
                             HirType::Array(element) => {
                                 let element_type = element.as_ref().clone();

@@ -1040,6 +1040,53 @@ fn compiles_native_array_from_native_arrays() {
 }
 
 #[test]
+fn compiles_native_array_from_an_array_like_length_object() {
+    // `Array.from({length})` -- as opposed to the real-array/string source
+    // the test above covers. A plain `{ length }` object has no indexed
+    // properties in this compiler's fixed-layout object model, so every
+    // per-index value the spec would read from the source is `undefined`,
+    // matching real JavaScript for a source object with no other own
+    // properties; `mapfn` typically ignores it and uses only the index.
+    let source = r#"
+        function thisValue(): string {
+            console.log("thisArg");
+            return "ignored";
+        }
+        function lengthOf(count: number): number {
+            console.log("length");
+            return count;
+        }
+        function nextIndex(value: undefined, index: number): number {
+            return index + 1;
+        }
+        async function main(): Promise<void> {
+            const empty = Array.from({ length: 0 });
+            console.log(empty.length);
+            const bare = Array.from({ length: 3 });
+            console.log(bare.length);
+            const doubled: number[] = Array.from({ length: 4 }, (_, i) => i * 2);
+            console.log(doubled.join(","));
+            const words: string[] = Array.from(
+                { length: lengthOf(3) },
+                (_, i) => `w${i}`,
+                thisValue(),
+            );
+            console.log(words.join(","));
+            // Spread arguments are lowered generically (no contextual typing
+            // for an inline callback's own parameters), so this leg needs a
+            // fully-typed named function rather than `(_, i) => ...` -- the
+            // same requirement the array/string overload's own spread tests
+            // above already live with.
+            console.log(Array.from(...[{ length: 2 }], nextIndex).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_length"),
+        "0\n3\n0,2,4,6\nlength\nthisArg\nw0,w1,w2\n1,2\n"
+    );
+}
+
+#[test]
 fn compiles_variadic_string_concat() {
     let source = r#"
         function receiver(): string {
