@@ -61,14 +61,21 @@ use wasmi_wasi::WasiCtx;
 
 type NapiBridgeCallback = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
 type NapiBridgeExports = unsafe extern "C" fn() -> *const c_char;
+type NapiBridgePoll = extern "C" fn() -> usize;
 type NapiBridgeHandle = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
     *const c_char,
     *const c_char,
 ) -> *const c_char;
-static NAPI_BRIDGE: Mutex<Option<(NapiBridgeExports, NapiBridgeCallback, NapiBridgeHandle)>> =
-    Mutex::new(None);
+static NAPI_BRIDGE: Mutex<
+    Option<(
+        NapiBridgeExports,
+        NapiBridgeCallback,
+        NapiBridgeHandle,
+        NapiBridgePoll,
+    )>,
+> = Mutex::new(None);
 
 thread_local! {
     static ACTIVE_NAPI_CONTEXT: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
@@ -94,12 +101,13 @@ pub fn register_napi_bridge(
     exports: NapiBridgeExports,
     call: NapiBridgeCallback,
     handle: NapiBridgeHandle,
+    poll: NapiBridgePoll,
 ) {
-    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call, handle));
+    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call, handle, poll));
 }
 
 fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-    let Some((exports, call, handle)) = *NAPI_BRIDGE.lock().unwrap() else {
+    let Some((exports, call, handle, _)) = *NAPI_BRIDGE.lock().unwrap() else {
         return Ok(());
     };
     let exports = Function::new(ctx.clone(), move || unsafe { to_str(exports()) })?;
@@ -132,6 +140,14 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     )?;
     ctx.globals().set("__thaw_napi_bridge_handle", handle)?;
     Ok(())
+}
+
+fn poll_napi_bridge(ctx: &Ctx<'_>) {
+    let poll = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.3);
+    if let Some(poll) = poll {
+        let _active = ActiveNapiContext::enter(ctx);
+        poll();
+    }
 }
 type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 type TlsStreamTable = (u32, HashMap<u32, TlsStream>);

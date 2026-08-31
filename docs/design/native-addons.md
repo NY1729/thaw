@@ -882,7 +882,11 @@ finalizerが1回だけ実行されることを検証する。native callback rec
 ため、handleからinstance Proxyへの弱い逆引きを保持する。class Proxyのtargetはconstructorの
 JavaScript prototypeを継承し、prototype側のmethodを先に、存在しないpropertyをN-API側で解決する。
 合成GC E2Eはnative finalizerからのcallbackが元instanceを`this`としてproperty更新できることも
-検証する。これにより`weak-napi`の`onGarbageCollect`が必要とする`this.emit('dead')`経路を満たす。
+検証する。instance ProxyのJavaScript expando propertyはProxy targetにも保持し、native setterへの
+転送と両立する。native側のundefined sentinelはJavaScriptへ戻す時点で実際の`undefined`へ復元する。
+instance Proxy自身のGCはnative wrapを一度だけ解放し、QuickJSのPromise job境界ではN-API/libuvの
+ready workもpollする。これにより`weak-napi`の`WeakTag` destructorが延期する
+`onGarbageCollect`と、その`this.emit('dead')`経路まで完走する。
 
 `export = callable`と同名namespaceをmergeするCommonJS declarationでは、default importを直接
 callable targetとnamespace member表の両方へ登録する。SWCがnamespace function名を

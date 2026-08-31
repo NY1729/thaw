@@ -2475,7 +2475,13 @@ QuickJS `this` value is supported through a reverse handle-to-Proxy lookup.
 Class Proxies also retain the JavaScript constructor prototype, so methods added
 with `Object.setPrototypeOf` or direct prototype assignment remain visible. The
 GC E2E verifies that a native finalizer callback can update its receiver through
-that JavaScript prototype-aware Proxy.
+that JavaScript prototype-aware Proxy. JavaScript expando properties remain on
+the Proxy target while writes still reach native setters, and native
+`undefined` results are restored before JavaScript observes them. Unreachable
+native instance Proxies release their wraps at QuickJS GC boundaries; the
+QuickJS Promise loop polls ready N-API/libuv work between jobs so deferred
+finalizers such as `weak-napi`'s dead notification run before the awaiting code
+continues.
 CommonJS declaration merging is supported for `export = callable` packages:
 functions from the callable's same-name namespace are available through a
 default import (`callable.method()`), while the default value remains directly
