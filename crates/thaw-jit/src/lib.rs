@@ -378,29 +378,54 @@ extern "C" fn string_repeat(value: f64, count: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-unsafe fn string_suffix(value: f64, start: f64, negative_from_end: bool) -> f64 {
+fn normalize_string_index(index: f64, length: f64, negative_from_end: bool) -> usize {
+    let index = if index.is_nan() { 0.0 } else { index.trunc() };
+    if negative_from_end && index < 0.0 {
+        (length + index).max(0.0) as usize
+    } else {
+        index.clamp(0.0, length) as usize
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn string_range(
+    value: f64,
+    start: f64,
+    end: f64,
+    negative_from_end: bool,
+    swap: bool,
+) -> f64 {
     let Some(value) = string_argument(value) else {
         return f64::from_bits(0);
     };
     let value = value.encode_utf16().collect::<Vec<_>>();
     let length = value.len() as f64;
-    let start = if start.is_nan() { 0.0 } else { start.trunc() };
-    let start = if negative_from_end && start < 0.0 {
-        (length + start).max(0.0)
-    } else {
-        start.clamp(0.0, length)
-    } as usize;
-    arena_string(String::from_utf16_lossy(&value[start..]))
+    let mut start = normalize_string_index(start, length, negative_from_end);
+    let mut end = normalize_string_index(end, length, negative_from_end);
+    if swap && start > end {
+        std::mem::swap(&mut start, &mut end);
+    }
+    arena_string(String::from_utf16_lossy(&value[start..end.max(start)]))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_slice(value: f64, start: f64) -> f64 {
-    unsafe { string_suffix(value, start, true) }
+    unsafe { string_range(value, start, f64::INFINITY, true, false) }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_substring(value: f64, start: f64) -> f64 {
-    unsafe { string_suffix(value, start, false) }
+    unsafe { string_range(value, start, f64::INFINITY, false, true) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_slice_range(value: f64, start: f64, end: f64) -> f64 {
+    unsafe { string_range(value, start, end, true, false) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_substring_range(value: f64, start: f64, end: f64) -> f64 {
+    unsafe { string_range(value, start, end, false, true) }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -717,7 +742,9 @@ enum NumericValue {
     StringStartsWith,
     StringRepeat,
     StringSlice,
+    StringSliceRange,
     StringSubstring,
+    StringSubstringRange,
     StringToLowerCase,
     StringToUpperCase,
     StringTrim,
@@ -774,7 +801,9 @@ impl NumericProgram {
                     "startswith" => Some(NumericValue::StringStartsWith),
                     "repeat" => Some(NumericValue::StringRepeat),
                     "slice" => Some(NumericValue::StringSlice),
+                    "slice2" => Some(NumericValue::StringSliceRange),
                     "substring" => Some(NumericValue::StringSubstring),
+                    "substring2" => Some(NumericValue::StringSubstringRange),
                     "tolowercase" => Some(NumericValue::StringToLowerCase),
                     "touppercase" => Some(NumericValue::StringToUpperCase),
                     "trim" => Some(NumericValue::StringTrim),
@@ -1005,6 +1034,18 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
+                NumericValue::StringSliceRange | NumericValue::StringSubstringRange => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    let function = if matches!(value, NumericValue::StringSliceRange) {
+                        string_slice_range
+                    } else {
+                        string_substring_range
+                    };
+                    emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                    depth -= 2;
+                }
                 NumericValue::StringToLowerCase
                 | NumericValue::StringToUpperCase
                 | NumericValue::StringTrim
@@ -1167,6 +1208,19 @@ fn emit_binary_call(code: &mut Vec<u8>, function: u64, left: u8) {
     emit_spill(code, left);
     emit_move(code, 0, left);
     emit_move(code, 1, left + 1);
+    code.extend_from_slice(&[0x48, 0xb8]);
+    code.extend_from_slice(&function.to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0]);
+    emit_move(code, left, 0);
+    emit_restore(code, left);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_ternary_call(code: &mut Vec<u8>, function: u64, left: u8) {
+    emit_spill(code, left);
+    emit_move(code, 0, left);
+    emit_move(code, 1, left + 1);
+    emit_move(code, 2, left + 2);
     code.extend_from_slice(&[0x48, 0xb8]);
     code.extend_from_slice(&function.to_le_bytes());
     code.extend_from_slice(&[0xff, 0xd0]);
@@ -1582,6 +1636,24 @@ mod tests {
             let result = call(
                 &suffix,
                 &[f64::from_bits(sliced.as_ptr() as usize as u64), start],
+            );
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+                expected
+            );
+            unsafe { libc::free(result.cast()) };
+        }
+        for (operation, start, end, expected) in [
+            ("slice2", -4.0, -1.0, "abc"),
+            ("slice2", 5.0, 2.0, ""),
+            ("substring2", 5.0, 2.0, "abc"),
+            ("substring2", f64::NAN, 2.9, "😀"),
+        ] {
+            let range = CString::new(format!("expr:s0,a1,a2,{operation}:{operation}")).unwrap();
+            let result = call(
+                &range,
+                &[f64::from_bits(sliced.as_ptr() as usize as u64), start, end],
             );
             let result = result.value.to_bits() as usize as *mut c_char;
             assert_eq!(
