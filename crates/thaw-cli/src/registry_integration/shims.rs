@@ -78,13 +78,27 @@ fn jit_numeric_export(
             Expr::Lit(Lit::Num(number)) => {
                 output.push(format!("c{:016x}", number.value.to_bits()));
             }
+            Expr::Lit(Lit::Bool(boolean)) => {
+                output.push(format!(
+                    "c{:016x}",
+                    f64::from(u8::from(boolean.value)).to_bits()
+                ));
+            }
             Expr::Unary(unary)
-                if matches!(unary.op, UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Tilde) =>
+                if matches!(
+                    unary.op,
+                    UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Tilde | UnaryOp::Bang
+                ) =>
             {
                 encode_expression(unary.arg.as_ref(), parameters, locals, output)?;
                 match unary.op {
                     UnaryOp::Minus => output.push("neg".into()),
                     UnaryOp::Tilde => output.push("bnot".into()),
+                    UnaryOp::Bang => {
+                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                        output.push(format!("c{:016x}", 1.0f64.to_bits()));
+                        output.push("?".into());
+                    }
                     _ => {}
                 }
             }
@@ -316,7 +330,14 @@ fn jit_numeric_export(
         || !function
             .params
             .iter()
-            .all(|(_, ty)| matches!(ty, thaw_bridge::DtsType::Native(thaw_hir::HirType::F64)))
+            .all(|(_, ty)| {
+                matches!(
+                    ty,
+                    thaw_bridge::DtsType::Native(
+                        thaw_hir::HirType::F64 | thaw_hir::HirType::Bool
+                    )
+                )
+            })
         || !matches!(
             &function.ret,
             thaw_bridge::DtsType::Native(thaw_hir::HirType::F64 | thaw_hir::HirType::Bool)
@@ -501,7 +522,17 @@ fn jit_numeric_declaration(
     let params = function
         .params
         .iter()
-        .map(|(name, _)| format!("{name}: number"))
+        .map(|(name, ty)| {
+            let ty = if matches!(
+                ty,
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool)
+            ) {
+                "boolean"
+            } else {
+                "number"
+            };
+            format!("{name}: {ty}")
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let ret = match &function.ret {

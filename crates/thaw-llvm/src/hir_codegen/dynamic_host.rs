@@ -974,7 +974,10 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         if signature.backend == DynamicBackend::Jit {
             if signature.params.len() > 16
-                || !signature.params.iter().all(|ty| *ty == HirType::F64)
+                || !signature
+                    .params
+                    .iter()
+                    .all(|ty| matches!(ty, HirType::F64 | HirType::Bool))
                 || !matches!(signature.ret, HirType::F64 | HirType::Bool)
                 || args.len() != signature.params.len()
             {
@@ -995,6 +998,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             for (index, argument) in args.iter().enumerate() {
                 let value = self.compile_expr(argument)?;
+                let value = if signature.params[index] == HirType::Bool {
+                    self.builder
+                        .build_unsigned_int_to_float(
+                            value.into_int_value(),
+                            self.context.f64_type(),
+                            "jit_boolean_argument",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .into()
+                } else {
+                    value
+                };
                 let slot = unsafe {
                     self.builder
                         .build_in_bounds_gep(

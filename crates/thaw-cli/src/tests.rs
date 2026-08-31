@@ -159,6 +159,21 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,a1,<".into())
     );
+    predicate.name = "negateFlag".into();
+    predicate.params = vec![(
+        "value".into(),
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+    )];
+    predicate.required_params = 1;
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.negateFlag = value => !value;",
+            "negateFlag",
+            false,
+            &predicate,
+        ),
+        Some("expr:a0,c0000000000000000,c3ff0000000000000,?".into())
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = (Math, right) => Math.abs(Math % right);",
