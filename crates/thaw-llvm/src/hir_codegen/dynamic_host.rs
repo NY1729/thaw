@@ -973,16 +973,29 @@ impl<'ctx> HirCompiler<'ctx> {
             return self.compile_typed_napi_method(signature, args);
         }
         if signature.backend == DynamicBackend::Jit {
+            let return_type = match &signature.ret {
+                HirType::Optional(payload)
+                    if matches!(payload.as_ref(), HirType::F64 | HirType::Str) =>
+                {
+                    payload.as_ref()
+                }
+                ty @ (HirType::F64 | HirType::Bool | HirType::Str) => ty,
+                _ => {
+                    return Err(
+                        "JIT calls currently return number, boolean, string, or optional number/string"
+                            .into(),
+                    )
+                }
+            };
             if signature.params.len() > 16
                 || !signature
                     .params
                     .iter()
                     .all(|ty| matches!(ty, HirType::F64 | HirType::Bool | HirType::Str))
-                || !matches!(signature.ret, HirType::F64 | HirType::Bool | HirType::Str)
                 || args.len() != signature.params.len()
             {
                 return Err(
-                    "JIT calls currently require 0-16 number, boolean, or string arguments and return number, boolean, or string".into(),
+                    "JIT calls currently require 0-16 number, boolean, or string arguments".into(),
                 );
             }
             let name = self
@@ -1057,11 +1070,38 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_extract_value(result, 1, "jit_numeric_error")
                 .map_err(|error| error.to_string())?;
+            let error = error.into_pointer_value();
+            let status = self
+                .builder
+                .build_ptr_to_int(
+                    error,
+                    self.context.i64_type(),
+                    "jit_status",
+                )
+                .map_err(|error| error.to_string())?;
+            let absent = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    status,
+                    self.context.i64_type().const_int(1, false),
+                    "jit_value_absent",
+                )
+                .map_err(|error| error.to_string())?;
+            let error = self
+                .builder
+                .build_select(
+                    absent,
+                    self.context.ptr_type(inkwell::AddressSpace::default()).const_null(),
+                    error,
+                    "jit_error_without_absence_tag",
+                )
+                .map_err(|error| error.to_string())?;
             self.builder
                 .build_store(self.pending_exception().as_pointer_value(), error)
                 .map_err(|error| error.to_string())?;
             self.branch_on_pending_exception()?;
-            return if signature.ret == HirType::Bool {
+            let value = if *return_type == HirType::Bool {
                 self.builder
                     .build_float_compare(
                         FloatPredicate::ONE,
@@ -1070,8 +1110,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         "jit_boolean_value",
                     )
                     .map(BasicValueEnum::from)
-                    .map_err(|error| error.to_string())
-            } else if signature.ret == HirType::Str {
+                    .map_err(|error| error.to_string())?
+            } else if *return_type == HirType::Str {
                 let bits = self
                     .builder
                     .build_bit_cast(
@@ -1088,10 +1128,28 @@ impl<'ctx> HirCompiler<'ctx> {
                         "jit_string_value",
                     )
                     .map(BasicValueEnum::from)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?
             } else {
-                Ok(value)
+                value
             };
+            if let HirType::Optional(payload) = &signature.ret {
+                let tagged_type = self.basic_type(&signature.ret)?.into_struct_type();
+                let present = self
+                    .builder
+                    .build_not(absent, "jit_optional_present")
+                    .map_err(|error| error.to_string())?;
+                let tagged = self
+                    .builder
+                    .build_insert_value(tagged_type.get_undef(), present, 0, "jit_optional_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_struct_value();
+                return self
+                    .builder
+                    .build_insert_value(tagged, value, 1, "jit_optional_payload")
+                    .map(|value| value.into_struct_value().into())
+                    .map_err(|error| format!("JIT optional {payload:?} result: {error}"));
+            }
+            return Ok(value);
         }
         let function_argument = signature
             .params

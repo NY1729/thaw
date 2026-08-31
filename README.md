@@ -2002,6 +2002,8 @@ directly in the caller-provided Thaw arena. One-argument `startsWith`,
 same typed string IR. `charAt(index?)` and `charCodeAt(index?)` also use that
 JIT path with UTF-16 code-unit indexing. `padStart(target, pad?)` and
 `padEnd(target, pad?)` use the same arena-backed JIT string return path.
+`at(index?)` and `codePointAt(index?)` use an explicit JIT presence tag so
+out-of-range results remain `undefined` without pointer or NaN sentinels.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,
