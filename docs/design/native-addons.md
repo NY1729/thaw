@@ -865,5 +865,7 @@ JavaScript wrapperからprimitive native functionを呼べる。実C addon E2E�
 `add(41, 1)`を呼び、registry削除後の単一実行ファイルが`42`を出力するところまで検証する。
 class exportは`new.target`をhandle bridgeへ転送し、返されたN-API instanceをQuickJS Proxyとして
 保持する。Proxyのget/setはproperty ABIへ、method呼び出しはreceiver付きmethod ABIへ転送する。
-同じE2Eでnative classをconstructしてmethod結果を取得する。QuickJS object/function identityを
-constructor引数としてN-API valueへ変換する処理は次段階とする。
+同じE2Eでnative classをconstructしてmethod結果を取得する。QuickJS function引数はWeakMapで
+参照tokenを重複排除し、N-API環境内でも同じtokenを同じFunction valueへ戻す。nativeからの同期
+callbackは現在のQuickJS contextで実行し、E2Eで戻り値と同一性を検証する。非function objectの
+identity変換は次段階とする。

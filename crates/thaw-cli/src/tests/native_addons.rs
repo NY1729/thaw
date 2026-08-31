@@ -68,12 +68,12 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\n",
+        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "const native = require.addon(); module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).get();",
+        "const native = require.addon(); module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).get(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); };",
     )
     .unwrap();
     let addon_c = dir.join("addon.c");
@@ -91,6 +91,9 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
             extern napi_status napi_create_double(napi_env, double, napi_value*);
             extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
+            extern napi_status napi_get_undefined(napi_env, napi_value*);
+            extern napi_status napi_get_boolean(napi_env, _Bool, napi_value*);
             extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
             extern napi_status napi_define_class(napi_env, const char*, size_t, napi_callback, void*, size_t, const napi_property_descriptor*, napi_value*);
             extern napi_status napi_wrap(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
@@ -100,6 +103,17 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
                 napi_get_cb_info(env, info, &argc, argv, 0, 0);
                 napi_get_value_double(env, argv[0], &left); napi_get_value_double(env, argv[1], &right);
                 napi_create_double(env, left + right, &result); return result;
+            }
+            static napi_value invoke(napi_env env, napi_callback_info info) {
+                size_t argc = 2; napi_value argv[2], receiver, result;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_get_undefined(env, &receiver);
+                napi_call_function(env, receiver, argv[0], 1, &argv[1], &result); return result;
+            }
+            static napi_value same(napi_env env, napi_callback_info info) {
+                size_t argc = 2; napi_value argv[2], result;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_get_boolean(env, argv[0] == argv[1], &result); return result;
             }
             static napi_value box_new(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value arg, self; double value; box* data = malloc(sizeof(*data));
@@ -114,6 +128,8 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
                 napi_value fn, constructor; napi_property_descriptor property = { "get", 0, box_get, 0, 0, 0, 0, 0 };
                 napi_create_function(env, "add", 3, add, 0, &fn); napi_set_named_property(env, exports, "add", fn);
+                napi_create_function(env, "invoke", 6, invoke, 0, &fn); napi_set_named_property(env, exports, "invoke", fn);
+                napi_create_function(env, "same", 4, same, 0, &fn); napi_set_named_property(env, exports, "same", fn);
                 napi_define_class(env, "Box", 3, box_new, 0, 1, &property, &constructor);
                 napi_set_named_property(env, exports, "Box", constructor); return exports;
             }
@@ -132,7 +148,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     let output = dir.join("app");
     std::fs::write(
         &source,
-        "import { addOne, boxed } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); }\n",
+        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); }\n",
     )
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -143,7 +159,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n42\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n42\n42\ntrue\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

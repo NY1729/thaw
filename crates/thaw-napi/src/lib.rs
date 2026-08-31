@@ -447,6 +447,7 @@ pub struct Env {
     symbols: HashMap<u64, NapiValue>,
     type_tags: HashMap<usize, NapiTypeTag>,
     property_keys: HashMap<String, NapiValue>,
+    quickjs_functions: HashMap<u64, NapiValue>,
     module_file_name: CString,
     last_error_info: NapiExtendedErrorInfo,
     // Box keeps the opaque C handle stable when the owning vector grows.
@@ -538,6 +539,7 @@ impl Env {
             symbols: HashMap::new(),
             type_tags: HashMap::new(),
             property_keys: HashMap::new(),
+            quickjs_functions: HashMap::new(),
             module_file_name: CString::new("").unwrap(),
             last_error_info: NapiExtendedErrorInfo {
                 error_message: ptr::null(),

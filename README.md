@@ -2457,8 +2457,9 @@ QuickJS/N-API JSON bridge. A standalone E2E removes the registry and runs a JS
 wrapper which calls a bundled native `add` export. Class exports also support
 `new`, instance methods, and instance getters/setters through a persistent N-API
 handle Proxy; the same E2E constructs a native class and calls its method.
-Passing QuickJS object/function identity into native constructors remains a
-separate bridge boundary.
+QuickJS function arguments are retained by reference, deduplicated by identity,
+and callable from native code through the same bridge. Non-function QuickJS
+object identity remains a separate bridge boundary.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against

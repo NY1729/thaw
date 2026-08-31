@@ -367,6 +367,26 @@ fn value_from_json_with_undefined(
                     ));
                 }
             }
+            if let Some(reference) = values
+                .get("__thaw_napi_function__")
+                .and_then(JsonValue::as_u64)
+            {
+                if let Some(value) = env.quickjs_functions.get(&reference) {
+                    return *value;
+                }
+                let bridge = Arc::new(ThawCallbackBridge {
+                    callback: ThawCallback::Value(thaw_quickjs::thaw_js_call_reference),
+                    context: reference as usize,
+                });
+                let function = env.alloc(Value::Function(Function {
+                    callback: thaw_compiled_callback,
+                    data: Arc::as_ptr(&bridge) as *mut c_void,
+                    properties: HashMap::new(),
+                    _thaw_bridge: Some(bridge),
+                }));
+                env.quickjs_functions.insert(reference, function);
+                return function;
+            }
             let values = values
                 .iter()
                 .map(|(key, value)| {
