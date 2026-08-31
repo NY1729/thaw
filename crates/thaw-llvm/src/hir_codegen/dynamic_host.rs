@@ -972,6 +972,45 @@ impl<'ctx> HirCompiler<'ctx> {
         {
             return self.compile_typed_napi_method(signature, args);
         }
+        if signature.backend == DynamicBackend::Jit {
+            if signature.params != [HirType::F64, HirType::F64]
+                || signature.ret != HirType::F64
+                || args.len() != 2
+            {
+                return Err("JIT calls currently require (number, number) => number".into());
+            }
+            let name = self
+                .builder
+                .build_global_string_ptr(&signature.symbol, "jit_symbol")
+                .map_err(|error| error.to_string())?;
+            let left = self.compile_expr(&args[0])?;
+            let right = self.compile_expr(&args[1])?;
+            let result = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_jit_call_f64").unwrap(),
+                    &[name.as_pointer_value().into(), left.into(), right.into()],
+                    "jit_numeric_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_struct_value();
+            let value = self
+                .builder
+                .build_extract_value(result, 0, "jit_numeric_value")
+                .map_err(|error| error.to_string())?;
+            let error = self
+                .builder
+                .build_extract_value(result, 1, "jit_numeric_error")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_store(self.pending_exception().as_pointer_value(), error)
+                .map_err(|error| error.to_string())?;
+            self.branch_on_pending_exception()?;
+            return Ok(value);
+        }
         let function_argument = signature
             .params
             .iter()
@@ -1175,6 +1214,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(value);
         }
         let backend = match signature.backend {
+            DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),
             DynamicBackend::QuickJs => "thaw_js_call_result",
             DynamicBackend::Napi => "thaw_napi_call_typed_result",
         };
