@@ -2021,7 +2021,9 @@ are string-coerced by the same typed IR; expanded string locals can be method
 receivers without returning to QuickJS. Conversely, `Number(string)`, unary
 numeric conversion, arithmetic/Math operands, and string method indexes,
 positions, lengths, and counts reuse the runtime's JavaScript-compatible
-string-number parser through the JIT callback ABI.
+string-number parser through the JIT callback ABI. `Boolean(value)`, unary
+`!`, logical `&&`/`||`, and conditional tests use typed truthiness IR; native
+strings test their contents so empty strings remain false without QuickJS.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,
