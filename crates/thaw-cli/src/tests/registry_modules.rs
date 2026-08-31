@@ -142,18 +142,18 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function describe(value: number, flag: boolean): string;\n",
+        "export declare function describe(value: string, flag: boolean): string;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.describe = function(value, flag) { const rounded = Math.round(value); const matched = '421'.includes(rounded); const padded = 'x'.padEnd(2, flag); const replaced = '42'.replace(rounded, flag); let text = `value=${rounded}`; text += ':'; text += flag; return text.concat(':', rounded, ':', matched, ':', padded, ':', replaced, ':', String(rounded > 0)); };\n",
+        "module.exports.describe = function(value, flag) { const parsed = Number(value); const rounded = Math.round(parsed); const matched = '421'.includes(rounded); const padded = 'x'.padEnd('2', flag); const replaced = '42'.replace(rounded, flag); const picked = 'abc'.charAt('1'); const repeated = 'x'.repeat('2'); let text = `value=${rounded}`; text += ':'; text += flag; return text.concat(':', rounded, ':', matched, ':', padded, ':', replaced, ':', picked, ':', repeated, ':', String(rounded > 0)); };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { describe } from 'jit-coercion';\nfunction main(): void { console.log(describe(42.4, true)); }\n",
+        "import { describe } from 'jit-coercion';\nfunction main(): void { console.log(describe('42.4', true)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -165,7 +165,7 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "value=42:true:42:true:xt:true:true\n"
+        "value=42:true:42:true:xt:true:b:xx:true\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
