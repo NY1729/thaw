@@ -1087,6 +1087,55 @@ fn compiles_native_array_from_an_array_like_length_object() {
 }
 
 #[test]
+fn compiles_map_group_by_a_native_array() {
+    // Built entirely from the same generic primitives `.get()`/`.set()`/
+    // `.push()` already lower to, plus `__thaw_map_new`/`ArrayAlloc` --
+    // no new runtime or codegen, so this mostly exercises composition:
+    // repeated keys accumulate via `.push()`'s in-place handle mutation
+    // rather than re-inserting a fresh bucket on every match.
+    let source = r#"
+        function lengthKey(word: string, index: number): number {
+            return word.length;
+        }
+        async function main(): Promise<void> {
+            const items: number[] = [1, 2, 3, 4, 5, 6];
+            const groups: Map<string, number[]> = Map.groupBy(items, (value, index) => {
+                console.log("key", value, index);
+                return value % 2 === 0 ? "even" : "odd";
+            });
+            const evens = groups.get("even");
+            if (evens !== undefined) {
+                console.log(evens.join(","));
+            }
+            const odds = groups.get("odd");
+            if (odds !== undefined) {
+                console.log(odds.join(","));
+            }
+            console.log(groups.size);
+            console.log(groups.has("missing"));
+
+            const words: string[] = ["a", "bb", "cc", "ddd"];
+            const bySpread: Map<number, string[]> = Map.groupBy(...[words, lengthKey]);
+            const two = bySpread.get(2);
+            if (two !== undefined) {
+                console.log(two.join(","));
+            }
+
+            const empty: number[] = [];
+            const emptyGroups: Map<string, number[]> = Map.groupBy(empty, (v, i) => "x");
+            console.log(emptyGroups.size);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "map_group_by"),
+        concat!(
+            "key 1 0\n", "key 2 1\n", "key 3 2\n", "key 4 3\n", "key 5 4\n", "key 6 5\n",
+            "2,4,6\n", "1,3,5\n", "2\n", "false\n", "bb,cc\n", "0\n",
+        )
+    );
+}
+
+#[test]
 fn compiles_variadic_string_concat() {
     let source = r#"
         function receiver(): string {
