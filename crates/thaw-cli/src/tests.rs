@@ -222,6 +222,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (left, right) => Math.atan2(left, right);",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,atan2".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (left, right) => Math.hypot(left, right, 12);",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,hypot,c4028000000000000,hypot".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (left, right) => ((left & 255) ^ right) >>> 0;",
             "add",
             false,
