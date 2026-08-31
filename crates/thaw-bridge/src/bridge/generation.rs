@@ -324,7 +324,7 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
         .iter()
         .map(|name| {
             format!(
-                "if (typeof module.exports === 'function') {{ globalThis.{name} = module.exports; }}\n\
+                "if (typeof module.exports === 'function' && typeof globalThis.{name} !== 'function') {{ globalThis.{name} = module.exports; }}\n\
                  else if (typeof module.exports === 'object' && module.exports !== null && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n"
             )
         })
@@ -417,7 +417,7 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          }}\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
-         \x20\x20if (typeof module.exports === 'object' && module.exports !== null) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
+         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
          {bind_default_exports}\
          }};\n\
          if (globalThis.__thaw_module_ready && typeof globalThis.__thaw_module_ready.then === 'function') {{ globalThis.__thaw_module_ready.then(__thaw_bind_module_exports); }}\n\

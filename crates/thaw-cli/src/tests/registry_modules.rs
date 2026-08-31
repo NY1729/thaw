@@ -573,6 +573,43 @@ fn imports_a_scoped_package_subpath_with_default_and_namespace_forms() {
 }
 
 #[test]
+fn default_callable_import_exposes_export_assignment_namespace_methods() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-export-assignment-namespace-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("registry");
+    let package = registry.join("callable-tools");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "declare function tools(value: number): number;\ndeclare namespace tools {\n    function answer(value: number): number;\n}\nexport = tools;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function tools(value) { return value * 2; } tools.answer = value => value; module.exports = tools;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import tools from \"callable-tools\"; function main(): void { console.log(tools(21)); console.log(tools.answer(42)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registers_builds_and_runs_an_installed_npm_wildcard_subpath() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-installed-wildcard-{}",

@@ -691,6 +691,8 @@ pub fn bundle(
                         )
                     })?;
                 for imported in &import.specifiers {
+                    let is_external_default = !modules[index].dependencies.contains_key(specifier)
+                        && matches!(imported, ImportSpecifier::Default(_));
                     let (local, requested) = match imported {
                         ImportSpecifier::Named(named) => (
                             named.local.sym.to_string(),
@@ -738,7 +740,11 @@ pub fn bundle(
                             module_location(&modules[index], specifier)
                         )
                     })?;
-                    names.insert(local, target.clone());
+                    names.insert(local.clone(), target.clone());
+                    if is_external_default {
+                        namespaces.insert(local, dependency_exports.clone());
+                        namespaces.insert(target.clone(), dependency_exports.clone());
+                    }
                 }
             }
         }
