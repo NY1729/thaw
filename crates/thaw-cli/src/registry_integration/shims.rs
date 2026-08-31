@@ -126,6 +126,19 @@ fn jit_numeric_export(
                     .into(),
                 );
             }
+            Expr::Bin(binary)
+                if matches!(binary.op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) =>
+            {
+                encode_expression(binary.left.as_ref(), parameters, locals, output)?;
+                if binary.op == BinaryOp::LogicalAnd {
+                    encode_expression(binary.right.as_ref(), parameters, locals, output)?;
+                    encode_expression(binary.left.as_ref(), parameters, locals, output)?;
+                } else {
+                    encode_expression(binary.left.as_ref(), parameters, locals, output)?;
+                    encode_expression(binary.right.as_ref(), parameters, locals, output)?;
+                }
+                output.push("?".into());
+            }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
                 if matches!(method, "abs" | "ceil" | "floor" | "round" | "sqrt" | "trunc") {
