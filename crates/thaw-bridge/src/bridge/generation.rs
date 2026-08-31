@@ -375,8 +375,10 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          \x20\x20var __thaw_napi_reference_id = 0;\n\
          \x20\x20var __thaw_napi_reference_ids = new WeakMap();\n\
          \x20\x20var __thaw_napi_reference_values = new Map();\n\
+         \x20\x20var __thaw_napi_handles = new WeakMap();\n\
          \x20\x20var __thaw_napi_argument = function(value) {{\n\
          \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
+         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) return {{ __thaw_napi_handle__: handle }};\n\
          \x20\x20\x20\x20if (Array.isArray(value)) return value.map(__thaw_napi_argument);\n\
          \x20\x20\x20\x20var id = __thaw_napi_reference_ids.get(value);\n\
          \x20\x20\x20\x20if (id) return typeof value === 'function' ? {{ __thaw_napi_function__: id }} : {{ __thaw_napi_object__: id, value: __thaw_napi_reference_values.get(id) }};\n\
@@ -392,13 +394,13 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          \x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\
          \x20\x20\x20\x20return result;\n\
          \x20\x20}};\n\
-         \x20\x20var __thaw_napi_proxy = function(handle) {{ return new Proxy({{}}, {{\n\
+         \x20\x20var __thaw_napi_proxy = function(handle) {{ var proxy = new Proxy({{}}, {{\n\
          \x20\x20\x20\x20get: function(_, name) {{\n\
          \x20\x20\x20\x20\x20\x20var result = __thaw_napi_handle('get', handle, String(name), []);\n\
          \x20\x20\x20\x20\x20\x20return result.kind === 'method' ? function() {{ return __thaw_napi_handle('call', handle, String(name), Array.prototype.slice.call(arguments)).value; }} : result.value;\n\
          \x20\x20\x20\x20}},\n\
          \x20\x20\x20\x20set: function(_, name, value) {{ __thaw_napi_handle('set', handle, String(name), [value]); return true; }}\n\
-         \x20\x20}}); }};\n\
+         \x20\x20}}); __thaw_napi_handles.set(proxy, handle); return proxy; }};\n\
          \x20\x20JSON.parse(globalThis.__thaw_napi_bridge_exports()).forEach(function(name) {{\n\
          \x20\x20\x20\x20__thaw_addon[name] = function() {{\n\
          \x20\x20\x20\x20\x20\x20if (new.target) {{ var created = __thaw_napi_handle('construct', name, '', Array.prototype.slice.call(arguments)); return __thaw_napi_proxy(created.value); }}\n\

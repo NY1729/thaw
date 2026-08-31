@@ -367,6 +367,17 @@ fn value_from_json_with_undefined(
                     ));
                 }
             }
+            if let Some(handle) = values
+                .get("__thaw_napi_handle__")
+                .and_then(JsonValue::as_str)
+                .and_then(|handle| handle.parse::<u64>().ok())
+            {
+                let value = handle as NapiValue;
+                if env.values.contains(&value) {
+                    return value;
+                }
+                return env.alloc(Value::Undefined);
+            }
             if let Some(reference) = values
                 .get("__thaw_napi_function__")
                 .and_then(JsonValue::as_u64)

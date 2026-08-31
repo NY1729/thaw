@@ -68,12 +68,12 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\nexport declare function passesObject(): number;\n",
+        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\nexport declare function passesObject(): number;\nexport declare function passesNativeHandle(value: number): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "const native = require.addon(); module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).get(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); }; module.exports.passesObject = () => { const object = { value: 42 }; return native.same(object, object) ? native.objectValue(object) : 0; };",
+        "const native = require.addon(); module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).get(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); }; module.exports.passesObject = () => { const object = { value: 42 }; return native.same(object, object) ? native.objectValue(object) : 0; }; module.exports.passesNativeHandle = value => new native.Box(new native.Box(value)).get();",
     )
     .unwrap();
     let addon_c = dir.join("addon.c");
@@ -122,8 +122,9 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
                 napi_get_named_property(env, object, "value", &result); return result;
             }
             static napi_value box_new(napi_env env, napi_callback_info info) {
-                size_t argc = 1; napi_value arg, self; double value; box* data = malloc(sizeof(*data));
-                napi_get_cb_info(env, info, &argc, &arg, &self, 0); napi_get_value_double(env, arg, &value);
+                size_t argc = 1; napi_value arg, self; double value; box *source = 0, *data = malloc(sizeof(*data));
+                napi_get_cb_info(env, info, &argc, &arg, &self, 0);
+                if (napi_unwrap(env, arg, (void**)&source) == 0) value = source->value; else napi_get_value_double(env, arg, &value);
                 data->value = value; napi_wrap(env, self, data, 0, 0, 0); return self;
             }
             static napi_value box_get(napi_env env, napi_callback_info info) {
@@ -155,7 +156,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     let output = dir.join("app");
     std::fs::write(
         &source,
-        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity, passesObject } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); console.log(passesObject()); }\n",
+        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity, passesObject, passesNativeHandle } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); console.log(passesObject()); console.log(passesNativeHandle(42)); }\n",
     )
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -168,7 +169,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\n42\n42\ntrue\n42\n"
+        "42\n42\n42\ntrue\n42\n42\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
