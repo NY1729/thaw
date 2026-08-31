@@ -1092,6 +1092,20 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_call_export_handle_with_function_typed_result",
+            handle_result_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_get_export",
             self.context.i64_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
