@@ -109,7 +109,7 @@ fn typed_dynamic_declaration(
         .iter()
         .map(|(name, ty)| match ty {
             thaw_bridge::DtsType::Native(ty) => {
-                render_dynamic_type(ty).map(|ty| format!("{name}: {ty}"))
+                render_dynamic_type(ty).map(|ty| (name.clone(), ty))
             }
             thaw_bridge::DtsType::Unsupported(_) => None,
         })
@@ -128,15 +128,76 @@ fn typed_dynamic_declaration(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let symbol = format!(
+    let base_symbol = format!(
         "__thaw_typed_{}_{}",
         if napi { "napi" } else { "js" },
         encoded
     );
-    Some((
-        symbol.clone(),
-        format!("declare function {symbol}({}): {ret};\n", params.join(", ")),
-    ))
+    let render_params = |arity: usize| {
+        params[..arity]
+            .iter()
+            .map(|(name, ty)| format!("{name}: {ty}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if function.required_params == params.len() {
+        return Some((
+            base_symbol.clone(),
+            format!(
+                "declare function {base_symbol}({}): {ret};\n",
+                render_params(params.len())
+            ),
+        ));
+    }
+    let wrapper = format!(
+        "__thaw_typed_wrapper_{}_{}",
+        if napi { "napi" } else { "js" },
+        encoded
+    );
+    let mut declarations = String::new();
+    for arity in function.required_params..=params.len() {
+        declarations.push_str(&format!(
+            "declare function {base_symbol}__arity_{arity}({}): {ret};\n",
+            render_params(arity)
+        ));
+    }
+    let wrapper_params = params
+        .iter()
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            format!(
+                "{name}{}: {ty}",
+                if index >= function.required_params {
+                    "?"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    declarations.push_str(&format!("function {wrapper}({wrapper_params}): {ret} {{\n"));
+    for arity in (function.required_params + 1..=params.len()).rev() {
+        let condition = &params[arity - 1].0;
+        let arguments = params[..arity]
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        declarations.push_str(&format!(
+            "    if ({condition} !== undefined) return {base_symbol}__arity_{arity}({arguments});\n"
+        ));
+    }
+    let arguments = params[..function.required_params]
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    declarations.push_str(&format!(
+        "    return {base_symbol}__arity_{}({arguments});\n}}\n",
+        function.required_params
+    ));
+    Some((wrapper, declarations))
 }
 
 /// `(package, name, alias)` -- see `rewrite_qualified_calls`. `package`

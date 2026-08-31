@@ -53,6 +53,11 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
             name.strip_prefix("__thaw_typed_napi_")
                 .map(|hex| (DynamicBackend::Napi, hex))
         })?;
+    let hex = match hex.split_once("__arity_") {
+        Some((hex, arity)) if arity.parse::<usize>().is_ok() => hex,
+        Some(_) => return None,
+        None => hex,
+    };
     if hex.len() % 2 != 0 {
         return None;
     }
