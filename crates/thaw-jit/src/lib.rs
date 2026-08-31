@@ -88,6 +88,47 @@ extern "C" fn round_number(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! unary_math_helpers {
+    ($($function:ident => $method:ident),+ $(,)?) => {
+        $(extern "C" fn $function(value: f64) -> f64 { value.$method() })+
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unary_math_helpers! {
+    acos_number => acos,
+    acosh_number => acosh,
+    asin_number => asin,
+    asinh_number => asinh,
+    atan_number => atan,
+    atanh_number => atanh,
+    cbrt_number => cbrt,
+    cos_number => cos,
+    cosh_number => cosh,
+    exp_number => exp,
+    expm1_number => exp_m1,
+    log_number => ln,
+    log1p_number => ln_1p,
+    log2_number => log2,
+    log10_number => log10,
+    sin_number => sin,
+    sinh_number => sinh,
+    tan_number => tan,
+    tanh_number => tanh,
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn sign_number(value: f64) -> f64 {
+    if value.is_nan() || value == 0.0 {
+        value
+    } else if value.is_sign_positive() {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn to_uint32(value: f64) -> u32 {
     if !value.is_finite() || value == 0.0 {
         return 0;
@@ -224,10 +265,30 @@ enum CompareOp {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UnaryMath {
+    Acos,
+    Acosh,
+    Asin,
+    Asinh,
+    Atan,
+    Atanh,
+    Cbrt,
     Ceil,
+    Cos,
+    Cosh,
+    Exp,
+    Expm1,
     Floor,
+    Log,
+    Log1p,
+    Log2,
+    Log10,
     Round,
+    Sign,
+    Sin,
+    Sinh,
     SquareRoot,
+    Tan,
+    Tanh,
     Truncate,
 }
 
@@ -259,10 +320,30 @@ impl UnaryMath {
     #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
     fn function(self) -> extern "C" fn(f64) -> f64 {
         match self {
+            Self::Acos => acos_number,
+            Self::Acosh => acosh_number,
+            Self::Asin => asin_number,
+            Self::Asinh => asinh_number,
+            Self::Atan => atan_number,
+            Self::Atanh => atanh_number,
+            Self::Cbrt => cbrt_number,
             Self::Ceil => ceil_number,
+            Self::Cos => cos_number,
+            Self::Cosh => cosh_number,
+            Self::Exp => exp_number,
+            Self::Expm1 => expm1_number,
             Self::Floor => floor_number,
+            Self::Log => log_number,
+            Self::Log1p => log1p_number,
+            Self::Log2 => log2_number,
+            Self::Log10 => log10_number,
             Self::Round => round_number,
+            Self::Sign => sign_number,
+            Self::Sin => sin_number,
+            Self::Sinh => sinh_number,
             Self::SquareRoot => unreachable!("square root emits SSE2 directly"),
+            Self::Tan => tan_number,
+            Self::Tanh => tanh_number,
             Self::Truncate => truncate_number,
         }
     }
@@ -341,10 +422,30 @@ impl NumericProgram {
                     "max" => Some(NumericValue::Maximum),
                     "min" => Some(NumericValue::Minimum),
                     "pow" => Some(NumericValue::Power),
+                    "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
+                    "acosh" => Some(NumericValue::UnaryMath(UnaryMath::Acosh)),
+                    "asin" => Some(NumericValue::UnaryMath(UnaryMath::Asin)),
+                    "asinh" => Some(NumericValue::UnaryMath(UnaryMath::Asinh)),
+                    "atan" => Some(NumericValue::UnaryMath(UnaryMath::Atan)),
+                    "atanh" => Some(NumericValue::UnaryMath(UnaryMath::Atanh)),
+                    "cbrt" => Some(NumericValue::UnaryMath(UnaryMath::Cbrt)),
                     "ceil" => Some(NumericValue::UnaryMath(UnaryMath::Ceil)),
+                    "cos" => Some(NumericValue::UnaryMath(UnaryMath::Cos)),
+                    "cosh" => Some(NumericValue::UnaryMath(UnaryMath::Cosh)),
+                    "exp" => Some(NumericValue::UnaryMath(UnaryMath::Exp)),
+                    "expm1" => Some(NumericValue::UnaryMath(UnaryMath::Expm1)),
                     "floor" => Some(NumericValue::UnaryMath(UnaryMath::Floor)),
+                    "log" => Some(NumericValue::UnaryMath(UnaryMath::Log)),
+                    "log1p" => Some(NumericValue::UnaryMath(UnaryMath::Log1p)),
+                    "log2" => Some(NumericValue::UnaryMath(UnaryMath::Log2)),
+                    "log10" => Some(NumericValue::UnaryMath(UnaryMath::Log10)),
                     "round" => Some(NumericValue::UnaryMath(UnaryMath::Round)),
+                    "sign" => Some(NumericValue::UnaryMath(UnaryMath::Sign)),
+                    "sin" => Some(NumericValue::UnaryMath(UnaryMath::Sin)),
+                    "sinh" => Some(NumericValue::UnaryMath(UnaryMath::Sinh)),
                     "sqrt" => Some(NumericValue::UnaryMath(UnaryMath::SquareRoot)),
+                    "tan" => Some(NumericValue::UnaryMath(UnaryMath::Tan)),
+                    "tanh" => Some(NumericValue::UnaryMath(UnaryMath::Tanh)),
                     "trunc" => Some(NumericValue::UnaryMath(UnaryMath::Truncate)),
                     "%" => Some(NumericValue::Remainder),
                     "?" => Some(NumericValue::Select),
@@ -814,6 +915,37 @@ mod tests {
         assert_eq!(call(&round, &[-0.5]).value.to_bits(), (-0.0f64).to_bits());
         let square_root = CString::new("expr:a0,sqrt:sqrt_nan").unwrap();
         assert!(call(&square_root, &[-1.0]).value.is_nan());
+
+        for (operation, input, expected) in [
+            ("acos", 1.0, 0.0),
+            ("acosh", 1.0, 0.0),
+            ("asin", 0.0, 0.0),
+            ("asinh", 0.0, 0.0),
+            ("atan", 0.0, 0.0),
+            ("atanh", 0.0, 0.0),
+            ("cbrt", 8.0, 2.0),
+            ("cos", 0.0, 1.0),
+            ("cosh", 0.0, 1.0),
+            ("exp", 0.0, 1.0),
+            ("expm1", 0.0, 0.0),
+            ("log", 1.0, 0.0),
+            ("log1p", 0.0, 0.0),
+            ("log2", 8.0, 3.0),
+            ("log10", 100.0, 2.0),
+            ("sign", -8.0, -1.0),
+            ("sin", 0.0, 0.0),
+            ("sinh", 0.0, 0.0),
+            ("tan", 0.0, 0.0),
+            ("tanh", 0.0, 0.0),
+        ] {
+            let symbol = CString::new(format!("expr:a0,{operation}:{operation}")).unwrap();
+            let result = call(&symbol, &[input]);
+            assert!(result.error.is_null());
+            assert!((result.value - expected).abs() < 1e-12);
+        }
+        let sign = CString::new("expr:a0,sign:sign_special").unwrap();
+        assert_eq!(call(&sign, &[-0.0]).value.to_bits(), (-0.0f64).to_bits());
+        assert!(call(&sign, &[f64::NAN]).value.is_nan());
 
         for (expression, args, expected) in [
             ("a0,a1,bor", [4_294_967_297.0, 0.0], 1.0),
