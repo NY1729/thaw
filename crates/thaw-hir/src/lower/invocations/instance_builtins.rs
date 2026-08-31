@@ -281,11 +281,30 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Lit(HirLit::F64(0.0)),
             ),
         ];
-        if op == "union" {
-            body_stmts.push(HirStmt::While(
-                loop_condition(),
-                vec![load_element.clone(), insert_element.clone(), advance_index.clone()],
-            ));
+        // `union` passes over both operands unconditionally. `symmetric-
+        // Difference` passes over both too, but on each pass keeps an
+        // element only when the *other* operand doesn't also have it (so a
+        // value present in both is dropped from both passes).
+        // `intersection`/`difference` need only the one pass over the
+        // receiver, handled in the final `else` branch below.
+        if op == "union" || op == "symmetricDifference" {
+            let keep_if_other_lacks = op == "symmetricDifference";
+            let guarded_insert = |other_name: &str| {
+                if keep_if_other_lacks {
+                    let membership = HirExpr::Call(
+                        Box::new(HirExpr::Var(has_intrinsic.clone())),
+                        vec![var(other_name), var(&element_name)],
+                    );
+                    vec![HirStmt::If(membership, Vec::new(), vec![insert_element.clone()])]
+                } else {
+                    vec![insert_element.clone()]
+                }
+            };
+            let mut first_pass = vec![load_element.clone()];
+            first_pass.extend(guarded_insert(&other_name));
+            first_pass.push(advance_index.clone());
+            body_stmts.push(HirStmt::While(loop_condition(), first_pass));
+
             body_stmts.push(HirStmt::Let(
                 elements_name.clone(),
                 elements_type.clone(),
@@ -300,10 +319,10 @@ impl<'a> FnLowerer<'a> {
                 index_name.clone(),
                 Box::new(HirExpr::Lit(HirLit::F64(0.0))),
             )));
-            body_stmts.push(HirStmt::While(
-                loop_condition(),
-                vec![load_element, insert_element, advance_index],
-            ));
+            let mut second_pass = vec![load_element.clone()];
+            second_pass.extend(guarded_insert(&receiver_name));
+            second_pass.push(advance_index.clone());
+            body_stmts.push(HirStmt::While(loop_condition(), second_pass));
         } else {
             // `intersection`: keep a receiver element only if `other` also
             // has it. `difference`: keep it only if `other` doesn't.
@@ -327,6 +346,143 @@ impl<'a> FnLowerer<'a> {
         }
         body_stmts.push(HirStmt::Return(Some(var(&result_name))));
         let body = HirExpr::Block(body_stmts);
+
+        let mut bindings = vec![(receiver_name, set_type.clone(), receiver)];
+        bindings.extend(extra_bindings);
+        bindings.push((other_name, set_type, other));
+        self.wrap_call_argument_bindings(body, &bindings)
+    }
+
+    /// ES2024 `Set.prototype.isSubsetOf`/`.isSupersetOf`/`.isDisjointFrom`,
+    /// sharing `lower_set_combine`'s snapshot/intrinsic shape but returning
+    /// a boolean via a single short-circuiting scan instead of building a
+    /// new `Set`. `scan_side`/`target_side` each name which operand
+    /// (`"receiver"` or `"other"`) to iterate and to `.has()`-test against:
+    /// `isSubsetOf` scans the receiver and tests the argument (every
+    /// receiver element must be present in it); `isSupersetOf(other)` is
+    /// exactly `other.isSubsetOf(receiver)`, so it swaps which side plays
+    /// each role instead of duplicating the scan; `isDisjointFrom` scans
+    /// the receiver too but asks the opposite question -- every element
+    /// must be *absent* from the argument (`expect_present: false`).
+    #[allow(clippy::too_many_arguments)]
+    fn lower_set_predicate(
+        &mut self,
+        receiver: HirExpr,
+        other: HirExpr,
+        element_type: HirType,
+        scan_side: &str,
+        target_side: &str,
+        expect_present: bool,
+        extra_bindings: Vec<LoweredBinding>,
+    ) -> Result<HirExpr, String> {
+        let key_suffix = map_key_intrinsic_suffix(&element_type)?;
+        let set_type = HirType::Set(Box::new(element_type.clone()));
+        let elements_type = HirType::Array(Box::new(element_type.clone()));
+        let has_intrinsic = format!("__thaw_map_{key_suffix}_has");
+
+        let receiver_name = format!("__thaw_set_predicate_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let other_name = format!("__thaw_set_predicate_other_{}", self.next_binding);
+        self.next_binding += 1;
+        let elements_name = format!("__thaw_set_predicate_elements_{}", self.next_binding);
+        self.next_binding += 1;
+        let length_name = format!("__thaw_set_predicate_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_set_predicate_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let element_name = format!("__thaw_set_predicate_element_{}", self.next_binding);
+        self.next_binding += 1;
+
+        self.scope.insert(receiver_name.clone(), set_type.clone());
+        self.scope.insert(other_name.clone(), set_type.clone());
+        self.scope
+            .insert(elements_name.clone(), elements_type.clone());
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope
+            .insert(element_name.clone(), element_type.clone());
+
+        let var = |name: &str| HirExpr::Var(name.to_string());
+        let scan_name = if scan_side == "receiver" {
+            receiver_name.clone()
+        } else {
+            other_name.clone()
+        };
+        let target_name = if target_side == "receiver" {
+            receiver_name.clone()
+        } else {
+            other_name.clone()
+        };
+
+        let membership = HirExpr::Call(
+            Box::new(HirExpr::Var(has_intrinsic)),
+            vec![var(&target_name), var(&element_name)],
+        );
+        let mismatch = if expect_present {
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(membership),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            )
+        } else {
+            membership
+        };
+
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                elements_name.clone(),
+                elements_type.clone(),
+                HirExpr::TypedClosure(
+                    elements_type,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_map_snapshot_keys".to_string())),
+                        vec![var(&scan_name)],
+                    )),
+                ),
+            ),
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(var(&elements_name))),
+            ),
+            HirStmt::Let(
+                index_name.clone(),
+                HirType::F64,
+                HirExpr::Lit(HirLit::F64(0.0)),
+            ),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&index_name)),
+                    Box::new(var(&length_name)),
+                ),
+                vec![
+                    HirStmt::Let(
+                        element_name.clone(),
+                        element_type.clone(),
+                        HirExpr::TypedIndex(
+                            Box::new(var(&elements_name)),
+                            Box::new(var(&index_name)),
+                            element_type,
+                        ),
+                    ),
+                    HirStmt::If(
+                        mismatch,
+                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+                        Vec::new(),
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(var(&index_name)),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
+        ]);
 
         let mut bindings = vec![(receiver_name, set_type.clone(), receiver)];
         bindings.extend(extra_bindings);
@@ -509,7 +665,8 @@ impl<'a> FnLowerer<'a> {
                 | "setUTCMinutes" | "setUTCSeconds" | "setUTCMilliseconds"
                 | "toDateString" | "toTimeString" | "toUTCString" | "toJSON"
                 | "keys" | "values" | "entries"
-                | "union" | "intersection" | "difference"
+                | "union" | "intersection" | "difference" | "symmetricDifference"
+                | "isSubsetOf" | "isSupersetOf" | "isDisjointFrom"
         )
     }
 
@@ -4073,7 +4230,10 @@ impl<'a> FnLowerer<'a> {
                         vec![receiver],
                     ));
                 }
-                if matches!(property.sym.as_ref(), "union" | "intersection" | "difference") {
+                if matches!(
+                    property.sym.as_ref(),
+                    "union" | "intersection" | "difference" | "symmetricDifference"
+                ) {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Set(element_type) = &receiver_type else {
@@ -4106,6 +4266,57 @@ impl<'a> FnLowerer<'a> {
                         other,
                         element_type,
                         property.sym.as_ref(),
+                        spread_bindings,
+                    );
+                }
+                if matches!(
+                    property.sym.as_ref(),
+                    "isSubsetOf" | "isSupersetOf" | "isDisjointFrom"
+                ) {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Set(element_type) = &receiver_type else {
+                        return Err(format!(
+                            "native `.{}()` requires a Set receiver, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    };
+                    let element_type = element_type.as_ref().clone();
+                    let (arguments, spread_bindings) = self.lower_native_spread_values(
+                        &call.args,
+                        &format!("Set.{}", property.sym),
+                    )?;
+                    let [other] = arguments.as_slice() else {
+                        return Err(format!(
+                            "native `.{}()` expects exactly one argument",
+                            property.sym
+                        ));
+                    };
+                    let other = other.clone();
+                    let other_type = self.infer_expr_type(&other)?;
+                    if other_type != receiver_type {
+                        return Err(format!(
+                            "native `.{}()` requires a {receiver_type:?} argument, got {other_type:?}",
+                            property.sym
+                        ));
+                    }
+                    // `isSupersetOf(other)` is `other.isSubsetOf(this)`;
+                    // `isDisjointFrom` asks the same "does the OTHER set
+                    // lack every element I test" question `isSubsetOf` asks
+                    // for its own elements, just against the receiver's
+                    // absence instead of presence.
+                    let (scan_name, test_target, expect_present) = match property.sym.as_ref() {
+                        "isSubsetOf" => ("receiver", "other", true),
+                        "isSupersetOf" => ("other", "receiver", true),
+                        _ => ("receiver", "other", false),
+                    };
+                    return self.lower_set_predicate(
+                        receiver,
+                        other,
+                        element_type,
+                        scan_name,
+                        test_target,
+                        expect_present,
                         spread_bindings,
                     );
                 }

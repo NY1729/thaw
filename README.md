@@ -1822,15 +1822,17 @@ The workspace crates have narrow responsibilities:
   every match. Named callbacks, captures, empty sources and the statically
   sized tuple spread form (with a fully-typed named callback, matching
   every other spread-argument builtin) are supported
-- ES2024 `Set.prototype.union`/`.intersection`/`.difference` build a fresh
-  result `Set` (never mutating either operand) from `__thaw_map_snapshot_keys`
-  snapshots of the receiver and/or argument -- the same conversion
-  `[...set]`/`Array.from(set)` already use -- combined via the same
-  `__thaw_map_{suffix}_set`/`_has` intrinsics `.add()`/`.has()` already call,
-  so this needed no new runtime function either. Both operands must be
-  `Set<T>` for the same `T`. `symmetricDifference`, `isSubsetOf`,
-  `isSupersetOf` and `isDisjointFrom` are natural follow-ups sharing the same
-  snapshot/intrinsic shape, not yet implemented
+- The complete ES2024 `Set.prototype` relational family --
+  `.union`/`.intersection`/`.difference`/`.symmetricDifference` (each
+  building a fresh result `Set`, never mutating either operand) and
+  `.isSubsetOf`/`.isSupersetOf`/`.isDisjointFrom` (each a short-circuiting
+  boolean scan instead) -- from `__thaw_map_snapshot_keys` snapshots of the
+  receiver and/or argument, the same conversion `[...set]`/`Array.from(set)`
+  already use, combined through the same `__thaw_map_{suffix}_set`/`_has`
+  intrinsics `.add()`/`.has()` already call. No new runtime function needed
+  for any of the seven. `isSupersetOf(other)` reuses `isSubsetOf`'s own scan
+  with the receiver/argument roles swapped rather than a second algorithm.
+  Both operands must be `Set<T>` for the same `T`
 - `Array.prototype.keys()`/`.values()`/`.entries()` -- previously only
   `Map`/`Set` had these -- return a real, eagerly-built array the same
   way (`0..length` indices, the array itself since it's already iterable,

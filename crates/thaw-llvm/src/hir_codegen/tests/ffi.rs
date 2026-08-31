@@ -1202,6 +1202,34 @@ fn compiles_set_union_intersection_and_difference() {
 }
 
 #[test]
+fn compiles_set_symmetric_difference_and_relational_predicates() {
+    // `symmetricDifference` shares `union`'s two-pass shape but keeps an
+    // element only when the *other* side lacks it. `isSubsetOf`/
+    // `isSupersetOf`/`isDisjointFrom` share the same snapshot/`.has()`
+    // shape but return a boolean via a short-circuiting scan instead of
+    // building a new Set; `isSupersetOf` is implemented as the same scan
+    // with receiver/argument swapped rather than a separate algorithm.
+    let source = r#"
+        async function main(): Promise<void> {
+            const a = new Set<number>([1, 2, 3]);
+            const b = new Set<number>([2, 3, 4]);
+            console.log(Array.from(a.symmetricDifference(b)).join(","));
+            console.log(a.isSubsetOf(b));
+            console.log(a.isSubsetOf(new Set<number>([1, 2, 3, 4])));
+            console.log(a.isSupersetOf(new Set<number>([1, 2])));
+            console.log(a.isSupersetOf(b));
+            console.log(a.isDisjointFrom(b));
+            console.log(a.isDisjointFrom(new Set<number>([9, 10])));
+            console.log(a.size, b.size);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_symmetric_difference_and_predicates"),
+        "1,4\nfalse\ntrue\ntrue\nfalse\nfalse\ntrue\n3 3\n"
+    );
+}
+
+#[test]
 fn compiles_variadic_string_concat() {
     let source = r#"
         function receiver(): string {
