@@ -294,6 +294,26 @@ fn jit_numeric_export(
         Some(())
     }
 
+    fn append_number(mut expression: Vec<String>, output: &mut Vec<String>) -> Option<()> {
+        let kind = jit_expression_kind(&expression)?.0;
+        output.append(&mut expression);
+        if kind == JitKind::String {
+            output.push("strnum".into());
+        }
+        Some(())
+    }
+
+    fn encode_number(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut encoded = Vec::new();
+        encode_expression(expression, parameters, locals, &mut encoded)?;
+        append_number(encoded, output)
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -367,7 +387,13 @@ fn jit_numeric_export(
                     UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Tilde | UnaryOp::Bang
                 ) =>
             {
-                encode_expression(unary.arg.as_ref(), parameters, locals, output)?;
+                if unary.op == UnaryOp::Bang {
+                    let mut encoded = Vec::new();
+                    encode_expression(unary.arg.as_ref(), parameters, locals, &mut encoded)?;
+                    output.append(&mut encoded);
+                } else {
+                    encode_number(unary.arg.as_ref(), parameters, locals, output)?;
+                }
                 match unary.op {
                     UnaryOp::Minus => output.push("neg".into()),
                     UnaryOp::Tilde => output.push("bnot".into()),
@@ -406,8 +432,9 @@ fn jit_numeric_export(
                         | BinaryOp::Exp
                 ) =>
             {
-                encode_expression(binary.left.as_ref(), parameters, locals, output)?;
-                encode_expression(binary.right.as_ref(), parameters, locals, output)?;
+                for operand in [&binary.left, &binary.right] {
+                    encode_number(operand.as_ref(), parameters, locals, output)?;
+                }
                 output.push(
                     match binary.op {
                         BinaryOp::Sub => "-",
@@ -487,7 +514,7 @@ fn jit_numeric_export(
                     let [count] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_expression(count.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(count.expr.as_ref(), parameters, locals, output)?;
                 } else if matches!(operation, "replace" | "replaceall") {
                     let [search, replacement] = call.args.as_slice() else {
                         return None;
@@ -506,7 +533,7 @@ fn jit_numeric_export(
                     match call.args.as_slice() {
                         [] => output.push("c0000000000000000".into()),
                         [index] => {
-                            encode_expression(index.expr.as_ref(), parameters, locals, output)?
+                            encode_number(index.expr.as_ref(), parameters, locals, output)?
                         }
                         _ => return None,
                     }
@@ -514,7 +541,7 @@ fn jit_numeric_export(
                     let [target, pad @ ..] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_expression(target.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(target.expr.as_ref(), parameters, locals, output)?;
                     match pad {
                         [] => output.push("t20".into()),
                         [pad] => {
@@ -533,11 +560,11 @@ fn jit_numeric_export(
                     match call.args.as_slice() {
                         [] => output.push("c0000000000000000".into()),
                         [start] => {
-                            encode_expression(start.expr.as_ref(), parameters, locals, output)?
+                            encode_number(start.expr.as_ref(), parameters, locals, output)?
                         }
                         [start, end] => {
-                            encode_expression(start.expr.as_ref(), parameters, locals, output)?;
-                            encode_expression(end.expr.as_ref(), parameters, locals, output)?;
+                            encode_number(start.expr.as_ref(), parameters, locals, output)?;
+                            encode_number(end.expr.as_ref(), parameters, locals, output)?;
                             output.push(format!("{operation}2"));
                             return Some(());
                         }
@@ -553,7 +580,7 @@ fn jit_numeric_export(
                     match position {
                         [] => {}
                         [position] => {
-                            encode_expression(position.expr.as_ref(), parameters, locals, output)?;
+                            encode_number(position.expr.as_ref(), parameters, locals, output)?;
                             output.push(format!("{operation}2"));
                             return Some(());
                         }
@@ -581,6 +608,26 @@ fn jit_numeric_export(
                 let mut encoded = Vec::new();
                 encode_expression(argument.expr.as_ref(), parameters, locals, &mut encoded)?;
                 append_string(encoded, output)?;
+            }
+            Expr::Call(call)
+                if matches!(
+                    &call.callee,
+                    Callee::Expr(callee)
+                        if matches!(callee.as_ref(), Expr::Ident(identifier) if identifier.sym == "Number")
+                ) =>
+            {
+                if parameters.contains_key("Number") || locals.contains_key("Number") {
+                    return None;
+                }
+                let [argument] = call.args.as_slice() else {
+                    return None;
+                };
+                if argument.spread.is_some() {
+                    return None;
+                }
+                let mut encoded = Vec::new();
+                encode_expression(argument.expr.as_ref(), parameters, locals, &mut encoded)?;
+                append_number(encoded, output)?;
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
@@ -618,34 +665,34 @@ fn jit_numeric_export(
                     let [argument] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(argument.expr.as_ref(), parameters, locals, output)?;
                     output.push(method.into());
                 } else if method == "pow" {
                     let [base, exponent] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_expression(base.expr.as_ref(), parameters, locals, output)?;
-                    encode_expression(exponent.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(base.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(exponent.expr.as_ref(), parameters, locals, output)?;
                     output.push("pow".into());
                 } else if matches!(method, "atan2" | "imul") {
                     let [y, x] = call.args.as_slice() else {
                         return None;
                     };
-                    encode_expression(y.expr.as_ref(), parameters, locals, output)?;
-                    encode_expression(x.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(y.expr.as_ref(), parameters, locals, output)?;
+                    encode_number(x.expr.as_ref(), parameters, locals, output)?;
                     output.push(method.into());
                 } else if method == "hypot" {
                     if call.args.is_empty() {
                         output.push(format!("c{:016x}", 0.0f64.to_bits()));
                     } else {
-                        encode_expression(
+                        encode_number(
                             call.args[0].expr.as_ref(),
                             parameters,
                             locals,
                             output,
                         )?;
                         for argument in &call.args[1..] {
-                            encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                            encode_number(argument.expr.as_ref(), parameters, locals, output)?;
                             output.push("hypot".into());
                         }
                     }
@@ -657,14 +704,14 @@ fn jit_numeric_export(
                     };
                     output.push(format!("c{:016x}", value.to_bits()));
                 } else {
-                    encode_expression(
+                    encode_number(
                         call.args[0].expr.as_ref(),
                         parameters,
                         locals,
                         output,
                     )?;
                     for argument in &call.args[1..] {
-                        encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                        encode_number(argument.expr.as_ref(), parameters, locals, output)?;
                         output.push(method.into());
                     }
                 }
@@ -1023,7 +1070,7 @@ fn jit_numeric_export(
             }
         }
     }
-    if module_functions.contains_key("String") {
+    if module_functions.contains_key("String") || module_functions.contains_key("Number") {
         return None;
     }
     let mut style = None;
@@ -1307,6 +1354,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::String);
+        } else if token == "strnum" {
+            if stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Number);
         } else if token == "asbool" {
             if *stack.last()? == JitKind::String {
                 return None;
