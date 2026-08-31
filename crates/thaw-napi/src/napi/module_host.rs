@@ -569,7 +569,7 @@ unsafe fn call_export_handle_impl(
 ) -> ThawNapiHandleResult {
     let result = (|| -> Result<u64, String> {
         let name = text(name)?;
-        let callable = thaw_napi_get_export(CString::new(name).unwrap().as_ptr());
+        let callable = thaw_napi_get_export(CString::new(name.as_str()).unwrap().as_ptr());
         if callable == 0 {
             return Err("unknown native addon export".into());
         }
@@ -590,6 +590,67 @@ pub unsafe extern "C" fn thaw_napi_call_export_handle_typed_result(
     args: *const c_char,
 ) -> ThawNapiHandleResult {
     call_export_handle_impl(name, args, true)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_export_handle_with_function_typed_result(
+    name: *const c_char,
+    args: *const c_char,
+    function_index: usize,
+    callback: Option<ThawNativeValueCallback>,
+    context: *mut c_void,
+) -> ThawNapiHandleResult {
+    let result = (|| -> Result<u64, String> {
+        let name = text(name)?;
+        let callable = thaw_napi_get_export(CString::new(name.as_str()).unwrap().as_ptr());
+        let callback = callback.ok_or("native addon function argument is null")?;
+        let env = module_env_for_handle(callable)?;
+        let mut values = module_arguments(env, args, true)?;
+        if function_index > values.len() {
+            return Err(format!(
+                "function argument index {function_index} exceeds argument count {}",
+                values.len()
+            ));
+        }
+        let bridge = Arc::new(ThawCallbackBridge {
+            callback: ThawCallback::Value(callback),
+            context: context as usize,
+        });
+        let function = env_mut(env)
+            .map_err(|_| "invalid native addon environment")?
+            .alloc(Value::Function(Function {
+                callback: thaw_compiled_callback,
+                data: Arc::as_ptr(&bridge) as *mut c_void,
+                properties: HashMap::new(),
+                _thaw_bridge: Some(bridge),
+            }));
+        values.insert(function_index, function);
+        let exported = match value_ref(callable as NapiValue)
+            .map_err(|_| "invalid function handle")?
+        {
+            Value::Function(exported) => exported.clone(),
+            _ => return Err(format!("native addon export `{name}` is not callable")),
+        };
+        let this_arg = env_mut(env)
+            .map_err(|_| "invalid native addon environment")?
+            .alloc(Value::Undefined);
+        let mut info = CallbackInfo {
+            args: values,
+            this_arg,
+            new_target: ptr::null_mut(),
+            data: exported.data,
+        };
+        let value = (exported.callback)(env, &mut info);
+        take_env_exception(env)?;
+        Ok(wait_for_promise(value)? as u64)
+    })();
+    match result {
+        Ok(value) => ThawNapiHandleResult {
+            value,
+            error: ptr::null_mut(),
+        },
+        Err(error) => handle_error(error),
+    }
 }
 
 #[no_mangle]
@@ -829,6 +890,28 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
     let Some(bridge) = (info.data as *const ThawCallbackBridge).as_ref() else {
         return ptr::null_mut();
     };
+    if let ThawCallback::Value(callback) = bridge.callback {
+        let args = info
+            .args
+            .iter()
+            .map(|value| json_from_value_with_undefined(*value, true))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|args| serde_json::to_string(&args).map_err(|error| error.to_string()));
+        let Ok(args) = args.and_then(|args| CString::new(args).map_err(|error| error.to_string()))
+        else {
+            return ptr::null_mut();
+        };
+        let result = callback(bridge.context as *mut c_void, args.as_ptr());
+        let Ok(result) = text(result)
+            .and_then(|result| serde_json::from_str(&result).map_err(|error| error.to_string()))
+        else {
+            return ptr::null_mut();
+        };
+        return value_from_json_with_undefined(env_mut(_env).unwrap(), &result, true);
+    }
+    let ThawCallback::Event(callback) = bridge.callback else {
+        unreachable!()
+    };
     let error = info
         .args
         .first()
@@ -843,7 +926,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
         .unwrap_or(JsonValue::Null);
     let error = CString::new(serde_json::to_string(&error).unwrap()).unwrap();
     let result = CString::new(serde_json::to_string(&result).unwrap()).unwrap();
-    (bridge.callback)(
+    callback(
         bridge.context as *mut c_void,
         error.as_ptr(),
         result.as_ptr(),
@@ -893,7 +976,7 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
             callback
         } else {
             let bridge = Arc::new(ThawCallbackBridge {
-                callback,
+                callback: ThawCallback::Event(callback),
                 context: context as usize,
             });
             let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
@@ -1012,7 +1095,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
             callback
         } else {
             let bridge = Arc::new(ThawCallbackBridge {
-                callback,
+                callback: ThawCallback::Event(callback),
                 context: context as usize,
             });
             let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
