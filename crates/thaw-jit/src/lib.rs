@@ -129,6 +129,16 @@ extern "C" fn sign_number(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn atan2_number(y: f64, x: f64) -> f64 {
+    y.atan2(x)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn hypot_number(left: f64, right: f64) -> f64 {
+    left.hypot(right)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn to_uint32(value: f64) -> u32 {
     if !value.is_finite() || value == 0.0 {
         return 0;
@@ -383,6 +393,8 @@ enum NumericValue {
     Negate,
     Maximum,
     Minimum,
+    Atan2,
+    Hypot,
     Power,
     UnaryMath(UnaryMath),
     Remainder,
@@ -421,6 +433,8 @@ impl NumericProgram {
                     "neg" => Some(NumericValue::Negate),
                     "max" => Some(NumericValue::Maximum),
                     "min" => Some(NumericValue::Minimum),
+                    "atan2" => Some(NumericValue::Atan2),
+                    "hypot" => Some(NumericValue::Hypot),
                     "pow" => Some(NumericValue::Power),
                     "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
                     "acosh" => Some(NumericValue::UnaryMath(UnaryMath::Acosh)),
@@ -570,6 +584,18 @@ impl NumericProgram {
                         return None;
                     }
                     emit_call(&mut code, power as *const () as u64);
+                    depth = 1;
+                }
+                NumericValue::Atan2 | NumericValue::Hypot => {
+                    if depth != 2 {
+                        return None;
+                    }
+                    let function = if matches!(value, NumericValue::Atan2) {
+                        atan2_number
+                    } else {
+                        hypot_number
+                    };
+                    emit_call(&mut code, function as *const () as u64);
                     depth = 1;
                 }
                 NumericValue::UnaryMath(operation) => {
@@ -946,6 +972,10 @@ mod tests {
         let sign = CString::new("expr:a0,sign:sign_special").unwrap();
         assert_eq!(call(&sign, &[-0.0]).value.to_bits(), (-0.0f64).to_bits());
         assert!(call(&sign, &[f64::NAN]).value.is_nan());
+        let atan2 = CString::new("expr:a0,a1,atan2:atan2").unwrap();
+        assert!((call(&atan2, &[1.0, 1.0]).value - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
+        let hypot = CString::new("expr:a0,a1,hypot:hypot").unwrap();
+        assert_eq!(call(&hypot, &[3.0, 4.0]).value, 5.0);
 
         for (expression, args, expected) in [
             ("a0,a1,bor", [4_294_967_297.0, 0.0], 1.0),

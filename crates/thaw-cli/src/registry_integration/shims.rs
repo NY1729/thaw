@@ -56,6 +56,7 @@ fn jit_numeric_export(
             "asin" => Some("asin"),
             "asinh" => Some("asinh"),
             "atan" => Some("atan"),
+            "atan2" => Some("atan2"),
             "atanh" => Some("atanh"),
             "cbrt" => Some("cbrt"),
             "ceil" => Some("ceil"),
@@ -64,6 +65,7 @@ fn jit_numeric_export(
             "exp" => Some("exp"),
             "expm1" => Some("expm1"),
             "floor" => Some("floor"),
+            "hypot" => Some("hypot"),
             "log" => Some("log"),
             "log1p" => Some("log1p"),
             "log2" => Some("log2"),
@@ -235,6 +237,28 @@ fn jit_numeric_export(
                     encode_expression(base.expr.as_ref(), parameters, locals, output)?;
                     encode_expression(exponent.expr.as_ref(), parameters, locals, output)?;
                     output.push("pow".into());
+                } else if method == "atan2" {
+                    let [y, x] = call.args.as_slice() else {
+                        return None;
+                    };
+                    encode_expression(y.expr.as_ref(), parameters, locals, output)?;
+                    encode_expression(x.expr.as_ref(), parameters, locals, output)?;
+                    output.push("atan2".into());
+                } else if method == "hypot" {
+                    if call.args.is_empty() {
+                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                    } else {
+                        encode_expression(
+                            call.args[0].expr.as_ref(),
+                            parameters,
+                            locals,
+                            output,
+                        )?;
+                        for argument in &call.args[1..] {
+                            encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
+                            output.push("hypot".into());
+                        }
+                    }
                 } else if call.args.is_empty() {
                     let value = if method == "min" {
                         f64::INFINITY
@@ -780,7 +804,18 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
             depth -= 2;
         } else if matches!(
             token.as_str(),
-            "%" | "min" | "max" | "pow" | "band" | "bor" | "bxor" | "shl" | "shr" | "ushr"
+            "%"
+                | "min"
+                | "max"
+                | "pow"
+                | "atan2"
+                | "hypot"
+                | "band"
+                | "bor"
+                | "bxor"
+                | "shl"
+                | "shr"
+                | "ushr"
         ) {
             if depth != 2 {
                 return None;
