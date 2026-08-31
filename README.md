@@ -1999,7 +1999,8 @@ specialized by the same W^X cache,
 with returned UTF-8 strings allocated directly in the caller-provided Thaw
 arena. Number and boolean interpolation, plus `String(value)` for typed
 primitive values, use the same path and JavaScript-compatible number
-formatting. Mixed string/number/boolean `+` and mutable-local `+=` preserve
+formatting; this includes supported Math/comparison expressions and expanded
+local results. Mixed string/number/boolean `+` and mutable-local `+=` preserve
 JavaScript's left-to-right coercion order on that path. One-argument `startsWith`,
 `endsWith`, `includes`, `indexOf`, and `lastIndexOf`, plus zero-argument
 `toLowerCase`, `toUpperCase`, `trim`, `trimStart`, and `trimEnd`, and numeric

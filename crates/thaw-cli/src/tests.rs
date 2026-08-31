@@ -436,6 +436,33 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,numstr".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.greet = value => String(Math.round(value / 2));",
+            "greet",
+            false,
+            &number_string,
+        ),
+        Some("expr:a0,c4000000000000000,/,round,numstr".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.greet = function(value) { const rounded = Math.round(value); return `value=${rounded}`; };",
+            "greet",
+            false,
+            &number_string,
+        ),
+        Some("expr:t76616c75653d,a0,round,numstr,concat".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.greet = value => String(value > 0);",
+            "greet",
+            false,
+            &number_string,
+        ),
+        Some("expr:a0,c0000000000000000,>,boolstr".into())
+    );
     let mut shadowed_string = number_string.clone();
     shadowed_string.params[0].0 = "String".into();
     assert_eq!(

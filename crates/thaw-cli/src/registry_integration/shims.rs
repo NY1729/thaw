@@ -131,72 +131,6 @@ fn jit_numeric_export(
             .map(String::as_str)
     }
 
-    fn primitive_string_coercion(
-        expression: &Expr,
-        parameters: &std::collections::HashMap<String, String>,
-    ) -> Option<&'static str> {
-        match expression {
-            Expr::Ident(identifier) => match parameters.get(identifier.sym.as_ref())?.as_bytes()[0]
-            {
-                b's' => Some("identity"),
-                b'b' => Some("boolstr"),
-                b'a' => Some("numstr"),
-                _ => None,
-            },
-            Expr::Lit(Lit::Str(_)) => Some("identity"),
-            Expr::Lit(Lit::Bool(_)) => Some("boolstr"),
-            Expr::Lit(Lit::Num(_)) => Some("numstr"),
-            Expr::Paren(parenthesized) => {
-                primitive_string_coercion(parenthesized.expr.as_ref(), parameters)
-            }
-            Expr::Unary(unary) if unary.op == UnaryOp::Bang => Some("boolstr"),
-            Expr::Unary(unary)
-                if matches!(unary.op, UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Tilde) =>
-            {
-                Some("numstr")
-            }
-            Expr::Bin(binary)
-                if matches!(
-                    binary.op,
-                    BinaryOp::Lt
-                        | BinaryOp::LtEq
-                        | BinaryOp::Gt
-                        | BinaryOp::GtEq
-                        | BinaryOp::EqEq
-                        | BinaryOp::EqEqEq
-                        | BinaryOp::NotEq
-                        | BinaryOp::NotEqEq
-                ) =>
-            {
-                Some("boolstr")
-            }
-            Expr::Bin(binary)
-                if matches!(
-                    binary.op,
-                    BinaryOp::Sub
-                        | BinaryOp::Mul
-                        | BinaryOp::Div
-                        | BinaryOp::Mod
-                        | BinaryOp::BitAnd
-                        | BinaryOp::BitOr
-                        | BinaryOp::BitXor
-                        | BinaryOp::LShift
-                        | BinaryOp::RShift
-                        | BinaryOp::ZeroFillRShift
-                        | BinaryOp::Exp
-                ) =>
-            {
-                Some("numstr")
-            }
-            Expr::Bin(binary) if binary.op == BinaryOp::Add => {
-                let left = primitive_string_coercion(binary.left.as_ref(), parameters)?;
-                let right = primitive_string_coercion(binary.right.as_ref(), parameters)?;
-                (left != "identity" && right != "identity").then_some("numstr")
-            }
-            _ => None,
-        }
-    }
-
     fn is_string_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -204,28 +138,11 @@ fn jit_numeric_export(
         match expression {
             Expr::Ident(_) => string_parameter(expression, parameters).is_some(),
             Expr::Lit(Lit::Str(_)) => true,
-            Expr::Tpl(template) => {
-                template.quasis.len() == template.exprs.len() + 1
-                    && template
-                        .exprs
-                        .iter()
-                        .all(|expression| {
-                            is_string_expression(expression, parameters)
-                                || primitive_string_coercion(expression, parameters).is_some()
-                        })
-            }
+            Expr::Tpl(template) => template.quasis.len() == template.exprs.len() + 1,
             Expr::Paren(parenthesized) => {
                 is_string_expression(parenthesized.expr.as_ref(), parameters)
             }
-            Expr::Bin(binary) if binary.op == BinaryOp::Add => {
-                let left_string = is_string_expression(binary.left.as_ref(), parameters);
-                let right_string = is_string_expression(binary.right.as_ref(), parameters);
-                (left_string
-                    && (right_string
-                        || primitive_string_coercion(binary.right.as_ref(), parameters).is_some()))
-                    || (right_string
-                        && primitive_string_coercion(binary.left.as_ref(), parameters).is_some())
-            }
+            Expr::Bin(binary) if binary.op == BinaryOp::Add => true,
             Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else {
                     return false;
@@ -236,8 +153,7 @@ fn jit_numeric_export(
                     let [argument] = call.args.as_slice() else {
                         return false;
                     };
-                    return argument.spread.is_none()
-                        && primitive_string_coercion(argument.expr.as_ref(), parameters).is_some();
+                    return argument.spread.is_none();
                 }
                 let Expr::Member(member) = callee.as_ref() else {
                     return false;
@@ -362,6 +278,17 @@ fn jit_numeric_export(
         Some(())
     }
 
+    fn append_string(mut expression: Vec<String>, output: &mut Vec<String>) -> Option<()> {
+        let kind = jit_expression_kind(&expression)?.0;
+        output.append(&mut expression);
+        match kind {
+            JitKind::Number => output.push("numstr".into()),
+            JitKind::Boolean => output.push("boolstr".into()),
+            JitKind::String => {}
+        }
+        Some(())
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -404,10 +331,9 @@ fn jit_numeric_export(
                         emitted = true;
                     }
                     if let Some(expression) = template.exprs.get(index) {
-                        encode_expression(expression, parameters, locals, output)?;
-                        if !is_string_expression(expression, parameters) {
-                            output.push(primitive_string_coercion(expression, parameters)?.into());
-                        }
+                        let mut encoded = Vec::new();
+                        encode_expression(expression, parameters, locals, &mut encoded)?;
+                        append_string(encoded, output)?;
                         if emitted {
                             output.push("concat".into());
                         }
@@ -634,11 +560,9 @@ fn jit_numeric_export(
                 if argument.spread.is_some() {
                     return None;
                 }
-                encode_expression(argument.expr.as_ref(), parameters, locals, output)?;
-                let operation = primitive_string_coercion(argument.expr.as_ref(), parameters)?;
-                if operation != "identity" {
-                    output.push(operation.into());
-                }
+                let mut encoded = Vec::new();
+                encode_expression(argument.expr.as_ref(), parameters, locals, &mut encoded)?;
+                append_string(encoded, output)?;
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
