@@ -2006,6 +2006,8 @@ JIT path with UTF-16 code-unit indexing. `padStart(target, pad?)` and
 out-of-range results remain `undefined` without pointer or NaN sentinels.
 The typed JIT also accepts the optional UTF-16 position argument of
 `startsWith`, `endsWith`, `includes`, `indexOf`, and `lastIndexOf`.
+`localeCompare`, `isWellFormed`, and `toWellFormed` likewise stay on the typed
+JIT path; the latter two use Thaw's valid-UTF-8 native string invariant.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,
