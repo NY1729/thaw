@@ -902,6 +902,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date.now returned no value".into());
             }
+            "__thaw_performance_now" => {
+                if !args.is_empty() {
+                    return Err("performance.now expects no operands".into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_performance_now").unwrap(),
+                        &[],
+                        "performance_now",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("performance.now returned no value".into());
+            }
             "__thaw_date_get_full_year"
             | "__thaw_date_get_month"
             | "__thaw_date_get_date"

@@ -475,6 +475,24 @@ pub extern "C" fn thaw_sleep_ms(milliseconds: u64) -> *mut ThawPromise {
     promise
 }
 
+/// Milliseconds elapsed since this process started, matching the Web/Node
+/// `performance.now()` contract: a monotonic clock unaffected by wall-clock
+/// adjustments, unlike `Date.now()`. The reference point (process start) is
+/// implementation-defined by the spec, so any fixed monotonic epoch is
+/// spec-compliant; there's no meaningful "request start" to anchor to
+/// instead, since a warm Lambda execution environment reuses one process
+/// across many invocations.
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+#[no_mangle]
+pub extern "C" fn thaw_performance_now() -> f64 {
+    PROCESS_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs_f64()
+        * 1000.0
+}
+
 /// Drives ready continuations and timers until `promise` settles. Returns its
 /// result/error pointer; use `thaw_promise_state` to distinguish fulfillment
 /// from rejection. Returns null for an invalid handle or no possible progress.
