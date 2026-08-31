@@ -199,6 +199,12 @@ extern "C" fn string_length(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_truthy(value: f64) -> f64 {
+    let value = value.to_bits() as usize as *const c_char;
+    unsafe { (!value.is_null() && !CStr::from_ptr(value).to_bytes().is_empty()) as u8 as f64 }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_char_code_at(value: f64, index: f64) -> f64 {
     if index.is_infinite() {
         return f64::NAN;
@@ -976,6 +982,7 @@ enum NumericValue {
     StringLastIndexOf,
     StringLastIndexOfAt,
     StringLength,
+    StringTruthy,
     StringPadEnd,
     StringPadStart,
     StringStartsWith,
@@ -1054,6 +1061,7 @@ impl NumericProgram {
                     "lastindexof" => Some(NumericValue::StringLastIndexOf),
                     "lastindexof2" => Some(NumericValue::StringLastIndexOfAt),
                     "strlen" => Some(NumericValue::StringLength),
+                    "strbool" => Some(NumericValue::StringTruthy),
                     "padend" => Some(NumericValue::StringPadEnd),
                     "padstart" => Some(NumericValue::StringPadStart),
                     "startswith" => Some(NumericValue::StringStartsWith),
@@ -1383,6 +1391,12 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, string_length as *const () as u64, depth - 1);
+                }
+                NumericValue::StringTruthy => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, string_truthy as *const () as u64, depth - 1);
                 }
                 NumericValue::StringIsWellFormed => {
                     if depth == 0 {
@@ -2208,5 +2222,12 @@ mod tests {
         let result = call(&symbol, &[1.0]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 42.0);
+        let symbol = CString::new("expr:s0,strbool:string-boolean").unwrap();
+        for (value, expected) in [("", 0.0), ("value", 1.0)] {
+            let value = CString::new(value).unwrap();
+            let result = call(&symbol, &[f64::from_bits(value.as_ptr() as usize as u64)]);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
     }
 }
