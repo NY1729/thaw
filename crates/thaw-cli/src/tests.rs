@@ -75,12 +75,14 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
 
     assert_eq!(
         jit_numeric_export(
-            "module.exports.add = (left, right) => (left + right) * 2;",
+            "module.exports.add = (left, right) => left < right ? (left + right) * 2 : left - right;",
             "add",
             false,
             &function,
         ),
-        Some("expr:x,y,+,c4000000000000000,*".into())
+        Some(
+            "expr:x,y,<,x,y,+,c4000000000000000,*,x,y,-,?".into()
+        )
     );
     assert_eq!(
         jit_numeric_export(

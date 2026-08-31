@@ -1,9 +1,7 @@
 //! Small runtime JIT for residual operations that Thaw cannot specialize AOT.
 //!
-//! This intentionally is not a JavaScript engine. The first tier only accepts
-//! numeric binary operations and emits one W^X-protected native code stub per
-//! symbol. More Dynamic IR instructions can be added when a real fallback site
-//! needs them.
+//! This intentionally is not a JavaScript engine. It accepts a compact numeric
+//! expression IR and emits one W^X-protected native code stub per symbol.
 
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -29,6 +27,16 @@ enum NumericOp {
     Subtract,
     Multiply,
     Divide,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompareOp {
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Equal,
+    NotEqual,
 }
 
 impl NumericOp {
@@ -59,6 +67,8 @@ enum NumericValue {
     Right,
     Constant(f64),
     Operation(NumericOp),
+    Compare(CompareOp),
+    Select,
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -76,6 +86,13 @@ impl NumericProgram {
                     "-" => Some(NumericValue::Operation(NumericOp::Subtract)),
                     "*" => Some(NumericValue::Operation(NumericOp::Multiply)),
                     "/" => Some(NumericValue::Operation(NumericOp::Divide)),
+                    "<" => Some(NumericValue::Compare(CompareOp::Less)),
+                    "<=" => Some(NumericValue::Compare(CompareOp::LessEqual)),
+                    ">" => Some(NumericValue::Compare(CompareOp::Greater)),
+                    ">=" => Some(NumericValue::Compare(CompareOp::GreaterEqual)),
+                    "==" => Some(NumericValue::Compare(CompareOp::Equal)),
+                    "!=" => Some(NumericValue::Compare(CompareOp::NotEqual)),
+                    "?" => Some(NumericValue::Select),
                     constant => constant
                         .strip_prefix('c')
                         .filter(|bits| bits.len() == 16)
@@ -137,6 +154,44 @@ impl NumericProgram {
                     ]);
                     depth -= 1;
                 }
+                NumericValue::Compare(operation) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let right = depth - 1;
+                    let left = depth - 2;
+                    emit_compare(&mut code, left, right, *operation);
+                    depth -= 1;
+                }
+                NumericValue::Select => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    let condition = depth - 3;
+                    let consequent = depth - 2;
+                    let alternate = depth - 1;
+                    // Remove the sign bit before testing so both +0 and -0 are false;
+                    // all other values, including NaN, retain JavaScript truthiness.
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x7e,
+                        0xc0 | (condition << 3),
+                        0x48,
+                        0xd1,
+                        0xe0,
+                        0x48,
+                        0x85,
+                        0xc0,
+                        0x74,
+                        0x06,
+                    ]);
+                    emit_move(&mut code, condition, consequent);
+                    code.extend_from_slice(&[0xeb, 0x04]);
+                    emit_move(&mut code, condition, alternate);
+                    depth -= 2;
+                }
             }
         }
         (depth == 1).then(|| {
@@ -149,6 +204,30 @@ impl NumericProgram {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn emit_move(code: &mut Vec<u8>, destination: u8, source: u8) {
     code.extend_from_slice(&[0x66, 0x0f, 0x28, 0xc0 | (destination << 3) | source]);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_compare(code: &mut Vec<u8>, left: u8, right: u8, operation: CompareOp) {
+    code.extend_from_slice(&[0x66, 0x0f, 0x2e, 0xc0 | (left << 3) | right]);
+    let condition = match operation {
+        CompareOp::Less => 0x92,
+        CompareOp::LessEqual => 0x96,
+        CompareOp::Greater => 0x97,
+        CompareOp::GreaterEqual => 0x93,
+        CompareOp::Equal => 0x94,
+        CompareOp::NotEqual => 0x95,
+    };
+    code.extend_from_slice(&[0x0f, condition, 0xc0]);
+    match operation {
+        CompareOp::Less | CompareOp::LessEqual | CompareOp::Equal => {
+            code.extend_from_slice(&[0x0f, 0x9b, 0xc2, 0x20, 0xd0]);
+        }
+        CompareOp::NotEqual => {
+            code.extend_from_slice(&[0x0f, 0x9a, 0xc2, 0x08, 0xd0]);
+        }
+        CompareOp::Greater | CompareOp::GreaterEqual => {}
+    }
+    code.extend_from_slice(&[0x0f, 0xb6, 0xc0, 0xf2, 0x0f, 0x2a, 0xc0 | (left << 3)]);
 }
 
 struct Code(*mut libc::c_void);
@@ -279,5 +358,39 @@ mod tests {
         let result = unsafe { thaw_jit_call_f64(symbol.as_ptr(), 19.0, 2.0) };
         assert!(result.error.is_null());
         assert_eq!(result.value, 42.0);
+
+        let symbol =
+            CString::new("expr:x,y,<,c4045000000000000,cc000000000000000,?:conditional").unwrap();
+        let comparison = CString::new("expr:x,y,<:comparison").unwrap();
+        assert_eq!(
+            unsafe { thaw_jit_call_f64(comparison.as_ptr(), 2.0, 3.0) }.value,
+            1.0
+        );
+        assert_eq!(
+            unsafe { thaw_jit_call_f64(symbol.as_ptr(), 2.0, 3.0) }.value,
+            42.0
+        );
+        assert_eq!(
+            unsafe { thaw_jit_call_f64(symbol.as_ptr(), 3.0, 2.0) }.value,
+            -2.0
+        );
+
+        for (operator, expected) in [("<", 0.0), ("==", 0.0), ("!=", 1.0)] {
+            let symbol = CString::new(format!("expr:x,y,{operator}:nan")).unwrap();
+            let result = unsafe { thaw_jit_call_f64(symbol.as_ptr(), f64::NAN, 1.0) };
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
+
+        let symbol =
+            CString::new("expr:x,c4045000000000000,cc000000000000000,?:truthiness").unwrap();
+        assert_eq!(
+            unsafe { thaw_jit_call_f64(symbol.as_ptr(), -0.0, 0.0) }.value,
+            -2.0
+        );
+        assert_eq!(
+            unsafe { thaw_jit_call_f64(symbol.as_ptr(), f64::NAN, 0.0) }.value,
+            42.0
+        );
     }
 }
