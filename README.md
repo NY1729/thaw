@@ -1889,7 +1889,7 @@ The workspace crates have narrow responsibilities:
 An experimental QuickJS-independent residual JIT backend is now linked as a
 separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
 HIR through LLVM to a small W^X runtime which specializes and caches numeric
-expressions containing arguments, constants, and nested `add/sub/mul/div`
+expressions containing arguments, constants, unary negation, and nested `add/sub/mul/div`
 operations, comparisons, and conditional selection on first use. Its
 end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
@@ -1899,7 +1899,7 @@ them to this backend, and omits fully extracted bundles from QuickJS.
 Single-return bodies and the common `if (...) return ...; return ...;` form are
 normalized to the same IR. Side-effect-free local numeric declarations are
 expanded in declaration order, while calls, mutation, and forward references
-remain on the QuickJS path. Numeric exports with 1-16 required arguments use a
+remain on the QuickJS path. Numeric exports with 0-16 required arguments use a
 single argument-array runtime ABI; generated code loads only the `aN` slots
 referenced by its IR.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
