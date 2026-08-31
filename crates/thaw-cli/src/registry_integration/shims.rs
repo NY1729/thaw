@@ -108,6 +108,49 @@ fn jit_numeric_export(
         (output.len() <= 128).then_some(())
     }
 
+    enum NumericBody<'a> {
+        Expression(&'a Expr),
+        Conditional {
+            test: &'a Expr,
+            consequent: &'a Expr,
+            alternate: &'a Expr,
+        },
+    }
+
+    fn returned_expression(statement: &Stmt) -> Option<&Expr> {
+        match statement {
+            Stmt::Return(returned) => returned.arg.as_deref(),
+            Stmt::Block(block) => {
+                let [statement] = block.stmts.as_slice() else {
+                    return None;
+                };
+                returned_expression(statement)
+            }
+            _ => None,
+        }
+    }
+
+    fn numeric_body(statements: &[Stmt]) -> Option<NumericBody<'_>> {
+        match statements {
+            [Stmt::Return(returned)] => {
+                Some(NumericBody::Expression(returned.arg.as_deref()?))
+            }
+            [Stmt::If(branch), Stmt::Return(alternate)] if branch.alt.is_none() => {
+                Some(NumericBody::Conditional {
+                    test: branch.test.as_ref(),
+                    consequent: returned_expression(branch.cons.as_ref())?,
+                    alternate: alternate.arg.as_deref()?,
+                })
+            }
+            [Stmt::If(branch)] => Some(NumericBody::Conditional {
+                test: branch.test.as_ref(),
+                consequent: returned_expression(branch.cons.as_ref())?,
+                alternate: returned_expression(branch.alt.as_deref()?)?,
+            }),
+            _ => None,
+        }
+    }
+
     if function.generic.is_some()
         || function.required_params != 2
         || function.params.len() != 2
@@ -191,25 +234,21 @@ fn jit_numeric_export(
         return None;
     };
 
-    let (params, body): (Vec<&Pat>, &Expr) = match callable {
+    let (params, body): (Vec<&Pat>, NumericBody<'_>) = match callable {
         Expr::Fn(function) if !function.function.is_async && !function.function.is_generator => {
             let body = function.function.body.as_ref()?;
-            let [Stmt::Return(returned)] = body.stmts.as_slice() else {
-                return None;
-            };
             (
                 function.function.params.iter().map(|param| &param.pat).collect(),
-                returned.arg.as_deref()?,
+                numeric_body(&body.stmts)?,
             )
         }
         Expr::Arrow(function) if !function.is_async && !function.is_generator => {
             let body = match function.body.as_ref() {
-                thaw_parser::ast::ArrowFunctionBody::Expr(body) => body.as_ref(),
+                thaw_parser::ast::ArrowFunctionBody::Expr(body) => {
+                    NumericBody::Expression(body.as_ref())
+                }
                 thaw_parser::ast::ArrowFunctionBody::FunctionBody(body) => {
-                    let [Stmt::Return(returned)] = body.stmts.as_slice() else {
-                        return None;
-                    };
-                    returned.arg.as_deref()?
+                    numeric_body(&body.stmts)?
                 }
             };
             (function.params.iter().collect(), body)
@@ -220,12 +259,21 @@ fn jit_numeric_export(
         return None;
     };
     let mut expression = Vec::new();
-    encode_expression(
-        body,
-        left_param.id.sym.as_ref(),
-        right_param.id.sym.as_ref(),
-        &mut expression,
-    )?;
+    let left = left_param.id.sym.as_ref();
+    let right = right_param.id.sym.as_ref();
+    match body {
+        NumericBody::Expression(body) => encode_expression(body, left, right, &mut expression)?,
+        NumericBody::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            encode_condition(test, left, right, &mut expression)?;
+            encode_expression(consequent, left, right, &mut expression)?;
+            encode_expression(alternate, left, right, &mut expression)?;
+            expression.push("?".into());
+        }
+    }
     let mut depth = 0usize;
     let mut maximum_depth = 0usize;
     for token in &expression {

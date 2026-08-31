@@ -1896,6 +1896,8 @@ end-to-end test produces
 extracts side-effect-free CommonJS function exports, including
 `module.exports = { ... }` packages, whose bodies fit this numeric IR, routes
 them to this backend, and omits fully extracted bundles from QuickJS.
+Single-return bodies and the common `if (...) return ...; return ...;` form are
+normalized to the same IR.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
 

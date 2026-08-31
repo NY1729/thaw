@@ -75,7 +75,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
 
     assert_eq!(
         jit_numeric_export(
-            "module.exports.add = (left, right) => left < right ? (left + right) * 2 : left - right;",
+            "module.exports.add = function(left, right) { if (left < right) return (left + right) * 2; return left - right; };",
             "add",
             false,
             &function,
