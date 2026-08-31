@@ -87,6 +87,53 @@ extern "C" fn round_number(value: f64) -> f64 {
     }
 }
 
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn to_uint32(value: f64) -> u32 {
+    if !value.is_finite() || value == 0.0 {
+        return 0;
+    }
+    let mut modulo = value.trunc() % 4_294_967_296.0;
+    if modulo < 0.0 {
+        modulo += 4_294_967_296.0;
+    }
+    modulo as u32
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn bit_and(left: f64, right: f64) -> f64 {
+    (to_uint32(left) & to_uint32(right)) as i32 as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn bit_or(left: f64, right: f64) -> f64 {
+    (to_uint32(left) | to_uint32(right)) as i32 as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn bit_xor(left: f64, right: f64) -> f64 {
+    (to_uint32(left) ^ to_uint32(right)) as i32 as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn shift_left(left: f64, right: f64) -> f64 {
+    (to_uint32(left) << (to_uint32(right) & 31)) as i32 as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn shift_right(left: f64, right: f64) -> f64 {
+    ((to_uint32(left) as i32) >> (to_uint32(right) & 31)) as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn shift_right_unsigned(left: f64, right: f64) -> f64 {
+    (to_uint32(left) >> (to_uint32(right) & 31)) as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn bit_not(value: f64) -> f64 {
+    (!to_uint32(value)) as i32 as f64
+}
+
 #[repr(C)]
 pub struct ThawJitResult {
     pub value: f64,
@@ -118,6 +165,30 @@ enum UnaryMath {
     Round,
     SquareRoot,
     Truncate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BitwiseOp {
+    And,
+    Or,
+    ShiftLeft,
+    ShiftRight,
+    ShiftRightUnsigned,
+    Xor,
+}
+
+impl BitwiseOp {
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    fn function(self) -> extern "C" fn(f64, f64) -> f64 {
+        match self {
+            Self::And => bit_and,
+            Self::Or => bit_or,
+            Self::ShiftLeft => shift_left,
+            Self::ShiftRight => shift_right,
+            Self::ShiftRightUnsigned => shift_right_unsigned,
+            Self::Xor => bit_xor,
+        }
+    }
 }
 
 impl UnaryMath {
@@ -161,6 +232,8 @@ enum NumericValue {
     Constant(f64),
     Operation(NumericOp),
     Compare(CompareOp),
+    Bitwise(BitwiseOp),
+    BitNot,
     Absolute,
     Negate,
     Maximum,
@@ -191,6 +264,13 @@ impl NumericProgram {
                     ">=" => Some(NumericValue::Compare(CompareOp::GreaterEqual)),
                     "==" => Some(NumericValue::Compare(CompareOp::Equal)),
                     "!=" => Some(NumericValue::Compare(CompareOp::NotEqual)),
+                    "band" => Some(NumericValue::Bitwise(BitwiseOp::And)),
+                    "bor" => Some(NumericValue::Bitwise(BitwiseOp::Or)),
+                    "bxor" => Some(NumericValue::Bitwise(BitwiseOp::Xor)),
+                    "shl" => Some(NumericValue::Bitwise(BitwiseOp::ShiftLeft)),
+                    "shr" => Some(NumericValue::Bitwise(BitwiseOp::ShiftRight)),
+                    "ushr" => Some(NumericValue::Bitwise(BitwiseOp::ShiftRightUnsigned)),
+                    "bnot" => Some(NumericValue::BitNot),
                     "abs" => Some(NumericValue::Absolute),
                     "neg" => Some(NumericValue::Negate),
                     "max" => Some(NumericValue::Maximum),
@@ -271,6 +351,19 @@ impl NumericProgram {
                     let left = depth - 2;
                     emit_compare(&mut code, left, right, *operation);
                     depth -= 1;
+                }
+                NumericValue::Bitwise(operation) => {
+                    if depth != 2 {
+                        return None;
+                    }
+                    emit_call(&mut code, operation.function() as *const () as u64);
+                    depth = 1;
+                }
+                NumericValue::BitNot => {
+                    if depth != 1 {
+                        return None;
+                    }
+                    emit_call(&mut code, bit_not as *const () as u64);
                 }
                 NumericValue::Absolute => {
                     if depth == 0 {
@@ -641,5 +734,19 @@ mod tests {
         assert_eq!(call(&round, &[-0.5]).value.to_bits(), (-0.0f64).to_bits());
         let square_root = CString::new("expr:a0,sqrt:sqrt_nan").unwrap();
         assert!(call(&square_root, &[-1.0]).value.is_nan());
+
+        for (expression, args, expected) in [
+            ("a0,a1,bor", [4_294_967_297.0, 0.0], 1.0),
+            ("a0,a1,band", [f64::NAN, 1.0], 0.0),
+            ("a0,a1,bxor", [43.0, 1.0], 42.0),
+            ("a0,a1,shl", [1.0, 33.0], 2.0),
+            ("a0,a1,shr", [-4.0, 1.0], -2.0),
+            ("a0,a1,ushr", [-1.0, 0.0], 4_294_967_295.0),
+        ] {
+            let symbol = CString::new(format!("expr:{expression}:bitwise")).unwrap();
+            assert_eq!(call(&symbol, &args).value, expected);
+        }
+        let bit_not = CString::new("expr:a0,bnot:bit_not").unwrap();
+        assert_eq!(call(&bit_not, &[0.0]).value, -1.0);
     }
 }
