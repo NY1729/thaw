@@ -15,7 +15,10 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
         .body
         .iter()
         .flat_map(extract_fn_decls)
-        .map(|(name, func)| lower_dts_function(name, func, &interfaces, &generic_interfaces))
+        .map(|(name, func)| {
+            let name = name.rsplit('.').next().unwrap_or(name);
+            lower_dts_function(name, func, &interfaces, &generic_interfaces)
+        })
         .collect())
 }
 

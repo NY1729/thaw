@@ -883,3 +883,9 @@ finalizerが1回だけ実行されることを検証する。native callback rec
 JavaScript prototypeを継承し、prototype側のmethodを先に、存在しないpropertyをN-API側で解決する。
 合成GC E2Eはnative finalizerからのcallbackが元instanceを`this`としてproperty更新できることも
 検証する。これにより`weak-napi`の`onGarbageCollect`が必要とする`this.emit('dead')`経路を満たす。
+
+`export = callable`と同名namespaceをmergeするCommonJS declarationでは、default importを直接
+callable targetとnamespace member表の両方へ登録する。SWCがnamespace function名を
+`callable.method`として返す場合はbare `method`へ正規化する。function-valued `module.exports`の
+enumerable static methodを先にglobalへhoistし、default bindingは未設定のfunction名だけをroot
+callableで補う。E2Eはdefault直接呼び出しと`default.method()`の両方を単一実行ファイルで検証する。

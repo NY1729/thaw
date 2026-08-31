@@ -2476,6 +2476,11 @@ Class Proxies also retain the JavaScript constructor prototype, so methods added
 with `Object.setPrototypeOf` or direct prototype assignment remain visible. The
 GC E2E verifies that a native finalizer callback can update its receiver through
 that JavaScript prototype-aware Proxy.
+CommonJS declaration merging is supported for `export = callable` packages:
+functions from the callable's same-name namespace are available through a
+default import (`callable.method()`), while the default value remains directly
+callable. Function-valued `module.exports` objects retain their enumerable
+static methods instead of rebinding every declared function to the root export.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
