@@ -1874,6 +1874,18 @@ The workspace crates have narrow responsibilities:
 - Uncaught synchronous exceptions and async rejections from Lambda handlers
   are posted to the Runtime API invocation error endpoint with their original
   message
+- The Runtime API's `Lambda-Runtime-Deadline-Ms` header drives a countdown
+  the async event loop consults alongside its existing timer/fd waits: once
+  it elapses, the loop stops waiting and rejects the invocation's completion
+  Promise with a `Task timed out after N.NN seconds` message rather than the
+  handler's real result, reported through the same invocation error endpoint.
+  Settling a Promise only ever honors its first settle, so a delayed real
+  result or rejection arriving afterward is safely ignored. Every pending
+  timer, fd wait, ready continuation and combinator join count left behind by
+  the abandoned coroutine is discarded before the arena resets, so a later
+  invocation's event loop can never resume a pointer into reused memory; a
+  handler with no deadline header (outside a real Lambda environment) runs
+  to completion as before
 - Versioned FFI metadata can opt native functions into a typed
   `{ value, error }` result ABI whose errors propagate through Thaw catch paths
 - Void native functions use the corresponding `{ error }` result ABI, including

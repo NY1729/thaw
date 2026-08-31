@@ -7,7 +7,9 @@
   async try/catchの例外伝播、fdのI/O readiness登録とpollイベントループ統合も
   実装済み。非ブロッキングHTTP状態機械とasync fetch接続も実装済み。
   async関数の集約型・タプル戻り値、式内の複数await、深いif/while/try、
-  Promise値のローカル・引数・オブジェクトfield経由の受け渡しも実装済み
+  Promise値のローカル・引数・オブジェクトfield経由の受け渡しも実装済み。
+  Lambda Runtime APIの`Lambda-Runtime-Deadline-Ms`に基づく実行タイムアウト
+  検出と、完了Promiseの強制reject・pending state破棄も実装済み（詳細は4.7節）
 - 前提: [thaw-hir](../../crates/thaw-hir), [thaw-llvm/hir_codegen](../../crates/thaw-llvm/src/hir_codegen.rs), [thaw-runtime](../../crates/thaw-runtime) の現状（Phase 0〜2一部）を前提にする
 
 ## 1. 目的とスコープ
@@ -364,7 +366,22 @@ Thaw 側のイベントループと QuickJS のジョブキュー（`JS_ExecuteP
   定義が曖昧になる。resume function 内で再度 try/catch の分岐を再構築
   する必要があり、Phase 1 の try/catch 実装を素直に拡張できない可能性が高い）。
 - キャンセル（Lambda のタイムアウトで実行中のコルーチンを中断する場合、
-  `coro.destroy` 経路とアリーナ解放のタイミング）。
+  `coro.destroy` 経路とアリーナ解放のタイミング）: `coro.destroy` を使う本物の
+  V2はまだだが、実行中ハンドラを外側から強制settleする経路は実装済み。
+  `handle_one_invocation`がRuntime APIの`Lambda-Runtime-Deadline-Ms`（絶対epoch
+  ms）を読み、`thaw_runtime_run_until_resolved`用のカウントダウンへ変換して
+  thread-localに保持する。同関数のポーリングループは残り時間を既存の
+  タイマー/fd待機と同じ`Duration`として扱い、time-boxされた待機のたびに
+  経過を確認して、尽きた時点で結果を待たずに対象Promiseへ`Task timed out
+  after X.XX seconds`でrejectする（Promise ABIは最初の1回のsettleしか
+  受理しないため、後から本来の結果/rejectionが来ても安全に無視される）。
+  `InvocationArenaReset`はアリーナ解放前に残存タイマー・fd待機・
+  ready-continuationキュー・combinator join countを無条件に破棄する
+  （`FD_WATCHERS`など呼び出し境界をまたぐ長寿命の登録は対象外）。これにより、
+  中断されたコルーチン自身のフレームが参照するpending stateが、次回
+  invocationのイベントループから解放済みアリーナへ再開されることはない。
+  実際のOSリソース（保留中`fetch`が握るソケットfdなど）はThawにGC/dropが
+  ないためこの経路では閉じられず、既知の制限として残る。
 
 ## 5. 移行パス
 

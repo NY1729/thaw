@@ -51,6 +51,63 @@ thread_local! {
     static FD_WAITS: RefCell<Vec<PromiseFdWait>> = const { RefCell::new(Vec::new()) };
     static FD_WATCHERS: RefCell<Vec<FdWatcher>> = const { RefCell::new(Vec::new()) };
     static ACTIVE_PROMISE_JOINS: Cell<usize> = const { Cell::new(0) };
+    // The current Lambda invocation's wall-clock deadline, derived from the
+    // Runtime API's `Lambda-Runtime-Deadline-Ms` header, paired with the
+    // countdown it started from (kept only to phrase the timeout message).
+    // `None` outside a Lambda invocation, or when the header was missing.
+    static INVOCATION_DEADLINE: Cell<Option<(Instant, Duration)>> = const { Cell::new(None) };
+}
+
+static INVOCATION_TIMEOUT_ERROR: &[u8] = b"Task timed out\0";
+
+/// Sets (or clears, when `None`) the current Lambda invocation's timeout
+/// countdown. `handle_one_invocation` calls this once per invocation with the
+/// remaining milliseconds derived from the Runtime API's deadline header.
+fn set_invocation_deadline(remaining_ms: Option<u64>) {
+    INVOCATION_DEADLINE.with(|cell| {
+        cell.set(remaining_ms.map(|ms| {
+            let budget = Duration::from_millis(ms);
+            (Instant::now() + budget, budget)
+        }))
+    });
+}
+
+/// `None` when no invocation deadline is active. `Some(Duration::ZERO)` once
+/// it has passed, so callers can tell "expired" apart from "no deadline" and
+/// still use the value to cap how long they block waiting for other events.
+fn invocation_deadline_remaining() -> Option<Duration> {
+    INVOCATION_DEADLINE
+        .with(Cell::get)
+        .map(|(deadline, _)| deadline.saturating_duration_since(Instant::now()))
+}
+
+/// Force-settles `promise` with a timeout error once its invocation's
+/// deadline has passed, mirroring the real Runtime API's own behavior for a
+/// handler that runs past its configured timeout. Safe to call on an
+/// already-settled promise -- the Promise ABI accepts only the first settle.
+fn reject_for_invocation_deadline(promise: *mut ThawPromise) {
+    let seconds = INVOCATION_DEADLINE
+        .with(Cell::get)
+        .map_or(0.0, |(_, budget)| budget.as_secs_f64());
+    let message = format!("Task timed out after {seconds:.2} seconds");
+    let error = arena_c_string(&message).unwrap_or(INVOCATION_TIMEOUT_ERROR.as_ptr());
+    thaw_promise_reject(promise, error);
+}
+
+/// Clears every thread-local queue that could still hold a pointer into the
+/// request arena `InvocationArenaReset` is about to reset: an abandoned
+/// coroutine (deadline timeout, or genuine deadlock with no possible
+/// progress) can leave its own pending timers/fd-waits registered, and a
+/// later invocation's event loop must never resume them into reused memory.
+/// `FD_WATCHERS` is deliberately untouched -- those back long-lived
+/// subscriptions (such as N-API filesystem watchers) that outlive one
+/// invocation by design.
+fn purge_pending_async_state() {
+    READY_CONTINUATIONS.with(|queue| queue.borrow_mut().clear());
+    TIMERS.with(|timers| timers.borrow_mut().clear());
+    FD_WAITS.with(|waits| waits.borrow_mut().clear());
+    ACTIVE_PROMISE_JOINS.with(|count| count.set(0));
+    set_invocation_deadline(None);
 }
 
 struct PromiseTimer {
@@ -435,13 +492,22 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
         if let Some(result) = promise_ref.result {
             return result;
         }
+        if invocation_deadline_remaining() == Some(Duration::ZERO) {
+            reject_for_invocation_deadline(promise.cast_mut());
+            continue;
+        }
         if thaw_runtime_poll_one() != 0 {
             continue;
         }
         if unsafe { thaw_promise_state(promise) } != 0 {
             continue;
         }
-        let delay = next_timer_delay();
+        let delay = match (next_timer_delay(), invocation_deadline_remaining()) {
+            (Some(timer), Some(deadline)) => Some(timer.min(deadline)),
+            (Some(timer), None) => Some(timer),
+            (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        };
         if has_fd_waits() {
             poll_fd_waits(delay);
         } else if let Some(delay) = delay {

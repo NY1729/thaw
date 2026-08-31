@@ -596,6 +596,48 @@ fn promise_all_drives_children_concurrently() {
 }
 
 #[test]
+fn invocation_deadline_rejects_a_pending_promise_without_waiting_for_it() {
+    // 10s away: long enough that the test would time out itself if the
+    // deadline mechanism failed to preempt it.
+    let pending = timed_value(10_000, 0.0);
+    set_invocation_deadline(Some(30));
+
+    let started = Instant::now();
+    let result = thaw_runtime_run_until_resolved(pending);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the deadline should reject long before the far-future timer fires"
+    );
+
+    assert_eq!(thaw_promise_state(pending), 2);
+    let message = unsafe { CStr::from_ptr(result.cast()) }.to_str().unwrap();
+    assert_eq!(message, "Task timed out after 0.03 seconds");
+
+    // The abandoned timer is still registered until something purges it --
+    // exactly the state `InvocationArenaReset` must clear before the next
+    // invocation's event loop could otherwise resume it into reused memory.
+    assert!(TIMERS.with(|timers| !timers.borrow().is_empty()));
+    purge_pending_async_state();
+    assert!(TIMERS.with(|timers| timers.borrow().is_empty()));
+    assert_eq!(invocation_deadline_remaining(), None);
+
+    unsafe { thaw_promise_destroy(pending) };
+}
+
+#[test]
+fn invocation_deadline_does_not_affect_a_promise_that_settles_in_time() {
+    set_invocation_deadline(Some(500));
+    let fast = timed_value(10, 42.0);
+    assert_eq!(
+        unsafe { *thaw_runtime_run_until_resolved(fast).cast::<f64>() },
+        42.0
+    );
+    assert_eq!(thaw_promise_state(fast), 1);
+    purge_pending_async_state();
+    unsafe { thaw_promise_destroy(fast) };
+}
+
+#[test]
 fn promise_race_uses_completion_order_and_drains_the_loser() {
     let slow = timed_value(30, 1.0);
     let fast = timed_value(2, 2.0);
@@ -1404,6 +1446,59 @@ fn posts_uncaught_handler_exception_to_the_lambda_error_endpoint() {
     let request = rx.recv().unwrap();
     assert!(request.starts_with("POST /2018-06-01/runtime/invocation/req-error/error"));
     assert!(request.contains(r#"{"errorMessage":"handler exploded","errorType":"ThawError"}"#));
+}
+
+static mut TEST_TIMEOUT_EXCEPTION: *const c_char = std::ptr::null();
+
+/// Mimics the generated JSON handler adapter's own rejection path: drive a
+/// promise that would only settle far in the future, and if the invocation
+/// deadline rejects it first, report that through `error_slot` like a real
+/// async handler would.
+extern "C" fn slow_async_handler(_: *const c_char) -> *const c_char {
+    let promise = timed_value(10_000, 0.0);
+    let result = thaw_runtime_run_until_resolved(promise);
+    assert_eq!(thaw_promise_state(promise), 2, "expected the deadline to reject this handler");
+    unsafe { TEST_TIMEOUT_EXCEPTION = result.cast() };
+    std::ptr::null()
+}
+
+#[test]
+fn posts_a_timeout_error_when_the_deadline_header_elapses_before_the_handler_settles() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut request = [0u8; 4096];
+        let _ = conn.read(&mut request).unwrap();
+        let now_epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let deadline_epoch_ms = now_epoch_ms + 30;
+        conn.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: req-timeout\r\nLambda-Runtime-Deadline-Ms: {deadline_epoch_ms}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        drop(conn);
+
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        conn.read_to_end(&mut request).unwrap();
+        tx.send(String::from_utf8_lossy(&request).into_owned())
+            .unwrap();
+        conn.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+
+    handle_one_invocation(&addr, slow_async_handler, &raw mut TEST_TIMEOUT_EXCEPTION).unwrap();
+    server.join().unwrap();
+    let request = rx.recv().unwrap();
+    assert!(request.starts_with("POST /2018-06-01/runtime/invocation/req-timeout/error"));
+    assert!(request.contains("Task timed out after 0.03 seconds"));
 }
 
 #[test]
