@@ -470,9 +470,41 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Array(Box::new(HirType::Str)),
                                 HirType::Str,
                             ),
+                            // Same snapshot conversion array-literal spreads
+                            // (`[...map]`/`[...set]`) already use, matching
+                            // each container's default iterator shape.
+                            HirType::Map(key_type, value_type) => {
+                                let pair_type = HirType::Tuple(vec![
+                                    key_type.as_ref().clone(),
+                                    value_type.as_ref().clone(),
+                                ]);
+                                let array_type = HirType::Array(Box::new(pair_type.clone()));
+                                let source = HirExpr::TypedClosure(
+                                    array_type.clone(),
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::Var(
+                                            "__thaw_map_snapshot_entries".into(),
+                                        )),
+                                        vec![source],
+                                    )),
+                                );
+                                (source, array_type, pair_type)
+                            }
+                            HirType::Set(element) => {
+                                let element_type = element.as_ref().clone();
+                                let array_type = HirType::Array(element);
+                                let source = HirExpr::TypedClosure(
+                                    array_type.clone(),
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_map_snapshot_keys".into())),
+                                        vec![source],
+                                    )),
+                                );
+                                (source, array_type, element_type)
+                            }
                             other => {
                                 return Err(format!(
-                                    "native `Array.from` requires a homogeneous array or string, got {other:?}"
+                                    "native `Array.from` requires a homogeneous array, string, Map, or Set, got {other:?}"
                                 ))
                             }
                         };

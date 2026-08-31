@@ -1040,6 +1040,32 @@ fn compiles_native_array_from_native_arrays() {
 }
 
 #[test]
+fn compiles_native_array_from_a_map_or_set() {
+    // Reuses the exact same `__thaw_map_snapshot_entries`/
+    // `__thaw_map_snapshot_keys` conversion array-literal spreads
+    // (`[...map]`/`[...set]`) already use, so `Array.from` matches each
+    // container's own default iterator shape: `[key, value]` pairs for a
+    // `Map`, elements (deduplicated, insertion order) for a `Set`.
+    let source = r#"
+        async function main(): Promise<void> {
+            const s = new Set<number>([1, 2, 2, 3]);
+            console.log(Array.from(s).join(","));
+            console.log(Array.from(s, value => value * 10).join(","));
+            const m = new Map<string, number>([["a", 1], ["b", 2]]);
+            for (const [k, v] of Array.from(m)) {
+                console.log(k, v);
+            }
+            const emptySet = new Set<number>();
+            console.log(Array.from(emptySet).length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_map_or_set"),
+        "1,2,3\n10,20,30\na 1\nb 2\n0\n"
+    );
+}
+
+#[test]
 fn compiles_native_array_from_an_array_like_length_object() {
     // `Array.from({length})` -- as opposed to the real-array/string source
     // the test above covers. A plain `{ length }` object has no indexed
