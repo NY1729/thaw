@@ -1059,14 +1059,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_jit_call_f64",
             self.context
                 .struct_type(&[self.context.f64_type().into(), i8_ptr.into()], false)
-                .fn_type(
-                    &[
-                        i8_ptr.into(),
-                        self.context.f64_type().into(),
-                        self.context.f64_type().into(),
-                    ],
-                    false,
-                ),
+                .fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false),
             Some(Linkage::External),
         );
         self.module

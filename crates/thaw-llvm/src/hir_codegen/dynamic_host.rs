@@ -973,28 +973,52 @@ impl<'ctx> HirCompiler<'ctx> {
             return self.compile_typed_napi_method(signature, args);
         }
         if signature.backend == DynamicBackend::Jit {
-            if !(1..=2).contains(&signature.params.len())
+            if !(1..=16).contains(&signature.params.len())
                 || !signature.params.iter().all(|ty| *ty == HirType::F64)
                 || signature.ret != HirType::F64
                 || args.len() != signature.params.len()
             {
-                return Err("JIT calls currently require one or two numbers and return number".into());
+                return Err("JIT calls currently require 1-16 numbers and return number".into());
             }
             let name = self
                 .builder
                 .build_global_string_ptr(&signature.symbol, "jit_symbol")
                 .map_err(|error| error.to_string())?;
-            let left = self.compile_expr(&args[0])?;
-            let right = if let Some(argument) = args.get(1) {
-                self.compile_expr(argument)?
-            } else {
-                self.context.f64_type().const_zero().into()
-            };
+            let argument_storage = self
+                .builder
+                .build_alloca(
+                    self.context.i8_type().array_type((args.len() * 8) as u32),
+                    "jit_arguments",
+                )
+                .map_err(|error| error.to_string())?;
+            for (index, argument) in args.iter().enumerate() {
+                let value = self.compile_expr(argument)?;
+                let slot = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            argument_storage,
+                            &[self.context.i64_type().const_int((index * 8) as u64, false)],
+                            "jit_argument",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(|error| error.to_string())?;
+            }
             let result = self
                 .builder
                 .build_call(
                     self.module.get_function("thaw_jit_call_f64").unwrap(),
-                    &[name.as_pointer_value().into(), left.into(), right.into()],
+                    &[
+                        name.as_pointer_value().into(),
+                        argument_storage.into(),
+                        self.context
+                            .i64_type()
+                            .const_int(args.len() as u64, false)
+                            .into(),
+                    ],
                     "jit_numeric_result",
                 )
                 .map_err(|error| error.to_string())?
