@@ -1923,6 +1923,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamic" => return self.compile_call_dynamic(args),
             "getDynamicValue" => return self.compile_get_dynamic_value(args),
             "callDynamicValue" => return self.compile_call_dynamic_value(args),
+            "callNativeAddonValue" => return self.compile_call_native_addon_value(args),
             "callDynamicValueHandle" => return self.compile_call_dynamic_value_handle(args),
             "callDynamicValueWithValue" => return self.compile_call_dynamic_value_with_value(args),
             "releaseDynamicValue" => return self.compile_release_dynamic_value(args),

@@ -100,6 +100,7 @@ fn loads_and_calls_a_real_napi_addon() {
             typedef struct { double value; } native_box;
             static napi_value box_constructor;
             static int finalized_count;
+            static double factory_factor;
             static void finalize_box(napi_env env, void* data, void* hint) {
                 (void)env; (void)hint; free(data); finalized_count++;
             }
@@ -138,6 +139,18 @@ fn loads_and_calls_a_real_napi_addon() {
                 napi_get_value_double(env, argv[0], &a); napi_get_value_double(env, argv[1], &b);
                 napi_create_double(env, a + b, &result); return result;
             }
+            static napi_value multiply(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, result; double value; void* data;
+                napi_get_cb_info(env, info, &argc, &arg, 0, &data);
+                napi_get_value_double(env, arg, &value);
+                napi_create_double(env, value * *(double*)data, &result); return result;
+            }
+            static napi_value multiplier(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, result;
+                napi_get_cb_info(env, info, &argc, &arg, 0, 0);
+                napi_get_value_double(env, arg, &factory_factor);
+                napi_create_function(env, "multiply", 8, multiply, &factory_factor, &result); return result;
+            }
             static napi_value negate(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value arg, result; _Bool value;
                 napi_get_cb_info(env, info, &argc, &arg, 0, 0);
@@ -172,6 +185,7 @@ fn loads_and_calls_a_real_napi_addon() {
                 napi_create_function(env, "roundtrip", 9, roundtrip, 0, &fn); napi_set_named_property(env, exports, "roundtrip", fn);
                 napi_create_function(env, "finalized", 9, finalized, 0, &fn); napi_set_named_property(env, exports, "finalized", fn);
                 napi_create_function(env, "add", 3, add, 0, &fn); napi_set_named_property(env, exports, "add", fn);
+                napi_create_function(env, "multiplier", 10, multiplier, 0, &fn); napi_set_named_property(env, exports, "multiplier", fn);
                 napi_create_function(env, "negate", 6, negate, 0, &fn); napi_set_named_property(env, exports, "negate", fn);
                 napi_create_function(env, "echo", 4, echo, 0, &fn); napi_set_named_property(env, exports, "echo", fn);
                 napi_create_function(env, "isUndefined", 11, is_undefined, 0, &fn); napi_set_named_property(env, exports, "isUndefined", fn);
@@ -194,6 +208,13 @@ fn loads_and_calls_a_real_napi_addon() {
     unsafe {
         assert_eq!(thaw_napi_load(path.as_ptr()), 1);
         let result = thaw_napi_call_result(name.as_ptr(), args.as_ptr());
+        assert!(result.error.is_null());
+        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "42.0");
+        let multiplier =
+            thaw_napi_call_export_handle_typed_result(c"multiplier".as_ptr(), c"[3]".as_ptr());
+        assert!(multiplier.error.is_null());
+        assert_ne!(multiplier.value, 0);
+        let result = thaw_napi_call_handle_typed_result(multiplier.value, c"[14]".as_ptr());
         assert!(result.error.is_null());
         assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "42.0");
         let negate = CString::new("negate").unwrap();

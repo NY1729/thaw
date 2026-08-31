@@ -2579,6 +2579,9 @@ and error callbacks after deleting the registry directory.
 Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
 to a real `napi_value` Buffer, and addons that return a function as their
 module root are bound to the single declaration name from `package.d.ts`.
+Typed N-API exports may also return a function value. The host retains that
+value in its owning environment and generated closures make factories such as
+`const triple = multiplier(3); triple(14)` work without manual handle calls.
 Registry installation now follows named function re-exports in split `.d.ts`
 barrels recursively, including package subpaths, and appends the referenced
 overload declarations to the package surface. Cyclic barrels terminate without
