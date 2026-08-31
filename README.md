@@ -2467,6 +2467,11 @@ handle marker, allowing one native constructor or method to receive an instance
 created by another without degrading it to a plain-object snapshot. The real
 `weak-napi` addon now constructs both `ObjectInfo` and `WeakTag` through its
 bundled JavaScript wrapper.
+Plain-object references are registered with QuickJS `FinalizationRegistry`.
+Collection removes the corresponding zero-count N-API references and runs only
+the finalizers attached to that object; an E2E forces GC and verifies exactly
+one native finalizer call. Restoring a native callback's object receiver as the
+QuickJS `this` value remains pending for `weak-napi`'s JavaScript `dead` event.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against

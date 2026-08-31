@@ -121,6 +121,13 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         let operation = text(operation)?;
         let target = text(target)?;
         let name = text(name)?;
+        if operation == "release" {
+            let reference = target
+                .parse::<u64>()
+                .map_err(|_| "invalid QuickJS reference")?;
+            release_quickjs_reference(reference);
+            return Ok(serde_json::json!({ "kind": "value", "value": true }));
+        }
         let handle = if operation == "construct" {
             let target = CString::new(target).map_err(|_| "export contains NUL")?;
             thaw_napi_get_export(target.as_ptr())
@@ -197,6 +204,35 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
     CString::new(value.to_string())
         .unwrap_or_default()
         .into_raw()
+}
+
+fn release_quickjs_reference(reference: u64) {
+    let released = HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.module_envs
+            .iter_mut()
+            .filter_map(|env| {
+                let value = env.quickjs_references.remove(&reference)?;
+                for candidate in &mut env.references {
+                    if candidate.count == 0 && candidate.value == value {
+                        candidate.value = ptr::null_mut();
+                    }
+                }
+                let finalizers = env
+                    .object_finalizers
+                    .remove(&(value as usize))
+                    .unwrap_or_default();
+                Some((&mut **env as NapiEnv, finalizers))
+            })
+            .collect::<Vec<_>>()
+    });
+    for (env, finalizers) in released {
+        for record in finalizers {
+            if let Some(finalize) = record.finalize {
+                unsafe { finalize(env, record.data, record.hint) };
+            }
+        }
+    }
 }
 
 #[no_mangle]

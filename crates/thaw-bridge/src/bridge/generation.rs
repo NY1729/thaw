@@ -376,6 +376,7 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          \x20\x20var __thaw_napi_reference_ids = new WeakMap();\n\
          \x20\x20var __thaw_napi_reference_values = new Map();\n\
          \x20\x20var __thaw_napi_handles = new WeakMap();\n\
+         \x20\x20var __thaw_napi_finalizers = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(function(id) {{ __thaw_napi_reference_values.delete(id); __thaw_napi_handle('release', id, '', []); }}) : null;\n\
          \x20\x20var __thaw_napi_argument = function(value) {{\n\
          \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
          \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) return {{ __thaw_napi_handle__: handle }};\n\
@@ -386,6 +387,7 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          \x20\x20\x20\x20if (typeof value === 'function') {{ globalThis['__thaw_napi_reference_' + id] = value; return {{ __thaw_napi_function__: id }}; }}\n\
          \x20\x20\x20\x20var properties = {{}}; Object.keys(value).forEach(function(key) {{ properties[key] = __thaw_napi_argument(value[key]); }});\n\
          \x20\x20\x20\x20__thaw_napi_reference_values.set(id, properties);\n\
+         \x20\x20\x20\x20if (__thaw_napi_finalizers) __thaw_napi_finalizers.register(value, id);\n\
          \x20\x20\x20\x20return {{ __thaw_napi_object__: id, value: properties }};\n\
          \x20\x20}};\n\
          \x20\x20var __thaw_napi_arguments = function(args) {{ return Array.prototype.map.call(args, __thaw_napi_argument); }};\n\

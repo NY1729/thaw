@@ -874,3 +874,9 @@ callbackは現在のQuickJS contextで実行し、E2Eで戻り値と同一性を
 N-API instance Proxyは別のWeakMapでhandleを保持し、同じaddon環境のconstructor/method引数では
 元の`napi_value`を直接復元する。合成E2Eは`new Box(new Box(42))`を検証し、実`weak-napi` wrapperも
 `ObjectInfo` instanceを`WeakTag` constructorへ渡して両方を生成できる。
+
+plain objectの参照tokenはQuickJS `FinalizationRegistry`へ登録する。GC通知はN-API hostの全永続
+module環境から対応valueを外し、count 0のreferenceをnull化して、そのobjectへ
+`napi_add_finalizer`で関連付けられたcallbackだけを実行する。合成E2Eは複数回GCを駆動し、native
+finalizerが1回だけ実行されることを検証する。native callback receiverをQuickJS `this`へ復元する
+処理は未対応で、`weak-napi`のJavaScript `dead` event通知に残る境界である。

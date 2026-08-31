@@ -68,12 +68,12 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\nexport declare function passesObject(): number;\nexport declare function passesNativeHandle(value: number): number;\n",
+        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\nexport declare function passesObject(): number;\nexport declare function passesNativeHandle(value: number): number;\nexport declare function watchObject(): number;\nexport declare function collectObjects(): number;\nexport declare function finalizedObjects(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "const native = require.addon(); module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).get(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); }; module.exports.passesObject = () => { const object = { value: 42 }; return native.same(object, object) ? native.objectValue(object) : 0; }; module.exports.passesNativeHandle = value => new native.Box(new native.Box(value)).get();",
+        "const native = require.addon(); module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).get(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); }; module.exports.passesObject = () => { const object = { value: 42 }; return native.same(object, object) ? native.objectValue(object) : 0; }; module.exports.passesNativeHandle = value => new native.Box(new native.Box(value)).get(); const watcher = new native.Box(0); module.exports.watchObject = () => { watcher.watch({ value: 1 }); return 1; }; module.exports.collectObjects = async () => { for (let index = 0; index < 4; index++) { __thaw_gc(); await Promise.resolve(); } return 1; }; module.exports.finalizedObjects = () => watcher.finalized();",
     )
     .unwrap();
     let addon_c = dir.join("addon.c");
@@ -99,6 +99,9 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
             extern napi_status napi_define_class(napi_env, const char*, size_t, napi_callback, void*, size_t, const napi_property_descriptor*, napi_value*);
             extern napi_status napi_wrap(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
             extern napi_status napi_unwrap(napi_env, napi_value, void**);
+            extern napi_status napi_add_finalizer(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
+            static double finalized_objects;
+            static void finalize_object(napi_env env, void* data, void* hint) { (void)env; (void)data; (void)hint; finalized_objects++; }
             static napi_value add(napi_env env, napi_callback_info info) {
                 size_t argc = 2; napi_value argv[2], result; double left, right;
                 napi_get_cb_info(env, info, &argc, argv, 0, 0);
@@ -132,13 +135,27 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
                 napi_get_cb_info(env, info, &argc, 0, &self, 0); napi_unwrap(env, self, (void**)&data);
                 napi_create_double(env, data->value, &result); return result;
             }
+            static napi_value box_watch(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value object, result;
+                napi_get_cb_info(env, info, &argc, &object, 0, 0);
+                napi_add_finalizer(env, object, 0, finalize_object, 0, 0);
+                napi_get_undefined(env, &result); return result;
+            }
+            static napi_value box_finalized(napi_env env, napi_callback_info info) {
+                napi_value result; (void)info;
+                napi_create_double(env, finalized_objects, &result); return result;
+            }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
-                napi_value fn, constructor; napi_property_descriptor property = { "get", 0, box_get, 0, 0, 0, 0, 0 };
+                napi_value fn, constructor; napi_property_descriptor properties[3] = {
+                    { "get", 0, box_get, 0, 0, 0, 0, 0 },
+                    { "watch", 0, box_watch, 0, 0, 0, 0, 0 },
+                    { "finalized", 0, box_finalized, 0, 0, 0, 0, 0 }
+                };
                 napi_create_function(env, "add", 3, add, 0, &fn); napi_set_named_property(env, exports, "add", fn);
                 napi_create_function(env, "invoke", 6, invoke, 0, &fn); napi_set_named_property(env, exports, "invoke", fn);
                 napi_create_function(env, "same", 4, same, 0, &fn); napi_set_named_property(env, exports, "same", fn);
                 napi_create_function(env, "objectValue", 11, object_value, 0, &fn); napi_set_named_property(env, exports, "objectValue", fn);
-                napi_define_class(env, "Box", 3, box_new, 0, 1, &property, &constructor);
+                napi_define_class(env, "Box", 3, box_new, 0, 3, properties, &constructor);
                 napi_set_named_property(env, exports, "Box", constructor); return exports;
             }
         "#,
@@ -156,7 +173,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     let output = dir.join("app");
     std::fs::write(
         &source,
-        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity, passesObject, passesNativeHandle } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); console.log(passesObject()); console.log(passesNativeHandle(42)); }\n",
+        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity, passesObject, passesNativeHandle, watchObject, collectObjects, finalizedObjects } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); console.log(passesObject()); console.log(passesNativeHandle(42)); watchObject(); collectObjects(); collectObjects(); console.log(finalizedObjects()); }\n",
     )
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -169,7 +186,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\n42\n42\ntrue\n42\n42\n"
+        "42\n42\n42\ntrue\n42\n42\n1\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
