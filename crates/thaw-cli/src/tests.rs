@@ -95,6 +95,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "'use strict'; exports.sub = (left, right) => left - right; exports.add = (left, right) => left + right;",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,+".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (left, right) => Math.abs(left % right);",
             "add",
             false,
@@ -186,6 +195,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     assert_eq!(
         jit_numeric_export(
             "console.log('side effect'); module.exports.add = (left, right) => left + right;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports = (left, right) => left - right; exports.add = (left, right) => left + right;",
             "add",
             false,
             &function,

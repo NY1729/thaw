@@ -1949,8 +1949,9 @@ expressions normalize to the same value-selecting IR. Its
 end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
 extracts side-effect-free CommonJS function exports, including
-`module.exports = { ... }` packages, whose bodies fit this numeric IR, routes
-them to this backend, and omits fully extracted bundles from QuickJS.
+`module.exports = { ... }` packages and directive-prefixed sequences of named
+export assignments, whose bodies fit this numeric IR, routes them to this
+backend, and omits fully extracted bundles from QuickJS.
 Single-return bodies and the common `if (...) return ...; return ...;` form are
 normalized to the same IR. Side-effect-free local numeric declarations are
 expanded in declaration order, while calls, mutation, and forward references
