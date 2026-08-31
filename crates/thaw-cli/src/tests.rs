@@ -95,6 +95,17 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = function(left, right) { if (left) { if (right < 0) return 1; return 2; } else if (right) return 3; else return 4; };",
+            "add",
+            false,
+            &function,
+        ),
+        Some(
+            "expr:a0,a1,c0000000000000000,<,c3ff0000000000000,c4000000000000000,?,a1,c4008000000000000,c4010000000000000,?,?".into()
+        )
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports = { add: (left, right) => left + right, sub: (left, right) => left - right };",
             "add",
             false,
@@ -240,6 +251,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = function(left, right) { missing = left; return missing + right; };",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = function(left, right) { if (left) { console.log(right); return left; } return right; };",
             "add",
             false,
             &function,
