@@ -19,6 +19,7 @@ include!("tests/native_addons.rs");
 fn adapts_typed_dynamic_callable_results_to_natural_calls() {
     let function = thaw_bridge::DtsFunction {
         name: "customAlphabet".into(),
+        generic: None,
         params: vec![
             (
                 "alphabet".into(),

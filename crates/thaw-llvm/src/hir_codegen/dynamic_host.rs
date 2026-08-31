@@ -975,6 +975,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let function_argument = signature
             .params
             .iter()
+            .take(args.len())
             .enumerate()
             .filter_map(|(index, ty)| match ty {
                 HirType::Function(params, ret) => Some((index, params.as_slice(), ret.as_ref())),
