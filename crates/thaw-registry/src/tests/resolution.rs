@@ -309,6 +309,20 @@ fn selects_the_current_targets_bundled_node_prebuild() {
 }
 
 #[test]
+fn prefers_node_over_electron_prebuilds() {
+    let package = temp_registry("prefer_node_prebuild");
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("electron.napi.node"), b"electron").unwrap();
+    fs::write(target.join("node.napi.node"), b"node").unwrap();
+
+    let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+    assert_eq!(selected.path, target.join("node.napi.node"));
+    let _ = fs::remove_dir_all(package);
+}
+
+#[test]
 fn builds_prebuild_install_github_asset_for_the_current_target() {
     let manifest = serde_json::json!({
         "name": "sqlite3",

@@ -109,7 +109,13 @@ fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>,
             (libc == "musl") == musl || platform != "linux"
         })
         .collect::<Vec<_>>();
-    candidates.sort();
+    candidates.sort_by_key(|path| {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default();
+        (usize::from(!name.starts_with("node.")), name.into_owned())
+    });
     let Some(path) = candidates.into_iter().next() else {
         return Err(format!(
             "bundled addons exist for {platform}-{arch}, but none match libc `{libc}`"

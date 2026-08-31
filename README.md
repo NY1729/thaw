@@ -376,7 +376,8 @@ The workspace crates have narrow responsibilities:
   module-local symbol isolation, dependency deduplication and cycle diagnostics
 - Bare imports automatically resolve packages already installed in
   `thaw_modules`, generate their existing native/QuickJS/N-API bridge, and
-  support named, default and namespace call syntax without a matching `--use`
+  support named, default and namespace call syntax without a matching `--use`;
+  TypeScript `export = identifier` declarations supply the default import
 - QuickJS and N-API imports with representable `.d.ts` signatures use ordinary
   typed calls: primitive, `Json`, `number[]`, and fixed object arguments are
   marshalled automatically and results are converted back to their declared
@@ -2437,7 +2438,8 @@ visibility, matching libuv's lack of a global loop registry.
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
 `thaw_modules/<package>/native.node`, and records its target and SHA-256 in
-`native-addon.json`. `thaw build --use <package>` embeds it into the produced
+`native-addon.json`. When both Node and Electron variants match, the `node.*`
+prebuild is preferred. `thaw build --use <package>` embeds it into the produced
 executable, loads the bytes at module initialization, and routes fallback wrappers through its exported N-API
 functions. Loading native addons executes unrestricted native code in the
 generated process and is not sandboxed. If bundled prebuilds exist but none
