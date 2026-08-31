@@ -132,6 +132,42 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn optional_string_results_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-optional-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-optional");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function last(value: string, index: number): string | undefined;\nexport declare function point(value: string, index: number): number | undefined;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { last: (value, index) => value.at(index), point: (value, index) => value.codePointAt(index) };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { last, point } from 'jit-optional';\nfunction main(): void { console.log((last('abc', -1) !== undefined ? 1 : 0) + (last('abc', 3) === undefined ? 1 : 0) + (point('😀', 0) !== undefined ? 1 : 0) + (point('', 0) === undefined ? 1 : 0)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "4\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn import_meta_resolution_prefers_the_selected_registry_backend() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-import-meta-backend-{}",

@@ -11,6 +11,7 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 static INVALID_SYMBOL: &[u8] = b"invalid JIT symbol\0";
+const ABSENT_STATUS: *const c_char = ptr::dangling();
 #[cfg(not(all(target_arch = "x86_64", target_family = "unix")))]
 static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -23,6 +24,7 @@ pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
+    static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
 
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
@@ -215,6 +217,54 @@ extern "C" fn string_char_at(value: f64, index: f64) -> f64 {
         arena_string(String::new())
     } else {
         arena_string(String::from_utf16_lossy(&[code as u16]))
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_at(value: f64, index: f64) -> f64 {
+    let Some(value) = (unsafe { string_argument(value) }) else {
+        CALL_PRESENT.with(|present| present.set(false));
+        return f64::from_bits(0);
+    };
+    let units = value.encode_utf16().collect::<Vec<_>>();
+    let index = if index.is_nan() { 0.0 } else { index.trunc() };
+    let index = if index < 0.0 {
+        units.len() as f64 + index
+    } else {
+        index
+    };
+    let Some(unit) = (index.is_finite() && index >= 0.0)
+        .then(|| units.get(index as usize))
+        .flatten()
+    else {
+        CALL_PRESENT.with(|present| present.set(false));
+        return f64::from_bits(0);
+    };
+    arena_string(String::from_utf16_lossy(&[*unit]))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_code_point_at(value: f64, index: f64) -> f64 {
+    let Some(value) = (unsafe { string_argument(value) }) else {
+        CALL_PRESENT.with(|present| present.set(false));
+        return 0.0;
+    };
+    let units = value.encode_utf16().collect::<Vec<_>>();
+    let index = if index.is_nan() { 0.0 } else { index.trunc() };
+    let Some(&first) = (index.is_finite() && index >= 0.0)
+        .then(|| units.get(index as usize))
+        .flatten()
+    else {
+        CALL_PRESENT.with(|present| present.set(false));
+        return 0.0;
+    };
+    let Some(&second) = units.get(index as usize + 1) else {
+        return f64::from(first);
+    };
+    if (0xd800..=0xdbff).contains(&first) && (0xdc00..=0xdfff).contains(&second) {
+        f64::from(0x10000 + ((u32::from(first) - 0xd800) << 10) + u32::from(second) - 0xdc00)
+    } else {
+        f64::from(first)
     }
 }
 
@@ -795,6 +845,8 @@ enum NumericValue {
     StringCompare,
     StringCharAt,
     StringCharCodeAt,
+    StringAt,
+    StringCodePointAt,
     StringConcat,
     StringConstant(*const c_char),
     StringEndsWith,
@@ -859,6 +911,8 @@ impl NumericProgram {
                     "strcmp" => Some(NumericValue::StringCompare),
                     "charat" => Some(NumericValue::StringCharAt),
                     "charcodeat" => Some(NumericValue::StringCharCodeAt),
+                    "at" => Some(NumericValue::StringAt),
+                    "codepointat" => Some(NumericValue::StringCodePointAt),
                     "concat" => Some(NumericValue::StringConcat),
                     "endswith" => Some(NumericValue::StringEndsWith),
                     "includes" => Some(NumericValue::StringIncludes),
@@ -1071,14 +1125,19 @@ impl NumericProgram {
                     emit_binary_call(&mut code, string_compare as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::StringCharAt | NumericValue::StringCharCodeAt => {
+                NumericValue::StringCharAt
+                | NumericValue::StringCharCodeAt
+                | NumericValue::StringAt
+                | NumericValue::StringCodePointAt => {
                     if depth < 2 {
                         return None;
                     }
-                    let function = if matches!(value, NumericValue::StringCharAt) {
-                        string_char_at
-                    } else {
-                        string_char_code_at
+                    let function = match value {
+                        NumericValue::StringCharAt => string_char_at,
+                        NumericValue::StringCharCodeAt => string_char_code_at,
+                        NumericValue::StringAt => string_at,
+                        NumericValue::StringCodePointAt => string_code_point_at,
+                        _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
@@ -1447,11 +1506,19 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let function = std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code);
     let previous_allocator = ARENA_ALLOC.with(|allocator| allocator.replace(arena_alloc));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
+    let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let value = function(args);
     let error = CALL_ERROR.with(|error| error.replace(previous_error));
+    let present = CALL_PRESENT.with(|state| state.replace(previous_present));
     ARENA_ALLOC.with(|allocator| allocator.set(previous_allocator));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
+    }
+    if !present {
+        return ThawJitResult {
+            value: 0.0,
+            error: ABSENT_STATUS,
+        };
     }
     ThawJitResult {
         value,
@@ -1639,6 +1706,21 @@ mod tests {
             );
             unsafe { libc::free(result.cast()) };
         }
+        let at = CString::new("expr:s0,a1,at:at").unwrap();
+        let result = call(&at, &[text_argument, -1.0]);
+        assert!(result.error.is_null());
+        let value = result.value.to_bits() as usize as *mut c_char;
+        assert_eq!(unsafe { CStr::from_ptr(value) }.to_str().unwrap(), "�");
+        unsafe { libc::free(value.cast()) };
+        assert_eq!(call(&at, &[text_argument, 3.0]).error, ABSENT_STATUS);
+        let code_point = CString::new("expr:s0,a1,codepointat:codepointat").unwrap();
+        let result = call(&code_point, &[text_argument, 1.0]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 128_512.0);
+        assert_eq!(
+            call(&code_point, &[text_argument, 3.0]).error,
+            ABSENT_STATUS
+        );
         let supplementary = CString::new("𐀀").unwrap();
         let bmp = CString::new("\u{e000}").unwrap();
         let string_less =

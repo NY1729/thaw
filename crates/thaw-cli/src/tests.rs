@@ -569,6 +569,38 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:s0,a1,t20,{operation}"))
         );
     }
+    let optional_string = thaw_bridge::DtsFunction {
+        name: "at".into(),
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::Str,
+        ))),
+        ..string_repeat.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.at = (value, index) => value.at(index);",
+            "at",
+            false,
+            &optional_string,
+        ),
+        Some("expr:s0,a1,at".into())
+    );
+    let optional_number = thaw_bridge::DtsFunction {
+        name: "point".into(),
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::F64,
+        ))),
+        ..string_repeat.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.point = (value, index) => value.codePointAt(index);",
+            "point",
+            false,
+            &optional_number,
+        ),
+        Some("expr:s0,a1,codepointat".into())
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.length = value => value + 1;",
