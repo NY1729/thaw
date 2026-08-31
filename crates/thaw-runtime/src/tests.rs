@@ -1457,7 +1457,11 @@ static mut TEST_TIMEOUT_EXCEPTION: *const c_char = std::ptr::null();
 extern "C" fn slow_async_handler(_: *const c_char) -> *const c_char {
     let promise = timed_value(10_000, 0.0);
     let result = thaw_runtime_run_until_resolved(promise);
-    assert_eq!(thaw_promise_state(promise), 2, "expected the deadline to reject this handler");
+    assert_eq!(
+        thaw_promise_state(promise),
+        2,
+        "expected the deadline to reject this handler"
+    );
     unsafe { TEST_TIMEOUT_EXCEPTION = result.cast() };
     std::ptr::null()
 }
