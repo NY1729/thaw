@@ -162,6 +162,28 @@ extern "C" fn fround_number(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_is_nan(value: f64) -> f64 {
+    f64::from(u8::from(value.is_nan()))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_is_finite(value: f64) -> f64 {
+    f64::from(u8::from(value.is_finite()))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_is_integer(value: f64) -> f64 {
+    f64::from(u8::from(value.is_finite() && value.fract() == 0.0))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_is_safe_integer(value: f64) -> f64 {
+    f64::from(u8::from(
+        value.is_finite() && value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0,
+    ))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn to_uint32(value: f64) -> u32 {
     if !value.is_finite() || value == 0.0 {
         return 0;
@@ -962,6 +984,10 @@ enum NumericValue {
     Atan2,
     Hypot,
     Imul,
+    IsFinite,
+    IsInteger,
+    IsNaN,
+    IsSafeInteger,
     StringCompare,
     StringCharAt,
     StringCharCodeAt,
@@ -1043,6 +1069,10 @@ impl NumericProgram {
                     "atan2" => Some(NumericValue::Atan2),
                     "hypot" => Some(NumericValue::Hypot),
                     "imul" => Some(NumericValue::Imul),
+                    "isfinite" => Some(NumericValue::IsFinite),
+                    "isinteger" => Some(NumericValue::IsInteger),
+                    "isnan" => Some(NumericValue::IsNaN),
+                    "issafeinteger" => Some(NumericValue::IsSafeInteger),
                     "strcmp" => Some(NumericValue::StringCompare),
                     "charat" => Some(NumericValue::StringCharAt),
                     "charcodeat" => Some(NumericValue::StringCharCodeAt),
@@ -1269,6 +1299,22 @@ impl NumericProgram {
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
+                }
+                NumericValue::IsFinite
+                | NumericValue::IsInteger
+                | NumericValue::IsNaN
+                | NumericValue::IsSafeInteger => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::IsFinite => number_is_finite,
+                        NumericValue::IsInteger => number_is_integer,
+                        NumericValue::IsNaN => number_is_nan,
+                        NumericValue::IsSafeInteger => number_is_safe_integer,
+                        _ => unreachable!(),
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::StringCompare => {
                     if depth < 2 {
@@ -2212,6 +2258,20 @@ mod tests {
             (-0.0f64).to_bits()
         );
         assert_eq!(call(&power, &[-0.0, -3.0]).value, f64::NEG_INFINITY);
+
+        for (operation, value, expected) in [
+            ("isnan", f64::NAN, 1.0),
+            ("isnan", 0.0, 0.0),
+            ("isfinite", f64::INFINITY, 0.0),
+            ("isfinite", 42.0, 1.0),
+            ("isinteger", 42.5, 0.0),
+            ("isinteger", -42.0, 1.0),
+            ("issafeinteger", 9_007_199_254_740_991.0, 1.0),
+            ("issafeinteger", 9_007_199_254_740_992.0, 0.0),
+        ] {
+            let symbol = CString::new(format!("expr:a0,{operation}:{operation}")).unwrap();
+            assert_eq!(call(&symbol, &[value]).value, expected);
+        }
     }
 
     #[test]
