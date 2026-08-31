@@ -2027,6 +2027,8 @@ strings test their contents so empty strings remain false without QuickJS.
 Global `isNaN`/`isFinite` preserve their numeric coercion, while
 `Number.isNaN`, `Number.isFinite`, `Number.isInteger`, and
 `Number.isSafeInteger` use strict typed predicates in the same JIT IR.
+Global and `Number.parseFloat`/`parseInt` calls reuse Thaw runtime's tested
+ECMAScript prefix and radix parsers through the JIT callback ABI.
 Relational and equality comparisons inspect those IR types as well:
 string/string stays on UTF-16 ordering, mixed loose/relational comparisons use
 numeric coercion, and strict mismatched primitives evaluate both operands
