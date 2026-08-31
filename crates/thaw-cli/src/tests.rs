@@ -240,6 +240,28 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (left, right) => Math.PI * left + Math.E;",
+            "add",
+            false,
+            &function,
+        ),
+        Some(format!(
+            "expr:c{:016x},a0,*,c{:016x},+",
+            std::f64::consts::PI.to_bits(),
+            std::f64::consts::E.to_bits()
+        ))
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (Math, right) => Math.PI;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (left, right) => ((left & 255) ^ right) >>> 0;",
             "add",
             false,

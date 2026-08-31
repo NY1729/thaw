@@ -1976,8 +1976,9 @@ and exponential functions, and trigonometric/hyperbolic functions (including
 `add/sub/mul/div/remainder` operations, JavaScript `ToInt32`/`ToUint32`
 bitwise and shift operations, ECMAScript exponentiation (`**`/`Math.pow`),
 comparisons, and conditional selection on first use. Pure numeric `&&`/`||`
-expressions normalize to the same value-selecting IR. Its
-end-to-end test produces
+expressions normalize to the same value-selecting IR. Standard
+`Math.E/LN2/LN10/LOG2E/LOG10E/PI/SQRT1_2/SQRT2` constants are folded into that
+IR during CommonJS extraction. Its end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
 extracts side-effect-free CommonJS function exports, including
 `module.exports = { ... }` packages and directive-prefixed sequences of named
