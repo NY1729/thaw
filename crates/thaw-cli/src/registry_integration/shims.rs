@@ -77,10 +77,14 @@ fn jit_numeric_export(
             Expr::Lit(Lit::Num(number)) => {
                 output.push(format!("c{:016x}", number.value.to_bits()));
             }
-            Expr::Unary(unary) if matches!(unary.op, UnaryOp::Plus | UnaryOp::Minus) => {
+            Expr::Unary(unary)
+                if matches!(unary.op, UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Tilde) =>
+            {
                 encode_expression(unary.arg.as_ref(), parameters, locals, output)?;
-                if unary.op == UnaryOp::Minus {
-                    output.push("neg".into());
+                match unary.op {
+                    UnaryOp::Minus => output.push("neg".into()),
+                    UnaryOp::Tilde => output.push("bnot".into()),
+                    _ => {}
                 }
             }
             Expr::Paren(parenthesized) => {
@@ -94,6 +98,12 @@ fn jit_numeric_export(
                         | BinaryOp::Mul
                         | BinaryOp::Div
                         | BinaryOp::Mod
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                        | BinaryOp::LShift
+                        | BinaryOp::RShift
+                        | BinaryOp::ZeroFillRShift
                 ) =>
             {
                 encode_expression(binary.left.as_ref(), parameters, locals, output)?;
@@ -105,6 +115,12 @@ fn jit_numeric_export(
                         BinaryOp::Mul => "*",
                         BinaryOp::Div => "/",
                         BinaryOp::Mod => "%",
+                        BinaryOp::BitAnd => "band",
+                        BinaryOp::BitOr => "bor",
+                        BinaryOp::BitXor => "bxor",
+                        BinaryOp::LShift => "shl",
+                        BinaryOp::RShift => "shr",
+                        BinaryOp::ZeroFillRShift => "ushr",
                         _ => unreachable!(),
                     }
                     .into(),
@@ -405,12 +421,15 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 return None;
             }
             depth -= 2;
-        } else if matches!(token.as_str(), "%" | "min" | "max") {
+        } else if matches!(
+            token.as_str(),
+            "%" | "min" | "max" | "band" | "bor" | "bxor" | "shl" | "shr" | "ushr"
+        ) {
             if depth != 2 {
                 return None;
             }
             depth = 1;
-        } else if matches!(token.as_str(), "ceil" | "floor" | "round" | "trunc") {
+        } else if matches!(token.as_str(), "ceil" | "floor" | "round" | "trunc" | "bnot") {
             if depth != 1 {
                 return None;
             }
