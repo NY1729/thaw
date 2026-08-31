@@ -193,6 +193,32 @@ extern "C" fn string_length(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_char_code_at(value: f64, index: f64) -> f64 {
+    if index.is_infinite() {
+        return f64::NAN;
+    }
+    let index = if index.is_nan() { 0.0 } else { index.trunc() };
+    if index < 0.0 || index > usize::MAX as f64 {
+        return f64::NAN;
+    }
+    unsafe {
+        string_argument(value)
+            .and_then(|value| value.encode_utf16().nth(index as usize))
+            .map_or(f64::NAN, f64::from)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_char_at(value: f64, index: f64) -> f64 {
+    let code = string_char_code_at(value, index);
+    if code.is_nan() {
+        arena_string(String::new())
+    } else {
+        arena_string(String::from_utf16_lossy(&[code as u16]))
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_compare(left: f64, right: f64) -> f64 {
     unsafe {
         let Some(left) = string_argument(left) else {
@@ -732,6 +758,8 @@ enum NumericValue {
     Hypot,
     Imul,
     StringCompare,
+    StringCharAt,
+    StringCharCodeAt,
     StringConcat,
     StringConstant(*const c_char),
     StringEndsWith,
@@ -792,6 +820,8 @@ impl NumericProgram {
                     "hypot" => Some(NumericValue::Hypot),
                     "imul" => Some(NumericValue::Imul),
                     "strcmp" => Some(NumericValue::StringCompare),
+                    "charat" => Some(NumericValue::StringCharAt),
+                    "charcodeat" => Some(NumericValue::StringCharCodeAt),
                     "concat" => Some(NumericValue::StringConcat),
                     "endswith" => Some(NumericValue::StringEndsWith),
                     "includes" => Some(NumericValue::StringIncludes),
@@ -1000,6 +1030,18 @@ impl NumericProgram {
                         return None;
                     }
                     emit_binary_call(&mut code, string_compare as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::StringCharAt | NumericValue::StringCharCodeAt => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = if matches!(value, NumericValue::StringCharAt) {
+                        string_char_at
+                    } else {
+                        string_char_code_at
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
                 NumericValue::StringConcat => {
@@ -1529,6 +1571,30 @@ mod tests {
         let text_argument = f64::from_bits(text.as_ptr() as usize as u64);
         let string_length = CString::new("expr:s0,strlen:string_length").unwrap();
         assert_eq!(call(&string_length, &[text_argument]).value, 3.0);
+        for (operation, index, expected) in [
+            ("charcodeat", 0.0, 97.0),
+            ("charcodeat", 1.0, 55_357.0),
+            ("charcodeat", 2.0, 56_832.0),
+            ("charcodeat", -1.0, f64::NAN),
+        ] {
+            let character = CString::new(format!("expr:s0,a1,{operation}:{operation}")).unwrap();
+            let actual = call(&character, &[text_argument, index]).value;
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+        for (index, expected) in [(0.0, "a"), (1.0, "�"), (-1.0, "")] {
+            let character = CString::new("expr:s0,a1,charat:charat").unwrap();
+            let result = call(&character, &[text_argument, index]);
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+                expected
+            );
+            unsafe { libc::free(result.cast()) };
+        }
         let supplementary = CString::new("𐀀").unwrap();
         let bmp = CString::new("\u{e000}").unwrap();
         let string_less =
