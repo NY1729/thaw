@@ -101,18 +101,18 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function add(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\nexport declare function double(value: number): number;\nexport declare function sum3(a: number, b: number, c: number): number;\n",
+        "export declare function add(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\nexport declare function double(value: number): number;\nexport declare function negate(value: number): number;\nexport declare function sum3(a: number, b: number, c: number): number;\nexport declare function answer(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports = { add: function(left, right) { const sum = left + right; const doubled = sum * 2; const delta = left - right; if (left < right) return doubled; return delta; }, sub: (left, right) => left - right, double: value => value * 2, sum3: (a, b, c) => a + b + c };\n",
+        "module.exports = { add: function(left, right) { const sum = left + right; const doubled = sum * 2; const delta = left - right; if (left < right) return doubled; return delta; }, sub: (left, right) => left - right, double: value => value * 2, negate: value => -value, sum3: (a, b, c) => a + b + c, answer: () => 42 };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { add, sub, double, sum3 } from 'jit-math';\nfunction main(): void { console.log(add(2, 19) + sub(1, 1) + double(0) + sum3(0, 0, 0)); }\n",
+        "import { add, sub, double, negate, sum3, answer } from 'jit-math';\nfunction main(): void { console.log(add(2, 19) + sub(1, 1) + double(0) + negate(0) + sum3(0, 0, 0) + answer() - 42); }\n",
     )
     .unwrap();
     let output = dir.join("app");

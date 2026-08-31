@@ -41,19 +41,11 @@ fn jit_numeric_export(
             Expr::Lit(Lit::Num(number)) => {
                 output.push(format!("c{:016x}", number.value.to_bits()));
             }
-            Expr::Unary(unary)
-                if matches!(unary.op, UnaryOp::Plus | UnaryOp::Minus)
-                    && matches!(unary.arg.as_ref(), Expr::Lit(Lit::Num(_))) =>
-            {
-                let Expr::Lit(Lit::Num(number)) = unary.arg.as_ref() else {
-                    unreachable!()
-                };
-                let value = if unary.op == UnaryOp::Minus {
-                    -number.value
-                } else {
-                    number.value
-                };
-                output.push(format!("c{:016x}", value.to_bits()));
+            Expr::Unary(unary) if matches!(unary.op, UnaryOp::Plus | UnaryOp::Minus) => {
+                encode_expression(unary.arg.as_ref(), parameters, locals, output)?;
+                if unary.op == UnaryOp::Minus {
+                    output.push("neg".into());
+                }
             }
             Expr::Paren(parenthesized) => {
                 encode_expression(parenthesized.expr.as_ref(), parameters, locals, output)?;
@@ -196,7 +188,7 @@ fn jit_numeric_export(
 
     if function.generic.is_some()
         || function.required_params != function.params.len()
-        || !(1..=16).contains(&function.params.len())
+        || function.params.len() > 16
         || function.rest_param.is_some()
         || !function
             .params
@@ -344,6 +336,10 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 return None;
             }
             depth -= 2;
+        } else if token == "neg" {
+            if depth == 0 {
+                return None;
+            }
         } else {
             depth += 1;
             maximum_depth = maximum_depth.max(depth);

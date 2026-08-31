@@ -973,12 +973,12 @@ impl<'ctx> HirCompiler<'ctx> {
             return self.compile_typed_napi_method(signature, args);
         }
         if signature.backend == DynamicBackend::Jit {
-            if !(1..=16).contains(&signature.params.len())
+            if signature.params.len() > 16
                 || !signature.params.iter().all(|ty| *ty == HirType::F64)
                 || signature.ret != HirType::F64
                 || args.len() != signature.params.len()
             {
-                return Err("JIT calls currently require 1-16 numbers and return number".into());
+                return Err("JIT calls currently require 0-16 numbers and return number".into());
             }
             let name = self
                 .builder

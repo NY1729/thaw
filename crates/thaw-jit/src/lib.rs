@@ -67,6 +67,7 @@ enum NumericValue {
     Constant(f64),
     Operation(NumericOp),
     Compare(CompareOp),
+    Negate,
     Select,
 }
 
@@ -91,6 +92,7 @@ impl NumericProgram {
                     ">=" => Some(NumericValue::Compare(CompareOp::GreaterEqual)),
                     "==" => Some(NumericValue::Compare(CompareOp::Equal)),
                     "!=" => Some(NumericValue::Compare(CompareOp::NotEqual)),
+                    "neg" => Some(NumericValue::Negate),
                     "?" => Some(NumericValue::Select),
                     value => value
                         .strip_prefix('a')
@@ -161,6 +163,29 @@ impl NumericProgram {
                     let left = depth - 2;
                     emit_compare(&mut code, left, right, *operation);
                     depth -= 1;
+                }
+                NumericValue::Negate => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let value = depth - 1;
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x7e,
+                        0xc0 | (value << 3),
+                        0x48,
+                        0x0f,
+                        0xba,
+                        0xf8,
+                        0x3f,
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x6e,
+                        0xc0 | (value << 3),
+                    ]);
                 }
                 NumericValue::Select => {
                     if depth < 3 {
@@ -404,5 +429,12 @@ mod tests {
             CString::new("expr:x,c4045000000000000,cc000000000000000,?:truthiness").unwrap();
         assert_eq!(call(&symbol, &[-0.0]).value, -2.0);
         assert_eq!(call(&symbol, &[f64::NAN]).value, 42.0);
+
+        let symbol = CString::new("expr:a0,neg:negate").unwrap();
+        assert_eq!(call(&symbol, &[42.0]).value, -42.0);
+        assert_eq!(call(&symbol, &[-0.0]).value.to_bits(), 0.0f64.to_bits());
+
+        let symbol = CString::new("expr:c4045000000000000:constant").unwrap();
+        assert_eq!(call(&symbol, &[]).value, 42.0);
     }
 }
