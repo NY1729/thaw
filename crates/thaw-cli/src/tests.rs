@@ -168,6 +168,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     }
     assert_eq!(
         jit_numeric_export(
+            "const sum = (left, right) => left + right, add = sum; module.exports = { add };",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,a1,+".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "const left = 99; exports.add = (left, right) => left + right;",
             "add",
             false,

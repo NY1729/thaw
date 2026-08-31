@@ -1984,7 +1984,8 @@ module-scope `const` expressions are expanded into exported functions, after
 which the functions route to this backend and fully extracted bundles omit
 QuickJS. Hoisted top-level function declarations can be exported through
 named assignments, object aliases, or object shorthand and reuse the same
-body analysis.
+body analysis. Function-valued `const` declarations and aliases resolve
+through the same table.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,

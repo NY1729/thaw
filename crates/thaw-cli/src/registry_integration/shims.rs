@@ -403,15 +403,12 @@ fn jit_numeric_export(
 
     fn resolve_callable<'a>(
         expression: &'a Expr,
-        declarations: &std::collections::HashMap<String, &'a Function>,
+        declarations: &std::collections::HashMap<String, NumericCallable<'a>>,
     ) -> Option<NumericCallable<'a>> {
         match expression {
             Expr::Fn(function) => Some(NumericCallable::Function(function.function.as_ref())),
             Expr::Arrow(function) => Some(NumericCallable::Arrow(function)),
-            Expr::Ident(identifier) => declarations
-                .get(identifier.sym.as_ref())
-                .copied()
-                .map(NumericCallable::Function),
+            Expr::Ident(identifier) => declarations.get(identifier.sym.as_ref()).copied(),
             _ => None,
         }
     }
@@ -420,7 +417,7 @@ fn jit_numeric_export(
         assignment: &'a AssignExpr,
         export_name: &str,
         allow_default: bool,
-        declarations: &std::collections::HashMap<String, &'a Function>,
+        declarations: &std::collections::HashMap<String, NumericCallable<'a>>,
     ) -> Option<(ExportStyle, Option<NumericCallable<'a>>)> {
         if assignment.op != AssignOp::Assign {
             return None;
@@ -455,8 +452,7 @@ fn jit_numeric_export(
                             identifier.sym == export_name,
                             declarations
                                 .get(identifier.sym.as_ref())
-                                .copied()
-                                .map(NumericCallable::Function)?,
+                                .copied()?,
                         ),
                         _ => return None,
                     };
@@ -527,7 +523,7 @@ fn jit_numeric_export(
             if module_functions
                 .insert(
                     declaration.ident.sym.to_string(),
-                    declaration.function.as_ref(),
+                    NumericCallable::Function(declaration.function.as_ref()),
                 )
                 .is_some()
             {
@@ -559,9 +555,14 @@ fn jit_numeric_export(
                 {
                     return None;
                 }
+                let initializer = declarator.init.as_deref()?;
+                if let Some(callable) = resolve_callable(initializer, &module_functions) {
+                    module_functions.insert(name.id.sym.to_string(), callable);
+                    continue;
+                }
                 let mut encoded = Vec::new();
                 encode_expression(
-                    declarator.init.as_deref()?,
+                    initializer,
                     &no_parameters,
                     &module_locals,
                     &mut encoded,
