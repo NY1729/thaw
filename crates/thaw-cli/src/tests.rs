@@ -522,6 +522,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     }
     assert_eq!(
         jit_numeric_export(
+            "module.exports.greet = (label, count, flag) => label.concat(count, flag);",
+            "greet",
+            false,
+            &mixed_concat,
+        ),
+        Some("expr:s0,a1,numstr,concat,b2,boolstr,concat".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.greet = value => '\\0' + value;",
             "greet",
             false,
@@ -570,6 +579,21 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             ))
         );
     }
+    let mut coerced_search = string_predicate.clone();
+    coerced_search.params.push((
+        "search".into(),
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    ));
+    coerced_search.required_params = 2;
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.matches = (value, search) => value.includes(search);",
+            "matches",
+            false,
+            &coerced_search,
+        ),
+        Some("expr:s0,a1,numstr,includes".into())
+    );
     let mut string_index = string_length.clone();
     string_index.name = "find".into();
     for (method, operation) in [("indexOf", "indexof"), ("lastIndexOf", "lastindexof")] {
@@ -757,6 +781,21 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:s0,a1,t20,{operation}"))
         );
     }
+    let mut coerced_pad = string_repeat.clone();
+    coerced_pad.params.push((
+        "pad".into(),
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+    ));
+    coerced_pad.required_params = 3;
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.repeat = (value, count, pad) => value.padEnd(count, pad);",
+            "repeat",
+            false,
+            &coerced_pad,
+        ),
+        Some("expr:s0,a1,b2,boolstr,padend".into())
+    );
     let string_replace = thaw_bridge::DtsFunction {
         name: "replace".into(),
         params: vec![
@@ -789,6 +828,18 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:s0,s1,s2,{operation}"))
         );
     }
+    let mut coerced_replace = string_replace.clone();
+    coerced_replace.params[1].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::F64);
+    coerced_replace.params[2].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool);
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.replace = (value, search, replacement) => value.replace(search, replacement);",
+            "replace",
+            false,
+            &coerced_replace,
+        ),
+        Some("expr:s0,a1,numstr,b2,boolstr,replace".into())
+    );
     let optional_string = thaw_bridge::DtsFunction {
         name: "at".into(),
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(

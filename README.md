@@ -2015,7 +2015,10 @@ The typed JIT also accepts the optional UTF-16 position argument of
 `localeCompare`, `isWellFormed`, and `toWellFormed` likewise stay on the typed
 JIT path; the latter two use Thaw's valid-UTF-8 native string invariant.
 String-search `replace` and `replaceAll` with string replacement values use
-the arena-backed three-string JIT path as well.
+the arena-backed three-string JIT path as well. Primitive and computed
+arguments to `concat`, search, padding, comparison, `replace`, and `replaceAll`
+are string-coerced by the same typed IR; expanded string locals can be method
+receivers without returning to QuickJS.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
 Side-effect-free local declarations, assignments,
