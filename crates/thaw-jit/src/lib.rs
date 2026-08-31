@@ -229,6 +229,81 @@ string_predicates! {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn string_index(value: f64, search: f64, reverse: bool) -> f64 {
+    let Some(value) = string_argument(value) else {
+        return -1.0;
+    };
+    let Some(search) = string_argument(search) else {
+        return -1.0;
+    };
+    let value = value.encode_utf16().collect::<Vec<_>>();
+    let search = search.encode_utf16().collect::<Vec<_>>();
+    if search.is_empty() {
+        return if reverse { value.len() as f64 } else { 0.0 };
+    }
+    if search.len() > value.len() {
+        return -1.0;
+    }
+    let mut positions = 0..=value.len() - search.len();
+    let found = if reverse {
+        positions
+            .rev()
+            .find(|index| value[*index..].starts_with(&search))
+    } else {
+        positions.find(|index| value[*index..].starts_with(&search))
+    };
+    found.map_or(-1.0, |index| index as f64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_index_of(value: f64, search: f64) -> f64 {
+    unsafe { string_index(value, search, false) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_last_index_of(value: f64, search: f64) -> f64 {
+    unsafe { string_index(value, search, true) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn arena_string(value: String) -> f64 {
+    let size = value.len() + 1;
+    let Some(output) =
+        ARENA_ALLOC.with(|allocator| allocator.get().map(|alloc| unsafe { alloc(size, 1) }))
+    else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return f64::from_bits(0);
+    };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return f64::from_bits(0);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(value.as_ptr(), output, value.len());
+        output.add(value.len()).write(0);
+    }
+    f64::from_bits(output as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_to_lower_case(value: f64) -> f64 {
+    unsafe {
+        string_argument(value).map_or(f64::from_bits(0), |value| {
+            arena_string(value.to_lowercase())
+        })
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_to_upper_case(value: f64) -> f64 {
+    unsafe {
+        string_argument(value).map_or(f64::from_bits(0), |value| {
+            arena_string(value.to_uppercase())
+        })
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_concat(left: f64, right: f64) -> f64 {
     unsafe {
         let left = left.to_bits() as usize as *const c_char;
@@ -536,8 +611,12 @@ enum NumericValue {
     StringConstant(*const c_char),
     StringEndsWith,
     StringIncludes,
+    StringIndexOf,
+    StringLastIndexOf,
     StringLength,
     StringStartsWith,
+    StringToLowerCase,
+    StringToUpperCase,
     Power,
     UnaryMath(UnaryMath),
     Remainder,
@@ -583,8 +662,12 @@ impl NumericProgram {
                     "concat" => Some(NumericValue::StringConcat),
                     "endswith" => Some(NumericValue::StringEndsWith),
                     "includes" => Some(NumericValue::StringIncludes),
+                    "indexof" => Some(NumericValue::StringIndexOf),
+                    "lastindexof" => Some(NumericValue::StringLastIndexOf),
                     "strlen" => Some(NumericValue::StringLength),
                     "startswith" => Some(NumericValue::StringStartsWith),
+                    "tolowercase" => Some(NumericValue::StringToLowerCase),
+                    "touppercase" => Some(NumericValue::StringToUpperCase),
                     "pow" => Some(NumericValue::Power),
                     "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
                     "acosh" => Some(NumericValue::UnaryMath(UnaryMath::Acosh)),
@@ -787,7 +870,9 @@ impl NumericProgram {
                 }
                 NumericValue::StringStartsWith
                 | NumericValue::StringEndsWith
-                | NumericValue::StringIncludes => {
+                | NumericValue::StringIncludes
+                | NumericValue::StringIndexOf
+                | NumericValue::StringLastIndexOf => {
                     if depth < 2 {
                         return None;
                     }
@@ -795,10 +880,23 @@ impl NumericProgram {
                         NumericValue::StringStartsWith => string_starts_with,
                         NumericValue::StringEndsWith => string_ends_with,
                         NumericValue::StringIncludes => string_includes,
+                        NumericValue::StringIndexOf => string_index_of,
+                        NumericValue::StringLastIndexOf => string_last_index_of,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
+                }
+                NumericValue::StringToLowerCase | NumericValue::StringToUpperCase => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = if matches!(value, NumericValue::StringToLowerCase) {
+                        string_to_lower_case
+                    } else {
+                        string_to_upper_case
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::StringLength => {
                     if depth == 0 {
@@ -1287,6 +1385,33 @@ mod tests {
                 .value,
                 expected
             );
+        }
+        let indexed = CString::new("😀a😀").unwrap();
+        let emoji = CString::new("😀").unwrap();
+        for (operation, expected) in [("indexof", 0.0), ("lastindexof", 3.0)] {
+            let index = CString::new(format!("expr:s0,s1,{operation}:{operation}")).unwrap();
+            assert_eq!(
+                call(
+                    &index,
+                    &[
+                        f64::from_bits(indexed.as_ptr() as usize as u64),
+                        f64::from_bits(emoji.as_ptr() as usize as u64),
+                    ],
+                )
+                .value,
+                expected
+            );
+        }
+        for (operation, expected) in [("tolowercase", "straße"), ("touppercase", "STRASSE")] {
+            let input = CString::new("Straße").unwrap();
+            let convert = CString::new(format!("expr:s0,{operation}:{operation}")).unwrap();
+            let result = call(&convert, &[f64::from_bits(input.as_ptr() as usize as u64)]);
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+                expected
+            );
+            unsafe { libc::free(result.cast()) };
         }
         let combined = CString::new("expr:s0,t707265,startswith,s0,t666978,endswith,s0,t707265,startswith,?,s0,t726566,includes,s0,t707265,startswith,s0,t666978,endswith,s0,t707265,startswith,?,?:combined_string_predicates").unwrap();
         assert_eq!(

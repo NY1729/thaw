@@ -423,6 +423,35 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             ))
         );
     }
+    let mut string_index = string_length.clone();
+    string_index.name = "find".into();
+    for (method, operation) in [("indexOf", "indexof"), ("lastIndexOf", "lastindexof")] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.find = value => value.{method}('😀');"),
+                "find",
+                false,
+                &string_index,
+            ),
+            Some(format!("expr:s0,tf09f9880,{operation}"))
+        );
+    }
+    let mut string_case = string_concat.clone();
+    string_case.name = "normalize".into();
+    for (method, operation) in [
+        ("toLowerCase", "tolowercase"),
+        ("toUpperCase", "touppercase"),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.normalize = value => value.{method}();"),
+                "normalize",
+                false,
+                &string_case,
+            ),
+            Some(format!("expr:s0,{operation}"))
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "module.exports.length = value => value + 1;",
