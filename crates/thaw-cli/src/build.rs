@@ -219,6 +219,7 @@ fn build_with_link_mode(
     let arena_lib = build_staticlib("thaw-arena")?;
     let runtime_lib = build_staticlib("thaw-runtime")?;
     let std_lib = build_staticlib("thaw-std")?;
+    let jit_lib = build_staticlib("thaw-jit")?;
     let quickjs_lib = build_staticlib("thaw-quickjs")?;
     let napi_lib = build_staticlib("thaw-napi")?;
 
@@ -237,6 +238,7 @@ fn build_with_link_mode(
         .arg(&arena_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        .arg(&jit_lib)
         .arg(&quickjs_lib)
         .arg(&napi_lib)
         // QuickJS-NG's C code calls libm math functions directly; `rustc`
@@ -363,4 +365,3 @@ fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
         "could not find a staticlib for `{pkg}` in `cargo build` output"
     ))
 }
-

@@ -93,6 +93,7 @@ pub struct FfiSignature {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DynamicBackend {
+    Jit,
     QuickJs,
     Napi,
 }

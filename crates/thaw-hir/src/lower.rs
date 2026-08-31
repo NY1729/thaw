@@ -47,8 +47,12 @@ type LoweredBinding = (Symbol, HirType, HirExpr);
 
 fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
     let (backend, hex) = name
-        .strip_prefix("__thaw_typed_js_")
-        .map(|hex| (DynamicBackend::QuickJs, hex))
+        .strip_prefix("__thaw_typed_jit_")
+        .map(|hex| (DynamicBackend::Jit, hex))
+        .or_else(|| {
+            name.strip_prefix("__thaw_typed_js_")
+                .map(|hex| (DynamicBackend::QuickJs, hex))
+        })
         .or_else(|| {
             name.strip_prefix("__thaw_typed_napi_")
                 .map(|hex| (DynamicBackend::Napi, hex))

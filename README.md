@@ -1886,6 +1886,15 @@ The workspace crates have narrow responsibilities:
 
 ### Not yet compatible
 
+An experimental QuickJS-independent residual JIT backend is now linked as a
+separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
+HIR through LLVM to a small W^X runtime which specializes and caches
+`add/sub/mul/div` number operations on first use. Its end-to-end test produces
+`42` with the artifact's `quickjs` flag still false. Automatic extraction of
+eligible functions from npm `bundle.js` and non-numeric Dynamic IR remain the
+next migration steps; ordinary fallback bundles continue to use QuickJS for
+now.
+
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
