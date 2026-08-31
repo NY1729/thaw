@@ -21,9 +21,9 @@ fn jit_numeric_export(
     function: &thaw_bridge::DtsFunction,
 ) -> Option<String> {
     use thaw_parser::ast::{
-        AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr, Ident, Lit,
-        MemberProp, ModuleItem, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
-        UnaryOp, UpdateOp, VarDeclKind,
+        ArrowExpr, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr,
+        Function, Ident, Lit, MemberProp, ModuleItem, Pat, Prop, PropName, PropOrSpread,
+        SimpleAssignTarget, Stmt, UnaryOp, UpdateOp, VarDeclKind,
     };
 
     fn math_method(
@@ -395,11 +395,33 @@ fn jit_numeric_export(
         Named,
     }
 
+    #[derive(Clone, Copy)]
+    enum NumericCallable<'a> {
+        Function(&'a Function),
+        Arrow(&'a ArrowExpr),
+    }
+
+    fn resolve_callable<'a>(
+        expression: &'a Expr,
+        declarations: &std::collections::HashMap<String, &'a Function>,
+    ) -> Option<NumericCallable<'a>> {
+        match expression {
+            Expr::Fn(function) => Some(NumericCallable::Function(function.function.as_ref())),
+            Expr::Arrow(function) => Some(NumericCallable::Arrow(function)),
+            Expr::Ident(identifier) => declarations
+                .get(identifier.sym.as_ref())
+                .copied()
+                .map(NumericCallable::Function),
+            _ => None,
+        }
+    }
+
     fn exported_callable<'a>(
         assignment: &'a AssignExpr,
         export_name: &str,
         allow_default: bool,
-    ) -> Option<(ExportStyle, Option<&'a Expr>)> {
+        declarations: &std::collections::HashMap<String, &'a Function>,
+    ) -> Option<(ExportStyle, Option<NumericCallable<'a>>)> {
         if assignment.op != AssignOp::Assign {
             return None;
         }
@@ -415,29 +437,39 @@ fn jit_numeric_export(
                     let PropOrSpread::Prop(property) = property else {
                         return None;
                     };
-                    let Prop::KeyValue(property) = property.as_ref() else {
-                        return None;
-                    };
-                    if !matches!(property.value.as_ref(), Expr::Fn(_) | Expr::Arrow(_)) {
-                        return None;
-                    }
-                    let is_target = match &property.key {
-                        PropName::Ident(identifier) => identifier.sym == export_name,
-                        PropName::Str(string) => string.value.to_string_lossy() == export_name,
+                    let (is_target, callable) = match property.as_ref() {
+                        Prop::KeyValue(property) => {
+                            let is_target = match &property.key {
+                                PropName::Ident(identifier) => identifier.sym == export_name,
+                                PropName::Str(string) => {
+                                    string.value.to_string_lossy() == export_name
+                                }
+                                _ => return None,
+                            };
+                            (
+                                is_target,
+                                resolve_callable(property.value.as_ref(), declarations)?,
+                            )
+                        }
+                        Prop::Shorthand(identifier) => (
+                            identifier.sym == export_name,
+                            declarations
+                                .get(identifier.sym.as_ref())
+                                .copied()
+                                .map(NumericCallable::Function)?,
+                        ),
                         _ => return None,
                     };
-                    if is_target && selected.replace(property.value.as_ref()).is_some() {
+                    if is_target && selected.replace(callable).is_some() {
                         return None;
                     }
                 }
                 return Some((ExportStyle::Whole, selected));
             }
-            if !matches!(assignment.right.as_ref(), Expr::Fn(_) | Expr::Arrow(_)) {
-                return None;
-            }
+            let callable = resolve_callable(assignment.right.as_ref(), declarations)?;
             return Some((
                 ExportStyle::Whole,
-                allow_default.then_some(assignment.right.as_ref()),
+                allow_default.then_some(callable),
             ));
         }
         let name = if let Expr::Member(object) = target.obj.as_ref() {
@@ -458,12 +490,10 @@ fn jit_numeric_export(
         } else {
             return None;
         };
-        if !matches!(assignment.right.as_ref(), Expr::Fn(_) | Expr::Arrow(_)) {
-            return None;
-        }
+        let callable = resolve_callable(assignment.right.as_ref(), declarations)?;
         Some((
             ExportStyle::Named,
-            (name == export_name).then_some(assignment.right.as_ref()),
+            (name == export_name).then_some(callable),
         ))
     }
 
@@ -491,6 +521,20 @@ fn jit_numeric_export(
     }
 
     let module = thaw_parser::parse_javascript(source).ok()?;
+    let mut module_functions = std::collections::HashMap::new();
+    for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))) = item {
+            if module_functions
+                .insert(
+                    declaration.ident.sym.to_string(),
+                    declaration.function.as_ref(),
+                )
+                .is_some()
+            {
+                return None;
+            }
+        }
+    }
     let mut style = None;
     let mut callable = None;
     let mut module_locals = std::collections::HashMap::new();
@@ -499,6 +543,9 @@ fn jit_numeric_export(
         let ModuleItem::Stmt(statement) = item else {
             return None;
         };
+        if matches!(statement, Stmt::Decl(Decl::Fn(_))) {
+            continue;
+        }
         if let Stmt::Decl(Decl::Var(declaration)) = statement {
             if declaration.kind != VarDeclKind::Const {
                 return None;
@@ -507,7 +554,9 @@ fn jit_numeric_export(
                 let Pat::Ident(name) = &declarator.name else {
                     return None;
                 };
-                if module_locals.contains_key(name.id.sym.as_ref()) {
+                if module_locals.contains_key(name.id.sym.as_ref())
+                    || module_functions.contains_key(name.id.sym.as_ref())
+                {
                     return None;
                 }
                 let mut encoded = Vec::new();
@@ -531,7 +580,7 @@ fn jit_numeric_export(
             return None;
         };
         let (assignment_style, selected) =
-            exported_callable(assignment, export_name, allow_default)?;
+            exported_callable(assignment, export_name, allow_default, &module_functions)?;
         if style.replace(assignment_style).is_some_and(|style| {
             style != assignment_style || assignment_style == ExportStyle::Whole
         }) {
@@ -547,16 +596,16 @@ fn jit_numeric_export(
 
     let (params, local_steps, body): (Vec<&Pat>, Vec<LocalStep<'_>>, NumericBody<'_>) =
         match callable {
-        Expr::Fn(function) if !function.function.is_async && !function.function.is_generator => {
-            let body = function.function.body.as_ref()?;
+        NumericCallable::Function(function) if !function.is_async && !function.is_generator => {
+            let body = function.body.as_ref()?;
             let (locals, body) = split_numeric_body(&body.stmts)?;
             (
-                function.function.params.iter().map(|param| &param.pat).collect(),
+                function.params.iter().map(|param| &param.pat).collect(),
                 locals,
                 body,
             )
         }
-        Expr::Arrow(function) if !function.is_async && !function.is_generator => {
+        NumericCallable::Arrow(function) if !function.is_async && !function.is_generator => {
             let (locals, body) = match function.body.as_ref() {
                 thaw_parser::ast::ArrowFunctionBody::Expr(body) => {
                     (Vec::new(), NumericBody::Expression(body.as_ref()))
