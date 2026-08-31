@@ -1993,8 +1993,9 @@ body analysis. Function-valued `const` declarations and aliases resolve
 through the same table.
 Required string parameters can enter the typed JIT ABI for UTF-16 `.length`
 and relational/equality comparisons returning number or boolean; these
-exports also avoid QuickJS entirely. String literals, `+` concatenation, and
-variadic string-only `.concat()` are specialized by the same W^X cache,
+exports also avoid QuickJS entirely. String literals, string-only template
+literals, `+` concatenation, and variadic string-only `.concat()` are
+specialized by the same W^X cache,
 with returned UTF-8 strings allocated directly in the caller-provided Thaw
 arena. One-argument `startsWith`,
 `endsWith`, `includes`, `indexOf`, and `lastIndexOf`, plus zero-argument

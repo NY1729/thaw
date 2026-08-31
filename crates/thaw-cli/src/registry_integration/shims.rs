@@ -138,6 +138,13 @@ fn jit_numeric_export(
         match expression {
             Expr::Ident(_) => string_parameter(expression, parameters).is_some(),
             Expr::Lit(Lit::Str(_)) => true,
+            Expr::Tpl(template) => {
+                template.quasis.len() == template.exprs.len() + 1
+                    && template
+                        .exprs
+                        .iter()
+                        .all(|expression| is_string_expression(expression, parameters))
+            }
             Expr::Paren(parenthesized) => {
                 is_string_expression(parenthesized.expr.as_ref(), parameters)
             }
@@ -256,17 +263,27 @@ fn jit_numeric_export(
             }
             Expr::Lit(Lit::Str(string)) => {
                 let string = string.value.to_string_lossy();
-                if string.as_bytes().contains(&0) {
-                    return None;
+                encode_string(&string, output)?;
+            }
+            Expr::Tpl(template) if template.quasis.len() == template.exprs.len() + 1 => {
+                for (index, quasi) in template.quasis.iter().enumerate() {
+                    let value = quasi
+                        .cooked
+                        .as_ref()
+                        .map(|value| value.to_string_lossy())
+                        .unwrap_or_else(|| quasi.raw.to_string().into());
+                    encode_string(&value, output)?;
+                    if index > 0 {
+                        output.push("concat".into());
+                    }
+                    if let Some(expression) = template.exprs.get(index) {
+                        if !is_string_expression(expression, parameters) {
+                            return None;
+                        }
+                        encode_expression(expression, parameters, locals, output)?;
+                        output.push("concat".into());
+                    }
                 }
-                output.push(format!(
-                    "t{}",
-                    string
-                        .as_bytes()
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>()
-                ));
             }
             Expr::Member(member) => {
                 if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "length")
@@ -565,6 +582,21 @@ fn jit_numeric_export(
             _ => return None,
         }
         (output.len() <= 128).then_some(())
+    }
+
+    fn encode_string(value: &str, output: &mut Vec<String>) -> Option<()> {
+        if value.as_bytes().contains(&0) {
+            return None;
+        }
+        output.push(format!(
+            "t{}",
+            value
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
+        Some(())
     }
 
     fn encode_condition(
