@@ -134,6 +134,70 @@ extern "C" fn bit_not(value: f64) -> f64 {
     (!to_uint32(value)) as i32 as f64
 }
 
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn is_odd_integer(value: f64) -> bool {
+    value.is_finite()
+        && value.trunc() == value
+        && value.abs() < 9_007_199_254_740_992.0
+        && value.abs() % 2.0 == 1.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn power(base: f64, exponent: f64) -> f64 {
+    if exponent.is_nan() {
+        return f64::NAN;
+    }
+    if exponent == 0.0 {
+        return 1.0;
+    }
+    if base.is_nan() {
+        return f64::NAN;
+    }
+    let odd = is_odd_integer(exponent);
+    if base.is_infinite() {
+        if base.is_sign_positive() {
+            return if exponent > 0.0 { f64::INFINITY } else { 0.0 };
+        }
+        return if exponent > 0.0 {
+            if odd {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }
+        } else if odd {
+            -0.0
+        } else {
+            0.0
+        };
+    }
+    if base == 0.0 {
+        return if exponent > 0.0 {
+            if base.is_sign_negative() && odd {
+                -0.0
+            } else {
+                0.0
+            }
+        } else if base.is_sign_negative() && odd {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    if exponent.is_infinite() {
+        return match base.abs().partial_cmp(&1.0) {
+            Some(std::cmp::Ordering::Greater) if exponent.is_sign_positive() => f64::INFINITY,
+            Some(std::cmp::Ordering::Greater) => 0.0,
+            Some(std::cmp::Ordering::Less) if exponent.is_sign_positive() => 0.0,
+            Some(std::cmp::Ordering::Less) => f64::INFINITY,
+            _ => f64::NAN,
+        };
+    }
+    if base < 0.0 && exponent.trunc() != exponent {
+        return f64::NAN;
+    }
+    base.powf(exponent)
+}
+
 #[repr(C)]
 pub struct ThawJitResult {
     pub value: f64,
@@ -238,6 +302,7 @@ enum NumericValue {
     Negate,
     Maximum,
     Minimum,
+    Power,
     UnaryMath(UnaryMath),
     Remainder,
     Select,
@@ -275,6 +340,7 @@ impl NumericProgram {
                     "neg" => Some(NumericValue::Negate),
                     "max" => Some(NumericValue::Maximum),
                     "min" => Some(NumericValue::Minimum),
+                    "pow" => Some(NumericValue::Power),
                     "ceil" => Some(NumericValue::UnaryMath(UnaryMath::Ceil)),
                     "floor" => Some(NumericValue::UnaryMath(UnaryMath::Floor)),
                     "round" => Some(NumericValue::UnaryMath(UnaryMath::Round)),
@@ -396,6 +462,13 @@ impl NumericProgram {
                         maximum
                     };
                     emit_call(&mut code, function as *const () as u64);
+                    depth = 1;
+                }
+                NumericValue::Power => {
+                    if depth != 2 {
+                        return None;
+                    }
+                    emit_call(&mut code, power as *const () as u64);
                     depth = 1;
                 }
                 NumericValue::UnaryMath(operation) => {
@@ -748,5 +821,16 @@ mod tests {
         }
         let bit_not = CString::new("expr:a0,bnot:bit_not").unwrap();
         assert_eq!(call(&bit_not, &[0.0]).value, -1.0);
+
+        let power = CString::new("expr:a0,a1,pow:power").unwrap();
+        assert_eq!(call(&power, &[2.0, 5.0]).value, 32.0);
+        assert_eq!(call(&power, &[f64::NAN, 0.0]).value, 1.0);
+        assert!(call(&power, &[1.0, f64::INFINITY]).value.is_nan());
+        assert!(call(&power, &[-2.0, 0.5]).value.is_nan());
+        assert_eq!(
+            call(&power, &[-0.0, 3.0]).value.to_bits(),
+            (-0.0f64).to_bits()
+        );
+        assert_eq!(call(&power, &[-0.0, -3.0]).value, f64::NEG_INFINITY);
     }
 }
