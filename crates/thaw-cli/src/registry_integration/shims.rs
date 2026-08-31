@@ -853,10 +853,10 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 | "shr"
                 | "ushr"
         ) {
-            if depth != 2 {
+            if depth < 2 {
                 return None;
             }
-            depth = 1;
+            depth -= 1;
         } else if matches!(
             token.as_str(),
             "acos"
@@ -884,11 +884,10 @@ fn validated_jit_expression(expression: Vec<String>) -> Option<String> {
                 | "tanh"
                 | "trunc"
                 | "bnot"
+                | "neg"
+                | "abs"
+                | "sqrt"
         ) {
-            if depth != 1 {
-                return None;
-            }
-        } else if matches!(token.as_str(), "neg" | "abs" | "sqrt") {
             if depth == 0 {
                 return None;
             }

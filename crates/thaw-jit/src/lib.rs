@@ -534,17 +534,21 @@ impl NumericProgram {
                     depth -= 1;
                 }
                 NumericValue::Bitwise(operation) => {
-                    if depth != 2 {
+                    if depth < 2 {
                         return None;
                     }
-                    emit_call(&mut code, operation.function() as *const () as u64);
-                    depth = 1;
+                    emit_binary_call(
+                        &mut code,
+                        operation.function() as *const () as u64,
+                        depth - 2,
+                    );
+                    depth -= 1;
                 }
                 NumericValue::BitNot => {
-                    if depth != 1 {
+                    if depth == 0 {
                         return None;
                     }
-                    emit_call(&mut code, bit_not as *const () as u64);
+                    emit_unary_call(&mut code, bit_not as *const () as u64, depth - 1);
                 }
                 NumericValue::Absolute => {
                     if depth == 0 {
@@ -561,14 +565,14 @@ impl NumericProgram {
                     emit_bit_operation(&mut code, value, 0xf8);
                 }
                 NumericValue::Remainder => {
-                    if depth != 2 {
+                    if depth < 2 {
                         return None;
                     }
-                    emit_call(&mut code, fmod as *const () as u64);
-                    depth = 1;
+                    emit_binary_call(&mut code, fmod as *const () as u64, depth - 2);
+                    depth -= 1;
                 }
                 NumericValue::Minimum | NumericValue::Maximum => {
-                    if depth != 2 {
+                    if depth < 2 {
                         return None;
                     }
                     let function = if matches!(value, NumericValue::Minimum) {
@@ -576,18 +580,18 @@ impl NumericProgram {
                     } else {
                         maximum
                     };
-                    emit_call(&mut code, function as *const () as u64);
-                    depth = 1;
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
                 }
                 NumericValue::Power => {
-                    if depth != 2 {
+                    if depth < 2 {
                         return None;
                     }
-                    emit_call(&mut code, power as *const () as u64);
-                    depth = 1;
+                    emit_binary_call(&mut code, power as *const () as u64, depth - 2);
+                    depth -= 1;
                 }
                 NumericValue::Atan2 | NumericValue::Hypot => {
-                    if depth != 2 {
+                    if depth < 2 {
                         return None;
                     }
                     let function = if matches!(value, NumericValue::Atan2) {
@@ -595,8 +599,8 @@ impl NumericProgram {
                     } else {
                         hypot_number
                     };
-                    emit_call(&mut code, function as *const () as u64);
-                    depth = 1;
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
                 }
                 NumericValue::UnaryMath(operation) => {
                     if depth == 0 {
@@ -611,10 +615,11 @@ impl NumericProgram {
                             0xc0 | (register << 3) | register,
                         ]);
                     } else {
-                        if depth != 1 {
-                            return None;
-                        }
-                        emit_call(&mut code, operation.function() as *const () as u64);
+                        emit_unary_call(
+                            &mut code,
+                            operation.function() as *const () as u64,
+                            depth - 1,
+                        );
                     }
                 }
                 NumericValue::Select => {
@@ -700,10 +705,42 @@ fn emit_bit_operation(code: &mut Vec<u8>, value: u8, operation: u8) {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn emit_call(code: &mut Vec<u8>, function: u64) {
-    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x08, 0x48, 0xb8]);
+fn emit_spill(code: &mut Vec<u8>, registers: u8) {
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x48]);
+    for register in 0..registers {
+        code.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x44 | (register << 3), 0x24, register * 8]);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_restore(code: &mut Vec<u8>, registers: u8) {
+    for register in 0..registers {
+        code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x44 | (register << 3), 0x24, register * 8]);
+    }
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x48]);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_unary_call(code: &mut Vec<u8>, function: u64, value: u8) {
+    emit_spill(code, value);
+    emit_move(code, 0, value);
+    code.extend_from_slice(&[0x48, 0xb8]);
     code.extend_from_slice(&function.to_le_bytes());
-    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x08]);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    emit_move(code, value, 0);
+    emit_restore(code, value);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_binary_call(code: &mut Vec<u8>, function: u64, left: u8) {
+    emit_spill(code, left);
+    emit_move(code, 0, left);
+    emit_move(code, 1, left + 1);
+    code.extend_from_slice(&[0x48, 0xb8]);
+    code.extend_from_slice(&function.to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0]);
+    emit_move(code, left, 0);
+    emit_restore(code, left);
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -976,6 +1013,10 @@ mod tests {
         assert!((call(&atan2, &[1.0, 1.0]).value - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
         let hypot = CString::new("expr:a0,a1,hypot:hypot").unwrap();
         assert_eq!(call(&hypot, &[3.0, 4.0]).value, 5.0);
+        let nested_unary = CString::new("expr:a0,a1,sin,+:nested_unary").unwrap();
+        assert!((call(&nested_unary, &[2.0, 1.0]).value - (2.0 + 1.0f64.sin())).abs() < 1e-12);
+        let nested_binary = CString::new("expr:a0,a1,a2,hypot,+:nested_binary").unwrap();
+        assert_eq!(call(&nested_binary, &[7.0, 3.0, 4.0]).value, 12.0);
 
         for (expression, args, expected) in [
             ("a0,a1,bor", [4_294_967_297.0, 0.0], 1.0),
