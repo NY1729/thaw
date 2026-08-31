@@ -741,6 +741,22 @@ fn classifies_primitive_constrained_generic_function_as_fast_path() {
 }
 
 #[test]
+fn substitutes_constrained_generic_inside_returned_callable() {
+    let funcs = parse_dts(
+        "export declare function custom<Type extends string>(size?: number): (length?: number) => Type;",
+    )
+    .unwrap();
+    assert_eq!(funcs[0].required_params, 0);
+    assert!(matches!(
+        &funcs[0].ret,
+        DtsType::Native(HirType::CallableFunction(params, optional, None, ret))
+            if params == &vec![HirType::Optional(Box::new(HirType::F64))]
+                && optional.contains(0)
+                && ret.as_ref() == &HirType::Str
+    ));
+}
+
+#[test]
 fn classifies_union_parameter_as_fallback() {
     let funcs = parse_dts("export declare function f(x: string | number): void;").unwrap();
     assert!(matches!(

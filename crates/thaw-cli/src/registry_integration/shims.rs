@@ -117,7 +117,17 @@ fn typed_dynamic_declaration(
     let thaw_bridge::DtsType::Native(ret) = &function.ret else {
         return None;
     };
-    let ret = render_dynamic_type(ret)?;
+    // JavaScript function values cross the host boundary as retained handles,
+    // not as native Thaw function pointers. Callers can invoke the returned
+    // value through callDynamicValue/callDynamicValueHandle.
+    let ret = if matches!(
+        ret,
+        thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
+    ) {
+        "JsValue".to_string()
+    } else {
+        render_dynamic_type(ret)?
+    };
     let runtime_key = if napi {
         function.name.clone()
     } else {
