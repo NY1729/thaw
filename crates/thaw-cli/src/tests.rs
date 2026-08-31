@@ -262,6 +262,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (left, right) => Math.imul(Math.clz32(left), Math.fround(right));",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,clz32,a1,fround,imul".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (Math, right) => Math.PI;",
             "add",
             false,
