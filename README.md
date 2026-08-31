@@ -804,10 +804,18 @@ The workspace crates have narrow responsibilities:
   (nested arbitrarily), reusing the same `Json` round trip as the native
   `JSON.stringify` path (`wrap_native_value_as_json` then `JsonAsNative`)
   for a real deep copy without new codegen. A scalar just passes through
-  unchanged. Unlike QuickJS's version, `Function`, `Promise`, `Map`, `Set`
-  and a top-level `Json`/`Dictionary`/optional value are not supported
-  here and fail to compile -- there is no cycle detection either, but a
-  statically-typed value can't describe a cycle to begin with
+  unchanged. `Map<K, V>`/`Set<T>` are also supported: a fresh `Map`/`Set`
+  is built and each entry's value/element is itself recursively cloned
+  through this same dispatch (so a `Map<string, number[]>`'s array values
+  are real, independent copies too), snapshotting the source via the same
+  conversion `[...map]`/`Array.from(map)` already use; `K`/`T` must be
+  `number` or `string` (an object/array/etc. key is a compile-time error --
+  cloning a `Map` keyed by a fresh, differently-identitied object copy
+  raises questions this compiler's `Map`/`Set` model has no answer for).
+  Unlike QuickJS's version, `Function`, `Promise`, and a top-level
+  `Json`/`Dictionary`/optional value are not supported here and fail to
+  compile -- there is no cycle detection either, but a statically-typed
+  value can't describe a cycle to begin with
 - QuickJS bundles provide iterable `URLSearchParams` values with form
   encoding, duplicate keys, record/pair initialization, mutation and sorting
 - QuickJS bundles expose `URL` parsing for hierarchical URLs and relative
