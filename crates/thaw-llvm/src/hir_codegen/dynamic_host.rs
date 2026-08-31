@@ -978,11 +978,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     .params
                     .iter()
                     .all(|ty| matches!(ty, HirType::F64 | HirType::Bool | HirType::Str))
-                || !matches!(signature.ret, HirType::F64 | HirType::Bool)
+                || !matches!(signature.ret, HirType::F64 | HirType::Bool | HirType::Str)
                 || args.len() != signature.params.len()
             {
                 return Err(
-                    "JIT calls currently require 0-16 number, boolean, or string arguments and return number or boolean".into(),
+                    "JIT calls currently require 0-16 number, boolean, or string arguments and return number, boolean, or string".into(),
                 );
             }
             let name = self
@@ -1035,6 +1035,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             .i64_type()
                             .const_int(args.len() as u64, false)
                             .into(),
+                        self.module
+                            .get_function("thaw_arena_alloc")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
                     ],
                     "jit_numeric_result",
                 )
@@ -1062,6 +1068,24 @@ impl<'ctx> HirCompiler<'ctx> {
                         value.into_float_value(),
                         self.context.f64_type().const_zero(),
                         "jit_boolean_value",
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| error.to_string())
+            } else if signature.ret == HirType::Str {
+                let bits = self
+                    .builder
+                    .build_bit_cast(
+                        value.into_float_value(),
+                        self.context.i64_type(),
+                        "jit_string_bits",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                self.builder
+                    .build_int_to_ptr(
+                        bits,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "jit_string_value",
                     )
                     .map(BasicValueEnum::from)
                     .map_err(|error| error.to_string())

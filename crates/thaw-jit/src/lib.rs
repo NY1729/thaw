@@ -3,8 +3,9 @@
 //! This intentionally is not a JavaScript engine. It accepts a compact numeric
 //! expression IR and emits one W^X-protected native code stub per symbol.
 
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
@@ -14,6 +15,15 @@ static INVALID_SYMBOL: &[u8] = b"invalid JIT symbol\0";
 static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 static ALLOCATION_FAILED: &[u8] = b"failed to allocate JIT code\0";
+
+pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
+
+thread_local! {
+    static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
+    static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
+}
+
+static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 #[link(name = "m")]
@@ -195,6 +205,59 @@ extern "C" fn string_compare(left: f64, right: f64) -> f64 {
             std::cmp::Ordering::Greater => 1.0,
         }
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_concat(left: f64, right: f64) -> f64 {
+    unsafe {
+        let left = left.to_bits() as usize as *const c_char;
+        let right = right.to_bits() as usize as *const c_char;
+        if left.is_null() || right.is_null() {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return f64::from_bits(0);
+        }
+        let left = CStr::from_ptr(left).to_bytes();
+        let right = CStr::from_ptr(right).to_bytes();
+        let Some(size) = left
+            .len()
+            .checked_add(right.len())
+            .and_then(|length| length.checked_add(1))
+        else {
+            CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+            return f64::from_bits(0);
+        };
+        let Some(output) =
+            ARENA_ALLOC.with(|allocator| allocator.get().map(|alloc| alloc(size, 1)))
+        else {
+            CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+            return f64::from_bits(0);
+        };
+        if output.is_null() {
+            CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+            return f64::from_bits(0);
+        }
+        std::ptr::copy_nonoverlapping(left.as_ptr(), output, left.len());
+        std::ptr::copy_nonoverlapping(right.as_ptr(), output.add(left.len()), right.len());
+        output.add(size - 1).write(0);
+        f64::from_bits(output as usize as u64)
+    }
+}
+
+fn intern_string(encoded: &str) -> Option<*const c_char> {
+    if !encoded.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = (0..encoded.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let value = CString::new(bytes).ok()?;
+    let mut constants = STRING_CONSTANTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    let value = constants.entry(encoded.to_owned()).or_insert(value);
+    Some(value.as_ptr())
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -448,6 +511,8 @@ enum NumericValue {
     Hypot,
     Imul,
     StringCompare,
+    StringConcat,
+    StringConstant(*const c_char),
     StringLength,
     Power,
     UnaryMath(UnaryMath),
@@ -491,6 +556,7 @@ impl NumericProgram {
                     "hypot" => Some(NumericValue::Hypot),
                     "imul" => Some(NumericValue::Imul),
                     "strcmp" => Some(NumericValue::StringCompare),
+                    "concat" => Some(NumericValue::StringConcat),
                     "strlen" => Some(NumericValue::StringLength),
                     "pow" => Some(NumericValue::Power),
                     "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
@@ -530,6 +596,12 @@ impl NumericProgram {
                         .map(NumericValue::Argument)
                         .or_else(|| {
                             value
+                                .strip_prefix('t')
+                                .and_then(intern_string)
+                                .map(NumericValue::StringConstant)
+                        })
+                        .or_else(|| {
+                            value
                                 .strip_prefix('c')
                                 .filter(|bits| bits.len() == 16)
                                 .and_then(|bits| u64::from_str_radix(bits, 16).ok())
@@ -567,6 +639,15 @@ impl NumericProgram {
                     }
                     code.extend_from_slice(&[0x48, 0xb8]);
                     code.extend_from_slice(&value.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    depth += 1;
+                }
+                NumericValue::StringConstant(value) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(*value as usize as u64).to_le_bytes());
                     code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
                     depth += 1;
                 }
@@ -668,6 +749,13 @@ impl NumericProgram {
                         return None;
                     }
                     emit_binary_call(&mut code, string_compare as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::StringConcat => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(&mut code, string_concat as *const () as u64, depth - 2);
                     depth -= 1;
                 }
                 NumericValue::StringLength => {
@@ -913,11 +1001,14 @@ fn compile(_symbol: &str, _program: &NumericProgram) -> Result<*mut libc::c_void
 ///
 /// `symbol` must point to a live NUL-terminated string for this call. When
 /// `arg_count` is nonzero, `args` must reference at least that many `f64`s.
+/// `arena_alloc`, when supplied for a string-returning program, must return a
+/// writable allocation of the requested size and alignment.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_jit_call_f64(
     symbol: *const c_char,
     args: *const f64,
     arg_count: usize,
+    arena_alloc: Option<ArenaAlloc>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -945,8 +1036,16 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
         Err(error) => return ThawJitResult { value: 0.0, error },
     };
     let function = std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code);
+    let previous_allocator = ARENA_ALLOC.with(|allocator| allocator.replace(arena_alloc));
+    let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
+    let value = function(args);
+    let error = CALL_ERROR.with(|error| error.replace(previous_error));
+    ARENA_ALLOC.with(|allocator| allocator.set(previous_allocator));
+    if !error.is_null() {
+        return ThawJitResult { value: 0.0, error };
+    }
     ThawJitResult {
-        value: function(args),
+        value,
         error: ptr::null(),
     }
 }
@@ -957,7 +1056,10 @@ mod tests {
     use std::ffi::CString;
 
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
-        unsafe { thaw_jit_call_f64(symbol.as_ptr(), args.as_ptr(), args.len()) }
+        unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
+            unsafe { libc::malloc(size).cast() }
+        }
+        unsafe { thaw_jit_call_f64(symbol.as_ptr(), args.as_ptr(), args.len(), Some(allocate)) }
     }
 
     #[test]
@@ -1119,6 +1221,23 @@ mod tests {
             .value,
             1.0
         );
+        let name = CString::new("世界").unwrap();
+        let concatenate = CString::new("expr:t686920,s0,concat:concatenate").unwrap();
+        let result = call(
+            &concatenate,
+            &[f64::from_bits(name.as_ptr() as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let result = result.value.to_bits() as usize as *mut c_char;
+        assert_eq!(
+            unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+            "hi 世界"
+        );
+        unsafe { libc::free(result.cast()) };
+        let argument = [f64::from_bits(name.as_ptr() as usize as u64)];
+        let missing_allocator =
+            unsafe { thaw_jit_call_f64(concatenate.as_ptr(), argument.as_ptr(), 1, None) };
+        assert!(!missing_allocator.error.is_null());
 
         for (expression, args, expected) in [
             ("a0,a1,bor", [4_294_967_297.0, 0.0], 1.0),

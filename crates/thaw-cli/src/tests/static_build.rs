@@ -39,9 +39,13 @@ fn specialized_jit_runs_without_quickjs() {
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
+    let concat_symbol = "expr:t21,s0,concat:test"
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     std::fs::write(
         &source,
-        format!("declare function __thaw_typed_jit_6164643a74657374(left: number, right: number): number;\ndeclare function __thaw_typed_jit_{string_symbol}(value: string): number;\nfunction main(): void {{ console.log(__thaw_typed_jit_6164643a74657374(20, 22) + __thaw_typed_jit_{string_symbol}('😀') - 2); }}\n"),
+        format!("declare function __thaw_typed_jit_6164643a74657374(left: number, right: number): number;\ndeclare function __thaw_typed_jit_{string_symbol}(value: string): number;\ndeclare function __thaw_typed_jit_{concat_symbol}(value: string): string;\nfunction main(): void {{ console.log(__thaw_typed_jit_6164643a74657374(20, 22) + __thaw_typed_jit_{string_symbol}(__thaw_typed_jit_{concat_symbol}('😀')) - 3); }}\n"),
     )
     .unwrap();
     build(
