@@ -100,6 +100,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
         thaw_napi_export_names,
         thaw_napi_call,
         thaw_napi_handle_bridge,
+        thaw_napi_poll_async_work,
     );
     Ok(())
 }
@@ -126,6 +127,13 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 .parse::<u64>()
                 .map_err(|_| "invalid QuickJS reference")?;
             release_quickjs_reference(reference);
+            return Ok(serde_json::json!({ "kind": "value", "value": true }));
+        }
+        if operation == "release_handle" {
+            let handle = target
+                .parse::<u64>()
+                .map_err(|_| "invalid native addon handle")?;
+            release_napi_handle(handle)?;
             return Ok(serde_json::json!({ "kind": "value", "value": true }));
         }
         let handle = if operation == "construct" {
@@ -233,6 +241,41 @@ fn release_quickjs_reference(reference: u64) {
             }
         }
     }
+}
+
+fn release_napi_handle(handle: u64) -> Result<(), String> {
+    let released = HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        let env = host
+            .module_envs
+            .iter_mut()
+            .find(|env| env.values.contains(&(handle as NapiValue)))
+            .ok_or_else(|| "unknown native addon handle".to_string())?;
+        let value = handle as NapiValue;
+        for reference in &mut env.references {
+            if reference.count == 0 && reference.value == value {
+                reference.value = ptr::null_mut();
+            }
+        }
+        let wrap = env.wraps.remove(&(value as usize));
+        let finalizers = env
+            .object_finalizers
+            .remove(&(value as usize))
+            .unwrap_or_default();
+        Ok::<_, String>((&mut **env as NapiEnv, wrap, finalizers))
+    })?;
+    let (env, wrap, finalizers) = released;
+    if let Some(wrap) = wrap {
+        if let Some(finalize) = wrap.finalize {
+            unsafe { finalize(env, wrap.data, wrap.hint) };
+        }
+    }
+    for record in finalizers {
+        if let Some(finalize) = record.finalize {
+            unsafe { finalize(env, record.data, record.hint) };
+        }
+    }
+    Ok(())
 }
 
 #[no_mangle]

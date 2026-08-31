@@ -227,6 +227,7 @@ fn finish_with_platform_events<'js>(
         {
             poll_platform_events.call::<_, ()>(())?;
         }
+        poll_napi_bridge(ctx);
         if let Some(result) = promise.result() {
             return result;
         }

@@ -2002,6 +2002,15 @@ fn wraps_real_commonjs_source_and_binds_default_export() {
     assert!(wrapped.contains("globalThis.leftPad = module.exports;"));
 }
 
+#[test]
+fn native_class_proxies_retain_js_properties_and_release_native_handles() {
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[]);
+    assert!(wrapped.contains("__thaw_napi_proxy_finalizers.register(proxy"));
+    assert!(wrapped.contains("'release_handle'"));
+    assert!(wrapped.contains("Reflect.set(_, name, value, receiver)"));
+    assert!(wrapped.contains("result.value['$__thaw_napi_undefined$'] === true"));
+}
+
 /// The exact shape thaw-registry's ESM rewrite produces for a real
 /// ESM package (`escape-string-regexp`'s `export default function
 /// escapeStringRegexp(){}`): `module.exports.default = <fn>`, not
