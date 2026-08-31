@@ -101,7 +101,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &function,
         ),
         Some(
-            "expr:a0,a1,c0000000000000000,<,c3ff0000000000000,c4000000000000000,?,a1,c4008000000000000,c4010000000000000,?,?".into()
+            "expr:a0,asbool,a1,c0000000000000000,<,c3ff0000000000000,c4000000000000000,?,a1,asbool,c4008000000000000,c4010000000000000,?,?".into()
         )
     );
     assert_eq!(
@@ -294,7 +294,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &function,
         ),
-        Some("expr:a0,a0,a1,?,a0,a1,a0,?,+".into())
+        Some("expr:a0,asbool,a0,a1,?,a0,asbool,a1,a0,?,+".into())
     );
     for source in [
         "module.exports.add = (left, right) => left ** right;",
@@ -572,6 +572,51 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     let mut string_predicate = string_length.clone();
     string_predicate.name = "matches".into();
     string_predicate.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool);
+    for (source, expected) in [
+        (
+            "module.exports.matches = value => Boolean(value);",
+            "expr:s0,strbool",
+        ),
+        (
+            "module.exports.matches = value => !value;",
+            "expr:s0,strbool,c0000000000000000,c3ff0000000000000,?,asbool",
+        ),
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "matches", false, &string_predicate),
+            Some(expected.into())
+        );
+    }
+    let mut shadowed_boolean = string_predicate.clone();
+    shadowed_boolean.params[0].0 = "Boolean".into();
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.matches = Boolean => Boolean('x');",
+            "matches",
+            false,
+            &shadowed_boolean,
+        ),
+        None
+    );
+    for (source, expected) in [
+        (
+            "module.exports.greet = value => value && 'yes';",
+            "expr:s0,strbool,t796573,s0,?",
+        ),
+        (
+            "module.exports.greet = value => value || 'fallback';",
+            "expr:s0,strbool,s0,t66616c6c6261636b,?",
+        ),
+        (
+            "module.exports.greet = value => value ? 'yes' : 'no';",
+            "expr:s0,strbool,t796573,t6e6f,?",
+        ),
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "greet", false, &string_concat),
+            Some(expected.into())
+        );
+    }
     for (method, operation, search) in [
         ("startsWith", "startswith", "pre"),
         ("endsWith", "endswith", "fix"),

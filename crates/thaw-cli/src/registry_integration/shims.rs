@@ -314,6 +314,17 @@ fn jit_numeric_export(
         append_number(encoded, output)
     }
 
+    fn append_boolean(mut expression: Vec<String>, output: &mut Vec<String>) -> Option<()> {
+        let kind = jit_expression_kind(&expression)?.0;
+        output.append(&mut expression);
+        match kind {
+            JitKind::Number => output.push("asbool".into()),
+            JitKind::String => output.push("strbool".into()),
+            JitKind::Boolean => {}
+        }
+        Some(())
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -390,7 +401,7 @@ fn jit_numeric_export(
                 if unary.op == UnaryOp::Bang {
                     let mut encoded = Vec::new();
                     encode_expression(unary.arg.as_ref(), parameters, locals, &mut encoded)?;
-                    output.append(&mut encoded);
+                    append_boolean(encoded, output)?;
                 } else {
                     encode_number(unary.arg.as_ref(), parameters, locals, output)?;
                 }
@@ -456,13 +467,17 @@ fn jit_numeric_export(
             Expr::Bin(binary)
                 if matches!(binary.op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) =>
             {
-                encode_expression(binary.left.as_ref(), parameters, locals, output)?;
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                encode_expression(binary.left.as_ref(), parameters, locals, &mut left)?;
+                encode_expression(binary.right.as_ref(), parameters, locals, &mut right)?;
+                append_boolean(left.clone(), output)?;
                 if binary.op == BinaryOp::LogicalAnd {
-                    encode_expression(binary.right.as_ref(), parameters, locals, output)?;
-                    encode_expression(binary.left.as_ref(), parameters, locals, output)?;
+                    output.extend(right);
+                    output.extend(left);
                 } else {
-                    encode_expression(binary.left.as_ref(), parameters, locals, output)?;
-                    encode_expression(binary.right.as_ref(), parameters, locals, output)?;
+                    output.extend(left);
+                    output.extend(right);
                 }
                 output.push("?".into());
             }
@@ -629,6 +644,26 @@ fn jit_numeric_export(
                 encode_expression(argument.expr.as_ref(), parameters, locals, &mut encoded)?;
                 append_number(encoded, output)?;
             }
+            Expr::Call(call)
+                if matches!(
+                    &call.callee,
+                    Callee::Expr(callee)
+                        if matches!(callee.as_ref(), Expr::Ident(identifier) if identifier.sym == "Boolean")
+                ) =>
+            {
+                if parameters.contains_key("Boolean") || locals.contains_key("Boolean") {
+                    return None;
+                }
+                let [argument] = call.args.as_slice() else {
+                    return None;
+                };
+                if argument.spread.is_some() {
+                    return None;
+                }
+                let mut encoded = Vec::new();
+                encode_expression(argument.expr.as_ref(), parameters, locals, &mut encoded)?;
+                append_boolean(encoded, output)?;
+            }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
                 if matches!(
@@ -775,7 +810,9 @@ fn jit_numeric_export(
                 return (output.len() <= 128).then_some(());
             }
         }
-        encode_expression(expression, parameters, locals, output)?;
+        let mut encoded = Vec::new();
+        encode_expression(expression, parameters, locals, &mut encoded)?;
+        append_boolean(encoded, output)?;
         (output.len() <= 128).then_some(())
     }
 
@@ -1070,7 +1107,10 @@ fn jit_numeric_export(
             }
         }
     }
-    if module_functions.contains_key("String") || module_functions.contains_key("Number") {
+    if module_functions.contains_key("String")
+        || module_functions.contains_key("Number")
+        || module_functions.contains_key("Boolean")
+    {
         return None;
     }
     let mut style = None;
@@ -1359,6 +1399,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token == "strbool" {
+            if stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if token == "asbool" {
             if *stack.last()? == JitKind::String {
                 return None;
