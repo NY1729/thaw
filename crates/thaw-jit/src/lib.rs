@@ -589,6 +589,32 @@ extern "C" fn string_pad_end(value: f64, target_length: f64, pad: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn string_replace(value: f64, search: f64, replacement: f64, all: bool) -> f64 {
+    let (Some(value), Some(search), Some(replacement)) = (
+        string_argument(value),
+        string_argument(search),
+        string_argument(replacement),
+    ) else {
+        return f64::from_bits(0);
+    };
+    arena_string(if all {
+        value.replace(&search, &replacement)
+    } else {
+        value.replacen(&search, &replacement, 1)
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_replace_first(value: f64, search: f64, replacement: f64) -> f64 {
+    unsafe { string_replace(value, search, replacement, false) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_replace_all(value: f64, search: f64, replacement: f64) -> f64 {
+    unsafe { string_replace(value, search, replacement, true) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_concat(left: f64, right: f64) -> f64 {
     unsafe {
         let left = left.to_bits() as usize as *const c_char;
@@ -913,6 +939,8 @@ enum NumericValue {
     StringStartsWith,
     StringStartsWithAt,
     StringRepeat,
+    StringReplace,
+    StringReplaceAll,
     StringSlice,
     StringSliceRange,
     StringSubstring,
@@ -985,6 +1013,8 @@ impl NumericProgram {
                     "startswith" => Some(NumericValue::StringStartsWith),
                     "startswith2" => Some(NumericValue::StringStartsWithAt),
                     "repeat" => Some(NumericValue::StringRepeat),
+                    "replace" => Some(NumericValue::StringReplace),
+                    "replaceall" => Some(NumericValue::StringReplaceAll),
                     "slice" => Some(NumericValue::StringSlice),
                     "slice2" => Some(NumericValue::StringSliceRange),
                     "substring" => Some(NumericValue::StringSubstring),
@@ -1245,7 +1275,9 @@ impl NumericProgram {
                 | NumericValue::StringEndsWithAt
                 | NumericValue::StringIncludesAt
                 | NumericValue::StringIndexOfAt
-                | NumericValue::StringLastIndexOfAt => {
+                | NumericValue::StringLastIndexOfAt
+                | NumericValue::StringReplace
+                | NumericValue::StringReplaceAll => {
                     if depth < 3 {
                         return None;
                     }
@@ -1259,6 +1291,8 @@ impl NumericProgram {
                         NumericValue::StringIncludesAt => string_includes_at,
                         NumericValue::StringIndexOfAt => string_index_of_at,
                         NumericValue::StringLastIndexOfAt => string_last_index_of_at,
+                        NumericValue::StringReplace => string_replace_first,
+                        NumericValue::StringReplaceAll => string_replace_all,
                         _ => unreachable!(),
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
@@ -1980,6 +2014,30 @@ mod tests {
                     f64::from_bits(padded.as_ptr() as usize as u64),
                     3.0,
                     f64::from_bits(padding.as_ptr() as usize as u64),
+                ],
+            );
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+                expected
+            );
+            unsafe { libc::free(result.cast()) };
+        }
+        let replace_value = CString::new("aba").unwrap();
+        for (operation, search, replacement, expected) in [
+            ("replace", "a", "x", "xba"),
+            ("replaceall", "a", "x", "xbx"),
+            ("replaceall", "", "-", "-a-b-a-"),
+        ] {
+            let search = CString::new(search).unwrap();
+            let replacement = CString::new(replacement).unwrap();
+            let replace = CString::new(format!("expr:s0,s1,s2,{operation}:{operation}")).unwrap();
+            let result = call(
+                &replace,
+                &[
+                    f64::from_bits(replace_value.as_ptr() as usize as u64),
+                    f64::from_bits(search.as_ptr() as usize as u64),
+                    f64::from_bits(replacement.as_ptr() as usize as u64),
                 ],
             );
             let result = result.value.to_bits() as usize as *mut c_char;

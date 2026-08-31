@@ -167,6 +167,7 @@ fn jit_numeric_export(
                     "charAt" => call.args.len() <= 1,
                     "at" => call.args.len() <= 1,
                     "repeat" => call.args.len() == 1,
+                    "replace" | "replaceAll" => call.args.len() == 2,
                     "padStart" | "padEnd" => (1..=2).contains(&call.args.len()),
                     "slice" | "substring" => call.args.len() <= 2,
                     _ => false,
@@ -208,6 +209,8 @@ fn jit_numeric_export(
             "trimStart" => "trimstart",
             "trimEnd" => "trimend",
             "repeat" => "repeat",
+            "replace" => "replace",
+            "replaceAll" => "replaceall",
             "charAt" => "charat",
             "charCodeAt" => "charcodeat",
             "localeCompare" => "strcmp",
@@ -387,6 +390,17 @@ fn jit_numeric_export(
                         return None;
                     };
                     encode_expression(count.expr.as_ref(), parameters, locals, output)?;
+                } else if matches!(operation, "replace" | "replaceall") {
+                    let [search, replacement] = call.args.as_slice() else {
+                        return None;
+                    };
+                    if !is_string_expression(search.expr.as_ref(), parameters)
+                        || !is_string_expression(replacement.expr.as_ref(), parameters)
+                    {
+                        return None;
+                    }
+                    encode_expression(search.expr.as_ref(), parameters, locals, output)?;
+                    encode_expression(replacement.expr.as_ref(), parameters, locals, output)?;
                 } else if matches!(operation, "charat" | "charcodeat" | "at" | "codepointat") {
                     match call.args.as_slice() {
                         [] => output.push("c0000000000000000".into()),
@@ -1153,6 +1167,11 @@ fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Op
             stack.push(true);
         } else if matches!(token.as_str(), "padstart" | "padend") {
             if !stack.pop()? || stack.pop()? || !stack.pop()? {
+                return None;
+            }
+            stack.push(true);
+        } else if matches!(token.as_str(), "replace" | "replaceall") {
+            if !stack.pop()? || !stack.pop()? || !stack.pop()? {
                 return None;
             }
             stack.push(true);
