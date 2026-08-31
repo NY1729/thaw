@@ -477,6 +477,38 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:s0,{operation}"))
         );
     }
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.normalize = value => value.toWellFormed();",
+            "normalize",
+            false,
+            &string_case,
+        ),
+        Some("expr:s0,towellformed".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.matches = value => value.isWellFormed();",
+            "matches",
+            false,
+            &string_predicate,
+        ),
+        Some("expr:s0,iswellformed".into())
+    );
+    let locale_compare = thaw_bridge::DtsFunction {
+        name: "compare".into(),
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..string_less.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.compare = (left, right) => left.localeCompare(right);",
+            "compare",
+            false,
+            &locale_compare,
+        ),
+        Some("expr:s0,s1,strcmp".into())
+    );
     for (method, operation) in [
         ("trim", "trim"),
         ("trimStart", "trimstart"),
