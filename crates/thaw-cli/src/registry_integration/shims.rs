@@ -23,7 +23,7 @@ fn jit_numeric_export(
     use thaw_parser::ast::{
         AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr, Ident, Lit,
         MemberProp, ModuleItem, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
-        UnaryOp,
+        UnaryOp, UpdateOp, VarDeclKind,
     };
 
     fn math_method(
@@ -285,19 +285,69 @@ fn jit_numeric_export(
         }
     }
 
-    fn split_numeric_body(statements: &[Stmt]) -> Option<(Vec<(&Ident, &Expr)>, NumericBody<'_>)> {
-        let mut locals = Vec::new();
+    enum LocalStep<'a> {
+        Declare {
+            name: &'a Ident,
+            initializer: &'a Expr,
+            mutable: bool,
+        },
+        Assign {
+            name: &'a Ident,
+            operation: AssignOp,
+            value: &'a Expr,
+        },
+        Update {
+            name: &'a Ident,
+            operation: UpdateOp,
+        },
+    }
+
+    fn split_numeric_body(statements: &[Stmt]) -> Option<(Vec<LocalStep<'_>>, NumericBody<'_>)> {
+        let mut steps = Vec::new();
         let mut offset = 0;
-        while let Some(Stmt::Decl(Decl::Var(declaration))) = statements.get(offset) {
-            for declarator in &declaration.decls {
-                let Pat::Ident(name) = &declarator.name else {
-                    return None;
-                };
-                locals.push((&name.id, declarator.init.as_deref()?));
+        loop {
+            match statements.get(offset) {
+                Some(Stmt::Decl(Decl::Var(declaration))) => {
+                    for declarator in &declaration.decls {
+                        let Pat::Ident(name) = &declarator.name else {
+                            return None;
+                        };
+                        steps.push(LocalStep::Declare {
+                            name: &name.id,
+                            initializer: declarator.init.as_deref()?,
+                            mutable: declaration.kind != VarDeclKind::Const,
+                        });
+                    }
+                }
+                Some(Stmt::Expr(statement)) => match statement.expr.as_ref() {
+                    Expr::Assign(assignment) => {
+                        let AssignTarget::Simple(SimpleAssignTarget::Ident(name)) =
+                            &assignment.left
+                        else {
+                            break;
+                        };
+                        steps.push(LocalStep::Assign {
+                            name: &name.id,
+                            operation: assignment.op,
+                            value: assignment.right.as_ref(),
+                        });
+                    }
+                    Expr::Update(update) => {
+                        let Expr::Ident(name) = update.arg.as_ref() else {
+                            break;
+                        };
+                        steps.push(LocalStep::Update {
+                            name,
+                            operation: update.op,
+                        });
+                    }
+                    _ => break,
+                },
+                _ => break,
             }
             offset += 1;
         }
-        Some((locals, numeric_body(&statements[offset..])?))
+        Some((steps, numeric_body(&statements[offset..])?))
     }
 
     fn encode_numeric_body(
@@ -453,7 +503,7 @@ fn jit_numeric_export(
     }
     let callable = callable?;
 
-    let (params, local_initializers, body): (Vec<&Pat>, Vec<(&Ident, &Expr)>, NumericBody<'_>) =
+    let (params, local_steps, body): (Vec<&Pat>, Vec<LocalStep<'_>>, NumericBody<'_>) =
         match callable {
         Expr::Fn(function) if !function.function.is_async && !function.function.is_generator => {
             let body = function.function.body.as_ref()?;
@@ -491,13 +541,78 @@ fn jit_numeric_export(
     }
     let mut expression = Vec::new();
     let mut locals = std::collections::HashMap::new();
-    for (name, initializer) in local_initializers {
-        if parameters.contains_key(name.sym.as_ref()) || locals.contains_key(name.sym.as_ref()) {
-            return None;
+    let mut mutable = std::collections::HashSet::new();
+    for step in local_steps {
+        match step {
+            LocalStep::Declare {
+                name,
+                initializer,
+                mutable: is_mutable,
+            } => {
+                if parameters.contains_key(name.sym.as_ref())
+                    || locals.contains_key(name.sym.as_ref())
+                {
+                    return None;
+                }
+                let mut encoded = Vec::new();
+                encode_expression(initializer, &parameters, &locals, &mut encoded)?;
+                locals.insert(name.sym.to_string(), encoded);
+                if is_mutable {
+                    mutable.insert(name.sym.to_string());
+                }
+            }
+            LocalStep::Assign {
+                name,
+                operation,
+                value,
+            } => {
+                if !mutable.contains(name.sym.as_ref()) {
+                    return None;
+                }
+                let mut encoded = if operation == AssignOp::Assign {
+                    Vec::new()
+                } else {
+                    locals.get(name.sym.as_ref())?.clone()
+                };
+                encode_expression(value, &parameters, &locals, &mut encoded)?;
+                if operation != AssignOp::Assign {
+                    encoded.push(
+                        match operation {
+                            AssignOp::AddAssign => "+",
+                            AssignOp::SubAssign => "-",
+                            AssignOp::MulAssign => "*",
+                            AssignOp::DivAssign => "/",
+                            AssignOp::ModAssign => "%",
+                            AssignOp::LShiftAssign => "shl",
+                            AssignOp::RShiftAssign => "shr",
+                            AssignOp::ZeroFillRShiftAssign => "ushr",
+                            AssignOp::BitOrAssign => "bor",
+                            AssignOp::BitXorAssign => "bxor",
+                            AssignOp::BitAndAssign => "band",
+                            AssignOp::ExpAssign => "pow",
+                            _ => return None,
+                        }
+                        .into(),
+                    );
+                }
+                locals.insert(name.sym.to_string(), encoded);
+            }
+            LocalStep::Update { name, operation } => {
+                if !mutable.contains(name.sym.as_ref()) {
+                    return None;
+                }
+                let mut encoded = locals.get(name.sym.as_ref())?.clone();
+                encoded.push(format!("c{:016x}", 1.0f64.to_bits()));
+                encoded.push(
+                    match operation {
+                        UpdateOp::PlusPlus => "+",
+                        UpdateOp::MinusMinus => "-",
+                    }
+                    .into(),
+                );
+                locals.insert(name.sym.to_string(), encoded);
+            }
         }
-        let mut encoded = Vec::new();
-        encode_expression(initializer, &parameters, &locals, &mut encoded)?;
-        locals.insert(name.sym.to_string(), encoded);
     }
     encode_numeric_body(body, &parameters, &locals, &mut expression)?;
     validated_jit_expression(expression)
