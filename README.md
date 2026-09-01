@@ -2023,6 +2023,8 @@ length in typed JIT IR while preserving argument order.
 Computed primitive-array assignment updates a typed slot in the same JIT,
 growing and zero-filling the shared native array handle when needed; assignment
 expressions return the assigned value and statement bodies may return the array.
+Numeric compound assignments and string `+=` reuse that write path while a
+two-slot JIT duplication instruction evaluates the receiver and index once.
 Primitive `pop()` and `shift()` likewise replace that handle after removal and
 return typed optional values, preserving `undefined` for empty arrays.
 Primitive `splice(start?, deleteCount?, ...items)` builds its fixed-signature

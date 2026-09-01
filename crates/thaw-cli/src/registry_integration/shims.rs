@@ -699,7 +699,7 @@ fn jit_numeric_export(
                     ));
                 }
             }
-            Expr::Assign(assignment) if assignment.op == AssignOp::Assign => {
+            Expr::Assign(assignment) => {
                 let AssignTarget::Simple(SimpleAssignTarget::Member(target)) = &assignment.left
                 else {
                     return None;
@@ -727,18 +727,46 @@ fn jit_numeric_export(
                 };
                 output.extend(receiver);
                 encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
-                let mut value = Vec::new();
-                encode_expression(
-                    assignment.right.as_ref(),
-                    parameters,
-                    locals,
-                    context,
-                    &mut value,
-                )?;
-                if jit_expression_kind(&value)?.0 != expected {
-                    return None;
+                if assignment.op != AssignOp::Assign {
+                    output.push("dup2".into());
+                    output.push(format!("{prefix}get"));
                 }
-                output.extend(value);
+                let mut value = Vec::new();
+                encode_expression(assignment.right.as_ref(), parameters, locals, context, &mut value)?;
+                if assignment.op == AssignOp::Assign {
+                    if jit_expression_kind(&value)?.0 != expected {
+                        return None;
+                    }
+                    output.extend(value);
+                } else if assignment.op == AssignOp::AddAssign && expected == JitKind::String {
+                    append_string(value, output)?;
+                    output.push("concat".into());
+                } else {
+                    if expected != JitKind::Number || jit_expression_kind(&value)?.0 == JitKind::Array {
+                        return None;
+                    }
+                    append_number(value, output)?;
+                    if assignment.op != AssignOp::Assign {
+                        output.push(
+                            match assignment.op {
+                                AssignOp::AddAssign => "+",
+                                AssignOp::SubAssign => "-",
+                                AssignOp::MulAssign => "*",
+                                AssignOp::DivAssign => "/",
+                                AssignOp::ModAssign => "%",
+                                AssignOp::LShiftAssign => "shl",
+                                AssignOp::RShiftAssign => "shr",
+                                AssignOp::ZeroFillRShiftAssign => "ushr",
+                                AssignOp::BitOrAssign => "bor",
+                                AssignOp::BitXorAssign => "bxor",
+                                AssignOp::BitAndAssign => "band",
+                                AssignOp::ExpAssign => "pow",
+                                _ => return None,
+                            }
+                            .into(),
+                        );
+                    }
+                }
                 output.push(format!("{prefix}set"));
             }
             Expr::Unary(unary)
@@ -2698,6 +2726,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(value);
         } else if token == "drop" {
             stack.pop()?;
+        } else if token == "dup2" {
+            let length = stack.len();
+            if length < 2 {
+                return None;
+            }
+            stack.push(stack[length - 2]);
+            stack.push(stack[length - 1]);
         } else if matches!(token.as_str(), "rnwith" | "rswith" | "rbwith") {
             let value = stack.pop()?;
             if stack.pop()? != JitKind::Number
