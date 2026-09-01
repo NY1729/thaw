@@ -2037,6 +2037,9 @@ boolean and string `toString()` calls likewise use the existing boolean formatte
 or string value without loading QuickJS.
 Primitive arrays can enter the same word-sized JIT argument ABI; their native
 handle is read directly for `.length`, without JSON marshalling or QuickJS.
+Statically typed `Array.isArray` calls also stay in that IR: array arguments
+produce `true`, supported primitive arguments produce `false`, and the argument
+expression is still evaluated before the typed result is returned.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches

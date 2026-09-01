@@ -176,6 +176,38 @@ fn jit_numeric_export(
         }
     }
 
+    fn array_predicate<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<&'a Expr> {
+        if parameters.contains_key("Array")
+            || locals.contains_key("Array")
+            || helpers.contains_key("Array")
+        {
+            return None;
+        }
+        let [argument] = call.args.as_slice() else {
+            return None;
+        };
+        if argument.spread.is_some() {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Array")
+            || !matches!(&member.prop, MemberProp::Ident(property) if property.sym == "isArray")
+        {
+            return None;
+        }
+        Some(argument.expr.as_ref())
+    }
+
     fn math_constant(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -759,6 +791,21 @@ fn jit_numeric_export(
                     }
                     _ => return None,
                 }
+            }
+            Expr::Call(call)
+                if array_predicate(call, parameters, locals, context.helpers).is_some() =>
+            {
+                let mut encoded = Vec::new();
+                encode_expression(
+                    array_predicate(call, parameters, locals, context.helpers)?,
+                    parameters,
+                    locals,
+                    context,
+                    &mut encoded,
+                )?;
+                let is_array = jit_expression_kind(&encoded)?.0 == JitKind::Array;
+                output.extend(encoded);
+                output.push(if is_array { "isarray" } else { "isnotarray" }.into());
             }
             Expr::Call(call) if array_method(call, parameters).is_some() => {
                 let (method, receiver) = array_method(call, parameters)?;
@@ -2100,6 +2147,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if matches!(token.as_str(), "isarray" | "isnotarray") {
+            stack.pop()?;
+            stack.push(JitKind::Boolean);
         } else if matches!(
             token.as_str(),
             "rnat" | "rbat" | "rsat" | "rnget" | "rbget" | "rsget"

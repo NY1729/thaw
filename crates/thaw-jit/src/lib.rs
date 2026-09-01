@@ -257,6 +257,16 @@ extern "C" fn array_length(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn is_array(_: f64) -> f64 {
+    1.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn is_not_array(_: f64) -> f64 {
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn array_at(value: f64, index: f64, kind: u8) -> f64 {
     let Some((data, length)) = (unsafe { array_data(value) }) else {
         CALL_PRESENT.with(|present| present.set(false));
@@ -1288,6 +1298,8 @@ enum NumericValue {
     StringLastIndexOfAt,
     StringLength,
     ArrayLength,
+    IsArray,
+    IsNotArray,
     NumberArrayAt,
     BoolArrayAt,
     StringArrayAt,
@@ -1398,6 +1410,8 @@ impl NumericProgram {
                     "lastindexof2" => Some(NumericValue::StringLastIndexOfAt),
                     "strlen" => Some(NumericValue::StringLength),
                     "arraylen" => Some(NumericValue::ArrayLength),
+                    "isarray" => Some(NumericValue::IsArray),
+                    "isnotarray" => Some(NumericValue::IsNotArray),
                     "rnat" => Some(NumericValue::NumberArrayAt),
                     "rbat" => Some(NumericValue::BoolArrayAt),
                     "rsat" => Some(NumericValue::StringArrayAt),
@@ -1796,6 +1810,20 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, array_length as *const () as u64, depth - 1);
+                }
+                NumericValue::IsArray | NumericValue::IsNotArray => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(
+                        &mut code,
+                        if *value == NumericValue::IsArray {
+                            is_array
+                        } else {
+                            is_not_array
+                        } as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::NumberArrayAt
                 | NumericValue::BoolArrayAt
@@ -2861,6 +2889,13 @@ mod tests {
             call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
             3.0
         );
+        let symbol = CString::new("expr:rn0,isarray:is-array").unwrap();
+        assert_eq!(
+            call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+            1.0
+        );
+        let symbol = CString::new("expr:a0,isnotarray:is-not-array").unwrap();
+        assert_eq!(call(&symbol, &[42.0]).value, 0.0);
         for (operation, from, expected) in [
             ("rnindexof", 0.0f64, 1.0),
             ("rnincludes", 0.0, 1.0),
