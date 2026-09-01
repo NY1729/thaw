@@ -643,6 +643,46 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rs0,rsmaplength,arrayvalue".into())
     );
+    for (callback, operation, result) in [
+        ("String", "string", string_filter.ret.clone()),
+        (
+            "Number",
+            "number",
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+                thaw_hir::HirType::F64,
+            ))),
+        ),
+        (
+            "Boolean",
+            "boolean",
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+                thaw_hir::HirType::Bool,
+            ))),
+        ),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.add = values => values.map({callback});"),
+                "add",
+                false,
+                &thaw_bridge::DtsFunction {
+                    ret: result,
+                    ..string_filter.clone()
+                },
+            ),
+            Some(format!("expr:rs0,rsmapto{operation},arrayvalue")),
+            "{callback}"
+        );
+    }
+    assert_eq!(
+        jit_numeric_export(
+            "const String = value => value; module.exports.add = values => values.map(String);",
+            "add",
+            false,
+            &string_filter,
+        ),
+        Some("expr:rs0,rsmapidentity,arrayvalue".into())
+    );
     let bool_map = thaw_bridge::DtsFunction {
         ret: bool_array.clone(),
         ..bool_quantifier.clone()

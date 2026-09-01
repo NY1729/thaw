@@ -1350,7 +1350,14 @@ fn jit_numeric_export(
                     let [callback] = call.args.as_slice() else {
                         return None;
                     };
-                    if prefix != "rn" {
+                    if let Some(target) = primitive_conversion_map(
+                        callback.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                    ) {
+                        output.push(format!("{prefix}mapto{target}"));
+                    } else if prefix != "rn" {
                         let operation = primitive_unary_map(
                             callback.expr.as_ref(),
                             parameters,
@@ -3035,6 +3042,31 @@ fn jit_numeric_export(
         }
     }
 
+    fn primitive_conversion_map(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &InlineContext<'_>,
+    ) -> Option<&'static str> {
+        let Expr::Ident(identifier) = expression else {
+            return None;
+        };
+        let name = identifier.sym.as_ref();
+        if parameters.contains_key(name)
+            || locals.contains_key(name)
+            || context.module_locals.contains_key(name)
+            || context.helpers.contains_key(name)
+        {
+            return None;
+        }
+        match name {
+            "Number" => Some("number"),
+            "Boolean" => Some("boolean"),
+            "String" => Some("string"),
+            _ => None,
+        }
+    }
+
     fn encode_helper_call(
         call: &CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -3846,7 +3878,12 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "rsmaplength"
                 | "rbmapidentity"
                 | "rbmapnot"
-        ) {
+        ) || token
+            .strip_prefix("rnmapto")
+            .or_else(|| token.strip_prefix("rbmapto"))
+            .or_else(|| token.strip_prefix("rsmapto"))
+            .is_some_and(|target| matches!(target, "number" | "boolean" | "string"))
+        {
             if stack.pop()? != JitKind::Array {
                 return None;
             }
