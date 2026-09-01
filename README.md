@@ -2166,6 +2166,10 @@ including value-and-index expressions.
 Compound numeric `reduce` and `reduceRight` callbacks use it too, with the
 standard accumulator, current value, index, and source-array arguments plus
 initial-value and empty-array behavior.
+These JIT callbacks can capture typed outer parameters and locals through a
+compact native pack. Number, boolean, string, and primitive-array handles keep
+their native representation, covering composed scale/offset, range predicates,
+string-to-number thresholds, and captured-array metadata without QuickJS.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
 including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array

@@ -470,6 +470,49 @@ fn composed_numeric_reducers_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
+fn array_jit_callbacks_capture_typed_outer_values_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-captures-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-captures");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function map(values: number[], factor: number, offset: number): number[];\nexport declare function filter(values: number[], minimum: number, maximum: number): number[];\nexport declare function reduce(values: number[], multiplier: number, offset: number): number;\nexport declare function above(values: number[], threshold: string): boolean;\nexport declare function addLength(values: number[], extras: number[]): number[];\nexport declare function signed(values: number[], enabled: boolean): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.map = (values, factor, offset) => values.map((value, index) => value * factor + offset + index); module.exports.filter = (values, minimum, maximum) => values.filter(value => value >= minimum && value <= maximum); module.exports.reduce = (values, multiplier, offset) => values.reduce((accumulator, value, index) => accumulator * multiplier + value + offset + index, 0); module.exports.above = (values, threshold) => values.some(value => value > Number(threshold)); module.exports.addLength = (values, extras) => values.map(value => value + extras.length); module.exports.signed = (values, enabled) => values.map(value => enabled ? value : -value);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { map, filter, reduce, above, addLength, signed } from 'jit-captures';\nfunction main(): void { console.log(map([1, 2], 3, 4).join(',')); console.log(filter([1, 3, 5, 7], 3, 5).join(',')); console.log(reduce([1, 2], 2, 3)); console.log(above([1, 4], '3')); console.log(addLength([1, 2], [9, 8, 7]).join(',')); console.log(signed([1, -2], false).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "7,11\n3,5\n14\ntrue\n4,5\n-1,2\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_array_comparisons_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-primitive-comparisons-{}",

@@ -793,7 +793,10 @@ fn number_array_map(value: f64, operation: impl Fn(f64, f64) -> f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn compile_jit_callback(callback: f64) -> Option<extern "C" fn(*const f64) -> f64> {
+type JitCallback = extern "C" fn(*const f64) -> f64;
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn compile_jit_callback(callback: f64) -> Option<(JitCallback, usize)> {
     let Some(callback) = (unsafe { string_argument(callback) }) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return None;
@@ -803,7 +806,8 @@ fn compile_jit_callback(callback: f64) -> Option<extern "C" fn(*const f64) -> f6
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return None;
     };
-    if program.required_args() > 4 {
+    let required_args = program.required_args();
+    if required_args > 16 {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return None;
     }
@@ -814,29 +818,91 @@ fn compile_jit_callback(callback: f64) -> Option<extern "C" fn(*const f64) -> f6
             return None;
         }
     };
-    Some(unsafe {
-        std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code)
-    })
+    Some((
+        unsafe { std::mem::transmute::<*mut libc::c_void, JitCallback>(code) },
+        required_args,
+    ))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn capture_arguments(value: f64, builtins: usize, required: usize) -> Option<Vec<f64>> {
+    let Some((array, length)) = (unsafe { array_data(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return None;
+    };
+    if builtins + length > 16 || required > builtins + length {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return None;
+    }
+    Some(
+        (0..length)
+            .map(|index| unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() })
+            .collect(),
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn call_jit_callback(callback: JitCallback, builtins: &[f64], captures: &[f64]) -> f64 {
+    let mut arguments = [0.0; 16];
+    arguments[..builtins.len()].copy_from_slice(builtins);
+    arguments[builtins.len()..builtins.len() + captures.len()].copy_from_slice(captures);
+    callback(arguments.as_ptr())
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn number_array_jit_map(value: f64, callback: f64) -> f64 {
-    let Some(callback) = compile_jit_callback(callback) else {
+    let Some((callback, required)) = compile_jit_callback(callback) else {
         return 0.0;
     };
+    if required > 3 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
     number_array_map(value, |element, index| {
         callback([element, index, value].as_ptr())
     })
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_jit_map_captured(value: f64, callback: f64, captures: f64) -> f64 {
+    let Some((callback, required)) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
+    let Some(captures) = capture_arguments(captures, 3, required) else {
+        return 0.0;
+    };
+    number_array_map(value, |element, index| {
+        call_jit_callback(callback, &[element, index, value], &captures)
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_jit_scan(value: f64, callback: f64, mode: u8) -> f64 {
-    let Some(callback) = compile_jit_callback(callback) else {
+    let Some((callback, required)) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
+    if required > 3 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    primitive_array_scan(value, 0, mode, |array, index| {
+        let element = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+        let result = callback([element, index as f64, value].as_ptr());
+        result != 0.0 && !result.is_nan()
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_jit_scan_captured(value: f64, callback: f64, captures: f64, mode: u8) -> f64 {
+    let Some((callback, required)) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
+    let Some(captures) = capture_arguments(captures, 3, required) else {
         return 0.0;
     };
     primitive_array_scan(value, 0, mode, |array, index| {
         let element = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
-        let result = callback([element, index as f64, value].as_ptr());
+        let result = call_jit_callback(callback, &[element, index as f64, value], &captures);
         result != 0.0 && !result.is_nan()
     })
 }
@@ -846,6 +912,15 @@ macro_rules! jit_scan_fn {
     ($name:ident, $mode:expr) => {
         extern "C" fn $name(value: f64, callback: f64) -> f64 {
             number_array_jit_scan(value, callback, $mode)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! jit_scan_captured_fn {
+    ($name:ident, $mode:expr) => {
+        extern "C" fn $name(value: f64, callback: f64, captures: f64) -> f64 {
+            number_array_jit_scan_captured(value, callback, captures, $mode)
         }
     };
 }
@@ -864,6 +939,20 @@ jit_scan_fn!(number_array_jit_find_last, 4);
 jit_scan_fn!(number_array_jit_find_last_index, 5);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 jit_scan_fn!(number_array_jit_filter, 6);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_captured_fn!(number_array_jit_some_captured, 0);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_captured_fn!(number_array_jit_every_captured, 1);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_captured_fn!(number_array_jit_find_captured, 2);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_captured_fn!(number_array_jit_find_index_captured, 3);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_captured_fn!(number_array_jit_find_last_captured, 4);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_captured_fn!(number_array_jit_find_last_index_captured, 5);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_captured_fn!(number_array_jit_filter_captured, 6);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_jit_reduce(
@@ -872,9 +961,22 @@ fn number_array_jit_reduce(
     callback: f64,
     from_right: bool,
     has_initial: bool,
+    captures: Option<f64>,
 ) -> f64 {
-    let Some(callback) = compile_jit_callback(callback) else {
+    let Some((callback, required)) = compile_jit_callback(callback) else {
         return 0.0;
+    };
+    let captures = if let Some(captures) = captures {
+        let Some(captures) = capture_arguments(captures, 4, required) else {
+            return 0.0;
+        };
+        captures
+    } else {
+        if required > 4 {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return 0.0;
+        }
+        Vec::new()
     };
     let Some((array, length)) = (unsafe { array_data(value) }) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
@@ -892,7 +994,11 @@ fn number_array_jit_reduce(
     };
     let mut apply = |index| {
         let element = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
-        accumulator = callback([accumulator, element, index as f64, value].as_ptr());
+        accumulator = call_jit_callback(
+            callback,
+            &[accumulator, element, index as f64, value],
+            &captures,
+        );
     };
     if from_right {
         for index in (0..if has_initial { length } else { length - 1 }).rev() {
@@ -910,7 +1016,7 @@ fn number_array_jit_reduce(
 macro_rules! jit_reduce_fn {
     ($name:ident, $from_right:expr, $has_initial:expr) => {
         extern "C" fn $name(value: f64, initial: f64, callback: f64) -> f64 {
-            number_array_jit_reduce(value, initial, callback, $from_right, $has_initial)
+            number_array_jit_reduce(value, initial, callback, $from_right, $has_initial, None)
         }
     };
 }
@@ -923,6 +1029,31 @@ jit_reduce_fn!(number_array_jit_reduce_first, false, false);
 jit_reduce_fn!(number_array_jit_reduce_right_initial, true, true);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 jit_reduce_fn!(number_array_jit_reduce_right_last, true, false);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! jit_reduce_captured_fn {
+    ($name:ident, $from_right:expr, $has_initial:expr) => {
+        extern "C" fn $name(value: f64, initial: f64, callback: f64, captures: f64) -> f64 {
+            number_array_jit_reduce(
+                value,
+                initial,
+                callback,
+                $from_right,
+                $has_initial,
+                Some(captures),
+            )
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_reduce_captured_fn!(number_array_jit_reduce_initial_captured, false, true);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_reduce_captured_fn!(number_array_jit_reduce_first_captured, false, false);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_reduce_captured_fn!(number_array_jit_reduce_right_initial_captured, true, true);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_reduce_captured_fn!(number_array_jit_reduce_right_last_captured, true, false);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_index_map(value: f64, encoded: f64) -> f64 {
@@ -3112,7 +3243,7 @@ enum NumericValue {
     NumberArrayMax,
     NumberArrayHypot,
     NumberArrayReduce(NumericReduceOp, bool, bool),
-    NumberArrayJitReduce(bool, bool),
+    NumberArrayJitReduce(bool, bool, bool),
     NumberArrayQuantifier(CompareOp, bool),
     NumberArrayFind(CompareOp, u8),
     NumberArrayFilter(CompareOp),
@@ -3121,8 +3252,8 @@ enum NumericValue {
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
-    NumberArrayJitMap,
-    NumberArrayJitScan(u8),
+    NumberArrayJitMap(bool),
+    NumberArrayJitScan(u8, bool),
     NumberArrayIndexMap(NumericReduceOp, bool),
     NumberArraySelectMap(CompareOp, u8),
     NumberArrayBranchMap(u16),
@@ -3200,8 +3331,8 @@ impl NumericProgram {
                     | NumericValue::NumberArraySort
                     | NumericValue::StringArraySort
                     | NumericValue::BoolArraySort
-                    | NumericValue::NumberArrayJitMap
-                    | NumericValue::NumberArrayJitScan(6)
+                    | NumericValue::NumberArrayJitMap(_)
+                    | NumericValue::NumberArrayJitScan(6, _)
                     | NumericValue::StringArrayToSortedDescending
                     | NumericValue::StringArraySortDescending
                     | NumericValue::NumberArrayFill
@@ -3313,6 +3444,7 @@ impl NumericProgram {
                     "rnappend" => Some(NumericValue::NumberArrayAppend),
                     "rsappend" => Some(NumericValue::StringArrayAppend),
                     "rbappend" => Some(NumericValue::BoolArrayAppend),
+                    "captureappend" => Some(NumericValue::NumberArrayAppend),
                     "arrayreversed" => Some(NumericValue::ArrayToReversed),
                     "arrayreverse" => Some(NumericValue::ArrayReverse),
                     "rnsorted" => Some(NumericValue::NumberArrayToSorted),
@@ -3348,10 +3480,22 @@ impl NumericProgram {
                     "rnmin" => Some(NumericValue::NumberArrayMin),
                     "rnmax" => Some(NumericValue::NumberArrayMax),
                     "rnhypot" => Some(NumericValue::NumberArrayHypot),
-                    "rnreducejit" => Some(NumericValue::NumberArrayJitReduce(true, false)),
-                    "rnreducejit0" => Some(NumericValue::NumberArrayJitReduce(false, false)),
-                    "rnreducerightjit" => Some(NumericValue::NumberArrayJitReduce(true, true)),
-                    "rnreducerightjit0" => Some(NumericValue::NumberArrayJitReduce(false, true)),
+                    "rnreducejit" => Some(NumericValue::NumberArrayJitReduce(true, false, false)),
+                    "rnreducejit0" => Some(NumericValue::NumberArrayJitReduce(false, false, false)),
+                    "rnreducerightjit" => {
+                        Some(NumericValue::NumberArrayJitReduce(true, true, false))
+                    }
+                    "rnreducerightjit0" => {
+                        Some(NumericValue::NumberArrayJitReduce(false, true, false))
+                    }
+                    "rnreducejitc" => Some(NumericValue::NumberArrayJitReduce(true, false, true)),
+                    "rnreducejitc0" => Some(NumericValue::NumberArrayJitReduce(false, false, true)),
+                    "rnreducerightjitc" => {
+                        Some(NumericValue::NumberArrayJitReduce(true, true, true))
+                    }
+                    "rnreducerightjitc0" => {
+                        Some(NumericValue::NumberArrayJitReduce(false, true, true))
+                    }
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
@@ -3621,20 +3765,30 @@ impl NumericProgram {
                                 _ => return None,
                             }))
                         })
-                        .or_else(|| {
-                            (value == "rnmapjit").then_some(NumericValue::NumberArrayJitMap)
+                        .or(match value {
+                            "rnmapjit" => Some(NumericValue::NumberArrayJitMap(false)),
+                            "rnmapjitc" => Some(NumericValue::NumberArrayJitMap(true)),
+                            _ => None,
                         })
                         .or_else(|| {
-                            Some(NumericValue::NumberArrayJitScan(match value {
-                                "rnsomejit" => 0,
-                                "rneveryjit" => 1,
-                                "rnfindjit" => 2,
-                                "rnfindindexjit" => 3,
-                                "rnfindlastjit" => 4,
-                                "rnfindlastindexjit" => 5,
-                                "rnfilterjit" => 6,
+                            let (mode, captured) = match value {
+                                "rnsomejit" => (0, false),
+                                "rneveryjit" => (1, false),
+                                "rnfindjit" => (2, false),
+                                "rnfindindexjit" => (3, false),
+                                "rnfindlastjit" => (4, false),
+                                "rnfindlastindexjit" => (5, false),
+                                "rnfilterjit" => (6, false),
+                                "rnsomejitc" => (0, true),
+                                "rneveryjitc" => (1, true),
+                                "rnfindjitc" => (2, true),
+                                "rnfindindexjitc" => (3, true),
+                                "rnfindlastjitc" => (4, true),
+                                "rnfindlastindexjitc" => (5, true),
+                                "rnfilterjitc" => (6, true),
                                 _ => return None,
-                            }))
+                            };
+                            Some(NumericValue::NumberArrayJitScan(mode, captured))
                         })
                         .or_else(|| {
                             value
@@ -4091,18 +4245,32 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::NumberArrayJitReduce(has_initial, from_right) => {
-                    if depth < 3 {
-                        return None;
+                NumericValue::NumberArrayJitReduce(has_initial, from_right, captured) => {
+                    if *captured {
+                        if depth < 4 {
+                            return None;
+                        }
+                        let function = match (has_initial, from_right) {
+                            (true, false) => number_array_jit_reduce_initial_captured,
+                            (false, false) => number_array_jit_reduce_first_captured,
+                            (true, true) => number_array_jit_reduce_right_initial_captured,
+                            (false, true) => number_array_jit_reduce_right_last_captured,
+                        };
+                        emit_quaternary_call(&mut code, function as *const () as u64, depth - 4);
+                        depth -= 3;
+                    } else {
+                        if depth < 3 {
+                            return None;
+                        }
+                        let function = match (has_initial, from_right) {
+                            (true, false) => number_array_jit_reduce_initial,
+                            (false, false) => number_array_jit_reduce_first,
+                            (true, true) => number_array_jit_reduce_right_initial,
+                            (false, true) => number_array_jit_reduce_right_last,
+                        };
+                        emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                        depth -= 2;
                     }
-                    let function = match (has_initial, from_right) {
-                        (true, false) => number_array_jit_reduce_initial,
-                        (false, false) => number_array_jit_reduce_first,
-                        (true, true) => number_array_jit_reduce_right_initial,
-                        (false, true) => number_array_jit_reduce_right_last,
-                    };
-                    emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
-                    depth -= 2;
                 }
                 NumericValue::NumberArrayQuantifier(operation, every) => {
                     if depth < 2 {
@@ -4281,33 +4449,63 @@ impl NumericProgram {
                     );
                     depth -= 1;
                 }
-                NumericValue::NumberArrayJitMap => {
-                    if depth < 2 {
-                        return None;
+                NumericValue::NumberArrayJitMap(captured) => {
+                    if *captured {
+                        if depth < 3 {
+                            return None;
+                        }
+                        emit_ternary_call(
+                            &mut code,
+                            number_array_jit_map_captured as *const () as u64,
+                            depth - 3,
+                        );
+                        depth -= 2;
+                    } else {
+                        if depth < 2 {
+                            return None;
+                        }
+                        emit_binary_call(
+                            &mut code,
+                            number_array_jit_map as *const () as u64,
+                            depth - 2,
+                        );
+                        depth -= 1;
                     }
-                    emit_binary_call(
-                        &mut code,
-                        number_array_jit_map as *const () as u64,
-                        depth - 2,
-                    );
-                    depth -= 1;
                 }
-                NumericValue::NumberArrayJitScan(mode) => {
-                    if depth < 2 {
-                        return None;
+                NumericValue::NumberArrayJitScan(mode, captured) => {
+                    if *captured {
+                        if depth < 3 {
+                            return None;
+                        }
+                        let function = match mode {
+                            0 => number_array_jit_some_captured,
+                            1 => number_array_jit_every_captured,
+                            2 => number_array_jit_find_captured,
+                            3 => number_array_jit_find_index_captured,
+                            4 => number_array_jit_find_last_captured,
+                            5 => number_array_jit_find_last_index_captured,
+                            6 => number_array_jit_filter_captured,
+                            _ => return None,
+                        };
+                        emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                        depth -= 2;
+                    } else {
+                        if depth < 2 {
+                            return None;
+                        }
+                        let function = match mode {
+                            0 => number_array_jit_some,
+                            1 => number_array_jit_every,
+                            2 => number_array_jit_find,
+                            3 => number_array_jit_find_index,
+                            4 => number_array_jit_find_last,
+                            5 => number_array_jit_find_last_index,
+                            6 => number_array_jit_filter,
+                            _ => return None,
+                        };
+                        emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                        depth -= 1;
                     }
-                    let function = match mode {
-                        0 => number_array_jit_some,
-                        1 => number_array_jit_every,
-                        2 => number_array_jit_find,
-                        3 => number_array_jit_find_index,
-                        4 => number_array_jit_find_last,
-                        5 => number_array_jit_find_last_index,
-                        6 => number_array_jit_filter,
-                        _ => return None,
-                    };
-                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
-                    depth -= 1;
                 }
                 NumericValue::NumberArrayIndexMap(operation, reverse) => {
                     if depth == 0 || depth == 8 {
