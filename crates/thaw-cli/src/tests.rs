@@ -432,6 +432,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (values, factor) => values.map(value => { const scaled = value * factor; return scaled; });",
+            "add",
+            false,
+            &filter,
+        ),
+        Some("expr:rn0,a1,rnmapmul,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, factor) => values.map(value => { let scaled = value; scaled *= factor; return scaled; });",
+            "add",
+            false,
+            &filter,
+        ),
+        Some("expr:rn0,a1,rnmapmul,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "const positive = value => value > 0; module.exports.add = values => values.filter(positive);",
             "add",
             false,

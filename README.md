@@ -2146,6 +2146,8 @@ primitive arrays directly between their native element layouts.
 Binary arithmetic `number[]` `map` callbacks likewise allocate once and support
 `+`, `-`, `*`, `/`, `%`, and `**` with the element on either side.
 Two-parameter forms can use the callback index as the other arithmetic operand.
+Pure local declarations and assignments inside those callbacks are expanded
+before specialization, so block-bodied arithmetic maps stay on the JIT path.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
 including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array

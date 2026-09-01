@@ -2884,43 +2884,49 @@ fn jit_numeric_export(
         let [Pat::Ident(value)] = parameters.as_slice() else {
             return None;
         };
-        if !steps.is_empty() {
-            return None;
-        }
-        let expression = match body {
-            NumericBody::Expression(expression) => expression,
-            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
-            _ => return None,
-        };
-        let Expr::Bin(binary) = expression else {
-            return None;
-        };
-        let (operand, reverse) = if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == value.id.sym)
-        {
-            (binary.right.as_ref(), false)
-        } else if matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym) {
-            (binary.left.as_ref(), true)
-        } else {
-            return None;
-        };
-        let operation = match binary.op {
-            BinaryOp::Add => "add",
-            BinaryOp::Sub => "sub",
-            BinaryOp::Mul => "mul",
-            BinaryOp::Div => "div",
-            BinaryOp::Mod => "rem",
-            BinaryOp::Exp => "pow",
-            _ => return None,
-        };
+        let marker = (0..16)
+            .map(|index| format!("a{index}"))
+            .find(|candidate| {
+                !outer_parameters.values().any(|token| token == candidate)
+                    && !outer_locals
+                        .values()
+                        .flatten()
+                        .any(|token| token == candidate)
+            })?;
+        let mut callback_parameters = outer_parameters.clone();
+        callback_parameters.insert(value.id.sym.to_string(), marker.clone());
         let mut encoded = Vec::new();
-        encode_expression(
-            operand,
-            outer_parameters,
-            outer_locals,
+        encode_steps_and_body(
+            steps,
+            body,
+            &callback_parameters,
+            outer_locals.clone(),
             context,
             &mut encoded,
         )?;
-        if jit_expression_kind(&encoded)?.0 != JitKind::Number
+        if encoded.iter().filter(|token| **token == marker).count() != 1 {
+            return None;
+        }
+        let operation = match encoded.pop()?.as_str() {
+            "+" => "add",
+            "-" => "sub",
+            "*" => "mul",
+            "/" => "div",
+            "%" => "rem",
+            "pow" => "pow",
+            _ => return None,
+        };
+        let reverse = if encoded.first() == Some(&marker) {
+            encoded.remove(0);
+            false
+        } else if encoded.last() == Some(&marker) {
+            encoded.pop();
+            true
+        } else {
+            return None;
+        };
+        if encoded.is_empty()
+            || jit_expression_kind(&encoded)?.0 != JitKind::Number
             || encoded
                 .iter()
                 .any(|token| matches!(token.as_str(), "random" | "datenow" | "performancenow"))
