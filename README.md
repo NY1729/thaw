@@ -2040,6 +2040,9 @@ handle is read directly for `.length`, without JSON marshalling or QuickJS.
 Statically typed `Array.isArray` calls also stay in that IR: array arguments
 produce `true`, supported primitive arguments produce `false`, and the argument
 expression is still evaluated before the typed result is returned.
+`Object.is` uses typed SameValue instructions there as well, including equal
+`NaN` values, distinct positive/negative zero, string contents, and native array
+identity.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
