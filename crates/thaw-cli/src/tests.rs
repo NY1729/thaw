@@ -603,6 +603,28 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = values => values.map(value => value);",
+            "add",
+            false,
+            &string_filter,
+        ),
+        Some("expr:rs0,rsmapidentity,arrayvalue".into())
+    );
+    let bool_map = thaw_bridge::DtsFunction {
+        ret: bool_array.clone(),
+        ..bool_quantifier.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.map(value => !value);",
+            "add",
+            false,
+            &bool_map,
+        ),
+        Some("expr:rb0,rbmapnot,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = values => values.filter(value => value === 1);",
             "add",
             false,
