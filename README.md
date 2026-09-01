@@ -2121,7 +2121,8 @@ the standard empty-array reduction error through the JIT exception path.
 Direct `Math.min(accumulator, value)` and `Math.max(accumulator, value)` reducers
 use the same path, preserving `NaN` and signed-zero ordering.
 Pure module-scope function and arrow aliases used as reducer callbacks are
-resolved through the same analysis, including forward function declarations.
+resolved through the same analysis, including forward function declarations,
+side-effect-free local aliases, and calls to other pure module helpers.
 Their `join` and zero-argument `toString` calls reuse the native array
 formatters through one arena-backed JIT callback as well.
 Computed numeric element reads (`values[index]`) use a distinct bounds-checked
