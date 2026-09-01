@@ -2128,7 +2128,10 @@ Optional-producing operations propagate their result presence inside the JIT
 as well. `pop`, `shift`, string/array `at`, computed array reads, code-point
 reads, and value-returning `find` variants can feed lazy `??` chains; present
 falsey values are retained, while empty or out-of-range results evaluate only
-the selected fallback.
+the selected fallback. Their present values can also continue through `?.`
+receiver calls such as `values.pop()?.toFixed()` and
+`names.at(0)?.toUpperCase()`; an absent receiver skips the continuation and its
+arguments before selecting any `??` fallback.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
