@@ -1249,12 +1249,44 @@ fn jit_export(
         context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
+        fn optional_tokens<'a>(
+            expression: &Expr,
+            parameters: &'a std::collections::HashMap<String, String>,
+        ) -> Option<(&'a str, &'a str)> {
+            let expression = match expression {
+                Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
+                expression => expression,
+            };
+            let Expr::Ident(identifier) = expression else {
+                return None;
+            };
+            parameters
+                .get(identifier.sym.as_ref())?
+                .strip_prefix("optional:")?
+                .split_once(':')
+        }
+
+        fn flatten_nullish<'a>(expression: &'a Expr, output: &mut Vec<&'a Expr>) {
+            if let Expr::Bin(binary) = expression {
+                if binary.op == BinaryOp::NullishCoalescing {
+                    flatten_nullish(binary.left.as_ref(), output);
+                    flatten_nullish(binary.right.as_ref(), output);
+                    return;
+                }
+            }
+            output.push(expression);
+        }
+
         match expression {
             Expr::Ident(identifier) if locals.contains_key(identifier.sym.as_ref()) => {
                 output.extend(locals.get(identifier.sym.as_ref())?.iter().cloned());
             }
             Expr::Ident(identifier) if parameters.contains_key(identifier.sym.as_ref()) => {
-                output.push(parameters.get(identifier.sym.as_ref())?.clone());
+                let value = parameters.get(identifier.sym.as_ref())?;
+                if value.starts_with("optional:") {
+                    return None;
+                }
+                output.push(value.clone());
             }
             Expr::Ident(_) => output.push(format!(
                 "c{:016x}",
@@ -1595,6 +1627,30 @@ fn jit_export(
                 .into());
                 output.extend(right);
                 output.push("end".into());
+            }
+            Expr::Bin(binary) if binary.op == BinaryOp::NullishCoalescing => {
+                let mut operands = Vec::new();
+                flatten_nullish(expression, &mut operands);
+                let mut opened = 0;
+                for (index, operand) in operands.iter().enumerate() {
+                    if let Some((presence, value)) = optional_tokens(operand, parameters) {
+                        if index + 1 == operands.len() {
+                            return None;
+                        }
+                        output.push(presence.into());
+                        output.push("asbool".into());
+                        output.push("if".into());
+                        output.push(value.into());
+                        output.push("else".into());
+                        opened += 1;
+                    } else {
+                        encode_expression(operand, parameters, locals, context, output)?;
+                        break;
+                    }
+                }
+                for _ in 0..opened {
+                    output.push("end".into());
+                }
             }
             Expr::Bin(binary)
                 if matches!(
@@ -4461,9 +4517,19 @@ fn jit_export(
             _ => "a",
         };
         if optional {
+            let presence = format!("a{slot}");
+            let value = format!("{prefix}{}", slot + 1);
+            let Some(default) = default.as_ref() else {
+                parameters.insert(
+                    parameter.clone(),
+                    format!("optional:{presence}:{value}"),
+                );
+                slot += 2;
+                continue;
+            };
             let mut fallback = Vec::new();
             encode_expression(
-                *default.as_ref()?,
+                default,
                 &parameters,
                 &locals,
                 &mut context,
@@ -4474,9 +4540,9 @@ fn jit_export(
                 append_boolean(fallback, &mut boolean)?;
                 fallback = boolean;
             }
-            let mut selected = vec![format!("a{slot}"), format!("{prefix}{}", slot + 1)];
+            let mut selected = vec![presence, "asbool".into(), "if".into(), value, "else".into()];
             selected.extend(fallback);
-            selected.push("?".into());
+            selected.push("end".into());
             jit_expression_kind(&selected)?;
             locals.insert(parameter.clone(), selected);
             slot += 2;

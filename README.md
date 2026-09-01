@@ -2111,8 +2111,10 @@ or `object` from the same JIT while preserving operand evaluation.
 Zero-argument `Number()`, `String()`, and `Boolean()` calls fold to their
 ECMAScript primitive defaults in that IR.
 Defaulted optional primitive parameters use a presence-and-value JIT ABI;
-defaults are selected in typed IR in declaration order, including explicit
-`undefined` and defaults that reference earlier parameters.
+defaults are selected lazily in typed IR in declaration order, including
+explicit `undefined` and defaults that reference earlier parameters. The same
+presence tag drives `??` chains, so falsey present values are retained and only
+the first required fallback expression can execute.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
