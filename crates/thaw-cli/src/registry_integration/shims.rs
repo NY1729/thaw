@@ -18,6 +18,12 @@ enum JitExport {
     Value(String),
     Object(Vec<(String, JitExport)>),
     Tuple(Vec<JitExport>),
+    WithLocals(Vec<JitLocal>, Box<JitExport>),
+}
+
+struct JitLocal {
+    ty: thaw_hir::HirType,
+    operation: String,
 }
 
 fn is_unary_math_method(operation: &str) -> bool {
@@ -4337,16 +4343,68 @@ fn jit_export(
         ty @ (thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)),
     ) = &function.ret
     {
-        if !local_steps.is_empty() {
-            return None;
+        let mut jit_locals = Vec::new();
+        for step in local_steps {
+            let LocalStep::Declare {
+                name,
+                initializer,
+                mutable: false,
+            } = step
+            else {
+                return None;
+            };
+            if parameters.contains_key(name.sym.as_ref())
+                || locals.contains_key(name.sym.as_ref())
+                || slot == 16
+            {
+                return None;
+            }
+            let mut encoded = Vec::new();
+            encode_expression(
+                initializer,
+                &parameters,
+                &locals,
+                &mut context,
+                &mut encoded,
+            )?;
+            let kind = jit_expression_kind(&encoded)?.0;
+            let (ty, prefix) = match kind {
+                JitKind::Number => (thaw_hir::HirType::F64, "a"),
+                JitKind::Boolean => (thaw_hir::HirType::Bool, "b"),
+                JitKind::String => (thaw_hir::HirType::Str, "s"),
+                JitKind::Array => match array_prefix(&encoded)? {
+                    "rn" => (
+                        thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)),
+                        "rn",
+                    ),
+                    "rb" => (
+                        thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Bool)),
+                        "rb",
+                    ),
+                    "rs" => (
+                        thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str)),
+                        "rs",
+                    ),
+                    _ => return None,
+                },
+            };
+            let operation = validated_jit_expression(encoded, kind)?;
+            locals.insert(name.sym.to_string(), vec![format!("{prefix}{slot}")]);
+            jit_locals.push(JitLocal { ty, operation });
+            slot += 1;
         }
-        return encode_return_expression(
+        let result = encode_return_expression(
             return_expression(body)?,
             ty,
             &parameters,
             &locals,
             &mut context,
-        );
+        )?;
+        return Some(if jit_locals.is_empty() {
+            result
+        } else {
+            JitExport::WithLocals(jit_locals, Box::new(result))
+        });
     }
     encode_steps_and_body(
         local_steps,
@@ -4379,7 +4437,7 @@ fn jit_numeric_export(
 ) -> Option<String> {
     match jit_export(source, export_name, allow_default, function)? {
         JitExport::Value(operation) => Some(operation),
-        JitExport::Object(_) | JitExport::Tuple(_) => None,
+        JitExport::Object(_) | JitExport::Tuple(_) | JitExport::WithLocals(_, _) => None,
     }
 }
 
@@ -5281,6 +5339,7 @@ fn jit_numeric_declaration(
                     .collect::<Vec<_>>();
                 format!("[{}]", values.join(", "))
             }
+            JitExport::WithLocals(_, _) => unreachable!(),
         }
     }
 
@@ -5295,23 +5354,50 @@ fn jit_numeric_declaration(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    if matches!(operation, JitExport::Object(_) | JitExport::Tuple(_)) {
+    let (jit_locals, aggregate) = match operation {
+        JitExport::Object(_) | JitExport::Tuple(_) => (&[][..], operation),
+        JitExport::WithLocals(locals, aggregate) => (locals.as_slice(), aggregate.as_ref()),
+        JitExport::Value(_) => (&[][..], operation),
+    };
+    if matches!(aggregate, JitExport::Object(_) | JitExport::Tuple(_)) {
         let thaw_bridge::DtsType::Native(return_type) = &function.ret else {
             unreachable!()
         };
-        let arguments = params
+        let mut arguments = params
             .iter()
             .map(|(name, _, _)| *name)
             .collect::<Vec<_>>()
             .join(", ");
         let mut declaration = String::new();
         let runtime_name = format!("{package}::{}", function.name);
+        let mut leaf_params = direct_params.clone();
+        let mut local_statements = String::new();
+        for (index, local) in jit_locals.iter().enumerate() {
+            let local_name = format!("__thaw_jit_local_{index}");
+            let local_type = render_dynamic_type(&local.ty).unwrap();
+            let symbol = encoded_symbol(&format!(
+                "{}:{runtime_name}:local.{index}",
+                local.operation
+            ));
+            declaration.push_str(&format!(
+                "declare function {symbol}({leaf_params}): {local_type};\n"
+            ));
+            local_statements.push_str(&format!(
+                "const {local_name}: {local_type} = {symbol}({arguments}); "
+            ));
+            if !leaf_params.is_empty() {
+                leaf_params.push_str(", ");
+                arguments.push_str(", ");
+            }
+            leaf_params.push_str(&format!("{local_name}: {local_type}"));
+            arguments.push_str(&local_name);
+        }
         let result = emit_aggregate_call(
             &runtime_name,
-            operation,
+            aggregate,
             return_type,
             &mut Vec::new(),
-            &direct_params,
+            &leaf_params,
             &arguments,
             &mut declaration,
         );
@@ -5329,7 +5415,7 @@ fn jit_numeric_declaration(
             .collect::<Vec<_>>()
             .join(", ");
         declaration.push_str(&format!(
-            "function {wrapper}({wrapper_params}): {} {{ return {result}; }}\n",
+            "function {wrapper}({wrapper_params}): {} {{ {local_statements}return {result}; }}\n",
             render_dynamic_type(return_type).unwrap()
         ));
         return (wrapper, declaration);
