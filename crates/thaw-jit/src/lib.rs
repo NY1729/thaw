@@ -300,6 +300,22 @@ number_array_reducers!(
     number_array_reduce_power_last,
     |left, right| power(left, right)
 );
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_reducers!(
+    number_array_reduce_minimum,
+    number_array_reduce_minimum_first,
+    number_array_reduce_minimum_right,
+    number_array_reduce_minimum_last,
+    |left, right| minimum(left, right)
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_reducers!(
+    number_array_reduce_maximum,
+    number_array_reduce_maximum_first,
+    number_array_reduce_maximum_right,
+    number_array_reduce_maximum_last,
+    |left, right| maximum(left, right)
+);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
@@ -2081,6 +2097,8 @@ enum NumericReduceOp {
     Divide,
     Remainder,
     Power,
+    Minimum,
+    Maximum,
 }
 
 impl NumericReduceOp {
@@ -2092,6 +2110,8 @@ impl NumericReduceOp {
             "div" => Some(Self::Divide),
             "rem" => Some(Self::Remainder),
             "pow" => Some(Self::Power),
+            "min" => Some(Self::Minimum),
+            "max" => Some(Self::Maximum),
             _ => None,
         }
     }
@@ -2917,6 +2937,18 @@ impl NumericProgram {
                             number_array_reduce_power_first,
                             number_array_reduce_power_right,
                             number_array_reduce_power_last,
+                        ],
+                        NumericReduceOp::Minimum => [
+                            number_array_reduce_minimum,
+                            number_array_reduce_minimum_first,
+                            number_array_reduce_minimum_right,
+                            number_array_reduce_minimum_last,
+                        ],
+                        NumericReduceOp::Maximum => [
+                            number_array_reduce_maximum,
+                            number_array_reduce_maximum_first,
+                            number_array_reduce_maximum_right,
+                            number_array_reduce_maximum_last,
                         ],
                     };
                     let function = functions[*from_right as usize * 2 + usize::from(!*has_initial)];
@@ -4629,6 +4661,8 @@ mod tests {
             ("div", 8.0 / 10.0 / 20.0 / 30.0, 10.0 / 20.0 / 30.0),
             ("rem", 8.0, 10.0),
             ("pow", f64::INFINITY, f64::INFINITY),
+            ("min", 8.0, 10.0),
+            ("max", 30.0, 30.0),
         ] {
             let reduce = CString::new(format!(
                 "expr:rn0,c4020000000000000,rnreduce{operation}:array-reduce"
@@ -4653,6 +4687,8 @@ mod tests {
                 "div" => (8.0 / 30.0 / 20.0 / 10.0, 30.0 / 20.0 / 10.0),
                 "rem" => (8.0, 0.0),
                 "pow" => (f64::INFINITY, power(power(30.0, 20.0), 10.0)),
+                "min" => (8.0, 10.0),
+                "max" => (30.0, 30.0),
                 _ => unreachable!(),
             };
             for (suffix, expected) in [("", right_expected), ("0", last_expected)] {

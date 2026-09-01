@@ -1282,7 +1282,12 @@ fn jit_numeric_export(
                     if prefix != "rn" {
                         return None;
                     }
-                    let operation = numeric_reducer(callback.expr.as_ref())?;
+                    let operation = numeric_reducer(
+                        callback.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context.helpers,
+                    )?;
                     if let Some(initial) = initial {
                         encode_number(
                             initial.expr.as_ref(),
@@ -2457,7 +2462,12 @@ fn jit_numeric_export(
         }
     }
 
-    fn numeric_reducer(expression: &Expr) -> Option<&'static str> {
+    fn numeric_reducer(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<&'static str> {
         let callable = match expression {
             Expr::Fn(function) => NumericCallable::Function(function.function.as_ref()),
             Expr::Arrow(function) => NumericCallable::Arrow(function),
@@ -2477,21 +2487,54 @@ fn jit_numeric_export(
             }
             _ => return None,
         };
-        let Expr::Bin(binary) = expression else {
-            return None;
-        };
-        if !matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == accumulator.id.sym)
-            || !matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
-        {
-            return None;
-        }
-        match binary.op {
-            BinaryOp::Add => Some("add"),
-            BinaryOp::Sub => Some("sub"),
-            BinaryOp::Mul => Some("mul"),
-            BinaryOp::Div => Some("div"),
-            BinaryOp::Mod => Some("rem"),
-            BinaryOp::Exp => Some("pow"),
+        match expression {
+            Expr::Bin(binary)
+                if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == accumulator.id.sym)
+                    && matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym) =>
+            {
+                match binary.op {
+                    BinaryOp::Add => Some("add"),
+                    BinaryOp::Sub => Some("sub"),
+                    BinaryOp::Mul => Some("mul"),
+                    BinaryOp::Div => Some("div"),
+                    BinaryOp::Mod => Some("rem"),
+                    BinaryOp::Exp => Some("pow"),
+                    _ => None,
+                }
+            }
+            Expr::Call(call)
+                if !outer_parameters.contains_key("Math")
+                    && !outer_locals.contains_key("Math")
+                    && !helpers.contains_key("Math") =>
+            {
+                let [left, right] = call.args.as_slice() else {
+                    return None;
+                };
+                if left.spread.is_some()
+                    || right.spread.is_some()
+                    || !matches!(left.expr.as_ref(), Expr::Ident(left) if left.sym == accumulator.id.sym)
+                    || !matches!(right.expr.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
+                {
+                    return None;
+                }
+                let Callee::Expr(callee) = &call.callee else {
+                    return None;
+                };
+                let Expr::Member(member) = callee.as_ref() else {
+                    return None;
+                };
+                if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Math") {
+                    return None;
+                }
+                let MemberProp::Ident(property) = &member.prop else {
+                    return None;
+                };
+                match property.sym.as_ref() {
+                    "min" => Some("min"),
+                    "max" => Some("max"),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -3246,7 +3289,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 let operation = operation.strip_prefix("right").unwrap_or(operation);
                 matches!(
                     operation.strip_suffix('0').unwrap_or(operation),
-                    "add" | "sub" | "mul" | "div" | "rem" | "pow"
+                    "add" | "sub" | "mul" | "div" | "rem" | "pow" | "min" | "max"
                 )
             })
         {

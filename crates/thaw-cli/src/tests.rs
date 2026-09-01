@@ -398,6 +398,45 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             );
         }
     }
+    for (method, direction) in [("min", "reduce"), ("max", "reduceRight")] {
+        for (initial, suffix) in [(true, ""), (false, "0")] {
+            assert_eq!(
+                jit_numeric_export(
+                    &format!(
+                        "module.exports.add = values => values.{direction}((accumulator, value) => Math.{method}(accumulator, value){});",
+                        if initial { ", 0" } else { "" }
+                    ),
+                    "add",
+                    false,
+                    &spread_extreme,
+                ),
+                Some(format!(
+                    "expr:rn0,c0000000000000000,rnreduce{}{method}{suffix}",
+                    if direction == "reduceRight" { "right" } else { "" }
+                ))
+            );
+        }
+    }
+    let shadowed_math = thaw_bridge::DtsFunction {
+        params: vec![
+            spread_extreme.params[0].clone(),
+            (
+                "Math".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        ..spread_extreme.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, Math) => values.reduce((accumulator, value) => Math.min(accumulator, value), 0);",
+            "add",
+            false,
+            &shadowed_math,
+        ),
+        None
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = values => values.reduce((accumulator, value) => value + accumulator, 0);",
