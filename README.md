@@ -2211,10 +2211,10 @@ objects. LLVM recursively expands the native object layout directly into typed
 JIT argument slots, so property reads, array indexing and composed expressions
 avoid JSON conversion and QuickJS; the total expanded signature is currently
 limited to the same 16-slot callback ABI.
-Fixed-shape object results with the same recursively representable leaves are
-also assembled by an AOT wrapper from specialized JIT leaf expressions. Object
-literal source order, shorthand fields and nested objects are preserved without
-embedding the fallback bundle.
+Fixed-shape object and tuple results with the same recursively representable
+leaves are also assembled by an AOT wrapper from specialized JIT leaf
+expressions. Object literal source order, shorthand fields, nested objects and
+nested tuples are preserved without embedding the fallback bundle.
 
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections and the
