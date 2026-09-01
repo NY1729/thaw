@@ -1670,9 +1670,6 @@ fn jit_export(
                 else {
                     return None;
                 };
-                let MemberProp::Computed(index) = &target.prop else {
-                    return None;
-                };
                 let mut receiver = Vec::new();
                 encode_expression(
                     target.obj.as_ref(),
@@ -1681,18 +1678,42 @@ fn jit_export(
                     context,
                     &mut receiver,
                 )?;
-                if jit_expression_kind(&receiver)?.0 != JitKind::Array {
-                    return None;
-                }
-                let prefix = array_prefix(&receiver)?;
-                let expected = match prefix {
-                    "rn" => JitKind::Number,
-                    "rs" => JitKind::String,
-                    "rb" => JitKind::Boolean,
+                let receiver_kind = jit_expression_kind(&receiver)?.0;
+                let prefix = match receiver_kind {
+                    JitKind::Array => array_prefix(&receiver)?,
+                    JitKind::Dictionary => dictionary_prefix(&receiver)?,
+                    _ => return None,
+                };
+                let expected = match prefix.as_bytes().get(1) {
+                    Some(b'n') => JitKind::Number,
+                    Some(b's') => JitKind::String,
+                    Some(b'b') => JitKind::Boolean,
                     _ => return None,
                 };
                 output.extend(receiver);
-                encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
+                match (&target.prop, receiver_kind) {
+                    (MemberProp::Computed(index), JitKind::Array) => {
+                        encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
+                    }
+                    (MemberProp::Computed(key), JitKind::Dictionary) => {
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            key.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        if jit_expression_kind(&encoded)?.0 != JitKind::String {
+                            return None;
+                        }
+                        output.extend(encoded);
+                    }
+                    (MemberProp::Ident(key), JitKind::Dictionary) => {
+                        encode_string(key.sym.as_ref(), output)?;
+                    }
+                    _ => return None,
+                }
                 if assignment.op != AssignOp::Assign {
                     output.push("dup2".into());
                     output.push(format!("{prefix}get"));
@@ -1739,9 +1760,6 @@ fn jit_export(
                 let Expr::Member(target) = update.arg.as_ref() else {
                     return None;
                 };
-                let MemberProp::Computed(index) = &target.prop else {
-                    return None;
-                };
                 let mut receiver = Vec::new();
                 encode_expression(
                     target.obj.as_ref(),
@@ -1750,13 +1768,41 @@ fn jit_export(
                     context,
                     &mut receiver,
                 )?;
-                if array_prefix(&receiver)? != "rn" {
+                let receiver_kind = jit_expression_kind(&receiver)?.0;
+                let prefix = match receiver_kind {
+                    JitKind::Array if array_prefix(&receiver)? == "rn" => "rn",
+                    JitKind::Dictionary if dictionary_prefix(&receiver)? == "dn" => "dn",
+                    _ => return None,
+                };
+                output.extend(receiver);
+                match (&target.prop, receiver_kind) {
+                    (MemberProp::Computed(index), JitKind::Array) => {
+                        encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
+                    }
+                    (MemberProp::Computed(key), JitKind::Dictionary) => {
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            key.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        if jit_expression_kind(&encoded)?.0 != JitKind::String {
+                            return None;
+                        }
+                        output.extend(encoded);
+                    }
+                    (MemberProp::Ident(key), JitKind::Dictionary) => {
+                        encode_string(key.sym.as_ref(), output)?;
+                    }
+                    _ => return None,
+                }
+                if prefix != "rn" && prefix != "dn" {
                     return None;
                 }
-                output.extend(receiver);
-                encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
                 output.push("dup2".into());
-                output.push("rnget".into());
+                output.push(format!("{prefix}get"));
                 if !update.prefix {
                     output.push("dup".into());
                 }
@@ -1768,7 +1814,49 @@ fn jit_export(
                     }
                     .into(),
                 );
-                output.push(if update.prefix { "rnset" } else { "rnpostset" }.into());
+                output.push(
+                    if update.prefix {
+                        format!("{prefix}set")
+                    } else {
+                        format!("{prefix}postset")
+                    },
+                );
+            }
+            Expr::Unary(unary) if unary.op == UnaryOp::Delete => {
+                let Expr::Member(target) = unary.arg.as_ref() else {
+                    return None;
+                };
+                let mut receiver = Vec::new();
+                encode_expression(
+                    target.obj.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut receiver,
+                )?;
+                if jit_expression_kind(&receiver)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                output.extend(receiver);
+                match &target.prop {
+                    MemberProp::Computed(key) => {
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            key.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        if jit_expression_kind(&encoded)?.0 != JitKind::String {
+                            return None;
+                        }
+                        output.extend(encoded);
+                    }
+                    MemberProp::Ident(key) => encode_string(key.sym.as_ref(), output)?,
+                    _ => return None,
+                }
+                output.push("ddelete".into());
             }
             Expr::Unary(unary)
                 if matches!(
@@ -6075,6 +6163,35 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "dsget" => JitKind::String,
                 _ => unreachable!(),
             });
+        } else if matches!(token.as_str(), "dnset" | "dbset" | "dsset") {
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::Dictionary
+                || value
+                    != match token.as_str() {
+                        "dnset" => JitKind::Number,
+                        "dbset" => JitKind::Boolean,
+                        "dsset" => JitKind::String,
+                        _ => unreachable!(),
+                    }
+            {
+                return None;
+            }
+            stack.push(value);
+        } else if token == "dnpostset" {
+            if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::Dictionary
+            {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if token == "ddelete" {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Dictionary {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if matches!(
             token.as_str(),
             "rnat" | "rbat" | "rsat" | "rnget" | "rbget" | "rsget"
