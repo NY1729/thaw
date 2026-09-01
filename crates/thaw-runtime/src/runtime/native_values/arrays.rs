@@ -633,6 +633,48 @@ pub unsafe extern "C" fn thaw_array_shift(
 }
 
 #[no_mangle]
+/// Removes and returns one primitive value for residual-JIT `pop`/`shift`.
+/// Operations 0..=2 select number/string/boolean `pop`; 3..=5 select the
+/// corresponding `shift`. Returns 1 when a value was removed, 0 for an empty
+/// array, and -1 on allocation or input failure.
+///
+/// # Safety
+/// `array` must point to a writable primitive Thaw array handle matching
+/// `operation`, and `out_value` must be writable for one `f64`.
+pub unsafe extern "C" fn thaw_jit_array_remove(
+    operation: u8,
+    array: *mut *mut u8,
+    out_value: *mut f64,
+) -> i8 {
+    let (Some(current), Some(out_value)) = (array.as_ref().copied(), out_value.as_mut()) else {
+        return -1;
+    };
+    let Some(length) = (unsafe { native_array_length(current) }) else {
+        return -1;
+    };
+    if length == 0 {
+        *out_value = 0.0;
+        return 0;
+    }
+    let mut slot = 0_u64;
+    let output = match operation {
+        0..=2 => unsafe { thaw_array_pop(current, 8, (&mut slot as *mut u64).cast()) },
+        3..=5 => unsafe { thaw_array_shift(current, 8, (&mut slot as *mut u64).cast()) },
+        _ => return -1,
+    };
+    if output.is_null() {
+        return -1;
+    }
+    unsafe { array.write(output) };
+    *out_value = match operation % 3 {
+        0 | 1 => f64::from_bits(slot),
+        2 => f64::from(slot != 0),
+        _ => unreachable!(),
+    };
+    1
+}
+
+#[no_mangle]
 /// `Array.prototype.splice`. Removes the elements of `array` in
 /// `[start, start + delete_count)` (both clamped to the array's bounds, as
 /// `Array.prototype.slice` clamps its own bounds) and inserts `insert_count`

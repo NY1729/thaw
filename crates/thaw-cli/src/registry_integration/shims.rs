@@ -489,6 +489,8 @@ fn jit_numeric_export(
                 | "copyWithin"
                 | "push"
                 | "unshift"
+                | "pop"
+                | "shift"
                 | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
@@ -961,6 +963,11 @@ fn jit_numeric_export(
                             output.push("drop".into());
                         }
                     }
+                } else if matches!(method, "pop" | "shift") {
+                    if !call.args.is_empty() {
+                        return None;
+                    }
+                    output.push(format!("{prefix}{method}"));
                 } else if method == "concat" {
                     if call.args.is_empty() {
                         output.push("c0000000000000000".into());
@@ -2395,6 +2402,19 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if matches!(
+            token.as_str(),
+            "rnpop" | "rspop" | "rbpop" | "rnshift" | "rsshift" | "rbshift"
+        ) {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(match &token[..2] {
+                "rn" => JitKind::Number,
+                "rs" => JitKind::String,
+                "rb" => JitKind::Boolean,
+                _ => return None,
+            });
         } else if matches!(token.as_str(), "startswith" | "endswith" | "includes") {
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
                 return None;
