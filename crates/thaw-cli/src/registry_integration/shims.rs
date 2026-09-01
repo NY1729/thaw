@@ -1324,12 +1324,11 @@ fn jit_numeric_export(
                     if prefix != "rn" {
                         return None;
                     }
-                    let operation = numeric_reducer(
-                        callback.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                    )?;
+                    if callback.spread.is_some()
+                        || initial.is_some_and(|initial| initial.spread.is_some())
+                    {
+                        return None;
+                    }
                     if let Some(initial) = initial {
                         encode_number(
                             initial.expr.as_ref(),
@@ -1341,11 +1340,36 @@ fn jit_numeric_export(
                     } else {
                         output.push("c0000000000000000".into());
                     }
-                    output.push(format!(
-                        "rnreduce{}{operation}{}",
-                        if method == "reduceRight" { "right" } else { "" },
-                        if initial.is_some() { "" } else { "0" }
-                    ));
+                    if let Some(operation) = numeric_reducer(
+                        callback.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                    ) {
+                        output.push(format!(
+                            "rnreduce{}{operation}{}",
+                            if method == "reduceRight" { "right" } else { "" },
+                            if initial.is_some() { "" } else { "0" }
+                        ));
+                    } else {
+                        let (callback, kind) = encode_numeric_jit_callback(
+                            callback.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            4,
+                            Some(3),
+                        )?;
+                        if kind != JitKind::Number {
+                            return None;
+                        }
+                        encode_string(&callback.join(","), output)?;
+                        output.push(format!(
+                            "rnreduce{}jit{}",
+                            if method == "reduceRight" { "right" } else { "" },
+                            if initial.is_some() { "" } else { "0" }
+                        ));
+                    }
                 } else if method == "map" {
                     let [callback] = call.args.as_slice() else {
                         return None;
@@ -1408,6 +1432,8 @@ fn jit_numeric_export(
                                 parameters,
                                 locals,
                                 context,
+                                3,
+                                Some(2),
                             )?;
                             if kind != JitKind::Number {
                                 return None;
@@ -1471,6 +1497,8 @@ fn jit_numeric_export(
                                 parameters,
                                 locals,
                                 context,
+                                3,
+                                Some(2),
                             )?;
                             if !matches!(kind, JitKind::Number | JitKind::Boolean) {
                                 return None;
@@ -2525,6 +2553,9 @@ fn jit_numeric_export(
                     }
                     let mut encoded = Vec::new();
                     encode_expression(initializer, parameters, &locals, context, &mut encoded)?;
+                    if !stable_jit_tokens(&encoded) {
+                        return None;
+                    }
                     locals.insert(name.sym.to_string(), encoded);
                     if is_mutable {
                         mutable.insert(name.sym.to_string());
@@ -2571,6 +2602,9 @@ fn jit_numeric_export(
                             }
                             .into(),
                         );
+                    }
+                    if !stable_jit_tokens(&encoded) {
+                        return None;
                     }
                     locals.insert(name.sym.to_string(), encoded);
                 }
@@ -3309,6 +3343,8 @@ fn jit_numeric_export(
         outer_parameters: &std::collections::HashMap<String, String>,
         outer_locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
+        max_parameters: usize,
+        array_parameter: Option<usize>,
     ) -> Option<(Vec<String>, JitKind)> {
         if matches!(expression, Expr::Ident(identifier)
             if outer_parameters.contains_key(identifier.sym.as_ref())
@@ -3316,20 +3352,48 @@ fn jit_numeric_export(
         {
             return None;
         }
+        if [
+            "Array",
+            "Boolean",
+            "Date",
+            "Math",
+            "Number",
+            "Object",
+            "String",
+            "performance",
+            "process",
+        ]
+        .iter()
+        .any(|name| {
+            outer_parameters.contains_key(*name)
+                || outer_locals.contains_key(*name)
+        }) {
+            return None;
+        }
         let callable = resolve_callable(expression, context.helpers)?;
         let (parameters, steps, body) = callable_parts(callable)?;
-        let callback_parameters = match parameters.as_slice() {
-            [Pat::Ident(value)] => {
-                std::collections::HashMap::from([(value.id.sym.to_string(), "a0".into())])
+        if parameters.len() > max_parameters {
+            return None;
+        }
+        let mut callback_parameters = std::collections::HashMap::new();
+        for (index, parameter) in parameters.iter().enumerate() {
+            let Pat::Ident(parameter) = parameter else {
+                return None;
+            };
+            if callback_parameters
+                .insert(
+                    parameter.id.sym.to_string(),
+                    format!(
+                        "{}{}",
+                        if array_parameter == Some(index) { "rn" } else { "a" },
+                        index
+                    ),
+                )
+                .is_some()
+            {
+                return None;
             }
-            [Pat::Ident(value), Pat::Ident(index)] if value.id.sym != index.id.sym => {
-                std::collections::HashMap::from([
-                    (value.id.sym.to_string(), "a0".into()),
-                    (index.id.sym.to_string(), "a1".into()),
-                ])
-            }
-            _ => return None,
-        };
+        }
         let mut encoded = Vec::new();
         encode_steps_and_body(
             steps,
@@ -3340,10 +3404,13 @@ fn jit_numeric_export(
             &mut encoded,
         )?;
         let kind = jit_expression_kind(&encoded)?.0;
-        (!encoded
-                .iter()
-                .any(|token| matches!(token.as_str(), "random" | "datenow" | "performancenow")))
-        .then_some((encoded, kind))
+        stable_jit_tokens(&encoded).then_some((encoded, kind))
+    }
+
+    fn stable_jit_tokens(tokens: &[String]) -> bool {
+        !tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "random" | "datenow" | "performancenow"))
     }
 
     fn numeric_unary_map(
@@ -4324,6 +4391,17 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             })
         {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if matches!(
+            token.as_str(),
+            "rnreducejit" | "rnreducejit0" | "rnreducerightjit" | "rnreducerightjit0"
+        ) {
+            if stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Array
+            {
                 return None;
             }
             stack.push(JitKind::Number);

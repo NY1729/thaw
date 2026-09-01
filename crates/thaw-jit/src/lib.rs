@@ -803,7 +803,7 @@ fn compile_jit_callback(callback: f64) -> Option<extern "C" fn(*const f64) -> f6
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return None;
     };
-    if program.required_args() > 2 {
+    if program.required_args() > 4 {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return None;
     }
@@ -824,7 +824,9 @@ extern "C" fn number_array_jit_map(value: f64, callback: f64) -> f64 {
     let Some(callback) = compile_jit_callback(callback) else {
         return 0.0;
     };
-    number_array_map(value, |element, index| callback([element, index].as_ptr()))
+    number_array_map(value, |element, index| {
+        callback([element, index, value].as_ptr())
+    })
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -834,7 +836,7 @@ fn number_array_jit_scan(value: f64, callback: f64, mode: u8) -> f64 {
     };
     primitive_array_scan(value, 0, mode, |array, index| {
         let element = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
-        let result = callback([element, index as f64].as_ptr());
+        let result = callback([element, index as f64, value].as_ptr());
         result != 0.0 && !result.is_nan()
     })
 }
@@ -862,6 +864,65 @@ jit_scan_fn!(number_array_jit_find_last, 4);
 jit_scan_fn!(number_array_jit_find_last_index, 5);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 jit_scan_fn!(number_array_jit_filter, 6);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_jit_reduce(
+    value: f64,
+    initial: f64,
+    callback: f64,
+    from_right: bool,
+    has_initial: bool,
+) -> f64 {
+    let Some(callback) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
+    let Some((array, length)) = (unsafe { array_data(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    if !has_initial && length == 0 {
+        CALL_ERROR.with(|error| error.set(EMPTY_REDUCE.as_ptr().cast()));
+        return 0.0;
+    }
+    let mut accumulator = if has_initial {
+        initial
+    } else {
+        let index = if from_right { length - 1 } else { 0 };
+        unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() }
+    };
+    let mut apply = |index| {
+        let element = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+        accumulator = callback([accumulator, element, index as f64, value].as_ptr());
+    };
+    if from_right {
+        for index in (0..if has_initial { length } else { length - 1 }).rev() {
+            apply(index);
+        }
+    } else {
+        for index in if has_initial { 0 } else { 1 }..length {
+            apply(index);
+        }
+    }
+    accumulator
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! jit_reduce_fn {
+    ($name:ident, $from_right:expr, $has_initial:expr) => {
+        extern "C" fn $name(value: f64, initial: f64, callback: f64) -> f64 {
+            number_array_jit_reduce(value, initial, callback, $from_right, $has_initial)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_reduce_fn!(number_array_jit_reduce_initial, false, true);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_reduce_fn!(number_array_jit_reduce_first, false, false);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_reduce_fn!(number_array_jit_reduce_right_initial, true, true);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_reduce_fn!(number_array_jit_reduce_right_last, true, false);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_index_map(value: f64, encoded: f64) -> f64 {
@@ -3051,6 +3112,7 @@ enum NumericValue {
     NumberArrayMax,
     NumberArrayHypot,
     NumberArrayReduce(NumericReduceOp, bool, bool),
+    NumberArrayJitReduce(bool, bool),
     NumberArrayQuantifier(CompareOp, bool),
     NumberArrayFind(CompareOp, u8),
     NumberArrayFilter(CompareOp),
@@ -3286,6 +3348,10 @@ impl NumericProgram {
                     "rnmin" => Some(NumericValue::NumberArrayMin),
                     "rnmax" => Some(NumericValue::NumberArrayMax),
                     "rnhypot" => Some(NumericValue::NumberArrayHypot),
+                    "rnreducejit" => Some(NumericValue::NumberArrayJitReduce(true, false)),
+                    "rnreducejit0" => Some(NumericValue::NumberArrayJitReduce(false, false)),
+                    "rnreducerightjit" => Some(NumericValue::NumberArrayJitReduce(true, true)),
+                    "rnreducerightjit0" => Some(NumericValue::NumberArrayJitReduce(false, true)),
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
@@ -4024,6 +4090,19 @@ impl NumericProgram {
                     let function = functions[*from_right as usize * 2 + usize::from(!*has_initial)];
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
+                }
+                NumericValue::NumberArrayJitReduce(has_initial, from_right) => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    let function = match (has_initial, from_right) {
+                        (true, false) => number_array_jit_reduce_initial,
+                        (false, false) => number_array_jit_reduce_first,
+                        (true, true) => number_array_jit_reduce_right_initial,
+                        (false, true) => number_array_jit_reduce_right_last,
+                    };
+                    emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                    depth -= 2;
                 }
                 NumericValue::NumberArrayQuantifier(operation, every) => {
                     if depth < 2 {
