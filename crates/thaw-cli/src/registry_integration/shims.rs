@@ -331,6 +331,28 @@ fn jit_numeric_export(
         Some((operation, member.obj.as_ref()))
     }
 
+    fn number_format_method(call: &CallExpr) -> Option<(&'static str, &Expr)> {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        let operation = match property.sym.as_ref() {
+            "toFixed" => "tofixed",
+            "toPrecision" => "toprecision",
+            "toString" => "toradix",
+            _ => return None,
+        };
+        Some((operation, member.obj.as_ref()))
+    }
+
     fn append_add(
         mut left: Vec<String>,
         mut right: Vec<String>,
@@ -585,6 +607,34 @@ fn jit_numeric_export(
                 ) =>
             {
                 encode_condition(expression, parameters, locals, context, output)?;
+            }
+            Expr::Call(call) if number_format_method(call).is_some() => {
+                let (operation, receiver) = number_format_method(call)?;
+                let mut encoded = Vec::new();
+                encode_expression(receiver, parameters, locals, context, &mut encoded)?;
+                if jit_expression_kind(&encoded)?.0 != JitKind::Number {
+                    return None;
+                }
+                match call.args.as_slice() {
+                    [] if operation == "tofixed" => {
+                        output.extend(encoded);
+                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                        output.push(operation.into());
+                    }
+                    [] => append_string(encoded, output)?,
+                    [argument] => {
+                        output.extend(encoded);
+                        encode_number(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?;
+                        output.push(operation.into());
+                    }
+                    _ => return None,
+                }
             }
             Expr::Call(call) if string_method(call, parameters, locals).is_some() => {
                 let (operation, receiver) = string_method(call, parameters, locals)?;
@@ -1696,6 +1746,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if matches!(token.as_str(), "tofixed" | "toprecision" | "toradix") {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Number {
+                return None;
+            }
+            stack.push(JitKind::String);
         } else if token == "strbool" {
             if stack.pop()? != JitKind::String {
                 return None;
