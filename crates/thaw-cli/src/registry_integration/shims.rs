@@ -92,13 +92,8 @@ fn jit_export(
             thaw_hir::HirType::Tuple(elements) => elements.iter().try_fold(0usize, |slots, ty| {
                 jit_parameter_slots(ty).map(|count| slots + count)
             }),
-            thaw_hir::HirType::Optional(payload)
-                if !matches!(
-                    payload.as_ref(),
-                    thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
-                ) =>
-            {
-                jit_parameter_slots(payload).map(|_| 2)
+            thaw_hir::HirType::Optional(payload) => {
+                jit_parameter_slots(payload).map(|slots| slots + 1)
             }
             _ => None,
         }
@@ -4582,8 +4577,18 @@ fn jit_export(
             ty,
             thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
         ) {
-            if optional || default.is_some() {
+            if default.is_some() {
                 return None;
+            }
+            if optional {
+                let presence = format!("a{slot}");
+                slot += 1;
+                bind_jit_aggregate_fields(parameter, ty, &mut parameters, &mut slot)?;
+                parameters.insert(
+                    parameter.clone(),
+                    format!("optional:{presence}:aggregate"),
+                );
+                continue;
             }
             bind_jit_aggregate_fields(parameter, ty, &mut parameters, &mut slot)?;
             continue;

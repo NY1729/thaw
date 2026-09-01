@@ -220,6 +220,49 @@ fn logical_expressions_short_circuit_in_jit_without_quickjs() {
 }
 
 #[test]
+fn optional_aggregates_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-optional-aggregate-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-optional-aggregate");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Meta { count: number; label: string; enabled: boolean; }\nexport declare function count(value?: Meta): number | undefined;\nexport declare function labelOr(value?: Meta): string;\nexport declare function enabled(value?: Meta): boolean | undefined;\nexport declare function tupleName(value?: [number, string]): string | undefined;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.count = value => value?.count; module.exports.labelOr = value => value?.label ?? 'missing'; module.exports.enabled = value => value?.enabled; module.exports.tupleName = value => value?.[1];\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { count, labelOr, enabled, tupleName } from 'jit-optional-aggregate';\nfunction main(): void { const value = { count: 7, label: 'ready', enabled: false }; console.log(count(value)); console.log(count() === undefined); console.log(labelOr(value)); console.log(labelOr()); console.log(enabled(value)); console.log(enabled() === undefined); console.log(tupleName([1, 'pair'])); console.log(tupleName() === undefined); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "7\ntrue\nready\nmissing\nfalse\ntrue\npair\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-{}",
