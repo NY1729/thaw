@@ -1359,6 +1359,7 @@ fn jit_numeric_export(
                             context,
                             4,
                             Some(3),
+                            ("a", "rn"),
                         )?;
                         if kind != JitKind::Number {
                             return None;
@@ -1439,6 +1440,7 @@ fn jit_numeric_export(
                                 context,
                                 3,
                                 Some(2),
+                                ("a", "rn"),
                             )?;
                             if kind != JitKind::Number {
                                 return None;
@@ -1504,7 +1506,13 @@ fn jit_numeric_export(
                         if let Some(operation) = operation {
                             output.extend(operand);
                             output.push(format!("{prefix}{method}{operation}"));
-                        } else if prefix == "rn" {
+                        } else {
+                            let element_prefix = match prefix {
+                                "rn" => "a",
+                                "rb" => "b",
+                                "rs" => "s",
+                                _ => return None,
+                            };
                             let (callback, kind, captures) = encode_numeric_jit_callback(
                                 callback.expr.as_ref(),
                                 parameters,
@@ -1512,6 +1520,7 @@ fn jit_numeric_export(
                                 context,
                                 3,
                                 Some(2),
+                                (element_prefix, prefix),
                             )?;
                             if !matches!(kind, JitKind::Number | JitKind::Boolean) {
                                 return None;
@@ -1522,11 +1531,9 @@ fn jit_numeric_export(
                                 append_jit_captures(captures, output);
                             }
                             output.push(format!(
-                                "rn{method}jit{}",
+                                "{prefix}{method}jit{}",
                                 if captured { "c" } else { "" }
                             ));
-                        } else {
-                            return None;
                         }
                     }
                 } else if matches!(method, "join" | "toString") {
@@ -3365,6 +3372,7 @@ fn jit_numeric_export(
         context: &mut InlineContext<'_>,
         max_parameters: usize,
         array_parameter: Option<usize>,
+        callback_prefixes: (&str, &str),
     ) -> Option<(Vec<String>, JitKind, Vec<Vec<String>>)> {
         if matches!(expression, Expr::Ident(identifier)
             if outer_parameters.contains_key(identifier.sym.as_ref())
@@ -3387,7 +3395,13 @@ fn jit_numeric_export(
                     parameter.id.sym.to_string(),
                     format!(
                         "{}{}",
-                        if array_parameter == Some(index) { "rn" } else { "a" },
+                        if array_parameter == Some(index) {
+                            callback_prefixes.1
+                        } else if index == 0 {
+                            callback_prefixes.0
+                        } else {
+                            "a"
+                        },
                         index
                     ),
                 )
@@ -4534,36 +4548,45 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if matches!(
-            token.as_str(),
-            "rnsomejit"
-                | "rneveryjit"
-                | "rnfindjit"
-                | "rnfindindexjit"
-                | "rnfindlastjit"
-                | "rnfindlastindexjit"
-                | "rnfilterjit"
-                | "rnsomejitc"
-                | "rneveryjitc"
-                | "rnfindjitc"
-                | "rnfindindexjitc"
-                | "rnfindlastjitc"
-                | "rnfindlastindexjitc"
-                | "rnfilterjitc"
-        ) {
+        } else if ["rn", "rb", "rs"].iter().any(|prefix| {
+            token.strip_prefix(prefix).is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "somejit"
+                        | "everyjit"
+                        | "findjit"
+                        | "findindexjit"
+                        | "findlastjit"
+                        | "findlastindexjit"
+                        | "filterjit"
+                        | "somejitc"
+                        | "everyjitc"
+                        | "findjitc"
+                        | "findindexjitc"
+                        | "findlastjitc"
+                        | "findlastindexjitc"
+                        | "filterjitc"
+                )
+            })
+        }) {
             if token.ends_with("jitc") && stack.pop()? != JitKind::Array {
                 return None;
             }
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Array {
                 return None;
             }
-            stack.push(if matches!(token.as_str(), "rnfilterjit" | "rnfilterjitc") {
+            let suffix = &token[2..];
+            stack.push(if matches!(suffix, "filterjit" | "filterjitc") {
                 JitKind::Array
-            } else if matches!(
-                token.as_str(),
-                "rnsomejit" | "rneveryjit" | "rnsomejitc" | "rneveryjitc"
-            ) {
+            } else if matches!(suffix, "somejit" | "everyjit" | "somejitc" | "everyjitc") {
                 JitKind::Boolean
+            } else if matches!(suffix, "findjit" | "findlastjit" | "findjitc" | "findlastjitc") {
+                match &token[..2] {
+                    "rn" => JitKind::Number,
+                    "rb" => JitKind::Boolean,
+                    "rs" => JitKind::String,
+                    _ => return None,
+                }
             } else {
                 JitKind::Number
             });

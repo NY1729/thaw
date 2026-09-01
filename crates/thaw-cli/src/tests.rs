@@ -777,7 +777,10 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &string_filter,
         ),
-        None
+        Some(
+            "expr:rs0,t73302c63336666303030303030303030303030302c73747269637466616c7365,rsfilterjit,arrayvalue"
+                .into()
+        )
     );
     assert_eq!(
         jit_numeric_export(

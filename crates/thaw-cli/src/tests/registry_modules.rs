@@ -427,6 +427,49 @@ fn composed_numeric_predicates_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
+fn composed_primitive_predicates_use_jit_callbacks_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-composed-primitive-predicate-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-composed-primitive-predicate");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function stringSome(values: string[], minimum: number): boolean;\nexport declare function stringEvery(values: string[], minimum: number): boolean;\nexport declare function stringFind(values: string[], minimum: number): string | undefined;\nexport declare function stringFindIndex(values: string[], minimum: number): number;\nexport declare function stringFindLast(values: string[], minimum: number): string | undefined;\nexport declare function stringFindLastIndex(values: string[], minimum: number): number;\nexport declare function stringFilter(values: string[], minimum: number): string[];\nexport declare function boolSome(values: boolean[], start: number): boolean;\nexport declare function boolEvery(values: boolean[], start: number): boolean;\nexport declare function boolFind(values: boolean[], start: number): boolean | undefined;\nexport declare function boolFindIndex(values: boolean[], start: number): number;\nexport declare function boolFindLast(values: boolean[], start: number): boolean | undefined;\nexport declare function boolFindLastIndex(values: boolean[], start: number): number;\nexport declare function boolFilter(values: boolean[], start: number): boolean[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.stringSome = (values, minimum) => values.some((value, index, source) => value.length > index + minimum && source.length === 4); module.exports.stringEvery = (values, minimum) => values.every((value, index) => value.length > index + minimum); module.exports.stringFind = (values, minimum) => values.find((value, index) => value.length > index + minimum); module.exports.stringFindIndex = (values, minimum) => values.findIndex((value, index) => value.length > index + minimum); module.exports.stringFindLast = (values, minimum) => values.findLast((value, index) => value.length > index + minimum); module.exports.stringFindLastIndex = (values, minimum) => values.findLastIndex((value, index) => value.length > index + minimum); module.exports.stringFilter = (values, minimum) => values.filter((value, index) => value.length > index + minimum); module.exports.boolSome = (values, start) => values.some((value, index, source) => value && index >= start && source.length === 4); module.exports.boolEvery = (values, start) => values.every((value, index) => value && index >= start); module.exports.boolFind = (values, start) => values.find((value, index) => value && index >= start); module.exports.boolFindIndex = (values, start) => values.findIndex((value, index) => value && index >= start); module.exports.boolFindLast = (values, start) => values.findLast((value, index) => value && index >= start); module.exports.boolFindLastIndex = (values, start) => values.findLastIndex((value, index) => value && index >= start); module.exports.boolFilter = (values, start) => values.filter((value, index) => value && index >= start);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import * as p from 'jit-composed-primitive-predicate';\nfunction main(): void { const words = ['a', 'bbb', 'cc', 'dddd']; console.log(p.stringSome(words, 0)); console.log(p.stringEvery(words, 0)); console.log(p.stringFind(words, 0) ?? '-'); console.log(p.stringFindIndex(words, 0)); console.log(p.stringFindLast(words, 0) ?? '-'); console.log(p.stringFindLastIndex(words, 0)); console.log(p.stringFilter(words, 0).join(',')); const flags = [true, false, true, true]; console.log(p.boolSome(flags, 1)); console.log(p.boolEvery(flags, 1)); console.log(p.boolFind(flags, 1) ?? false); console.log(p.boolFindIndex(flags, 1)); console.log(p.boolFindLast(flags, 1) ?? false); console.log(p.boolFindLastIndex(flags, 1)); console.log(p.boolFilter(flags, 1).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nfalse\na\n0\ndddd\n3\na,bbb,dddd\ntrue\nfalse\ntrue\n2\ntrue\n3\ntrue,true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn composed_numeric_reducers_use_jit_callbacks_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-composed-reducer-{}",
