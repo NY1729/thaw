@@ -450,6 +450,49 @@ fn primitive_array_mutation_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_array_element_assignment_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-set-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-set");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function setNumber(values: number[], index: number, value: number): number;\nexport declare function setNumbers(values: number[], index: number, value: number): number[];\nexport declare function setString(values: string[], index: number, value: string): string[];\nexport declare function setFlag(values: boolean[], index: number, value: boolean): boolean[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.setNumber = (values, index, value) => values[index] = value; module.exports.setNumbers = (values, index, value) => { values[index] = value; return values; }; module.exports.setString = (values, index, value) => { values[index] = value; return values; }; module.exports.setFlag = (values, index, value) => { values[index] = value; return values; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { setNumber, setNumbers, setString, setFlag } from 'jit-array-set';\nfunction main(): void { const numbers = [1]; const alias = numbers; console.log(setNumber(numbers, 3, 9)); console.log(alias.join('|')); console.log(setNumbers(numbers, 1, 2).join('|')); console.log(numbers.join('|')); const strings = ['a']; console.log(setString(strings, 2, 'c').join('|')); console.log(strings.join('|')); const flags = [true]; console.log(setFlag(flags, 2, true).join('|')); console.log(flags.join('|')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "9\n1|0|0|9\n1|2|0|9\n1|2|0|9\na||c\na||c\ntrue|false|true\ntrue|false|true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_array_removal_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-removal-{}",

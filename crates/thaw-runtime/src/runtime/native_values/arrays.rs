@@ -550,6 +550,59 @@ pub unsafe extern "C" fn thaw_jit_array_unshift(
 }
 
 #[no_mangle]
+/// Assigns one primitive slot for residual JIT code, growing the shared array
+/// handle and zero-filling any gap when `index` is beyond the current end.
+///
+/// # Safety
+/// `array` must point to a writable number/string/boolean Thaw array handle
+/// matching `operation` (0/1/2).
+pub unsafe extern "C" fn thaw_jit_array_set(
+    operation: u8,
+    array: *mut *mut u8,
+    index: f64,
+    value: f64,
+) -> i8 {
+    let Some(current) = (unsafe { array.as_ref() }).copied() else {
+        return -1;
+    };
+    let Some(length) = (unsafe { native_array_length(current) }) else {
+        return -1;
+    };
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index > usize::MAX as f64 {
+        return -1;
+    }
+    let index = index as usize;
+    let slot = match operation {
+        0 | 1 => value.to_bits(),
+        2 => u64::from(value != 0.0),
+        _ => return -1,
+    };
+    if index < length {
+        unsafe { current.add(8 + index * 8).cast::<u64>().write_unaligned(slot) };
+        return 1;
+    }
+    let Some(bytes) = index
+        .checked_add(1)
+        .and_then(|length| length.checked_mul(8))
+        .and_then(|bytes| bytes.checked_add(8))
+    else {
+        return -1;
+    };
+    let output = thaw_arena::thaw_arena_alloc(bytes, 8);
+    if output.is_null() {
+        return -1;
+    }
+    unsafe {
+        output.cast::<u64>().write((index + 1) as u64);
+        std::ptr::copy_nonoverlapping(current.add(8), output.add(8), length * 8);
+        output.add(8 + length * 8).write_bytes(0, (index - length) * 8);
+        output.add(8 + index * 8).cast::<u64>().write_unaligned(slot);
+        array.write(output);
+    }
+    1
+}
+
+#[no_mangle]
 /// `Array.prototype.pop`. Removes the last element of `array`, writing its
 /// `element_width` bytes into `out_value` and returning a fresh buffer with
 /// the remaining elements. If `array` is null or already empty, `out_value`
