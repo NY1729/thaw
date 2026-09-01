@@ -612,6 +612,7 @@ fn jit_numeric_export(
                 | "splice"
                 | "toSpliced"
                 | "with"
+                | "reduce"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -1271,7 +1272,22 @@ fn jit_numeric_export(
                 let prefix = array_prefix(&encoded)?;
                 let encoded_receiver = encoded.clone();
                 output.extend(encoded);
-                if matches!(method, "join" | "toString") {
+                if method == "reduce" {
+                    let [callback, initial] = call.args.as_slice() else {
+                        return None;
+                    };
+                    if prefix != "rn" || !additive_reducer(callback.expr.as_ref()) {
+                        return None;
+                    }
+                    encode_number(
+                        initial.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        output,
+                    )?;
+                    output.push("rnreduceadd".into());
+                } else if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
                         [] => encode_string(",", output)?,
                         [separator] if method == "join" => {
@@ -2429,6 +2445,39 @@ fn jit_numeric_export(
         }
     }
 
+    fn additive_reducer(expression: &Expr) -> bool {
+        let callable = match expression {
+            Expr::Fn(function) => NumericCallable::Function(function.function.as_ref()),
+            Expr::Arrow(function) => NumericCallable::Arrow(function),
+            _ => return false,
+        };
+        let Some((parameters, steps, body)) = callable_parts(callable) else {
+            return false;
+        };
+        let [Pat::Ident(accumulator), Pat::Ident(value)] = parameters.as_slice() else {
+            return false;
+        };
+        if !steps.is_empty() || accumulator.id.sym == value.id.sym {
+            return false;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => {
+                let Some(expression) = statement.arg.as_deref() else {
+                    return false;
+                };
+                expression
+            }
+            _ => return false,
+        };
+        matches!(expression,
+            Expr::Bin(binary)
+                if binary.op == BinaryOp::Add
+                    && matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == accumulator.id.sym)
+                    && matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
+        )
+    }
+
     fn encode_helper_call(
         call: &CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -3170,6 +3219,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             "arraylen" | "rnmin" | "rnmax" | "rnhypot"
         ) {
             if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if token == "rnreduceadd" {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(JitKind::Number);

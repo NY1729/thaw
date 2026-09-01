@@ -258,6 +258,46 @@ fn mixed_hypot_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn additive_array_reduce_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-reduce-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-reduce");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function sum(values: number[], initial: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.sum = (values, initial) => values.reduce(function(accumulator, value) { return accumulator + value; }, initial);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { sum } from 'jit-array-reduce';\nfunction main(): void { console.log(sum([1e16, -1e16, 1], 1)); console.log(Object.is(sum([], -0), -0)); console.log(sum([10, 20, 12], 0)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\ntrue\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn typed_typeof_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-typeof-{}",
