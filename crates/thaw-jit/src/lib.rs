@@ -665,7 +665,7 @@ fn primitive_array_map(value: f64, encoded: f64) -> f64 {
     let encoded = encoded as u8;
     let kind = encoded / 8;
     let operation = encoded % 8;
-    if !(1..=2).contains(&kind) || !matches!((kind, operation), (1, 0 | 1) | (2, 0 | 2..=6)) {
+    if !(1..=2).contains(&kind) || !matches!((kind, operation), (1, 0 | 1) | (2, 0 | 2..=7)) {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     }
@@ -695,6 +695,7 @@ fn primitive_array_map(value: f64, encoded: f64) -> f64 {
             4 => string_trim(f64::from_bits(slot)).to_bits(),
             5 => string_trim_start(f64::from_bits(slot)).to_bits(),
             6 => string_trim_end(f64::from_bits(slot)).to_bits(),
+            7 => string_length(f64::from_bits(slot)).to_bits(),
             _ => unreachable!(),
         };
         unsafe {
@@ -3218,6 +3219,7 @@ impl NumericProgram {
                                 "trim" if kind == 2 => 4,
                                 "trimstart" if kind == 2 => 5,
                                 "trimend" if kind == 2 => 6,
+                                "length" if kind == 2 => 7,
                                 _ => return None,
                             };
                             Some(NumericValue::PrimitiveArrayMap(kind, operation))
@@ -5830,6 +5832,18 @@ mod tests {
             unsafe { CStr::from_ptr(output.add(16).cast::<*const c_char>().read()).to_bytes() },
             b"X"
         );
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let string_lengths = CString::new("expr:rs0,rsmaplength:string-map-length").unwrap();
+        let result = call(
+            &string_lengths,
+            &[f64::from_bits(string_handle as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 0.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 1.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 0.0);
         unsafe { libc::free(output.cast_mut().cast()) };
         let map = CString::new("expr:rn0,c4000000000000000,rnmapmul:array-map").unwrap();
         let result = call(&map, &[f64::from_bits(handle as usize as u64)]);

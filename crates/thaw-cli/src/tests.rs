@@ -628,6 +628,21 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             "{method}"
         );
     }
+    let string_lengths = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+            thaw_hir::HirType::F64,
+        ))),
+        ..string_filter.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.map(value => value.length);",
+            "add",
+            false,
+            &string_lengths,
+        ),
+        Some("expr:rs0,rsmaplength,arrayvalue".into())
+    );
     let bool_map = thaw_bridge::DtsFunction {
         ret: bool_array.clone(),
         ..bool_quantifier.clone()

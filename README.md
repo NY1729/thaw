@@ -2140,6 +2140,7 @@ Identity maps for string and boolean arrays, plus boolean negation maps, copy
 native storage directly without loading QuickJS.
 String-array maps also reuse the native Unicode case conversion and JavaScript
 whitespace trimming operations.
+UTF-16 `.length` maps produce native `number[]` results through the same scan.
 Binary arithmetic `number[]` `map` callbacks likewise allocate once and support
 `+`, `-`, `*`, `/`, `%`, and `**` with the element on either side.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
