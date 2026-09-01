@@ -368,6 +368,19 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
                 "expr:rn0,c0000000000000000,rnreduce{operation}"
             ))
         );
+        assert_eq!(
+            jit_numeric_export(
+                &format!(
+                    "module.exports.add = values => values.reduce((accumulator, value) => accumulator {operator} value);"
+                ),
+                "add",
+                false,
+                &spread_extreme,
+            ),
+            Some(format!(
+                "expr:rn0,c0000000000000000,rnreduce{operation}0"
+            ))
+        );
     }
     assert_eq!(
         jit_numeric_export(
