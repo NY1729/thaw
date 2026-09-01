@@ -979,6 +979,25 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,a2,rnwith".into())
     );
+    let array_concat = thaw_bridge::DtsFunction {
+        name: "concat".into(),
+        params: vec![
+            array_length.params[0].clone(),
+            ("other".into(), array_length.params[0].1.clone()),
+        ],
+        required_params: 2,
+        ret: array_length.params[0].1.clone(),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.concat = (values, other) => values.concat(other);",
+            "concat",
+            false,
+            &array_concat,
+        ),
+        Some("expr:rn0,rn1,arrayconcat".into())
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",
