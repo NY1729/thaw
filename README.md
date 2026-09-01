@@ -2116,6 +2116,8 @@ reuse the native runtime's `fromIndex` and strict/SameValueZero comparison rules
 Initial-value `number[]` reductions with a direct arithmetic callback scan
 native storage from left to right in the JIT. `+`, `-`, `*`, `/`, `%`, and `**`
 are supported in arrow or function-expression callbacks, including empty arrays.
+The same reducers may omit the initial value, seeding from the first element and
+raising the standard empty-array reduction error through the JIT exception path.
 Their `join` and zero-argument `toString` calls reuse the native array
 formatters through one arena-backed JIT callback as well.
 Computed numeric element reads (`values[index]`) use a distinct bounds-checked
