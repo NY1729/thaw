@@ -666,6 +666,21 @@ array_to_sorted!(thaw_bool_array_to_sorted, thaw_bool_array_sort);
 array_to_sorted!(thaw_object_array_to_sorted, thaw_object_array_sort);
 
 #[no_mangle]
+/// Shared primitive-array default sorter for the residual JIT.
+///
+/// # Safety
+/// `array` must satisfy the selected typed `toSorted` function's pointer
+/// requirements.
+pub unsafe extern "C" fn thaw_jit_array_to_sorted(operation: u8, array: *const u8) -> *mut u8 {
+    match operation {
+        0 => unsafe { thaw_number_array_to_sorted(array) },
+        1 => unsafe { thaw_string_array_to_sorted(array) },
+        2 => unsafe { thaw_bool_array_to_sorted(array) },
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `array` must point to a Thaw array containing `f64` element slots.

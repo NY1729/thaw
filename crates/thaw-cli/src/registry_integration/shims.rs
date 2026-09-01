@@ -481,6 +481,7 @@ fn jit_numeric_export(
                 | "toString"
                 | "slice"
                 | "toReversed"
+                | "toSorted"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -920,6 +921,11 @@ fn jit_numeric_export(
                         return None;
                     }
                     output.push("arrayreversed".into());
+                } else if method == "toSorted" {
+                    if !call.args.is_empty() {
+                        return None;
+                    }
+                    output.push(format!("{prefix}sorted"));
                 } else if method == "slice" {
                     match call.args.as_slice() {
                         [] => {
@@ -2403,7 +2409,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if token == "arrayreversed" {
+        } else if matches!(
+            token.as_str(),
+            "arrayreversed" | "rnsorted" | "rssorted" | "rbsorted"
+        ) {
             if stack.pop()? != JitKind::Array {
                 return None;
             }
