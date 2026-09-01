@@ -495,6 +495,25 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             "{body}"
         );
     }
+    let callback = "a0,a0,*,c3ff0000000000000,+";
+    let encoded_callback = callback
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.map(value => value * value + 1);",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![spread_extreme.params[0].clone()],
+                required_params: 1,
+                ..filter.clone()
+            },
+        ),
+        Some(format!("expr:rn0,t{encoded_callback},rnmapjit,arrayvalue"))
+    );
     let unary_quantifier = thaw_bridge::DtsFunction {
         params: vec![spread_extreme.params[0].clone()],
         required_params: 1,

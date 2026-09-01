@@ -344,6 +344,46 @@ fn local_map_callbacks_use_jit_without_quickjs() {
 }
 
 #[test]
+fn composed_numeric_maps_use_jit_callbacks_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-composed-map-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-composed-map");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function polynomial(values: number[]): number[];\nexport declare function indexed(values: number[]): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function transform(value, index) { const sum = value + index; return sum * (value - index); } module.exports.polynomial = values => values.map(value => value * value + 1); module.exports.indexed = values => values.map(transform);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { polynomial, indexed } from 'jit-composed-map';\nfunction main(): void { console.log(polynomial([2, 3]).join(',')); console.log(indexed([2, 3, 4]).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5,10\n4,8,12\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_array_comparisons_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-primitive-comparisons-{}",
