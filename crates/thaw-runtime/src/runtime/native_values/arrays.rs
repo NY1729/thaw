@@ -318,6 +318,48 @@ pub unsafe extern "C" fn thaw_array_slice(
 }
 
 #[no_mangle]
+/// Returns an arena-owned shallow concatenation of two native arrays.
+///
+/// # Safety
+/// Both arrays must point to readable Thaw arrays whose elements occupy
+/// `element_width` bytes, and `element_width` must be nonzero.
+pub unsafe extern "C" fn thaw_array_concat(
+    left: *const u8,
+    right: *const u8,
+    element_width: usize,
+) -> *mut u8 {
+    let (Some(left_len), Some(right_len)) = (
+        unsafe { native_array_length(left) },
+        unsafe { native_array_length(right) },
+    ) else {
+        return std::ptr::null_mut();
+    };
+    let Some(length) = left_len.checked_add(right_len) else {
+        return std::ptr::null_mut();
+    };
+    let Some(payload_bytes) = length.checked_mul(element_width) else {
+        return std::ptr::null_mut();
+    };
+    if element_width == 0 {
+        return std::ptr::null_mut();
+    }
+    let output = thaw_arena::thaw_arena_alloc(8 + payload_bytes, element_width.min(8));
+    if output.is_null() {
+        return output;
+    }
+    unsafe {
+        output.cast::<u64>().write(length as u64);
+        std::ptr::copy_nonoverlapping(left.add(8), output.add(8), left_len * element_width);
+        std::ptr::copy_nonoverlapping(
+            right.add(8),
+            output.add(8 + left_len * element_width),
+            right_len * element_width,
+        );
+    }
+    output
+}
+
+#[no_mangle]
 /// Returns an arena-owned reversed shallow copy of a native array.
 ///
 /// # Safety
