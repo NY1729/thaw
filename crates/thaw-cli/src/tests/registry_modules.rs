@@ -530,6 +530,58 @@ fn dictionary_key_queries_use_jit_without_quickjs() {
 }
 
 #[test]
+fn returning_switch_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-switch-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-switch");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numberSwitch(value: number): number;\nexport declare function stringSwitch(value: string): string;\nexport declare function boolSwitch(value: boolean): number;\nexport declare function evaluateOnce(values: number[]): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function numberSwitch(value) { switch (value) { case 1: case 2: return 10; case 3: return 30; default: return 40; } } function stringSwitch(value) { switch (value) { case 'a': return 'A'; default: case 'fallback': return 'D'; case 'b': return 'B'; } } function boolSwitch(value) { switch (value) { case true: return 1; default: return 0; } } function evaluateOnce(values) { switch (values.pop()) { case 2: return values.length; default: return 99; } } module.exports = { numberSwitch, stringSwitch, boolSwitch, evaluateOnce };\n",
+    )
+    .unwrap();
+    let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
+    let functions = thaw_bridge::parse_dts(&declarations).unwrap();
+    let bundle = std::fs::read_to_string(package.join("bundle.js")).unwrap();
+    for function in &functions {
+        assert!(
+            jit_numeric_export(&bundle, &function.name, false, function).is_some(),
+            "{function:?} did not specialize"
+        );
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numberSwitch, stringSwitch, boolSwitch, evaluateOnce } from 'jit-switch';\nfunction main(): void { console.log(numberSwitch(1)); console.log(numberSwitch(2)); console.log(numberSwitch(3)); console.log(numberSwitch(9)); console.log(stringSwitch('a')); console.log(stringSwitch('b')); console.log(stringSwitch('x')); console.log(boolSwitch(true)); console.log(boolSwitch(false)); console.log(evaluateOnce([1, 2])); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "10\n10\n30\n40\nA\nB\nD\n1\n0\n1\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_aggregates_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-aggregate-{}",
