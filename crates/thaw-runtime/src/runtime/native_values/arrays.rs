@@ -1028,6 +1028,45 @@ pub unsafe extern "C" fn thaw_bool_array_includes(
 }
 
 #[no_mangle]
+/// Shared typed-array search entry point for the residual JIT. `operation`
+/// selects number/string/boolean `indexOf` or `includes` without duplicating
+/// their JavaScript comparison and `fromIndex` rules in the JIT crate.
+///
+/// # Safety
+/// `array` and a string `needle` must satisfy the selected typed-array
+/// operation's requirements.
+pub unsafe extern "C" fn thaw_jit_array_search(
+    operation: u8,
+    array: *const u8,
+    needle: f64,
+    from_index: f64,
+) -> f64 {
+    match operation {
+        0 => unsafe { thaw_number_array_index_of(array, needle, from_index) },
+        1 => f64::from(unsafe { thaw_number_array_includes(array, needle, from_index) }),
+        2 => unsafe {
+            thaw_string_array_index_of(
+                array,
+                needle.to_bits() as usize as *const c_char,
+                from_index,
+            )
+        },
+        3 => f64::from(unsafe {
+            thaw_string_array_includes(
+                array,
+                needle.to_bits() as usize as *const c_char,
+                from_index,
+            )
+        }),
+        4 => unsafe { thaw_bool_array_index_of(array, (needle != 0.0).into(), from_index) },
+        5 => f64::from(unsafe {
+            thaw_bool_array_includes(array, (needle != 0.0).into(), from_index)
+        }),
+        _ => -1.0,
+    }
+}
+
+#[no_mangle]
 /// # Safety
 /// `array` must point to a Thaw array containing boolean element slots.
 pub unsafe extern "C" fn thaw_bool_array_last_index_of(
