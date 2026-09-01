@@ -443,6 +443,22 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,c0000000000000000,rnfiltergt,arrayvalue".into())
     );
+    for (body, operation) in [("value + index", "add"), ("index - value", "rsub")] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.add = values => values.map((value, index) => {body});"),
+                "add",
+                false,
+                &thaw_bridge::DtsFunction {
+                    params: vec![spread_extreme.params[0].clone()],
+                    required_params: 1,
+                    ..filter.clone()
+                },
+            ),
+            Some(format!("expr:rn0,rnmapindex{operation},arrayvalue")),
+            "{body}"
+        );
+    }
     let unary_quantifier = thaw_bridge::DtsFunction {
         params: vec![spread_extreme.params[0].clone()],
         required_params: 1,

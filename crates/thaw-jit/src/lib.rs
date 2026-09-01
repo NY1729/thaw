@@ -767,7 +767,7 @@ fn primitive_array_convert(value: f64, encoded: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn number_array_map(value: f64, operation: impl Fn(f64) -> f64) -> f64 {
+fn number_array_map(value: f64, operation: impl Fn(f64, f64) -> f64) -> f64 {
     let (Some(allocate), Some((array, length))) =
         (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
     else {
@@ -786,20 +786,46 @@ fn number_array_map(value: f64, operation: impl Fn(f64) -> f64) -> f64 {
     unsafe { output.cast::<u64>().write(length as u64) };
     for index in 0..length {
         let element = unsafe { array.add(8 + index * 8).cast::<f64>().read() };
-        let mapped = operation(element);
+        let mapped = operation(element, index as f64);
         unsafe { output.add(8 + index * 8).cast::<f64>().write(mapped) };
     }
     array_result(output)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_index_map(value: f64, encoded: f64) -> f64 {
+    let encoded = encoded as u8;
+    let reverse = encoded >= 8;
+    let operation = encoded % 8;
+    number_array_map(value, |element, index| {
+        let (left, right) = if reverse {
+            (index, element)
+        } else {
+            (element, index)
+        };
+        match operation {
+            0 => left + right,
+            1 => left - right,
+            2 => left * right,
+            3 => left / right,
+            4 => left % right,
+            5 => power(left, right),
+            _ => {
+                CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+                0.0
+            }
+        }
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 macro_rules! number_array_maps {
     ($forward:ident, $reverse:ident, $operation:expr) => {
         extern "C" fn $forward(value: f64, operand: f64) -> f64 {
-            number_array_map(value, |element| $operation(element, operand))
+            number_array_map(value, |element, _| $operation(element, operand))
         }
         extern "C" fn $reverse(value: f64, operand: f64) -> f64 {
-            number_array_map(value, |element| $operation(operand, element))
+            number_array_map(value, |element, _| $operation(operand, element))
         }
     };
 }
@@ -843,12 +869,12 @@ number_array_maps!(
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn number_array_map_negate(value: f64) -> f64 {
-    number_array_map(value, |element| -element)
+    number_array_map(value, |element, _| -element)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn number_array_map_absolute(value: f64) -> f64 {
-    number_array_map(value, f64::abs)
+    number_array_map(value, |element, _| element.abs())
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -891,7 +917,7 @@ extern "C" fn number_array_map_math(value: f64, operation: f64) -> f64 {
             return 0.0;
         }
     };
-    number_array_map(value, |element| function(element))
+    number_array_map(value, |element, _| function(element))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -2858,6 +2884,7 @@ enum NumericValue {
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
+    NumberArrayIndexMap(NumericReduceOp, bool),
     NumberArrayUnaryMap(bool),
     NumberArrayMathMap(UnaryMath),
     NumberArrayPop,
@@ -3300,6 +3327,20 @@ impl NumericProgram {
                                     _ => return None,
                                 },
                             ))
+                        })
+                        .or_else(|| {
+                            let operation = value.strip_prefix("rnmapindex")?;
+                            let (operation, reverse) = NumericReduceOp::parse(operation)
+                                .map(|operation| (operation, false))
+                                .or_else(|| {
+                                    NumericReduceOp::parse(operation.strip_prefix('r')?)
+                                        .map(|operation| (operation, true))
+                                })?;
+                            (!matches!(
+                                operation,
+                                NumericReduceOp::Minimum | NumericReduceOp::Maximum
+                            ))
+                            .then_some(NumericValue::NumberArrayIndexMap(operation, reverse))
                         })
                         .or_else(|| {
                             Some(NumericValue::NumberArrayUnaryMap(match value {
@@ -3939,6 +3980,28 @@ impl NumericProgram {
                         depth - 2,
                     );
                     depth -= 1;
+                }
+                NumericValue::NumberArrayIndexMap(operation, reverse) => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    let operation = match operation {
+                        NumericReduceOp::Add => 0,
+                        NumericReduceOp::Subtract => 1,
+                        NumericReduceOp::Multiply => 2,
+                        NumericReduceOp::Divide => 3,
+                        NumericReduceOp::Remainder => 4,
+                        NumericReduceOp::Power => 5,
+                        NumericReduceOp::Minimum | NumericReduceOp::Maximum => return None,
+                    } + if *reverse { 8 } else { 0 };
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(operation).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_binary_call(
+                        &mut code,
+                        number_array_index_map as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::NumberArrayUnaryMap(absolute) => {
                     if depth == 0 {
@@ -5974,6 +6037,14 @@ mod tests {
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 40.0);
         assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 60.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let index_map = CString::new("expr:rn0,rnmapindexadd:array-index-map").unwrap();
+        let result = call(&index_map, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 10.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 21.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 32.0);
         unsafe { libc::free(output.cast_mut().cast()) };
         let remainder =
             CString::new("expr:rn0,c4018000000000000,rnmaprem:array-map-remainder").unwrap();
