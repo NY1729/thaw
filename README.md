@@ -2170,6 +2170,11 @@ These JIT callbacks can capture typed outer parameters and locals through a
 compact native pack. Number, boolean, string, and primitive-array handles keep
 their native representation, covering composed scale/offset, range predicates,
 string-to-number thresholds, and captured-array metadata without QuickJS.
+The same callback compiler now drives compound `some`, `every`, `find`,
+`findIndex`, `findLast`, `findLastIndex`, and `filter` scans for `string[]` and
+`boolean[]`. Element values retain their native string or boolean layout,
+indices and source arrays use the standard callback positions, and typed outer
+captures remain available without loading QuickJS.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
 including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array

@@ -877,7 +877,14 @@ extern "C" fn number_array_jit_map_captured(value: f64, callback: f64, captures:
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn number_array_jit_scan(value: f64, callback: f64, mode: u8) -> f64 {
+extern "C" fn primitive_array_jit_scan(value: f64, callback: f64, encoded: f64) -> f64 {
+    let encoded = encoded as u8;
+    let kind = encoded / 8;
+    let mode = encoded % 8;
+    if kind > 2 || mode > 6 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
     let Some((callback, required)) = compile_jit_callback(callback) else {
         return 0.0;
     };
@@ -885,74 +892,39 @@ fn number_array_jit_scan(value: f64, callback: f64, mode: u8) -> f64 {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     }
-    primitive_array_scan(value, 0, mode, |array, index| {
-        let element = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+    primitive_array_scan(value, kind, mode, |array, index| {
+        let element = unsafe { array_element(array, index, kind) };
         let result = callback([element, index as f64, value].as_ptr());
         result != 0.0 && !result.is_nan()
     })
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn number_array_jit_scan_captured(value: f64, callback: f64, captures: f64, mode: u8) -> f64 {
+extern "C" fn primitive_array_jit_scan_captured(
+    value: f64,
+    callback: f64,
+    captures: f64,
+    encoded: f64,
+) -> f64 {
+    let encoded = encoded as u8;
+    let kind = encoded / 8;
+    let mode = encoded % 8;
+    if kind > 2 || mode > 6 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
     let Some((callback, required)) = compile_jit_callback(callback) else {
         return 0.0;
     };
     let Some(captures) = capture_arguments(captures, 3, required) else {
         return 0.0;
     };
-    primitive_array_scan(value, 0, mode, |array, index| {
-        let element = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+    primitive_array_scan(value, kind, mode, |array, index| {
+        let element = unsafe { array_element(array, index, kind) };
         let result = call_jit_callback(callback, &[element, index as f64, value], &captures);
         result != 0.0 && !result.is_nan()
     })
 }
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-macro_rules! jit_scan_fn {
-    ($name:ident, $mode:expr) => {
-        extern "C" fn $name(value: f64, callback: f64) -> f64 {
-            number_array_jit_scan(value, callback, $mode)
-        }
-    };
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-macro_rules! jit_scan_captured_fn {
-    ($name:ident, $mode:expr) => {
-        extern "C" fn $name(value: f64, callback: f64, captures: f64) -> f64 {
-            number_array_jit_scan_captured(value, callback, captures, $mode)
-        }
-    };
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_fn!(number_array_jit_some, 0);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_fn!(number_array_jit_every, 1);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_fn!(number_array_jit_find, 2);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_fn!(number_array_jit_find_index, 3);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_fn!(number_array_jit_find_last, 4);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_fn!(number_array_jit_find_last_index, 5);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_fn!(number_array_jit_filter, 6);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_captured_fn!(number_array_jit_some_captured, 0);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_captured_fn!(number_array_jit_every_captured, 1);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_captured_fn!(number_array_jit_find_captured, 2);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_captured_fn!(number_array_jit_find_index_captured, 3);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_captured_fn!(number_array_jit_find_last_captured, 4);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_captured_fn!(number_array_jit_find_last_index_captured, 5);
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-jit_scan_captured_fn!(number_array_jit_filter_captured, 6);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_jit_reduce(
@@ -3253,7 +3225,7 @@ enum NumericValue {
     PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayJitMap(bool),
-    NumberArrayJitScan(u8, bool),
+    PrimitiveArrayJitScan(u8, u8, bool),
     NumberArrayIndexMap(NumericReduceOp, bool),
     NumberArraySelectMap(CompareOp, u8),
     NumberArrayBranchMap(u16),
@@ -3332,7 +3304,7 @@ impl NumericProgram {
                     | NumericValue::StringArraySort
                     | NumericValue::BoolArraySort
                     | NumericValue::NumberArrayJitMap(_)
-                    | NumericValue::NumberArrayJitScan(6, _)
+                    | NumericValue::PrimitiveArrayJitScan(_, 6, _)
                     | NumericValue::StringArrayToSortedDescending
                     | NumericValue::StringArraySortDescending
                     | NumericValue::NumberArrayFill
@@ -3771,24 +3743,31 @@ impl NumericProgram {
                             _ => None,
                         })
                         .or_else(|| {
-                            let (mode, captured) = match value {
-                                "rnsomejit" => (0, false),
-                                "rneveryjit" => (1, false),
-                                "rnfindjit" => (2, false),
-                                "rnfindindexjit" => (3, false),
-                                "rnfindlastjit" => (4, false),
-                                "rnfindlastindexjit" => (5, false),
-                                "rnfilterjit" => (6, false),
-                                "rnsomejitc" => (0, true),
-                                "rneveryjitc" => (1, true),
-                                "rnfindjitc" => (2, true),
-                                "rnfindindexjitc" => (3, true),
-                                "rnfindlastjitc" => (4, true),
-                                "rnfindlastindexjitc" => (5, true),
-                                "rnfilterjitc" => (6, true),
+                            let (kind, suffix) = ["rn", "rb", "rs"].iter().enumerate().find_map(
+                                |(kind, prefix)| {
+                                    value
+                                        .strip_prefix(prefix)
+                                        .map(|suffix| (kind as u8, suffix))
+                                },
+                            )?;
+                            let (mode, captured) = match suffix {
+                                "somejit" => (0, false),
+                                "everyjit" => (1, false),
+                                "findjit" => (2, false),
+                                "findindexjit" => (3, false),
+                                "findlastjit" => (4, false),
+                                "findlastindexjit" => (5, false),
+                                "filterjit" => (6, false),
+                                "somejitc" => (0, true),
+                                "everyjitc" => (1, true),
+                                "findjitc" => (2, true),
+                                "findindexjitc" => (3, true),
+                                "findlastjitc" => (4, true),
+                                "findlastindexjitc" => (5, true),
+                                "filterjitc" => (6, true),
                                 _ => return None,
                             };
-                            Some(NumericValue::NumberArrayJitScan(mode, captured))
+                            Some(NumericValue::PrimitiveArrayJitScan(kind, mode, captured))
                         })
                         .or_else(|| {
                             value
@@ -4472,38 +4451,32 @@ impl NumericProgram {
                         depth -= 1;
                     }
                 }
-                NumericValue::NumberArrayJitScan(mode, captured) => {
+                NumericValue::PrimitiveArrayJitScan(kind, mode, captured) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(kind * 8 + mode).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
                     if *captured {
                         if depth < 3 {
                             return None;
                         }
-                        let function = match mode {
-                            0 => number_array_jit_some_captured,
-                            1 => number_array_jit_every_captured,
-                            2 => number_array_jit_find_captured,
-                            3 => number_array_jit_find_index_captured,
-                            4 => number_array_jit_find_last_captured,
-                            5 => number_array_jit_find_last_index_captured,
-                            6 => number_array_jit_filter_captured,
-                            _ => return None,
-                        };
-                        emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                        emit_quaternary_call(
+                            &mut code,
+                            primitive_array_jit_scan_captured as *const () as u64,
+                            depth - 3,
+                        );
                         depth -= 2;
                     } else {
                         if depth < 2 {
                             return None;
                         }
-                        let function = match mode {
-                            0 => number_array_jit_some,
-                            1 => number_array_jit_every,
-                            2 => number_array_jit_find,
-                            3 => number_array_jit_find_index,
-                            4 => number_array_jit_find_last,
-                            5 => number_array_jit_find_last_index,
-                            6 => number_array_jit_filter,
-                            _ => return None,
-                        };
-                        emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                        emit_ternary_call(
+                            &mut code,
+                            primitive_array_jit_scan as *const () as u64,
+                            depth - 2,
+                        );
                         depth -= 1;
                     }
                 }
