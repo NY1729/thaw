@@ -175,6 +175,19 @@ extern "C" fn array_max(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_hypot(value: f64) -> f64 {
+    let Some((array, length)) = (unsafe { array_data(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let mut result = 0.0f64;
+    for index in 0..length {
+        result = result.hypot(unsafe { array.add(8 + index * 8).cast::<f64>().read() });
+    }
+    result
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
     value.floor()
 }
@@ -2051,6 +2064,7 @@ enum NumericValue {
     EmptyArray,
     NumberArrayMin,
     NumberArrayMax,
+    NumberArrayHypot,
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2260,6 +2274,7 @@ impl NumericProgram {
                     "arrayempty" => Some(NumericValue::EmptyArray),
                     "rnmin" => Some(NumericValue::NumberArrayMin),
                     "rnmax" => Some(NumericValue::NumberArrayMax),
+                    "rnhypot" => Some(NumericValue::NumberArrayHypot),
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
@@ -2700,6 +2715,12 @@ impl NumericProgram {
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::NumberArrayHypot => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, array_hypot as *const () as u64, depth - 1);
                 }
                 NumericValue::ArraySlice => {
                     if depth < 3 {
@@ -4395,6 +4416,11 @@ mod tests {
                 expected
             );
         }
+        let hypot = CString::new("expr:rn0,rnhypot:array-hypot").unwrap();
+        assert_eq!(
+            call(&hypot, &[f64::from_bits(handle as usize as u64)]).value,
+            10.0f64.hypot(20.0).hypot(30.0)
+        );
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();
         let empty_handle = &empty_data as *const *const u8;
@@ -4405,6 +4431,10 @@ mod tests {
                 expected
             );
         }
+        assert_eq!(
+            call(&hypot, &[f64::from_bits(empty_handle as usize as u64)]).value,
+            0.0
+        );
         let zeros = [2_u64, (-0.0f64).to_bits(), 0.0f64.to_bits()];
         let zeros_data = zeros.as_ptr().cast::<u8>();
         let zeros_handle = &zeros_data as *const *const u8;
@@ -4426,6 +4456,20 @@ mod tests {
                 .value
                 .is_nan());
         }
+        let large = [2_u64, 3e200f64.to_bits(), 4e200f64.to_bits()];
+        let large_data = large.as_ptr().cast::<u8>();
+        let large_handle = &large_data as *const *const u8;
+        assert_eq!(
+            call(&hypot, &[f64::from_bits(large_handle as usize as u64)]).value,
+            0.0f64.hypot(3e200).hypot(4e200)
+        );
+        let infinite = [2_u64, f64::NAN.to_bits(), f64::INFINITY.to_bits()];
+        let infinite_data = infinite.as_ptr().cast::<u8>();
+        let infinite_handle = &infinite_data as *const *const u8;
+        assert_eq!(
+            call(&hypot, &[f64::from_bits(infinite_handle as usize as u64)]).value,
+            f64::INFINITY
+        );
         let replaced =
             CString::new("expr:rn0,c3ff0000000000000,c4058c00000000000,rnwith:with").unwrap();
         let result = call(&replaced, &[f64::from_bits(handle as usize as u64)]);

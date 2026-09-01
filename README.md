@@ -1983,9 +1983,10 @@ IR during CommonJS extraction. `Number.EPSILON`, `MAX_VALUE`, `MIN_VALUE`,
 safe-integer bounds, `NaN`, signed infinities, and the unshadowed global
 `NaN`/`Infinity` names likewise become exact JIT constants. Native helper calls
 spill live numeric values, so Math calls can appear at any supported expression
-depth. `Math.min(...number[])` and `Math.max(...number[])` fold native array
-storage directly in the JIT, preserving empty-array infinities, `NaN`, and
-signed zero. Its end-to-end test produces
+depth. `Math.min(...number[])`, `Math.max(...number[])`, and
+`Math.hypot(...number[])` fold native array storage directly in the JIT,
+preserving empty-array identities, large finite magnitudes, infinities, `NaN`,
+and signed zero. Its end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
 extracts side-effect-free CommonJS function exports, including
 `module.exports = { ... }` packages and directive-prefixed sequences of named
