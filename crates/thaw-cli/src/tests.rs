@@ -887,6 +887,46 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,t2c,rnjoin".into())
     );
+    let array_slice = thaw_bridge::DtsFunction {
+        name: "slice".into(),
+        params: vec![
+            array_length.params[0].clone(),
+            (
+                "start".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "end".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 3,
+        ret: array_length.params[0].1.clone(),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.slice = (values, start, end) => values.slice(start, end);",
+            "slice",
+            false,
+            &array_slice,
+        ),
+        Some("expr:rn0,a1,a2,arrayslice".into())
+    );
+    let array_slice_all = thaw_bridge::DtsFunction {
+        params: vec![array_length.params[0].clone()],
+        required_params: 1,
+        ..array_slice.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.slice = values => values.slice();",
+            "slice",
+            false,
+            &array_slice_all,
+        ),
+        Some("expr:rn0,c0000000000000000,c7ff0000000000000,arrayslice".into())
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",

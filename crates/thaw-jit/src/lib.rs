@@ -38,6 +38,7 @@ pub type ArraySearch = unsafe extern "C" fn(u8, *const u8, f64, f64) -> f64;
 pub type ArrayFormat = unsafe extern "C" fn(u8, *const u8, *const c_char) -> *const c_char;
 pub type StringNormalize = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
 pub type StringSplit = unsafe extern "C" fn(*const c_char, *const c_char, f64) -> *mut u8;
+pub type ArraySlice = unsafe extern "C" fn(*const u8, usize, f64, f64) -> *mut u8;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -50,6 +51,7 @@ thread_local! {
     static ARRAY_FORMAT: Cell<Option<ArrayFormat>> = const { Cell::new(None) };
     static STRING_NORMALIZE: Cell<Option<StringNormalize>> = const { Cell::new(None) };
     static STRING_SPLIT: Cell<Option<StringSplit>> = const { Cell::new(None) };
+    static ARRAY_SLICE: Cell<Option<ArraySlice>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -370,6 +372,23 @@ fn array_format(operation: u8, value: f64, separator: f64) -> f64 {
             separator.to_bits() as usize as *const c_char,
         )
     };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        f64::from_bits(result as usize as u64)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_slice(value: f64, start: f64, end: f64) -> f64 {
+    let (Some(slice), Some((data, _))) =
+        (ARRAY_SLICE.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { slice(data, 8, start, end) };
     if result.is_null() {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
         0.0
@@ -1410,6 +1429,7 @@ enum NumericValue {
     NumberArrayJoin,
     BoolArrayJoin,
     StringArrayJoin,
+    ArraySlice,
     StringTruthy,
     StringPadEnd,
     StringPadStart,
@@ -1531,6 +1551,7 @@ impl NumericProgram {
                     "rnjoin" => Some(NumericValue::NumberArrayJoin),
                     "rbjoin" => Some(NumericValue::BoolArrayJoin),
                     "rsjoin" => Some(NumericValue::StringArrayJoin),
+                    "arrayslice" => Some(NumericValue::ArraySlice),
                     "strbool" => Some(NumericValue::StringTruthy),
                     "padend" => Some(NumericValue::StringPadEnd),
                     "padstart" => Some(NumericValue::StringPadStart),
@@ -1922,6 +1943,13 @@ impl NumericProgram {
                         return None;
                     }
                     emit_ternary_call(&mut code, string_split as *const () as u64, depth - 3);
+                    depth -= 2;
+                }
+                NumericValue::ArraySlice => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    emit_ternary_call(&mut code, array_slice as *const () as u64, depth - 3);
                     depth -= 2;
                 }
                 NumericValue::StringToLowerCase
@@ -2340,6 +2368,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     array_format: Option<ArrayFormat>,
     string_normalize: Option<StringNormalize>,
     string_split: Option<StringSplit>,
+    array_slice: Option<ArraySlice>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -2378,6 +2407,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_string_normalize =
         STRING_NORMALIZE.with(|normalize| normalize.replace(string_normalize));
     let previous_string_split = STRING_SPLIT.with(|split| split.replace(string_split));
+    let previous_array_slice = ARRAY_SLICE.with(|slice| slice.replace(array_slice));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let value = function(args);
@@ -2393,6 +2423,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     ARRAY_FORMAT.with(|format| format.set(previous_array_format));
     STRING_NORMALIZE.with(|normalize| normalize.set(previous_string_normalize));
     STRING_SPLIT.with(|split| split.set(previous_string_split));
+    ARRAY_SLICE.with(|slice| slice.set(previous_array_slice));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -2504,6 +2535,22 @@ mod tests {
             }
             output
         }
+        unsafe extern "C" fn slice_array(
+            array: *const u8,
+            element_width: usize,
+            start: f64,
+            end: f64,
+        ) -> *mut u8 {
+            assert!(!array.is_null());
+            assert_eq!(element_width, 8);
+            assert_eq!((start, end), (1.0, 2.0));
+            let output = unsafe { libc::malloc(16).cast::<u8>() };
+            unsafe {
+                output.cast::<u64>().write(1);
+                output.add(8).cast::<f64>().write(20.0);
+            }
+            output
+        }
         unsafe {
             thaw_jit_call_f64(
                 symbol.as_ptr(),
@@ -2519,6 +2566,7 @@ mod tests {
                 Some(format_array),
                 Some(normalize_string),
                 Some(split_string),
+                Some(slice_array),
             )
         }
     }
@@ -2944,6 +2992,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         assert!(!missing_allocator.error.is_null());
@@ -2979,6 +3028,22 @@ mod tests {
             unsafe { CStr::from_ptr(output.add(8).cast::<*const c_char>().read()) }.to_bytes(),
             b"a"
         );
+        unsafe { libc::free(output.cast()) };
+        let values = [
+            3_u64,
+            10.0f64.to_bits(),
+            20.0f64.to_bits(),
+            30.0f64.to_bits(),
+        ];
+        let data = values.as_ptr().cast::<u8>();
+        let handle = &data as *const *const u8;
+        let slice =
+            CString::new("expr:rn0,c3ff0000000000000,c4000000000000000,arrayslice:slice").unwrap();
+        let result = call(&slice, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = result.value.to_bits() as usize as *mut u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
         unsafe { libc::free(output.cast()) };
 
         for (expression, args, expected) in [

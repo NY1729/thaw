@@ -2009,6 +2009,8 @@ same typed string IR. Unicode `normalize(form?)` calls the native ICU-backed
 runtime directly through the JIT callback ABI and defaults to NFC without
 loading QuickJS. String-separator `split(separator, limit?)` reuses the native
 `string[]` builder and returns its result through the typed JIT array ABI.
+Primitive `number[]`, `string[]`, and `boolean[]` `slice(start?, end?)` calls
+reuse the native shallow-copy runtime through that same JIT array return ABI.
 `charAt(index?)` and `charCodeAt(index?)` also use that
 JIT path with UTF-16 code-unit indexing. `padStart(target, pad?)` and
 `padEnd(target, pad?)` use the same arena-backed JIT string return path.

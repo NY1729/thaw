@@ -473,7 +473,7 @@ fn jit_numeric_export(
         }
         matches!(
             property.sym.as_ref(),
-            "at" | "includes" | "indexOf" | "lastIndexOf" | "join" | "toString"
+            "at" | "includes" | "indexOf" | "lastIndexOf" | "join" | "toString" | "slice"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -908,6 +908,23 @@ fn jit_numeric_export(
                         _ => return None,
                     }
                     output.push(format!("{prefix}join"));
+                } else if method == "slice" {
+                    match call.args.as_slice() {
+                        [] => {
+                            output.push("c0000000000000000".into());
+                            output.push("c7ff0000000000000".into());
+                        }
+                        [start] => {
+                            encode_number(start.expr.as_ref(), parameters, locals, context, output)?;
+                            output.push("c7ff0000000000000".into());
+                        }
+                        [start, end] => {
+                            encode_number(start.expr.as_ref(), parameters, locals, context, output)?;
+                            encode_number(end.expr.as_ref(), parameters, locals, context, output)?;
+                        }
+                        _ => return None,
+                    }
+                    output.push("arrayslice".into());
                 } else if method == "at" {
                     match call.args.as_slice() {
                         [] => output.push(format!("c{:016x}", 0.0f64.to_bits())),
@@ -1923,9 +1940,10 @@ fn jit_numeric_export(
                     thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
                 )
             }
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => {
-                **element == thaw_hir::HirType::Str
-            }
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => matches!(
+                element.as_ref(),
+                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
+            ),
             _ => false,
         }
     {
@@ -2120,7 +2138,7 @@ fn jit_numeric_export(
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => JitKind::String,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => JitKind::Boolean,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-            if **element == thaw_hir::HirType::Str => JitKind::Array,
+            if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str) => JitKind::Array,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
             if **payload == thaw_hir::HirType::Str => JitKind::String,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
@@ -2365,6 +2383,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token == "arrayslice" {
+            if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Array
+            {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if matches!(token.as_str(), "isarray" | "isnotarray") {
             stack.pop()?;
             stack.push(JitKind::Boolean);
@@ -2533,11 +2559,12 @@ fn jit_numeric_declaration(
     let ret = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "string",
-        thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-            if **element == thaw_hir::HirType::Str =>
-        {
-            "string[]"
-        }
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => match element.as_ref() {
+            thaw_hir::HirType::F64 => "number[]",
+            thaw_hir::HirType::Bool => "boolean[]",
+            thaw_hir::HirType::Str => "string[]",
+            _ => "never[]",
+        },
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
             if **payload == thaw_hir::HirType::Str =>
         {
