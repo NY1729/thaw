@@ -48,6 +48,7 @@ pub type ArrayToSorted = unsafe extern "C" fn(u8, *const u8) -> *mut u8;
 pub type ArrayReverse = unsafe extern "C" fn(*mut u8, usize) -> *mut u8;
 pub type ArraySort = unsafe extern "C" fn(u8, *mut u8) -> *mut u8;
 pub type ArrayFill = unsafe extern "C" fn(u8, *mut u8, f64, f64, f64) -> *mut u8;
+pub type ArrayCopyWithin = unsafe extern "C" fn(*mut u8, usize, f64, f64, f64) -> *mut u8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 
 thread_local! {
@@ -69,6 +70,7 @@ thread_local! {
     static ARRAY_REVERSE: Cell<Option<ArrayReverse>> = const { Cell::new(None) };
     static ARRAY_SORT: Cell<Option<ArraySort>> = const { Cell::new(None) };
     static ARRAY_FILL: Cell<Option<ArrayFill>> = const { Cell::new(None) };
+    static ARRAY_COPY_WITHIN: Cell<Option<ArrayCopyWithin>> = const { Cell::new(None) };
     static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
@@ -598,6 +600,23 @@ macro_rules! array_fill_fn {
 array_fill_fn!(number_array_fill, 0);
 array_fill_fn!(string_array_fill, 1);
 array_fill_fn!(bool_array_fill, 2);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_copy_within(array: f64, target: f64, start: f64, end: f64) -> f64 {
+    let (Some(copy), Some((data, _))) = (ARRAY_COPY_WITHIN.with(Cell::get), unsafe {
+        array_data(array)
+    }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { copy(data.cast_mut(), 8, target, start, end) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        array_result(result)
+    }
+}
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_with(operation: u8, array: f64, index: f64, value: f64) -> f64 {
@@ -1677,6 +1696,7 @@ enum NumericValue {
     NumberArrayFill,
     StringArrayFill,
     BoolArrayFill,
+    ArrayCopyWithin,
     NumberArrayWith,
     StringArrayWith,
     BoolArrayWith,
@@ -1732,6 +1752,7 @@ impl NumericProgram {
                     | NumericValue::NumberArrayFill
                     | NumericValue::StringArrayFill
                     | NumericValue::BoolArrayFill
+                    | NumericValue::ArrayCopyWithin
                     | NumericValue::NumberArrayWith
                     | NumericValue::StringArrayWith
                     | NumericValue::BoolArrayWith
@@ -1845,6 +1866,7 @@ impl NumericProgram {
                     "rnfill" => Some(NumericValue::NumberArrayFill),
                     "rsfill" => Some(NumericValue::StringArrayFill),
                     "rbfill" => Some(NumericValue::BoolArrayFill),
+                    "arraycopywithin" => Some(NumericValue::ArrayCopyWithin),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -2325,6 +2347,17 @@ impl NumericProgram {
                     emit_quaternary_call(&mut code, function as *const () as u64, depth - 4);
                     depth -= 3;
                 }
+                NumericValue::ArrayCopyWithin => {
+                    if depth < 4 {
+                        return None;
+                    }
+                    emit_quaternary_call(
+                        &mut code,
+                        array_copy_within as *const () as u64,
+                        depth - 4,
+                    );
+                    depth -= 3;
+                }
                 NumericValue::NumberArrayWith
                 | NumericValue::StringArrayWith
                 | NumericValue::BoolArrayWith => {
@@ -2778,6 +2811,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     array_reverse: Option<ArrayReverse>,
     array_sort: Option<ArraySort>,
     array_fill: Option<ArrayFill>,
+    array_copy_within: Option<ArrayCopyWithin>,
     array_with: Option<ArrayWith>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
@@ -2826,6 +2860,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_array_reverse = ARRAY_REVERSE.with(|reverse| reverse.replace(array_reverse));
     let previous_array_sort = ARRAY_SORT.with(|sort| sort.replace(array_sort));
     let previous_array_fill = ARRAY_FILL.with(|fill| fill.replace(array_fill));
+    let previous_array_copy_within = ARRAY_COPY_WITHIN.with(|copy| copy.replace(array_copy_within));
     let previous_array_with = ARRAY_WITH.with(|replace| replace.replace(array_with));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
@@ -2853,6 +2888,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     ARRAY_REVERSE.with(|reverse| reverse.set(previous_array_reverse));
     ARRAY_SORT.with(|sort| sort.set(previous_array_sort));
     ARRAY_FILL.with(|fill| fill.set(previous_array_fill));
+    ARRAY_COPY_WITHIN.with(|copy| copy.set(previous_array_copy_within));
     ARRAY_WITH.with(|replace| replace.set(previous_array_with));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
@@ -3065,6 +3101,17 @@ mod tests {
             assert!(!array.is_null());
             array
         }
+        unsafe extern "C" fn copy_array_within(
+            array: *mut u8,
+            element_width: usize,
+            target: f64,
+            start: f64,
+            end: f64,
+        ) -> *mut u8 {
+            assert_eq!((element_width, target, start, end), (8, 0.0, 1.0, 2.0));
+            assert!(!array.is_null());
+            array
+        }
         unsafe extern "C" fn replace_array(
             operation: u8,
             array: *const u8,
@@ -3105,6 +3152,7 @@ mod tests {
                 Some(reverse_array_in_place),
                 Some(sort_array_in_place),
                 Some(fill_array_in_place),
+                Some(copy_array_within),
                 Some(replace_array),
             )
         }
@@ -3521,6 +3569,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,

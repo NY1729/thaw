@@ -2015,7 +2015,8 @@ their non-mutating `toReversed()` copies and default `toSorted()` ordering use
 it as well. Their destructive `reverse()` and default `sort()` counterparts
 mutate the caller's native storage and return it through the same JIT path.
 Typed `fill(value, start?, end?)` performs the same in-place update with native
-relative-index clamping.
+relative-index clamping. `copyWithin(target, start, end?)` also stays on that
+path and uses the native overlap-safe slot copy.
 `concat(...)` accepts zero or more arrays and scalar values of the
 same primitive element type, chaining native shallow allocations while keeping
 intermediate arrays inside the JIT. Primitive-array `with(index, value)` performs the same native
