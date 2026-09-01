@@ -1351,13 +1351,16 @@ fn jit_numeric_export(
                         return None;
                     };
                     if prefix != "rn" {
-                        return None;
-                    }
-                    if let Some(operation) = numeric_unary_map(
-                        callback.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
+                        let operation = primitive_unary_map(
+                            callback.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            prefix == "rb",
+                        )?;
+                        output.push(format!("{prefix}map{operation}"));
+                    } else if let Some(operation) = numeric_unary_map(
+                        callback.expr.as_ref(), parameters, locals, context,
                     ) {
                         output.push(format!("rnmap{operation}"));
                     } else {
@@ -2961,6 +2964,42 @@ fn jit_numeric_export(
         .then_some(operation)
     }
 
+    fn primitive_unary_map(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &InlineContext<'_>,
+        boolean: bool,
+    ) -> Option<&'static str> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(value)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        if matches!(expression, Expr::Ident(identifier) if identifier.sym == value.id.sym) {
+            return Some("identity");
+        }
+        (boolean
+            && matches!(expression, Expr::Unary(unary)
+                if unary.op == UnaryOp::Bang
+                    && matches!(unary.arg.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym)))
+        .then_some("not")
+    }
+
     fn encode_helper_call(
         call: &CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -3761,6 +3800,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(result);
+        } else if matches!(token.as_str(), "rsmapidentity" | "rbmapidentity" | "rbmapnot") {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if token
             .strip_prefix("rnreduce")
             .is_some_and(|operation| {
