@@ -513,6 +513,68 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let string_array =
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str)));
+    let string_filter = thaw_bridge::DtsFunction {
+        params: vec![("values".into(), string_array.clone())],
+        required_params: 1,
+        ret: string_array,
+        ..filter.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.filter(Boolean);",
+            "add",
+            false,
+            &string_filter,
+        ),
+        Some("expr:rs0,rsfiltertruthy,arrayvalue".into())
+    );
+    let string_finder = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::Str,
+        ))),
+        ..string_filter.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.find(value => value);",
+            "add",
+            false,
+            &string_finder,
+        ),
+        Some("expr:rs0,rsfindtruthy".into())
+    );
+    let bool_array =
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Bool)));
+    let bool_quantifier = thaw_bridge::DtsFunction {
+        params: vec![("values".into(), bool_array.clone())],
+        required_params: 1,
+        ..unary_quantifier.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.some(Boolean);",
+            "add",
+            false,
+            &bool_quantifier,
+        ),
+        Some("expr:rb0,rbsometruthy".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.find(Boolean);",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                    thaw_hir::HirType::Bool,
+                ))),
+                ..bool_quantifier.clone()
+            },
+        ),
+        Some("expr:rb0,rbfindtruthy".into())
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = (values, factor) => values.map(value => value * factor);",
