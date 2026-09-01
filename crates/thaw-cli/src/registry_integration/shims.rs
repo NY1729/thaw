@@ -1366,6 +1366,14 @@ fn jit_numeric_export(
                             prefix == "rb",
                         )?;
                         output.push(format!("{prefix}map{operation}"));
+                    } else if let Some((operation, mode)) = encode_numeric_select_map(
+                        callback.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        output,
+                    ) {
+                        output.push(format!("rnmapselect{operation}{mode}"));
                     } else if let Some(operation) = numeric_unary_map(
                         callback.expr.as_ref(), parameters, locals, context,
                     ) {
@@ -2937,6 +2945,96 @@ fn jit_numeric_export(
         Some((operation, reverse))
     }
 
+    fn encode_numeric_select_map(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<(&'static str, u8)> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(value)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        let Expr::Cond(conditional) = expression else {
+            return None;
+        };
+        let Expr::Bin(comparison) = conditional.test.as_ref() else {
+            return None;
+        };
+        let (operand, reverse) = if matches!(comparison.left.as_ref(), Expr::Ident(left) if left.sym == value.id.sym)
+        {
+            (comparison.right.as_ref(), false)
+        } else if matches!(comparison.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
+        {
+            (comparison.left.as_ref(), true)
+        } else {
+            return None;
+        };
+        let operation = match comparison.op {
+            BinaryOp::Lt => "lt",
+            BinaryOp::LtEq => "lte",
+            BinaryOp::Gt => "gt",
+            BinaryOp::GtEq => "gte",
+            BinaryOp::EqEq | BinaryOp::EqEqEq => "eq",
+            BinaryOp::NotEq | BinaryOp::NotEqEq => "ne",
+            _ => return None,
+        };
+        let mut encoded = Vec::new();
+        encode_expression(
+            operand,
+            outer_parameters,
+            outer_locals,
+            context,
+            &mut encoded,
+        )?;
+        if jit_expression_kind(&encoded)?.0 != JitKind::Number
+            || encoded
+                .iter()
+                .any(|token| matches!(token.as_str(), "random" | "datenow" | "performancenow"))
+        {
+            return None;
+        }
+        let branch_is_value = |branch: &Expr, context: &mut InlineContext<'_>| {
+            if matches!(branch, Expr::Ident(identifier) if identifier.sym == value.id.sym) {
+                return Some(true);
+            }
+            let mut branch_encoded = Vec::new();
+            encode_expression(
+                branch,
+                outer_parameters,
+                outer_locals,
+                context,
+                &mut branch_encoded,
+            )?;
+            (branch_encoded == encoded).then_some(false)
+        };
+        let true_is_value = branch_is_value(conditional.cons.as_ref(), context)?;
+        if branch_is_value(conditional.alt.as_ref(), context)? == true_is_value {
+            return None;
+        }
+        output.extend(encoded);
+        Some((
+            operation,
+            u8::from(reverse) | if true_is_value { 0 } else { 2 },
+        ))
+    }
+
     fn numeric_index_map(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
@@ -3991,6 +4089,20 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token
+            .strip_prefix("rnmapselect")
+            .is_some_and(|encoded| {
+                encoded
+                    .strip_suffix(['0', '1', '2', '3'])
+                    .is_some_and(|operation| {
+                        matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne")
+                    })
+            })
+        {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if token
             .strip_prefix("rnmapindex")
             .is_some_and(|operation| {
