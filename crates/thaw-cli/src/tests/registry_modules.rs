@@ -144,18 +144,18 @@ fn fixed_aggregate_results_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Meta { doubled: number; first: string; }\nexport interface Result { total: number; ok: boolean; label: string; numbers: number[]; meta: Meta; }\nexport interface Echo { value: number; name: string; values: number[]; }\nexport declare function build(value: number, name: string, values: number[]): Result;\nexport declare function echo(value: number, name: string, values: number[]): Echo;\nexport declare function tuple(value: number, name: string, values: number[]): [number, string, boolean, number[], { label: string; pair: [number, number[]] }];\n",
+        "export interface Meta { doubled: number; first: string; }\nexport interface Result { total: number; ok: boolean; label: string; numbers: number[]; meta: Meta; }\nexport interface Echo { value: number; name: string; values: number[]; }\nexport declare function build(value: number, name: string, values: number[]): Result;\nexport declare function echo(value: number, name: string, values: number[]): Echo;\nexport declare function tuple(value: number, name: string, values: number[]): [number, string, boolean, number[], { label: string; pair: [number, number[]] }];\nexport declare function summarizeTuple(input: [number, string, boolean, number[], { scale: number }, [boolean, string[]]]): string;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.build = (value, name, values) => ({ total: value + values[0], ok: name.length > 0, label: name.toUpperCase(), numbers: values.map(item => item + value), meta: { doubled: value * 2, first: name.charAt(0) } }); module.exports.echo = (value, name, values) => ({ values, name, value }); module.exports.tuple = (value, name, values) => [value + 2, name.toUpperCase(), name.length > 0, values.map(item => item + value), { label: name, pair: [value * 2, values] }];\n",
+        "module.exports.build = (value, name, values) => ({ total: value + values[0], ok: name.length > 0, label: name.toUpperCase(), numbers: values.map(item => item + value), meta: { doubled: value * 2, first: name.charAt(0) } }); module.exports.echo = (value, name, values) => ({ values, name, value }); module.exports.tuple = (value, name, values) => [value + 2, name.toUpperCase(), name.length > 0, values.map(item => item + value), { label: name, pair: [value * 2, values] }]; module.exports.summarizeTuple = input => input[2] && input[5][0] ? input[1] + ':' + (input[0] + input[3][0] + input[4].scale) + ':' + input[5][1][0] : 'disabled';\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { build, echo, tuple } from 'jit-object-results';\nfunction main(): void { const result = build(40, 'thaw', [2, 3]); console.log(result.total); console.log(result.ok); console.log(result.label); console.log(result.numbers.join('|')); console.log(result.meta.doubled); console.log(result.meta.first); const copy = echo(7, 'ok', [8, 9]); console.log(copy.value + ':' + copy.name + ':' + copy.values.join('|')); const values = tuple(5, 'hi', [1, 2]); console.log(values[0] + ':' + values[1] + ':' + values[2] + ':' + values[3].join('|')); console.log(values[4].label + ':' + values[4].pair[0] + ':' + values[4].pair[1].join('|')); }\n",
+        "import { build, echo, tuple, summarizeTuple } from 'jit-object-results';\nfunction main(): void { const result = build(40, 'thaw', [2, 3]); console.log(result.total); console.log(result.ok); console.log(result.label); console.log(result.numbers.join('|')); console.log(result.meta.doubled); console.log(result.meta.first); const copy = echo(7, 'ok', [8, 9]); console.log(copy.value + ':' + copy.name + ':' + copy.values.join('|')); const values = tuple(5, 'hi', [1, 2]); console.log(values[0] + ':' + values[1] + ':' + values[2] + ':' + values[3].join('|')); console.log(values[4].label + ':' + values[4].pair[0] + ':' + values[4].pair[1].join('|')); console.log(summarizeTuple([39, 'ok', true, [1], { scale: 2 }, [true, ['done']]])); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -171,7 +171,7 @@ fn fixed_aggregate_results_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\ntrue\nTHAW\n42|43\n80\nt\n7:ok:8|9\n7:HI:true:6|7\nhi:10:1|2\n"
+        "42\ntrue\nTHAW\n42|43\n80\nt\n7:ok:8|9\n7:HI:true:6|7\nhi:10:1|2\nok:42:done\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

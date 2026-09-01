@@ -2205,12 +2205,13 @@ back to the native boolean representation. Boolean literals and logical
 negation use the same IR, including ECMAScript's falsey `NaN` behavior.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
-Fixed-shape object parameters whose leaves are number, boolean, string, or
-primitive arrays can now enter extracted JIT exports as well, including nested
-objects. LLVM recursively expands the native object layout directly into typed
-JIT argument slots, so property reads, array indexing and composed expressions
-avoid JSON conversion and QuickJS; the total expanded signature is currently
-limited to the same 16-slot callback ABI.
+Fixed-shape object and tuple parameters whose leaves are number, boolean,
+string, or primitive arrays can now enter extracted JIT exports as well,
+including mutually nested objects and tuples. LLVM recursively expands the
+native aggregate layout directly into typed JIT argument slots, so property
+reads, tuple and array indexing, and composed expressions avoid JSON conversion
+and QuickJS; the total expanded signature is currently limited to the same
+16-slot callback ABI.
 Fixed-shape object and tuple results with the same recursively representable
 leaves are also assembled by an AOT wrapper from specialized JIT leaf
 expressions. Object literal source order, shorthand fields, nested objects and

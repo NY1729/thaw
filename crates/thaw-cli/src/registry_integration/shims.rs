@@ -82,8 +82,14 @@ fn jit_export(
             thaw_hir::HirType::Object(fields) => fields.iter().try_fold(0usize, |slots, (_, ty)| {
                 jit_parameter_slots(ty).map(|count| slots + count)
             }),
+            thaw_hir::HirType::Tuple(elements) => elements.iter().try_fold(0usize, |slots, ty| {
+                jit_parameter_slots(ty).map(|count| slots + count)
+            }),
             thaw_hir::HirType::Optional(payload)
-                if !matches!(payload.as_ref(), thaw_hir::HirType::Object(_)) =>
+                if !matches!(
+                    payload.as_ref(),
+                    thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
+                ) =>
             {
                 jit_parameter_slots(payload).map(|_| 2)
             }
@@ -106,7 +112,7 @@ fn jit_export(
         }
     }
 
-    fn bind_jit_object_fields(
+    fn bind_jit_aggregate_fields(
         path: &str,
         ty: &thaw_hir::HirType,
         parameters: &mut std::collections::HashMap<String, String>,
@@ -124,9 +130,20 @@ fn jit_export(
             },
             thaw_hir::HirType::Object(fields) => {
                 for (field, field_type) in fields {
-                    bind_jit_object_fields(
+                    bind_jit_aggregate_fields(
                         &format!("{path}.{field}"),
                         field_type,
+                        parameters,
+                        slot,
+                    )?;
+                }
+                return Some(());
+            }
+            thaw_hir::HirType::Tuple(elements) => {
+                for (index, element) in elements.iter().enumerate() {
+                    bind_jit_aggregate_fields(
+                        &format!("{path}.{index}"),
+                        element,
                         parameters,
                         slot,
                     )?;
@@ -144,10 +161,20 @@ fn jit_export(
         match expression {
             Expr::Ident(identifier) => Some(identifier.sym.to_string()),
             Expr::Member(member) => {
-                let MemberProp::Ident(property) = &member.prop else {
-                    return None;
+                let property = match &member.prop {
+                    MemberProp::Ident(property) => property.sym.to_string(),
+                    MemberProp::Computed(computed) => {
+                        let Expr::Lit(Lit::Num(index)) = computed.expr.as_ref() else {
+                            return None;
+                        };
+                        if index.value < 0.0 || index.value.fract() != 0.0 {
+                            return None;
+                        }
+                        (index.value as usize).to_string()
+                    }
+                    _ => return None,
                 };
-                Some(format!("{}.{}", member_path(member.obj.as_ref())?, property.sym))
+                Some(format!("{}.{}", member_path(member.obj.as_ref())?, property))
             }
             _ => None,
         }
@@ -4257,11 +4284,14 @@ fn jit_export(
             ty => (*ty, false),
         };
         let optional = *optional_parameter || optional_type;
-        if matches!(ty, thaw_hir::HirType::Object(_)) {
+        if matches!(
+            ty,
+            thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
+        ) {
             if optional || default.is_some() {
                 return None;
             }
-            bind_jit_object_fields(parameter, ty, &mut parameters, &mut slot)?;
+            bind_jit_aggregate_fields(parameter, ty, &mut parameters, &mut slot)?;
             continue;
         }
         let prefix = match ty {
