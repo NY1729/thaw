@@ -2081,7 +2081,9 @@ number, string, and boolean elements plus same-typed array spreads reuse the
 existing append/concat callbacks, and empty typed return arrays stay on the
 QuickJS-free path. `Array.of(...)` uses the same construction path, while
 `Array.from(array)` makes a native shallow copy for all three primitive array
-types without loading QuickJS.
+types without loading QuickJS. `Array.from(string)` reuses the native string
+iterator conversion, preserving Unicode code points such as astral characters
+as one `string[]` element instead of splitting their UTF-16 surrogate pair.
 Statically typed `Array.isArray` calls also stay in that IR: array arguments
 produce `true`, supported primitive arguments produce `false`, and the argument
 expression is still evaluated before the typed result is returned.
