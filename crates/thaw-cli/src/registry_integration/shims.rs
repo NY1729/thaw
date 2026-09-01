@@ -480,6 +480,7 @@ fn jit_numeric_export(
                 | "join"
                 | "toString"
                 | "slice"
+                | "concat"
                 | "toReversed"
                 | "toSorted"
                 | "with"
@@ -917,6 +918,23 @@ fn jit_numeric_export(
                         _ => return None,
                     }
                     output.push(format!("{prefix}join"));
+                } else if method == "concat" {
+                    let [argument] = call.args.as_slice() else {
+                        return None;
+                    };
+                    let mut encoded_argument = Vec::new();
+                    encode_expression(
+                        argument.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut encoded_argument,
+                    )?;
+                    if array_prefix(&encoded_argument)? != prefix {
+                        return None;
+                    }
+                    output.extend(encoded_argument);
+                    output.push("arrayconcat".into());
                 } else if method == "toReversed" {
                     if !call.args.is_empty() {
                         return None;
@@ -2440,6 +2458,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 || stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Array
             {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if token == "arrayconcat" {
+            if stack.pop()? != JitKind::Array || stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(JitKind::Array);

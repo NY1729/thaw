@@ -40,6 +40,7 @@ pub type ArrayFormat = unsafe extern "C" fn(u8, *const u8, *const c_char) -> *co
 pub type StringNormalize = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
 pub type StringSplit = unsafe extern "C" fn(*const c_char, *const c_char, f64) -> *mut u8;
 pub type ArraySlice = unsafe extern "C" fn(*const u8, usize, f64, f64) -> *mut u8;
+pub type ArrayConcat = unsafe extern "C" fn(*const u8, *const u8, usize) -> *mut u8;
 pub type ArrayToReversed = unsafe extern "C" fn(*const u8, usize) -> *mut u8;
 pub type ArrayToSorted = unsafe extern "C" fn(u8, *const u8) -> *mut u8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
@@ -56,6 +57,7 @@ thread_local! {
     static STRING_NORMALIZE: Cell<Option<StringNormalize>> = const { Cell::new(None) };
     static STRING_SPLIT: Cell<Option<StringSplit>> = const { Cell::new(None) };
     static ARRAY_SLICE: Cell<Option<ArraySlice>> = const { Cell::new(None) };
+    static ARRAY_CONCAT: Cell<Option<ArrayConcat>> = const { Cell::new(None) };
     static ARRAY_TO_REVERSED: Cell<Option<ArrayToReversed>> = const { Cell::new(None) };
     static ARRAY_TO_SORTED: Cell<Option<ArrayToSorted>> = const { Cell::new(None) };
     static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
@@ -396,6 +398,25 @@ extern "C" fn array_slice(value: f64, start: f64, end: f64) -> f64 {
         return 0.0;
     };
     let result = unsafe { slice(data, 8, start, end) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        f64::from_bits(result as usize as u64)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_concat(left: f64, right: f64) -> f64 {
+    let (Some(concat), Some((left, _)), Some((right, _))) = (
+        ARRAY_CONCAT.with(Cell::get),
+        unsafe { array_data(left) },
+        unsafe { array_data(right) },
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { concat(left, right, 8) };
     if result.is_null() {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
         0.0
@@ -1516,6 +1537,7 @@ enum NumericValue {
     BoolArrayJoin,
     StringArrayJoin,
     ArraySlice,
+    ArrayConcat,
     ArrayToReversed,
     NumberArrayToSorted,
     StringArrayToSorted,
@@ -1645,6 +1667,7 @@ impl NumericProgram {
                     "rbjoin" => Some(NumericValue::BoolArrayJoin),
                     "rsjoin" => Some(NumericValue::StringArrayJoin),
                     "arrayslice" => Some(NumericValue::ArraySlice),
+                    "arrayconcat" => Some(NumericValue::ArrayConcat),
                     "arrayreversed" => Some(NumericValue::ArrayToReversed),
                     "rnsorted" => Some(NumericValue::NumberArrayToSorted),
                     "rssorted" => Some(NumericValue::StringArrayToSorted),
@@ -2051,6 +2074,13 @@ impl NumericProgram {
                     }
                     emit_ternary_call(&mut code, array_slice as *const () as u64, depth - 3);
                     depth -= 2;
+                }
+                NumericValue::ArrayConcat => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(&mut code, array_concat as *const () as u64, depth - 2);
+                    depth -= 1;
                 }
                 NumericValue::ArrayToReversed => {
                     if depth == 0 {
@@ -2504,6 +2534,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     string_normalize: Option<StringNormalize>,
     string_split: Option<StringSplit>,
     array_slice: Option<ArraySlice>,
+    array_concat: Option<ArrayConcat>,
     array_to_reversed: Option<ArrayToReversed>,
     array_to_sorted: Option<ArrayToSorted>,
     array_with: Option<ArrayWith>,
@@ -2546,6 +2577,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
         STRING_NORMALIZE.with(|normalize| normalize.replace(string_normalize));
     let previous_string_split = STRING_SPLIT.with(|split| split.replace(string_split));
     let previous_array_slice = ARRAY_SLICE.with(|slice| slice.replace(array_slice));
+    let previous_array_concat = ARRAY_CONCAT.with(|concat| concat.replace(array_concat));
     let previous_array_to_reversed =
         ARRAY_TO_REVERSED.with(|reverse| reverse.replace(array_to_reversed));
     let previous_array_to_sorted = ARRAY_TO_SORTED.with(|sort| sort.replace(array_to_sorted));
@@ -2566,6 +2598,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     STRING_NORMALIZE.with(|normalize| normalize.set(previous_string_normalize));
     STRING_SPLIT.with(|split| split.set(previous_string_split));
     ARRAY_SLICE.with(|slice| slice.set(previous_array_slice));
+    ARRAY_CONCAT.with(|concat| concat.set(previous_array_concat));
     ARRAY_TO_REVERSED.with(|reverse| reverse.set(previous_array_to_reversed));
     ARRAY_TO_SORTED.with(|sort| sort.set(previous_array_to_sorted));
     ARRAY_WITH.with(|replace| replace.set(previous_array_with));
@@ -2708,6 +2741,27 @@ mod tests {
             }
             output
         }
+        unsafe extern "C" fn concatenate_arrays(
+            left: *const u8,
+            right: *const u8,
+            element_width: usize,
+        ) -> *mut u8 {
+            assert!(!left.is_null() && !right.is_null());
+            assert_eq!(element_width, 8);
+            let left_len = unsafe { left.cast::<u64>().read() } as usize;
+            let right_len = unsafe { right.cast::<u64>().read() } as usize;
+            let output = unsafe { libc::malloc(8 + (left_len + right_len) * 8).cast::<u8>() };
+            unsafe {
+                output.cast::<u64>().write((left_len + right_len) as u64);
+                std::ptr::copy_nonoverlapping(left.add(8), output.add(8), left_len * 8);
+                std::ptr::copy_nonoverlapping(
+                    right.add(8),
+                    output.add(8 + left_len * 8),
+                    right_len * 8,
+                );
+            }
+            output
+        }
         unsafe extern "C" fn sort_array(operation: u8, array: *const u8) -> *mut u8 {
             assert_eq!(operation, 0);
             assert!(!array.is_null());
@@ -2753,6 +2807,7 @@ mod tests {
                 Some(normalize_string),
                 Some(split_string),
                 Some(slice_array),
+                Some(concatenate_arrays),
                 Some(reverse_array),
                 Some(sort_array),
                 Some(replace_array),
@@ -3171,6 +3226,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,
