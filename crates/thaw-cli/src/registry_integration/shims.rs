@@ -613,6 +613,7 @@ fn jit_numeric_export(
                 | "toSpliced"
                 | "with"
                 | "reduce"
+                | "reduceRight"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -1272,7 +1273,7 @@ fn jit_numeric_export(
                 let prefix = array_prefix(&encoded)?;
                 let encoded_receiver = encoded.clone();
                 output.extend(encoded);
-                if method == "reduce" {
+                if matches!(method, "reduce" | "reduceRight") {
                     let (callback, initial) = match call.args.as_slice() {
                         [callback] => (callback, None),
                         [callback, initial] => (callback, Some(initial)),
@@ -1294,7 +1295,8 @@ fn jit_numeric_export(
                         output.push("c0000000000000000".into());
                     }
                     output.push(format!(
-                        "rnreduce{operation}{}",
+                        "rnreduce{}{operation}{}",
+                        if method == "reduceRight" { "right" } else { "" },
                         if initial.is_some() { "" } else { "0" }
                     ));
                 } else if matches!(method, "join" | "toString") {
@@ -3241,6 +3243,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if token
             .strip_prefix("rnreduce")
             .is_some_and(|operation| {
+                let operation = operation.strip_prefix("right").unwrap_or(operation);
                 matches!(
                     operation.strip_suffix('0').unwrap_or(operation),
                     "add" | "sub" | "mul" | "div" | "rem" | "pow"

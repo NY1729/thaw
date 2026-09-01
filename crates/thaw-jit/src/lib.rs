@@ -192,12 +192,32 @@ extern "C" fn array_hypot(value: f64) -> f64 {
 fn number_array_reduce(
     value: f64,
     initial: Option<f64>,
+    from_right: bool,
     operation: impl Fn(f64, f64) -> f64,
 ) -> f64 {
     let Some((array, length)) = (unsafe { array_data(value) }) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     };
+    if from_right {
+        let (mut accumulator, end) = match initial {
+            Some(initial) => (initial, length),
+            None if length != 0 => (
+                unsafe { array.add(8 + (length - 1) * 8).cast::<f64>().read() },
+                length - 1,
+            ),
+            None => {
+                CALL_ERROR.with(|error| error.set(EMPTY_REDUCE.as_ptr().cast()));
+                return 0.0;
+            }
+        };
+        for index in (0..end).rev() {
+            accumulator = operation(accumulator, unsafe {
+                array.add(8 + index * 8).cast::<f64>().read()
+            });
+        }
+        return accumulator;
+    }
     let (mut accumulator, start) = match initial {
         Some(initial) => (initial, 0),
         None if length != 0 => (unsafe { array.add(8).cast::<f64>().read() }, 1),
@@ -215,64 +235,71 @@ fn number_array_reduce(
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_add(value: f64, accumulator: f64) -> f64 {
-    number_array_reduce(value, Some(accumulator), |left, right| left + right)
+macro_rules! number_array_reducers {
+    ($forward:ident, $first:ident, $reverse:ident, $last:ident, $operation:expr) => {
+        extern "C" fn $forward(value: f64, accumulator: f64) -> f64 {
+            number_array_reduce(value, Some(accumulator), false, $operation)
+        }
+        extern "C" fn $first(value: f64, _unused: f64) -> f64 {
+            number_array_reduce(value, None, false, $operation)
+        }
+        extern "C" fn $reverse(value: f64, accumulator: f64) -> f64 {
+            number_array_reduce(value, Some(accumulator), true, $operation)
+        }
+        extern "C" fn $last(value: f64, _unused: f64) -> f64 {
+            number_array_reduce(value, None, true, $operation)
+        }
+    };
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_subtract(value: f64, accumulator: f64) -> f64 {
-    number_array_reduce(value, Some(accumulator), |left, right| left - right)
-}
-
+number_array_reducers!(
+    number_array_reduce_add,
+    number_array_reduce_add_first,
+    number_array_reduce_add_right,
+    number_array_reduce_add_last,
+    |left, right| left + right
+);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_multiply(value: f64, accumulator: f64) -> f64 {
-    number_array_reduce(value, Some(accumulator), |left, right| left * right)
-}
-
+number_array_reducers!(
+    number_array_reduce_subtract,
+    number_array_reduce_subtract_first,
+    number_array_reduce_subtract_right,
+    number_array_reduce_subtract_last,
+    |left, right| left - right
+);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_divide(value: f64, accumulator: f64) -> f64 {
-    number_array_reduce(value, Some(accumulator), |left, right| left / right)
-}
-
+number_array_reducers!(
+    number_array_reduce_multiply,
+    number_array_reduce_multiply_first,
+    number_array_reduce_multiply_right,
+    number_array_reduce_multiply_last,
+    |left, right| left * right
+);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_remainder(value: f64, accumulator: f64) -> f64 {
-    number_array_reduce(value, Some(accumulator), |left, right| left % right)
-}
-
+number_array_reducers!(
+    number_array_reduce_divide,
+    number_array_reduce_divide_first,
+    number_array_reduce_divide_right,
+    number_array_reduce_divide_last,
+    |left, right| left / right
+);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_power(value: f64, accumulator: f64) -> f64 {
-    number_array_reduce(value, Some(accumulator), |left, right| power(left, right))
-}
-
+number_array_reducers!(
+    number_array_reduce_remainder,
+    number_array_reduce_remainder_first,
+    number_array_reduce_remainder_right,
+    number_array_reduce_remainder_last,
+    |left, right| left % right
+);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_add_first(value: f64, _unused: f64) -> f64 {
-    number_array_reduce(value, None, |left, right| left + right)
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_subtract_first(value: f64, _unused: f64) -> f64 {
-    number_array_reduce(value, None, |left, right| left - right)
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_multiply_first(value: f64, _unused: f64) -> f64 {
-    number_array_reduce(value, None, |left, right| left * right)
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_divide_first(value: f64, _unused: f64) -> f64 {
-    number_array_reduce(value, None, |left, right| left / right)
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_remainder_first(value: f64, _unused: f64) -> f64 {
-    number_array_reduce(value, None, |left, right| left % right)
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_power_first(value: f64, _unused: f64) -> f64 {
-    number_array_reduce(value, None, |left, right| power(left, right))
-}
+number_array_reducers!(
+    number_array_reduce_power,
+    number_array_reduce_power_first,
+    number_array_reduce_power_right,
+    number_array_reduce_power_last,
+    |left, right| power(left, right)
+);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
@@ -2176,7 +2203,7 @@ enum NumericValue {
     NumberArrayMin,
     NumberArrayMax,
     NumberArrayHypot,
-    NumberArrayReduce(NumericReduceOp, bool),
+    NumberArrayReduce(NumericReduceOp, bool, bool),
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2463,11 +2490,14 @@ impl NumericProgram {
                     value => value
                         .strip_prefix("rnreduce")
                         .and_then(|operation| {
+                            let (operation, from_right) = operation
+                                .strip_prefix("right")
+                                .map_or((operation, false), |operation| (operation, true));
                             let (operation, has_initial) = operation
                                 .strip_suffix('0')
                                 .map_or((operation, true), |operation| (operation, false));
                             NumericReduceOp::parse(operation).map(|operation| {
-                                NumericValue::NumberArrayReduce(operation, has_initial)
+                                NumericValue::NumberArrayReduce(operation, has_initial, from_right)
                             })
                         })
                         .or_else(|| {
@@ -2846,24 +2876,50 @@ impl NumericProgram {
                     }
                     emit_unary_call(&mut code, array_hypot as *const () as u64, depth - 1);
                 }
-                NumericValue::NumberArrayReduce(operation, has_initial) => {
+                NumericValue::NumberArrayReduce(operation, has_initial, from_right) => {
                     if depth < 2 {
                         return None;
                     }
-                    let function: extern "C" fn(f64, f64) -> f64 = match (operation, has_initial) {
-                        (NumericReduceOp::Add, true) => number_array_reduce_add,
-                        (NumericReduceOp::Subtract, true) => number_array_reduce_subtract,
-                        (NumericReduceOp::Multiply, true) => number_array_reduce_multiply,
-                        (NumericReduceOp::Divide, true) => number_array_reduce_divide,
-                        (NumericReduceOp::Remainder, true) => number_array_reduce_remainder,
-                        (NumericReduceOp::Power, true) => number_array_reduce_power,
-                        (NumericReduceOp::Add, false) => number_array_reduce_add_first,
-                        (NumericReduceOp::Subtract, false) => number_array_reduce_subtract_first,
-                        (NumericReduceOp::Multiply, false) => number_array_reduce_multiply_first,
-                        (NumericReduceOp::Divide, false) => number_array_reduce_divide_first,
-                        (NumericReduceOp::Remainder, false) => number_array_reduce_remainder_first,
-                        (NumericReduceOp::Power, false) => number_array_reduce_power_first,
+                    type ReduceFn = extern "C" fn(f64, f64) -> f64;
+                    let functions: [ReduceFn; 4] = match operation {
+                        NumericReduceOp::Add => [
+                            number_array_reduce_add,
+                            number_array_reduce_add_first,
+                            number_array_reduce_add_right,
+                            number_array_reduce_add_last,
+                        ],
+                        NumericReduceOp::Subtract => [
+                            number_array_reduce_subtract,
+                            number_array_reduce_subtract_first,
+                            number_array_reduce_subtract_right,
+                            number_array_reduce_subtract_last,
+                        ],
+                        NumericReduceOp::Multiply => [
+                            number_array_reduce_multiply,
+                            number_array_reduce_multiply_first,
+                            number_array_reduce_multiply_right,
+                            number_array_reduce_multiply_last,
+                        ],
+                        NumericReduceOp::Divide => [
+                            number_array_reduce_divide,
+                            number_array_reduce_divide_first,
+                            number_array_reduce_divide_right,
+                            number_array_reduce_divide_last,
+                        ],
+                        NumericReduceOp::Remainder => [
+                            number_array_reduce_remainder,
+                            number_array_reduce_remainder_first,
+                            number_array_reduce_remainder_right,
+                            number_array_reduce_remainder_last,
+                        ],
+                        NumericReduceOp::Power => [
+                            number_array_reduce_power,
+                            number_array_reduce_power_first,
+                            number_array_reduce_power_right,
+                            number_array_reduce_power_last,
+                        ],
                     };
+                    let function = functions[*from_right as usize * 2 + usize::from(!*has_initial)];
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
@@ -4590,18 +4646,46 @@ mod tests {
                 call(&reduce, &[f64::from_bits(handle as usize as u64)]).value,
                 first_expected
             );
+            let (right_expected, last_expected) = match operation {
+                "add" => (68.0, 60.0),
+                "sub" => (-52.0, 0.0),
+                "mul" => (48_000.0, 6_000.0),
+                "div" => (8.0 / 30.0 / 20.0 / 10.0, 30.0 / 20.0 / 10.0),
+                "rem" => (8.0, 0.0),
+                "pow" => (f64::INFINITY, power(power(30.0, 20.0), 10.0)),
+                _ => unreachable!(),
+            };
+            for (suffix, expected) in [("", right_expected), ("0", last_expected)] {
+                let initial = if suffix.is_empty() {
+                    "c4020000000000000"
+                } else {
+                    "c0000000000000000"
+                };
+                let reduce = CString::new(format!(
+                    "expr:rn0,{initial},rnreduceright{operation}{suffix}:array-reduce-right"
+                ))
+                .unwrap();
+                assert_eq!(
+                    call(&reduce, &[f64::from_bits(handle as usize as u64)]).value,
+                    expected
+                );
+            }
         }
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();
         let empty_handle = &empty_data as *const *const u8;
-        let empty_reduce =
-            CString::new("expr:rn0,c0000000000000000,rnreduceadd0:empty-array-reduce").unwrap();
-        assert!(!call(
-            &empty_reduce,
-            &[f64::from_bits(empty_handle as usize as u64)]
-        )
-        .error
-        .is_null());
+        for operation in ["rnreduceadd0", "rnreducerightadd0"] {
+            let empty_reduce = CString::new(format!(
+                "expr:rn0,c0000000000000000,{operation}:empty-array-reduce"
+            ))
+            .unwrap();
+            assert!(!call(
+                &empty_reduce,
+                &[f64::from_bits(empty_handle as usize as u64)]
+            )
+            .error
+            .is_null());
+        }
         for (operation, expected) in [("rnmin", f64::INFINITY), ("rnmax", f64::NEG_INFINITY)] {
             let symbol = CString::new(format!("expr:rn0,{operation}:empty-extreme")).unwrap();
             assert_eq!(
