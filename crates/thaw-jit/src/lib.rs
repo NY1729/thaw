@@ -740,6 +740,28 @@ extern "C" fn array_splice(array: f64, start: f64, delete_count: f64, inserts: f
     }
 }
 
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_to_spliced(array: f64, start: f64, delete_count: f64, inserts: f64) -> f64 {
+    let Some(splice) = ARRAY_SPLICE.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let (Some((array, _)), Some((inserts, _))) =
+        (unsafe { array_data(array) }, unsafe { array_data(inserts) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let mut output = array.cast_mut();
+    let removed = unsafe { splice(&mut output, start, delete_count, inserts) };
+    if removed.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        array_result(output)
+    }
+}
+
 macro_rules! array_remove_fn {
     ($name:ident, $operation:expr) => {
         #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1848,6 +1870,7 @@ enum NumericValue {
     StringArrayShift,
     BoolArrayShift,
     ArraySplice,
+    ArrayToSpliced,
     NumberArrayWith,
     StringArrayWith,
     BoolArrayWith,
@@ -1906,6 +1929,7 @@ impl NumericProgram {
                     | NumericValue::BoolArrayFill
                     | NumericValue::ArrayCopyWithin
                     | NumericValue::ArraySplice
+                    | NumericValue::ArrayToSpliced
                     | NumericValue::NumberArrayWith
                     | NumericValue::StringArrayWith
                     | NumericValue::BoolArrayWith
@@ -2021,6 +2045,7 @@ impl NumericProgram {
                     "rbfill" => Some(NumericValue::BoolArrayFill),
                     "arraycopywithin" => Some(NumericValue::ArrayCopyWithin),
                     "arraysplice" => Some(NumericValue::ArraySplice),
+                    "arraytospliced" => Some(NumericValue::ArrayToSpliced),
                     "rnpush" => Some(NumericValue::NumberArrayPush),
                     "rspush" => Some(NumericValue::StringArrayPush),
                     "rbpush" => Some(NumericValue::BoolArrayPush),
@@ -2530,6 +2555,17 @@ impl NumericProgram {
                         return None;
                     }
                     emit_quaternary_call(&mut code, array_splice as *const () as u64, depth - 4);
+                    depth -= 3;
+                }
+                NumericValue::ArrayToSpliced => {
+                    if depth < 4 {
+                        return None;
+                    }
+                    emit_quaternary_call(
+                        &mut code,
+                        array_to_spliced as *const () as u64,
+                        depth - 4,
+                    );
                     depth -= 3;
                 }
                 NumericValue::NumberArrayPush
