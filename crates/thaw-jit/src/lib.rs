@@ -1948,6 +1948,7 @@ enum NumericValue {
     AsBoolean,
     StrictMismatch(bool),
     Drop,
+    DuplicatePair,
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -2111,6 +2112,7 @@ impl NumericProgram {
                     "rsshift" => Some(NumericValue::StringArrayShift),
                     "rbshift" => Some(NumericValue::BoolArrayShift),
                     "drop" => Some(NumericValue::Drop),
+                    "dup2" => Some(NumericValue::DuplicatePair),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -2696,6 +2698,14 @@ impl NumericProgram {
                         return None;
                     }
                     depth -= 1;
+                }
+                NumericValue::DuplicatePair => {
+                    if !(2..=6).contains(&depth) {
+                        return None;
+                    }
+                    emit_move(&mut code, depth, depth - 2);
+                    emit_move(&mut code, depth + 1, depth - 1);
+                    depth += 2;
                 }
                 NumericValue::NumberArrayWith
                 | NumericValue::StringArrayWith
