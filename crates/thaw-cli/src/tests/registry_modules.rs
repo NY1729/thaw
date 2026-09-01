@@ -301,6 +301,46 @@ fn arithmetic_array_callbacks_use_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_array_comparisons_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-primitive-comparisons-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-primitive-comparisons");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function selectStrings(values: string[], minimum: string): string[];\nexport declare function hasFlag(values: boolean[], expected: boolean): boolean;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { selectStrings: (values, minimum) => values.filter(value => value >= minimum), hasFlag: (values, expected) => values.some(value => value === expected) };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { selectStrings, hasFlag } from 'jit-primitive-comparisons';\nfunction main(): void { console.log(selectStrings(['a', 'c', 'b'], 'b').join(',')); console.log(hasFlag([false, true], true)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "c,b\ntrue\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn typed_typeof_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-typeof-{}",

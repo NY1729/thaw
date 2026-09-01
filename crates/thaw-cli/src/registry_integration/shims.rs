@@ -1400,17 +1400,21 @@ fn jit_numeric_export(
                     ) {
                         output.push(format!("{prefix}{method}truthy"));
                     } else {
-                        if prefix != "rn" {
-                            return None;
-                        }
-                        let operation = encode_numeric_quantifier_operand(
-                            callback.expr.as_ref(),
-                            parameters,
-                            locals,
-                            context,
-                            output,
-                        )?;
-                        output.push(format!("rn{method}{operation}"));
+                        let operation = if prefix == "rn" {
+                            encode_numeric_quantifier_operand(
+                                callback.expr.as_ref(), parameters, locals, context, output,
+                            )?
+                        } else {
+                            encode_primitive_comparison_operand(
+                                callback.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                if prefix == "rs" { JitKind::String } else { JitKind::Boolean },
+                                output,
+                            )?
+                        };
+                        output.push(format!("{prefix}{method}{operation}"));
                     }
                 } else if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
@@ -2717,6 +2721,62 @@ fn jit_numeric_export(
         Some(operation)
     }
 
+    fn encode_primitive_comparison_operand(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        expected: JitKind,
+        output: &mut Vec<String>,
+    ) -> Option<&'static str> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(value)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        let Expr::Bin(binary) = expression else {
+            return None;
+        };
+        let (operand, reverse) = if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == value.id.sym)
+        {
+            (binary.right.as_ref(), false)
+        } else if matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym) {
+            (binary.left.as_ref(), true)
+        } else {
+            return None;
+        };
+        let operation = match (binary.op, reverse) {
+            (BinaryOp::Lt, false) | (BinaryOp::Gt, true) => "lt",
+            (BinaryOp::LtEq, false) | (BinaryOp::GtEq, true) => "lte",
+            (BinaryOp::Gt, false) | (BinaryOp::Lt, true) => "gt",
+            (BinaryOp::GtEq, false) | (BinaryOp::LtEq, true) => "gte",
+            (BinaryOp::EqEq | BinaryOp::EqEqEq, _) => "eq",
+            (BinaryOp::NotEq | BinaryOp::NotEqEq, _) => "ne",
+            _ => return None,
+        };
+        let mut encoded = Vec::new();
+        encode_expression(operand, outer_parameters, outer_locals, context, &mut encoded)?;
+        if jit_expression_kind(&encoded)?.0 != expected {
+            return None;
+        }
+        output.extend(encoded);
+        Some(operation)
+    }
+
     fn primitive_truthy_callback(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
@@ -3320,6 +3380,29 @@ fn primitive_truthy_result(token: &str) -> Option<JitKind> {
     }
 }
 
+fn primitive_comparison_result(token: &str) -> Option<(JitKind, JitKind)> {
+    let (element, operation) = token
+        .strip_prefix("rb")
+        .map(|operation| (JitKind::Boolean, operation))
+        .or_else(|| token.strip_prefix("rs").map(|operation| (JitKind::String, operation)))?;
+    let (method, comparison) = [
+        "findlastindex", "findlast", "findindex", "filter", "every", "some", "find",
+    ]
+    .into_iter()
+    .find_map(|method| operation.strip_prefix(method).map(|comparison| (method, comparison)))?;
+    if !matches!(comparison, "lt" | "lte" | "gt" | "gte" | "eq" | "ne") {
+        return None;
+    }
+    let result = match method {
+        "some" | "every" => JitKind::Boolean,
+        "find" | "findlast" => element,
+        "findindex" | "findlastindex" => JitKind::Number,
+        "filter" => JitKind::Array,
+        _ => unreachable!(),
+    };
+    Some((element, result))
+}
+
 fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let mut stack = Vec::new();
     let mut maximum_depth = 0;
@@ -3670,6 +3753,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Number);
         } else if let Some(result) = primitive_truthy_result(token) {
             if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(result);
+        } else if let Some((element, result)) = primitive_comparison_result(token) {
+            if stack.pop()? != element || stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(result);
