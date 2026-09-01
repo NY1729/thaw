@@ -604,6 +604,48 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let array_predicate = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.check = values => Array.isArray(values);",
+            "check",
+            false,
+            &array_predicate,
+        ),
+        Some("expr:rn0,isarray".into())
+    );
+    let number_predicate = thaw_bridge::DtsFunction {
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        )],
+        ..array_predicate.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.check = value => Array.isArray(value);",
+            "check",
+            false,
+            &number_predicate,
+        ),
+        Some("expr:a0,isnotarray".into())
+    );
+    let shadowed_array = thaw_bridge::DtsFunction {
+        params: vec![("Array".into(), array_length.params[0].1.clone())],
+        ..array_predicate.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.check = Array => Array.isArray(Array);",
+            "check",
+            false,
+            &shadowed_array,
+        ),
+        None
+    );
     let array_search = thaw_bridge::DtsFunction {
         params: vec![
             array_length.params[0].clone(),
