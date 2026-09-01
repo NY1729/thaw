@@ -305,6 +305,21 @@ fn array_result(pointer: *mut u8) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn empty_array() -> f64 {
+    let Some(allocate) = ARENA_ALLOC.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let array = unsafe { allocate(8, 8) };
+    if array.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { array.cast::<u64>().write(0) };
+    array_result(array)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_length(value: f64) -> f64 {
     unsafe { array_data(value) }.map_or(0.0, |(_, length)| length as f64)
 }
@@ -1951,6 +1966,7 @@ enum NumericValue {
     StringArraySet,
     BoolArraySet,
     ArrayValue,
+    EmptyArray,
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2153,6 +2169,7 @@ impl NumericProgram {
                     "rsset" => Some(NumericValue::StringArraySet),
                     "rbset" => Some(NumericValue::BoolArraySet),
                     "arrayvalue" => Some(NumericValue::ArrayValue),
+                    "arrayempty" => Some(NumericValue::EmptyArray),
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
@@ -2742,6 +2759,18 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, array_value as *const () as u64, depth - 1);
+                }
+                NumericValue::EmptyArray => {
+                    if depth > 7 {
+                        return None;
+                    }
+                    emit_spill(&mut code, depth);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(empty_array as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_move(&mut code, depth, 0);
+                    emit_restore(&mut code, depth);
+                    depth += 1;
                 }
                 NumericValue::NumberArrayPop
                 | NumericValue::StringArrayPop
@@ -4197,6 +4226,17 @@ mod tests {
         let output = result.value.to_bits() as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
+        unsafe { libc::free(output.cast()) };
+        let literal = CString::new(
+            "expr:arrayempty,c3ff0000000000000,rnappend,c4000000000000000,rnappend,arrayvalue:literal",
+        )
+        .unwrap();
+        let result = call(&literal, &[]);
+        assert!(result.error.is_null());
+        let output = result.value.to_bits() as usize as *mut u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 2);
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 1.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 2.0);
         unsafe { libc::free(output.cast()) };
 
         for (expression, args, expected) in [
