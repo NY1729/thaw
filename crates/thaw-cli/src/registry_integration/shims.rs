@@ -31,10 +31,7 @@ fn jit_numeric_export(
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
     ) -> Option<&'static str> {
-        if parameters.contains_key("Math")
-            || locals.contains_key("Math")
-            || call.args.iter().any(|argument| argument.spread.is_some())
-        {
+        if parameters.contains_key("Math") || locals.contains_key("Math") {
             return None;
         }
         let Callee::Expr(callee) = &call.callee else {
@@ -49,6 +46,12 @@ fn jit_numeric_export(
         let MemberProp::Ident(property) = &member.prop else {
             return None;
         };
+        if call.args.iter().any(|argument| argument.spread.is_some())
+            && !(matches!(property.sym.as_ref(), "min" | "max")
+                && matches!(call.args.as_slice(), [argument] if argument.spread.is_some()))
+        {
+            return None;
+        }
         match property.sym.as_ref() {
             "acos" => Some("acos"),
             "acosh" => Some("acosh"),
@@ -2014,6 +2017,27 @@ fn jit_numeric_export(
                             output.push("hypot".into());
                         }
                     }
+                } else if matches!(method, "min" | "max")
+                    && matches!(call.args.as_slice(), [argument] if argument.spread.is_some())
+                {
+                    let [argument] = call.args.as_slice() else {
+                        unreachable!();
+                    };
+                    let mut encoded = Vec::new();
+                    encode_expression(
+                        argument.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut encoded,
+                    )?;
+                    if jit_expression_kind(&encoded)?.0 != JitKind::Array
+                        || array_prefix(&encoded)? != "rn"
+                    {
+                        return None;
+                    }
+                    output.extend(encoded);
+                    output.push(format!("rn{method}"));
                 } else if call.args.is_empty() {
                     let value = if method == "min" {
                         f64::INFINITY
@@ -3152,7 +3176,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if token == "arraylen" {
+        } else if matches!(token.as_str(), "arraylen" | "rnmin" | "rnmax") {
             if stack.pop()? != JitKind::Array {
                 return None;
             }

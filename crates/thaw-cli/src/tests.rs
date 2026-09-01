@@ -277,6 +277,27 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,a1,hypot,c4028000000000000,hypot".into())
     );
+    let spread_extreme = thaw_bridge::DtsFunction {
+        params: vec![(
+            "values".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+                thaw_hir::HirType::F64,
+            ))),
+        )],
+        required_params: 1,
+        ..function.clone()
+    };
+    for (method, operation) in [("min", "rnmin"), ("max", "rnmax")] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.add = values => Math.{method}(...values);"),
+                "add",
+                false,
+                &spread_extreme,
+            ),
+            Some(format!("expr:rn0,{operation}"))
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = (left, right) => Math.PI * left + Math.E;",

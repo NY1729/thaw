@@ -143,6 +143,38 @@ extern "C" fn maximum(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_extreme(value: f64, is_min: bool) -> f64 {
+    let Some((array, length)) = (unsafe { array_data(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let mut result = if is_min {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    };
+    for index in 0..length {
+        let value = unsafe { array.add(8 + index * 8).cast::<f64>().read() };
+        result = if is_min {
+            minimum(result, value)
+        } else {
+            maximum(result, value)
+        };
+    }
+    result
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_min(value: f64) -> f64 {
+    array_extreme(value, true)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_max(value: f64) -> f64 {
+    array_extreme(value, false)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
     value.floor()
 }
@@ -2017,6 +2049,8 @@ enum NumericValue {
     BoolArraySet,
     ArrayValue,
     EmptyArray,
+    NumberArrayMin,
+    NumberArrayMax,
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2224,6 +2258,8 @@ impl NumericProgram {
                     "rbset" => Some(NumericValue::BoolArraySet),
                     "arrayvalue" => Some(NumericValue::ArrayValue),
                     "arrayempty" => Some(NumericValue::EmptyArray),
+                    "rnmin" => Some(NumericValue::NumberArrayMin),
+                    "rnmax" => Some(NumericValue::NumberArrayMax),
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
@@ -2650,6 +2686,17 @@ impl NumericProgram {
                     let function = match value {
                         NumericValue::StringFromCharCode => string_from_char_code,
                         NumericValue::StringFromCodePoint => string_from_code_point,
+                        _ => unreachable!(),
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::NumberArrayMin | NumericValue::NumberArrayMax => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArrayMin => array_min,
+                        NumericValue::NumberArrayMax => array_max,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
@@ -4341,6 +4388,44 @@ mod tests {
         ];
         let data = values.as_ptr().cast::<u8>();
         let handle = &data as *const *const u8;
+        for (operation, expected) in [("rnmin", 10.0), ("rnmax", 30.0)] {
+            let symbol = CString::new(format!("expr:rn0,{operation}:array-extreme")).unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+                expected
+            );
+        }
+        let empty = [0_u64];
+        let empty_data = empty.as_ptr().cast::<u8>();
+        let empty_handle = &empty_data as *const *const u8;
+        for (operation, expected) in [("rnmin", f64::INFINITY), ("rnmax", f64::NEG_INFINITY)] {
+            let symbol = CString::new(format!("expr:rn0,{operation}:empty-extreme")).unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(empty_handle as usize as u64)]).value,
+                expected
+            );
+        }
+        let zeros = [2_u64, (-0.0f64).to_bits(), 0.0f64.to_bits()];
+        let zeros_data = zeros.as_ptr().cast::<u8>();
+        let zeros_handle = &zeros_data as *const *const u8;
+        for (operation, expected) in [("rnmin", -0.0f64), ("rnmax", 0.0f64)] {
+            let symbol = CString::new(format!("expr:rn0,{operation}:zero-extreme")).unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(zeros_handle as usize as u64)])
+                    .value
+                    .to_bits(),
+                expected.to_bits()
+            );
+        }
+        let nan = [2_u64, 1.0f64.to_bits(), f64::NAN.to_bits()];
+        let nan_data = nan.as_ptr().cast::<u8>();
+        let nan_handle = &nan_data as *const *const u8;
+        for operation in ["rnmin", "rnmax"] {
+            let symbol = CString::new(format!("expr:rn0,{operation}:nan-extreme")).unwrap();
+            assert!(call(&symbol, &[f64::from_bits(nan_handle as usize as u64)])
+                .value
+                .is_nan());
+        }
         let replaced =
             CString::new("expr:rn0,c3ff0000000000000,c4058c00000000000,rnwith:with").unwrap();
         let result = call(&replaced, &[f64::from_bits(handle as usize as u64)]);
