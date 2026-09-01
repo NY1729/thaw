@@ -669,6 +669,41 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,rnat".into())
     );
+    let array_join = thaw_bridge::DtsFunction {
+        params: vec![
+            array_length.params[0].clone(),
+            (
+                "separator".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+        ],
+        required_params: 2,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.join = (values, separator) => values.join(separator);",
+            "join",
+            false,
+            &array_join,
+        ),
+        Some("expr:rn0,s1,rnjoin".into())
+    );
+    let array_to_string = thaw_bridge::DtsFunction {
+        params: vec![array_length.params[0].clone()],
+        required_params: 1,
+        ..array_join.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.join = values => values.toString();",
+            "join",
+            false,
+            &array_to_string,
+        ),
+        Some("expr:rn0,t2c,rnjoin".into())
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",
