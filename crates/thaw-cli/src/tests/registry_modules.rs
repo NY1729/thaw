@@ -263,7 +263,7 @@ fn optional_operation_receivers_use_jit_without_quickjs() {
 }
 
 #[test]
-fn numeric_recursion_uses_jit_without_quickjs() {
+fn primitive_recursion_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-recursion-{}",
         std::process::id()
@@ -273,18 +273,18 @@ fn numeric_recursion_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function factorial(value: number): number;\nexport declare function gcd(left: number, right: number): number;\n",
+        "export declare function factorial(value: number): number;\nexport declare function gcd(left: number, right: number): number;\nexport declare function isEven(value: number): boolean;\nexport declare function punctuate(count: number, value: string): string;\nexport declare function ping(value: number): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function factorial(value) { return value <= 1 ? 1 : value * factorial(value - 1); } function gcd(left, right) { return right === 0 ? left : gcd(right, left % right); } module.exports = { factorial, gcd };\n",
+        "function factorial(value) { return value <= 1 ? 1 : value * factorial(value - 1); } function gcd(left, right) { return right === 0 ? left : gcd(right, left % right); } function isEven(value) { return value === 0 ? true : !isEven(value - 1); } function punctuate(count, value) { return count <= 0 ? value : punctuate(count - 1, value + '!'); } function ping(value) { return value <= 0 ? 0 : pong(value - 1) + 1; } function pong(value) { return value <= 0 ? 0 : ping(value - 1) + 1; } module.exports = { factorial, gcd, isEven, punctuate, ping };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { factorial, gcd } from 'jit-recursion';\nfunction main(): void { console.log(factorial(6)); console.log(gcd(1071, 462)); }\n",
+        "import { factorial, gcd, isEven, punctuate, ping } from 'jit-recursion';\nfunction main(): void { console.log(factorial(6)); console.log(gcd(1071, 462)); console.log(isEven(6)); console.log(isEven(5)); console.log(punctuate(3, 'thaw')); console.log(ping(5)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -298,7 +298,10 @@ fn numeric_recursion_uses_jit_without_quickjs() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "720\n21\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "720\n21\ntrue\nfalse\nthaw!!!\n5\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

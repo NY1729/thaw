@@ -3886,9 +3886,11 @@ impl NumericProgram {
                             .then_some(NumericValue::NumberArrayMap(operation, reverse))
                         })
                         .or_else(|| {
-                            value
-                                .strip_prefix("recur")
-                                .and_then(|arity| arity.parse::<u8>().ok())
+                            let encoded = value.strip_prefix("recur")?;
+                            matches!(encoded.as_bytes().first(), Some(b'n' | b'b' | b's'))
+                                .then_some(encoded.get(1..)?)?
+                                .parse::<u8>()
+                                .ok()
                                 .filter(|arity| (1..=8).contains(arity))
                                 .map(NumericValue::Recur)
                         })
@@ -6123,15 +6125,16 @@ mod tests {
     #[test]
     fn recursively_calls_the_compiled_expression() {
         let factorial = CString::new(
-            "expr:a0,c3ff0000000000000,<=,if,c3ff0000000000000,else,a0,a0,c3ff0000000000000,-,recur1,*,end:factorial",
+            "expr:a0,c3ff0000000000000,<=,if,c3ff0000000000000,else,a0,a0,c3ff0000000000000,-,recurn1,*,end:factorial",
         )
         .unwrap();
         let result = call(&factorial, &[6.0]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 720.0);
 
-        let gcd = CString::new("expr:a1,c0000000000000000,==,if,a0,else,a1,a0,a1,%,recur2,end:gcd")
-            .unwrap();
+        let gcd =
+            CString::new("expr:a1,c0000000000000000,==,if,a0,else,a1,a0,a1,%,recurn2,end:gcd")
+                .unwrap();
         let result = call(&gcd, &[1071.0, 462.0]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 21.0);

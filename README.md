@@ -2216,11 +2216,14 @@ expanded in statement order. Calls, property mutation, and forward references
 to mutable values remain on the QuickJS path. Calls to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
 including nested calls and forward function declarations; dynamic, shadowed, or
-mutually recursive calls deliberately fall back instead. Numeric exports made
-from a named function or arrow can call themselves with one to eight numeric
-arguments through a relative call to the same compiled JIT stub. Recursive
-arguments retain left-to-right expression evaluation, so ordinary terminating
-forms such as factorial and Euclidean GCD no longer embed QuickJS. Numeric exports with 0-16
+indirect cycles that do not return to the exported root deliberately fall back
+instead. Named primitive exports can call themselves with one to eight number,
+boolean, or string arguments and return any of those types through a relative
+call to the same compiled JIT stub. A cycle that returns to that root can inline
+its intervening pure helpers, covering static mutual recursion as well. Recursive
+arguments retain left-to-right expression evaluation, so factorial, Euclidean
+GCD, boolean recursion, string accumulation, and root-involving mutual recursion
+no longer embed QuickJS. Numeric exports with 0-16
 required arguments use a single argument-array runtime ABI; generated code loads
 only the `aN` slots referenced by its IR. Numeric/boolean predicates may accept
 and return `boolean`; LLVM converts boolean arguments to JIT slots and comparison results
