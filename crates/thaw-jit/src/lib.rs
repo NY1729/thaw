@@ -86,6 +86,7 @@ thread_local! {
     static DATE_NOW: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static PERFORMANCE_NOW: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static PROCESS_PID: Cell<Option<NumberSource>> = const { Cell::new(None) };
+    static PROCESS_PPID: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -753,6 +754,11 @@ extern "C" fn performance_now() -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn process_pid() -> f64 {
     number_source(&PROCESS_PID)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn process_ppid() -> f64 {
+    number_source(&PROCESS_PPID)
 }
 
 macro_rules! array_unshift_fn {
@@ -1989,6 +1995,7 @@ enum NumericValue {
     DateNow,
     PerformanceNow,
     ProcessPid,
+    ProcessPpid,
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -2159,6 +2166,7 @@ impl NumericProgram {
                     "datenow" => Some(NumericValue::DateNow),
                     "performancenow" => Some(NumericValue::PerformanceNow),
                     "processpid" => Some(NumericValue::ProcessPid),
+                    "processppid" => Some(NumericValue::ProcessPpid),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -2779,7 +2787,8 @@ impl NumericProgram {
                 NumericValue::MathRandom
                 | NumericValue::DateNow
                 | NumericValue::PerformanceNow
-                | NumericValue::ProcessPid => {
+                | NumericValue::ProcessPid
+                | NumericValue::ProcessPpid => {
                     if depth > 7 {
                         return None;
                     }
@@ -2790,6 +2799,7 @@ impl NumericProgram {
                         NumericValue::DateNow => date_now,
                         NumericValue::PerformanceNow => performance_now,
                         NumericValue::ProcessPid => process_pid,
+                        NumericValue::ProcessPpid => process_ppid,
                         _ => unreachable!(),
                     };
                     code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
@@ -3264,6 +3274,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     date_now: Option<NumberSource>,
     performance_now: Option<NumberSource>,
     process_pid: Option<NumberSource>,
+    process_ppid: Option<NumberSource>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -3322,6 +3333,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_date_now = DATE_NOW.with(|now| now.replace(date_now));
     let previous_performance_now = PERFORMANCE_NOW.with(|now| now.replace(performance_now));
     let previous_process_pid = PROCESS_PID.with(|pid| pid.replace(process_pid));
+    let previous_process_ppid = PROCESS_PPID.with(|ppid| ppid.replace(process_ppid));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let mut value = function(args);
@@ -3359,6 +3371,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     DATE_NOW.with(|now| now.set(previous_date_now));
     PERFORMANCE_NOW.with(|now| now.set(previous_performance_now));
     PROCESS_PID.with(|pid| pid.set(previous_process_pid));
+    PROCESS_PPID.with(|ppid| ppid.set(previous_process_ppid));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -3400,6 +3413,9 @@ mod tests {
         }
         unsafe extern "C" fn pid() -> f64 {
             123.0
+        }
+        unsafe extern "C" fn ppid() -> f64 {
+            12.0
         }
         unsafe extern "C" fn parse_float(value: *const c_char) -> f64 {
             match unsafe { CStr::from_ptr(value) }.to_bytes() {
@@ -3663,6 +3679,7 @@ mod tests {
                 Some(wall_now),
                 Some(monotonic_now),
                 Some(pid),
+                Some(ppid),
             )
         }
     }
@@ -4078,6 +4095,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,

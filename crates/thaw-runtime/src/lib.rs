@@ -498,6 +498,18 @@ pub extern "C" fn thaw_process_pid() -> f64 {
     f64::from(std::process::id())
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_process_ppid() -> f64 {
+    #[cfg(target_family = "unix")]
+    {
+        f64::from(unsafe { libc::getppid() })
+    }
+    #[cfg(not(target_family = "unix"))]
+    {
+        0.0
+    }
+}
+
 /// Drives ready continuations and timers until `promise` settles. Returns its
 /// result/error pointer; use `thaw_promise_state` to distinguish fulfillment
 /// from rejection. Returns null for an invalid handle or no possible progress.
