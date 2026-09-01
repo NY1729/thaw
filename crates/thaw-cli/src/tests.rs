@@ -340,6 +340,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (left, right) => Math.hypot(left);",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0,abs".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (left, values, tail, right) => Math.hypot(left, ...values, ...tail, right);",
+            "add",
+            false,
+            &mixed_extreme,
+        ),
+        Some("expr:a0,rn1,rnhypot,hypot,rn2,rnhypot,hypot,a3,hypot".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (left, right) => Math.PI * left + Math.E;",
             "add",
             false,
