@@ -487,6 +487,7 @@ fn jit_numeric_export(
                 | "sort"
                 | "fill"
                 | "copyWithin"
+                | "push"
                 | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
@@ -904,6 +905,7 @@ fn jit_numeric_export(
                     return None;
                 }
                 let prefix = array_prefix(&encoded)?;
+                let encoded_receiver = encoded.clone();
                 output.extend(encoded);
                 if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
@@ -922,6 +924,37 @@ fn jit_numeric_export(
                         _ => return None,
                     }
                     output.push(format!("{prefix}join"));
+                } else if method == "push" {
+                    if call.args.is_empty() {
+                        output.push("arraylen".into());
+                    }
+                    let expected = match prefix {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    };
+                    for (index, argument) in call.args.iter().enumerate() {
+                        if index != 0 {
+                            output.extend(encoded_receiver.iter().cloned());
+                        }
+                        let mut encoded_value = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded_value,
+                        )?;
+                        if jit_expression_kind(&encoded_value)?.0 != expected {
+                            return None;
+                        }
+                        output.extend(encoded_value);
+                        output.push(format!("{prefix}push"));
+                        if index + 1 != call.args.len() {
+                            output.push("drop".into());
+                        }
+                    }
                 } else if method == "concat" {
                     if call.args.is_empty() {
                         output.push("c0000000000000000".into());
@@ -2480,6 +2513,22 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
+        } else if matches!(token.as_str(), "rnpush" | "rspush" | "rbpush") {
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::Array
+                || value
+                    != match &token[..2] {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    }
+            {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if token == "drop" {
+            stack.pop()?;
         } else if matches!(token.as_str(), "rnwith" | "rswith" | "rbwith") {
             let value = stack.pop()?;
             if stack.pop()? != JitKind::Number

@@ -1214,6 +1214,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             .as_pointer_value()
                             .into(),
                         self.module
+                            .get_function("thaw_jit_array_push")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
+                        self.module
                             .get_function("thaw_jit_array_with")
                             .unwrap()
                             .as_global_value()
