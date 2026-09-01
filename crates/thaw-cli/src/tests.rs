@@ -1070,6 +1070,37 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a2,rnunshift,drop,rn0,a1,rnunshift".into())
     );
+    let array_pop = thaw_bridge::DtsFunction {
+        name: "pop".into(),
+        params: vec![array_length.params[0].clone()],
+        required_params: 1,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::F64,
+        ))),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.pop = values => values.pop();",
+            "pop",
+            false,
+            &array_pop,
+        ),
+        Some("expr:rn0,rnpop".into())
+    );
+    let array_shift = thaw_bridge::DtsFunction {
+        name: "shift".into(),
+        ..array_pop.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.shift = values => values.shift();",
+            "shift",
+            false,
+            &array_shift,
+        ),
+        Some("expr:rn0,rnshift".into())
+    );
     let array_with = thaw_bridge::DtsFunction {
         name: "replace".into(),
         params: vec![

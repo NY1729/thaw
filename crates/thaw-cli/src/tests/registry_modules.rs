@@ -450,6 +450,45 @@ fn primitive_array_mutation_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_array_removal_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-removal-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-removal");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function popNumber(values: number[]): number | undefined;\nexport declare function popString(values: string[]): string | undefined;\nexport declare function popFlag(values: boolean[]): boolean | undefined;\nexport declare function shiftNumber(values: number[]): number | undefined;\nexport declare function shiftString(values: string[]): string | undefined;\nexport declare function shiftFlag(values: boolean[]): boolean | undefined;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.popNumber = values => values.pop(); module.exports.popString = values => values.pop(); module.exports.popFlag = values => values.pop(); module.exports.shiftNumber = values => values.shift(); module.exports.shiftString = values => values.shift(); module.exports.shiftFlag = values => values.shift();\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { popNumber, popString, popFlag, shiftNumber, shiftString, shiftFlag } from 'jit-array-removal';\nfunction main(): void { const pn = [1, 2, 3]; const pnv = popNumber(pn); console.log(pnv === undefined ? 0 : pnv); console.log(pn.join('|')); const ps = ['a', 'b']; const psv = popString(ps); console.log(psv === undefined ? '' : psv); console.log(ps.join('|')); const pb = [true, false]; const pbv = popFlag(pb); console.log(pbv === undefined ? true : pbv); console.log(pb.join('|')); const sn = [1, 2, 3]; const snv = shiftNumber(sn); console.log(snv === undefined ? 0 : snv); console.log(sn.join('|')); const ss = ['a', 'b']; const ssv = shiftString(ss); console.log(ssv === undefined ? '' : ssv); console.log(ss.join('|')); const sb = [true, false]; const sbv = shiftFlag(sb); console.log(sbv === undefined ? false : sbv); console.log(sb.join('|')); const empty: number[] = []; console.log(popNumber(empty) === undefined ? 1 : 0); console.log(empty.length); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "3\n1|2\nb\na\nfalse\ntrue\n1\n2|3\na\nb\ntrue\nfalse\n1\n0\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn string_truthiness_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-truthiness-{}",

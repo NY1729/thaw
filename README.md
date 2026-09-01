@@ -2020,6 +2020,8 @@ path and uses the native overlap-safe slot copy.
 Variadic primitive-array `push(...items)` and `unshift(...items)` update the
 caller's native array handle after each arena-backed growth and return the final
 length in typed JIT IR while preserving argument order.
+Primitive `pop()` and `shift()` likewise replace that handle after removal and
+return typed optional values, preserving `undefined` for empty arrays.
 `concat(...)` accepts zero or more arrays and scalar values of the
 same primitive element type, chaining native shallow allocations while keeping
 intermediate arrays inside the JIT. Primitive-array `with(index, value)` performs the same native
