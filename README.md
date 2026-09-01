@@ -2225,6 +2225,9 @@ specialized JIT condition and branch leaves. The condition runs once and only
 the selected object or tuple branch executes, including stateful array leaves.
 The same lowering handles nested `if` / `else` blocks and fall-through return
 chains, preserving lazy branch execution while removing the QuickJS bundle.
+Mutable primitive locals before an aggregate return are converted to ordered
+SSA-style JIT intermediates. Plain and compound assignment, prefix/postfix
+updates, and encodable effect statements retain their source evaluation order.
 
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections and the
