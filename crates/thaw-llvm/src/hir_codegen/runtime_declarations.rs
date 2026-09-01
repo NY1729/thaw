@@ -313,6 +313,19 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_jit_array_set",
+            i8_type.fn_type(
+                &[
+                    i8_type.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_array_concat",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false),
             Some(Linkage::External),
@@ -1165,6 +1178,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         i8_ptr.into(),
                         i8_ptr.into(),
                         i64_type.into(),
+                        i8_ptr.into(),
                         i8_ptr.into(),
                         i8_ptr.into(),
                         i8_ptr.into(),
