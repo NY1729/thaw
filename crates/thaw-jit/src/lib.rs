@@ -793,6 +793,33 @@ fn number_array_map(value: f64, operation: impl Fn(f64, f64) -> f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_jit_map(value: f64, callback: f64) -> f64 {
+    let Some(callback) = (unsafe { string_argument(callback) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let symbol = format!("expr:{callback}:array-map-callback");
+    let Some(program) = NumericProgram::parse(&symbol) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    if program.required_args() > 2 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let code = match compile(&symbol, &program) {
+        Ok(code) => code,
+        Err(error) => {
+            CALL_ERROR.with(|slot| slot.set(error));
+            return 0.0;
+        }
+    };
+    let callback =
+        unsafe { std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code) };
+    number_array_map(value, |element, index| callback([element, index].as_ptr()))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_index_map(value: f64, encoded: f64) -> f64 {
     let encoded = encoded as u8;
     let reverse = encoded >= 8;
@@ -2988,6 +3015,7 @@ enum NumericValue {
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
+    NumberArrayJitMap,
     NumberArrayIndexMap(NumericReduceOp, bool),
     NumberArraySelectMap(CompareOp, u8),
     NumberArrayBranchMap(u16),
@@ -3065,6 +3093,7 @@ impl NumericProgram {
                     | NumericValue::NumberArraySort
                     | NumericValue::StringArraySort
                     | NumericValue::BoolArraySort
+                    | NumericValue::NumberArrayJitMap
                     | NumericValue::StringArrayToSortedDescending
                     | NumericValue::StringArraySortDescending
                     | NumericValue::NumberArrayFill
@@ -3479,6 +3508,9 @@ impl NumericProgram {
                                 "rnmapabs" => true,
                                 _ => return None,
                             }))
+                        })
+                        .or_else(|| {
+                            (value == "rnmapjit").then_some(NumericValue::NumberArrayJitMap)
                         })
                         .or_else(|| {
                             value
@@ -4108,6 +4140,17 @@ impl NumericProgram {
                     emit_binary_call(
                         &mut code,
                         functions[usize::from(*reverse)] as *const () as u64,
+                        depth - 2,
+                    );
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayJitMap => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(
+                        &mut code,
+                        number_array_jit_map as *const () as u64,
                         depth - 2,
                     );
                     depth -= 1;
