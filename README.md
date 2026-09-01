@@ -2251,10 +2251,11 @@ well. Primitive dictionaries can also be returned directly after mutation or
 rebuilt from object literals by the generated native wrapper, including
 runtime-computed string keys, spreads, duplicate-key overwrites and their
 left-to-right evaluation order. `Object.keys` returns a native string array,
-`Object.values` returns the corresponding native primitive array, and
-`Object.hasOwn` performs a direct host query for these dictionaries, so key
-and value enumeration, length/array operations and ownership checks remain on
-the QuickJS-free path.
+`Object.values` returns the corresponding native primitive array,
+`Object.entries` returns a native `[string, value][]`, and `Object.hasOwn`
+performs a direct host query for these dictionaries, so key and value
+enumeration, length/array operations and ownership checks remain on the
+QuickJS-free path.
 Fixed-shape object and tuple results with the same recursively representable
 leaves are also assembled by an AOT wrapper from specialized JIT leaf
 expressions. Object literal source order, shorthand fields, nested objects and

@@ -116,13 +116,21 @@ fn jit_export(
         }
     }
 
+    fn jit_array_result_element_supported(ty: &thaw_hir::HirType) -> bool {
+        matches!(
+            ty,
+            thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
+        ) || matches!(
+            ty,
+            thaw_hir::HirType::Tuple(elements)
+                if matches!(elements.as_slice(), [thaw_hir::HirType::Str, thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str])
+        )
+    }
+
     fn jit_result_supported(ty: &thaw_hir::HirType) -> bool {
         match ty {
             thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => true,
-            thaw_hir::HirType::Array(element) => matches!(
-                element.as_ref(),
-                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
-            ),
+            thaw_hir::HirType::Array(element) => jit_array_result_element_supported(element),
             thaw_hir::HirType::Dictionary(element) => matches!(
                 element.as_ref(),
                 thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
@@ -471,12 +479,7 @@ fn jit_export(
             thaw_hir::HirType::Bool => Some(JitKind::Boolean),
             thaw_hir::HirType::Str => Some(JitKind::String),
             thaw_hir::HirType::Array(element)
-                if matches!(
-                    element.as_ref(),
-                    thaw_hir::HirType::F64
-                        | thaw_hir::HirType::Bool
-                        | thaw_hir::HirType::Str
-                ) =>
+                if jit_array_result_element_supported(element) =>
             {
                 Some(JitKind::Array)
             }
@@ -956,6 +959,7 @@ fn jit_export(
         match (property.sym.as_ref(), call.args.as_slice()) {
             ("keys", [object]) => Some(("dkeys", object.expr.as_ref(), None)),
             ("values", [object]) => Some(("dvalues", object.expr.as_ref(), None)),
+            ("entries", [object]) => Some(("dentries", object.expr.as_ref(), None)),
             ("hasOwn", [object, key]) => Some((
                 "dhasown",
                 object.expr.as_ref(),
@@ -2310,11 +2314,15 @@ fn jit_export(
                 if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary {
                     return None;
                 }
-                let operation = if operation == "dvalues" {
+                let operation = if matches!(operation, "dvalues" | "dentries") {
+                    let entries = operation == "dentries";
                     match dictionary_prefix(&encoded)? {
-                        "dn" => "dnvalues",
-                        "db" => "dbvalues",
-                        "ds" => "dsvalues",
+                        "dn" if !entries => "dnvalues",
+                        "db" if !entries => "dbvalues",
+                        "ds" if !entries => "dsvalues",
+                        "dn" => "dnentries",
+                        "db" => "dbentries",
+                        "ds" => "dsentries",
                         _ => unreachable!(),
                     }
                 } else {
@@ -5115,10 +5123,9 @@ fn jit_export(
                     thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
                 )
             }
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => matches!(
-                element.as_ref(),
-                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
-            ),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => {
+                jit_array_result_element_supported(element)
+            }
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Dictionary(element)) => matches!(
                 element.as_ref(),
                 thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
@@ -6407,7 +6414,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
-        } else if matches!(token.as_str(), "dkeys" | "dnvalues" | "dbvalues" | "dsvalues") {
+        } else if matches!(
+            token.as_str(),
+            "dkeys"
+                | "dnvalues"
+                | "dbvalues"
+                | "dsvalues"
+                | "dnentries"
+                | "dbentries"
+                | "dsentries"
+        ) {
             if stack.pop()? != JitKind::Dictionary {
                 return None;
             }
@@ -6875,6 +6891,21 @@ fn jit_numeric_declaration(
             thaw_hir::HirType::F64 => "number[]",
             thaw_hir::HirType::Bool => "boolean[]",
             thaw_hir::HirType::Str => "string[]",
+            thaw_hir::HirType::Tuple(elements)
+                if matches!(elements.as_slice(), [thaw_hir::HirType::Str, thaw_hir::HirType::F64]) =>
+            {
+                "[string, number][]"
+            }
+            thaw_hir::HirType::Tuple(elements)
+                if matches!(elements.as_slice(), [thaw_hir::HirType::Str, thaw_hir::HirType::Bool]) =>
+            {
+                "[string, boolean][]"
+            }
+            thaw_hir::HirType::Tuple(elements)
+                if matches!(elements.as_slice(), [thaw_hir::HirType::Str, thaw_hir::HirType::Str]) =>
+            {
+                "[string, string][]"
+            }
             _ => "never[]",
         },
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
