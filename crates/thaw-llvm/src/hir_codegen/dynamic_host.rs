@@ -28,7 +28,7 @@ fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str => Some(1),
         HirType::Array(element)
-            if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) =>
+            if jit_array_result_element_supported(element) =>
         {
             Some(1)
         }

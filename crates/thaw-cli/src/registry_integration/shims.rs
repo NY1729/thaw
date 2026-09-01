@@ -84,12 +84,7 @@ fn jit_export(
         match ty {
             thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => Some(1),
             thaw_hir::HirType::Array(element)
-                if matches!(
-                    element.as_ref(),
-                    thaw_hir::HirType::F64
-                        | thaw_hir::HirType::Bool
-                        | thaw_hir::HirType::Str
-                ) =>
+                if jit_array_result_element_supported(element) =>
             {
                 Some(1)
             }
@@ -969,6 +964,37 @@ fn jit_export(
         }
     }
 
+    fn object_from_entries_call<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<&'a Expr> {
+        if parameters.contains_key("Object")
+            || locals.contains_key("Object")
+            || helpers.contains_key("Object")
+            || call.args.iter().any(|argument| argument.spread.is_some())
+        {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        match (member.obj.as_ref(), &member.prop, call.args.as_slice()) {
+            (
+                Expr::Ident(object),
+                MemberProp::Ident(property),
+                [entries],
+            ) if object.sym == "Object" && property.sym == "fromEntries" => {
+                Some(entries.expr.as_ref())
+            }
+            _ => None,
+        }
+    }
+
     fn numeric_constant(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -1289,6 +1315,15 @@ fn jit_export(
             ["dn", "db", "ds"]
                 .into_iter()
                 .find(|prefix| token.starts_with(prefix))
+        })
+    }
+
+    fn entry_prefix(expression: &[String]) -> Option<&'static str> {
+        expression.iter().find_map(|token| match token.as_str() {
+            token if token.starts_with("en") || token == "dnentries" => Some("dn"),
+            token if token.starts_with("eb") || token == "dbentries" => Some("db"),
+            token if token.starts_with("es") || token == "dsentries" => Some("ds"),
+            _ => None,
         })
     }
 
@@ -2303,6 +2338,24 @@ fn jit_export(
                     }
                     _ => return None,
                 }
+            }
+            Expr::Call(call)
+                if object_from_entries_call(call, parameters, locals, context.helpers).is_some() =>
+            {
+                let entries = object_from_entries_call(call, parameters, locals, context.helpers)?;
+                let mut encoded = Vec::new();
+                encode_expression(entries, parameters, locals, context, &mut encoded)?;
+                if jit_expression_kind(&encoded)?.0 != JitKind::Array {
+                    return None;
+                }
+                let operation = match entry_prefix(&encoded)? {
+                    "dn" => "dnfromentries",
+                    "db" => "dbfromentries",
+                    "ds" => "dsfromentries",
+                    _ => unreachable!(),
+                };
+                output.extend(encoded);
+                output.push(operation.into());
             }
             Expr::Call(call)
                 if object_dictionary_call(call, parameters, locals, context.helpers).is_some() =>
@@ -5342,6 +5395,12 @@ fn jit_export(
                 thaw_hir::HirType::F64 => "rn",
                 thaw_hir::HirType::Bool => "rb",
                 thaw_hir::HirType::Str => "rs",
+                thaw_hir::HirType::Tuple(elements) => match elements.as_slice() {
+                    [thaw_hir::HirType::Str, thaw_hir::HirType::F64] => "en",
+                    [thaw_hir::HirType::Str, thaw_hir::HirType::Bool] => "eb",
+                    [thaw_hir::HirType::Str, thaw_hir::HirType::Str] => "es",
+                    _ => return None,
+                },
                 _ => return None,
             },
             thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
@@ -5942,6 +6001,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
+        } else if matches!(
+            token.as_str(),
+            "dnfromentries" | "dbfromentries" | "dsfromentries"
+        ) {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Dictionary);
         } else if matches!(token.as_str(), "rnfill" | "rsfill" | "rbfill") {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Number {
                 return None;
@@ -6531,6 +6598,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             } else if token.starts_with("rn")
                 || token.starts_with("rb")
                 || token.starts_with("rs")
+                || token.starts_with("en")
+                || token.starts_with("eb")
+                || token.starts_with("es")
             {
                 JitKind::Array
             } else if token.starts_with("dn")
@@ -6908,6 +6978,14 @@ fn jit_numeric_declaration(
             }
             _ => "never[]",
         },
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Dictionary(element)) => {
+            match element.as_ref() {
+                thaw_hir::HirType::F64 => "{ [key: string]: number }",
+                thaw_hir::HirType::Bool => "{ [key: string]: boolean }",
+                thaw_hir::HirType::Str => "{ [key: string]: string }",
+                _ => "never",
+            }
+        }
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
             if **payload == thaw_hir::HirType::Str =>
         {
