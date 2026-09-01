@@ -1319,17 +1319,26 @@ fn jit_numeric_export(
                     if prefix != "rn" {
                         return None;
                     }
-                    let (operation, reverse) = encode_numeric_map_operand(
+                    if let Some(operation) = numeric_unary_map(
                         callback.expr.as_ref(),
                         parameters,
                         locals,
                         context,
-                        output,
-                    )?;
-                    output.push(format!(
-                        "rnmap{}{operation}",
-                        if reverse { "r" } else { "" }
-                    ));
+                    ) {
+                        output.push(format!("rnmap{operation}"));
+                    } else {
+                        let (operation, reverse) = encode_numeric_map_operand(
+                            callback.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?;
+                        output.push(format!(
+                            "rnmap{}{operation}",
+                            if reverse { "r" } else { "" }
+                        ));
+                    }
                 } else if matches!(
                     method,
                     "some"
@@ -2730,6 +2739,55 @@ fn jit_numeric_export(
         Some((operation, reverse))
     }
 
+    fn numeric_unary_map(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &InlineContext<'_>,
+    ) -> Option<&'static str> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(value)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        if matches!(expression, Expr::Unary(unary)
+            if unary.op == UnaryOp::Minus
+                && matches!(unary.arg.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym))
+        {
+            return Some("neg");
+        }
+        if value.id.sym == "Math"
+            || context.helpers.contains_key("Math")
+            || context.module_locals.contains_key("Math")
+        {
+            return None;
+        }
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let [argument] = call.args.as_slice() else {
+            return None;
+        };
+        (argument.spread.is_none()
+            && math_method(call, outer_parameters, outer_locals) == Some("abs")
+            && matches!(argument.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym))
+        .then_some("abs")
+    }
+
     fn encode_helper_call(
         call: &CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -3523,7 +3581,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if token == "arrayvalue" {
+        } else if token == "arrayvalue" || matches!(token.as_str(), "rnmapneg" | "rnmapabs") {
             if stack.pop()? != JitKind::Array {
                 return None;
             }
