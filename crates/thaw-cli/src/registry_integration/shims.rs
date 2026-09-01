@@ -3495,7 +3495,8 @@ fn jit_export(
         module_locals: std::collections::HashMap<String, Vec<String>>,
         active: Vec<String>,
         recursive_names: Vec<String>,
-        recursive_arity: usize,
+        recursive_parameters: Vec<JitKind>,
+        recursive_result: Option<JitKind>,
     }
 
     fn same_callable(left: NumericCallable<'_>, right: NumericCallable<'_>) -> bool {
@@ -4458,12 +4459,13 @@ fn jit_export(
         };
         let name = identifier.sym.as_ref();
         if context.recursive_names.iter().any(|recursive| recursive == name) {
-            if call.args.len() != context.recursive_arity
+            if call.args.len() != context.recursive_parameters.len()
                 || call.args.iter().any(|argument| argument.spread.is_some())
             {
                 return None;
             }
-            for argument in &call.args {
+            let expected_parameters = context.recursive_parameters.clone();
+            for (argument, expected) in call.args.iter().zip(expected_parameters) {
                 let mut encoded = Vec::new();
                 encode_expression(
                     argument.expr.as_ref(),
@@ -4472,12 +4474,18 @@ fn jit_export(
                     context,
                     &mut encoded,
                 )?;
-                if jit_expression_kind(&encoded)?.0 != JitKind::Number {
+                if jit_expression_kind(&encoded)?.0 != expected {
                     return None;
                 }
                 output.extend(encoded);
             }
-            output.push(format!("recur{}", call.args.len()));
+            let result = match context.recursive_result? {
+                JitKind::Number => 'n',
+                JitKind::Boolean => 'b',
+                JitKind::String => 's',
+                JitKind::Array => return None,
+            };
+            output.push(format!("recur{result}{}", call.args.len()));
             return Some(());
         }
         if parameters.contains_key(name)
@@ -4723,7 +4731,8 @@ fn jit_export(
                     module_locals: module_locals.clone(),
                     active: Vec::new(),
                     recursive_names: Vec::new(),
-                    recursive_arity: 0,
+                    recursive_parameters: Vec::new(),
+                    recursive_result: None,
                 };
                 encode_expression(
                     initializer,
@@ -4792,14 +4801,34 @@ fn jit_export(
     for (parameter, _, _, _) in &bindings {
         locals.remove(parameter);
     }
-    let recursive_names = if params.len() <= 8
-        && bindings.iter().all(|(_, ty, default, optional)| {
-            **ty == thaw_hir::HirType::F64 && default.is_none() && !optional
+    let recursive_parameters = (params.len() <= 8)
+        .then(|| {
+            bindings
+                .iter()
+                .map(|(_, ty, default, optional)| {
+                    if default.is_some() || *optional {
+                        return None;
+                    }
+                    match **ty {
+                        thaw_hir::HirType::F64 => Some(JitKind::Number),
+                        thaw_hir::HirType::Bool => Some(JitKind::Boolean),
+                        thaw_hir::HirType::Str => Some(JitKind::String),
+                        _ => None,
+                    }
+                })
+                .collect::<Option<Vec<_>>>()
         })
-        && matches!(
-            &function.ret,
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64)
-        )
+        .flatten()
+        .unwrap_or_default();
+    let recursive_result = match &function.ret {
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::F64) => Some(JitKind::Number),
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => Some(JitKind::Boolean),
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => Some(JitKind::String),
+        _ => None,
+    };
+    let recursive_names = if !params.is_empty()
+        && recursive_parameters.len() == params.len()
+        && recursive_result.is_some()
     {
         module_functions
             .iter()
@@ -4814,7 +4843,8 @@ fn jit_export(
         module_locals: helper_module_locals,
         active: Vec::new(),
         recursive_names,
-        recursive_arity: params.len(),
+        recursive_parameters,
+        recursive_result,
     };
     let mut parameters = std::collections::HashMap::new();
     let mut slot = 0usize;
@@ -5117,6 +5147,18 @@ enum JitKind {
     Array,
 }
 
+fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
+    if left == right {
+        Some(left)
+    } else if matches!(left, JitKind::Number | JitKind::Boolean)
+        && matches!(right, JitKind::Number | JitKind::Boolean)
+    {
+        Some(JitKind::Boolean)
+    } else {
+        None
+    }
+}
+
 fn jit_operation_may_be_absent(operation: &[String]) -> bool {
     let Some(token) = operation.last().map(String::as_str) else {
         return false;
@@ -5223,17 +5265,22 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if let Some(arity) = token
-            .strip_prefix("recur")
-            .and_then(|arity| arity.parse::<usize>().ok())
-            .filter(|arity| (1..=8).contains(arity))
-        {
+        } else if let Some((result, arity)) = token.strip_prefix("recur").and_then(|encoded| {
+            let result = match encoded.as_bytes().first()? {
+                b'n' => JitKind::Number,
+                b'b' => JitKind::Boolean,
+                b's' => JitKind::String,
+                _ => return None,
+            };
+            let arity = encoded.get(1..)?.parse::<usize>().ok()?;
+            (1..=8).contains(&arity).then_some((result, arity))
+        }) {
             for _ in 0..arity {
-                if stack.pop()? != JitKind::Number {
+                if stack.pop()? == JitKind::Array {
                     return None;
                 }
             }
-            stack.push(JitKind::Number);
+            stack.push(result);
         } else if matches!(
             token.as_str(),
             "<" | "<=" | ">" | ">=" | "==" | "!=" | "numsame"
@@ -5278,19 +5325,19 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if token == "end" {
             let (base, expected, awaits_alternate) = branches.pop()?;
             let expected = expected?;
-            if awaits_alternate || stack.len() != base + 1 || stack.pop()? != expected {
+            if awaits_alternate || stack.len() != base + 1 {
                 return None;
             }
-            stack.push(expected);
+            let alternate = stack.pop()?;
+            stack.push(merge_jit_kinds(expected, alternate)?);
         } else if token == "?" {
             let alternative = stack.pop()?;
             let consequent = stack.pop()?;
             if !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean | JitKind::String)
-                || consequent != alternative
             {
                 return None;
             }
-            stack.push(consequent);
+            stack.push(merge_jit_kinds(consequent, alternative)?);
         } else if matches!(token.as_str(), "strictfalse" | "stricttrue") {
             stack.pop()?;
             stack.pop()?;
