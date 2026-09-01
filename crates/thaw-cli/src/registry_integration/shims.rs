@@ -86,6 +86,16 @@ fn jit_export(
             {
                 Some(1)
             }
+            thaw_hir::HirType::Dictionary(element)
+                if matches!(
+                    element.as_ref(),
+                    thaw_hir::HirType::F64
+                        | thaw_hir::HirType::Bool
+                        | thaw_hir::HirType::Str
+                ) =>
+            {
+                Some(1)
+            }
             thaw_hir::HirType::Object(fields) => fields.iter().try_fold(0usize, |slots, (_, ty)| {
                 jit_parameter_slots(ty).map(|count| slots + count)
             }),
@@ -128,6 +138,12 @@ fn jit_export(
                 thaw_hir::HirType::F64 => Some("rn"),
                 thaw_hir::HirType::Bool => Some("rb"),
                 thaw_hir::HirType::Str => Some("rs"),
+                _ => None,
+            },
+            thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                thaw_hir::HirType::F64 => Some("dn"),
+                thaw_hir::HirType::Bool => Some("db"),
+                thaw_hir::HirType::Str => Some("ds"),
                 _ => None,
             },
             thaw_hir::HirType::Object(fields) => {
@@ -1098,6 +1114,14 @@ fn jit_export(
         })
     }
 
+    fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
+        expression.iter().find_map(|token| {
+            ["dn", "db", "ds"]
+                .into_iter()
+                .find(|prefix| token.starts_with(prefix))
+        })
+    }
+
     fn append_add(
         mut left: Vec<String>,
         mut right: Vec<String>,
@@ -1148,7 +1172,7 @@ fn jit_export(
             JitKind::Number => output.push("numstr".into()),
             JitKind::Boolean => output.push("boolstr".into()),
             JitKind::String => {}
-            JitKind::Array => return None,
+            JitKind::Array | JitKind::Dictionary => return None,
         }
         Some(())
     }
@@ -1158,7 +1182,7 @@ fn jit_export(
         output.append(&mut expression);
         match kind {
             JitKind::String => output.push("strnum".into()),
-            JitKind::Array => return None,
+            JitKind::Array | JitKind::Dictionary => return None,
             JitKind::Number | JitKind::Boolean => {}
         }
         Some(())
@@ -1183,7 +1207,7 @@ fn jit_export(
             JitKind::Number => output.push("asbool".into()),
             JitKind::String => output.push("strbool".into()),
             JitKind::Boolean => {}
-            JitKind::Array => return None,
+            JitKind::Array | JitKind::Dictionary => return None,
         }
         Some(())
     }
@@ -1214,14 +1238,14 @@ fn jit_export(
                     encoded.push("strarray".into());
                     ("rs", "arrayconcat")
                 }
-                JitKind::Number | JitKind::Boolean => return None,
+                JitKind::Number | JitKind::Boolean | JitKind::Dictionary => return None,
             }
         } else {
             let element_prefix = match jit_expression_kind(&encoded)?.0 {
                 JitKind::Number => "rn",
                 JitKind::String => "rs",
                 JitKind::Boolean => "rb",
-                JitKind::Array => return None,
+                JitKind::Array | JitKind::Dictionary => return None,
             };
             let operation = match element_prefix {
                 "rn" => "rnappend",
@@ -1448,6 +1472,9 @@ fn jit_export(
                 JitKind::Boolean => format!("b{RECEIVER}"),
                 JitKind::String => format!("s{RECEIVER}"),
                 JitKind::Array => format!("{}{}", array_prefix(&receiver)?, RECEIVER),
+                JitKind::Dictionary => {
+                    format!("{}{}", dictionary_prefix(&receiver)?, RECEIVER)
+                }
             };
             let mut continuation_parameters = parameters.clone();
             continuation_parameters.insert(RECEIVER.into(), receiver_token.clone());
@@ -1567,36 +1594,70 @@ fn jit_export(
                         context,
                         &mut receiver,
                     )?;
-                    if jit_expression_kind(&receiver)?.0 != JitKind::Array {
-                        return None;
+                    match jit_expression_kind(&receiver)?.0 {
+                        JitKind::Array => {
+                            let prefix = array_prefix(&receiver)?;
+                            output.extend(receiver);
+                            encode_number(
+                                computed.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                output,
+                            )?;
+                            output.push(format!("{prefix}get"));
+                        }
+                        JitKind::Dictionary => {
+                            let prefix = dictionary_prefix(&receiver)?;
+                            let mut key = Vec::new();
+                            encode_expression(
+                                computed.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut key,
+                            )?;
+                            if jit_expression_kind(&key)?.0 != JitKind::String {
+                                return None;
+                            }
+                            output.extend(receiver);
+                            output.extend(key);
+                            output.push(format!("{prefix}get"));
+                        }
+                        _ => return None,
                     }
-                    let prefix = array_prefix(&receiver)?;
-                    output.extend(receiver);
-                    encode_number(
-                        computed.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        output,
-                    )?;
-                    output.push(format!("{prefix}get"));
-                } else if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "length")
-                {
+                } else if let MemberProp::Ident(property) = &member.prop {
                     let mut receiver = Vec::new();
-                    encode_expression(
+                    let encoded_receiver = encode_expression(
                         member.obj.as_ref(),
                         parameters,
                         locals,
                         context,
                         &mut receiver,
-                    )?;
-                    let operation = match jit_expression_kind(&receiver)?.0 {
-                        JitKind::String => "strlen",
-                        JitKind::Array => "arraylen",
-                        _ => return None,
-                    };
-                    output.extend(receiver);
-                    output.push(operation.into());
+                    )
+                    .is_some();
+                    if encoded_receiver
+                        && jit_expression_kind(&receiver)?.0 == JitKind::Dictionary
+                    {
+                        let prefix = dictionary_prefix(&receiver)?;
+                        output.extend(receiver);
+                        encode_string(property.sym.as_ref(), output)?;
+                        output.push(format!("{prefix}get"));
+                    } else if property.sym == "length" {
+                        let operation = match jit_expression_kind(&receiver)?.0 {
+                            JitKind::String => "strlen",
+                            JitKind::Array => "arraylen",
+                            _ => return None,
+                        };
+                        output.extend(receiver);
+                        output.push(operation.into());
+                    } else {
+                        output.push(format!(
+                            "c{:016x}",
+                            numeric_constant(expression, parameters, locals, context.helpers)?
+                                .to_bits()
+                        ));
+                    }
                 } else {
                     output.push(format!(
                         "c{:016x}",
@@ -1741,7 +1802,7 @@ fn jit_export(
                     JitKind::Number => "typeofnumber",
                     JitKind::Boolean => "typeofboolean",
                     JitKind::String => "typeofstring",
-                    JitKind::Array => "typeofobject",
+                    JitKind::Array | JitKind::Dictionary => "typeofobject",
                 };
                 output.extend(encoded);
                 output.push(operation.into());
@@ -1801,7 +1862,9 @@ fn jit_export(
                 encode_expression(binary.left.as_ref(), parameters, locals, context, &mut left)?;
                 encode_expression(binary.right.as_ref(), parameters, locals, context, &mut right)?;
                 let kind = jit_expression_kind(&left)?.0;
-                if jit_expression_kind(&right)?.0 != kind || kind == JitKind::Array {
+                if jit_expression_kind(&right)?.0 != kind
+                    || matches!(kind, JitKind::Array | JitKind::Dictionary)
+                {
                     return None;
                 }
                 output.extend(left);
@@ -1810,7 +1873,7 @@ fn jit_export(
                     JitKind::Number => output.push("asbool".into()),
                     JitKind::String => output.push("strbool".into()),
                     JitKind::Boolean => {}
-                    JitKind::Array => unreachable!(),
+                    JitKind::Array | JitKind::Dictionary => unreachable!(),
                 }
                 output.push(if binary.op == BinaryOp::LogicalAnd {
                     "&&"
@@ -1917,7 +1980,7 @@ fn jit_export(
                         JitKind::Number => "absentn",
                         JitKind::Boolean => "absentb",
                         JitKind::String => "absents",
-                        JitKind::Array => return None,
+                        JitKind::Array | JitKind::Dictionary => return None,
                     }
                     .into(),
                 );
@@ -1951,7 +2014,7 @@ fn jit_export(
                         }
                         JitKind::String => output.extend(encoded),
                         JitKind::Number => append_string(encoded, output)?,
-                        JitKind::Array => return None,
+                        JitKind::Array | JitKind::Dictionary => return None,
                     }
                     return Some(());
                 }
@@ -2004,7 +2067,7 @@ fn jit_export(
                             JitKind::Number => "numsame",
                             JitKind::Boolean => "==",
                             JitKind::String => "strsame",
-                            JitKind::Array => "refsame",
+                            JitKind::Array | JitKind::Dictionary => "refsame",
                         }
                     }
                     .into(),
@@ -2054,7 +2117,7 @@ fn jit_export(
                                 output.extend(encoded);
                                 output.push("strarray".into());
                             }
-                            JitKind::Number | JitKind::Boolean => return None,
+                            JitKind::Number | JitKind::Boolean | JitKind::Dictionary => return None,
                         }
                     }
                     _ => unreachable!(),
@@ -2181,7 +2244,7 @@ fn jit_export(
                                 JitKind::Number => "n",
                                 JitKind::Boolean => "b",
                                 JitKind::String => "s",
-                                JitKind::Array => return None,
+                                JitKind::Array | JitKind::Dictionary => return None,
                             };
                             encode_string(&callback.join(","), output)?;
                             let captured = !captures.is_empty();
@@ -4249,6 +4312,7 @@ fn jit_export(
                 JitKind::Boolean => "b",
                 JitKind::String => "s",
                 JitKind::Array => array_prefix(tokens)?,
+                JitKind::Dictionary => dictionary_prefix(tokens)?,
             };
             let token = format!("{prefix}{}", max_parameters + offset);
             capture_tokens.push(token.clone());
@@ -4481,6 +4545,7 @@ fn jit_export(
                 JitKind::Boolean => 'b',
                 JitKind::String => 's',
                 JitKind::Array => return None,
+                JitKind::Dictionary => return None,
             };
             output.push(format!("recur{result}{arity}"));
             return Some(());
@@ -4983,6 +5048,12 @@ fn jit_export(
                 thaw_hir::HirType::Str => "rs",
                 _ => return None,
             },
+            thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                thaw_hir::HirType::F64 => "dn",
+                thaw_hir::HirType::Bool => "db",
+                thaw_hir::HirType::Str => "ds",
+                _ => return None,
+            },
             _ => "a",
         };
         if optional {
@@ -5158,6 +5229,7 @@ fn jit_export(
                     ),
                     _ => return None,
                 },
+                JitKind::Dictionary => return None,
             };
             let operation = validated_jit_expression(encoded, kind)?;
             if let Some(name) = binding {
@@ -5245,6 +5317,7 @@ enum JitKind {
     Boolean,
     String,
     Array,
+    Dictionary,
 }
 
 fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
@@ -5992,6 +6065,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if matches!(token.as_str(), "isarray" | "isnotarray") {
             stack.pop()?;
             stack.push(JitKind::Boolean);
+        } else if matches!(token.as_str(), "dnget" | "dbget" | "dsget") {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Dictionary {
+                return None;
+            }
+            stack.push(match token.as_str() {
+                "dnget" => JitKind::Number,
+                "dbget" => JitKind::Boolean,
+                "dsget" => JitKind::String,
+                _ => unreachable!(),
+            });
         } else if matches!(
             token.as_str(),
             "rnat" | "rbat" | "rsat" | "rnget" | "rbget" | "rsget"
@@ -6097,6 +6180,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 || token.starts_with("rs")
             {
                 JitKind::Array
+            } else if token.starts_with("dn")
+                || token.starts_with("db")
+                || token.starts_with("ds")
+            {
+                JitKind::Dictionary
             } else {
                 JitKind::Number
             });
@@ -6451,6 +6539,9 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
                     format!("{rendered}[]")
                 }
             })
+        }
+        thaw_hir::HirType::Dictionary(element) => {
+            render_dynamic_type(element).map(|element| format!("{{ [key: string]: {element} }}"))
         }
         thaw_hir::HirType::Tuple(elements) => elements
             .iter()

@@ -299,6 +299,17 @@ pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_jit_dictionary_get(kind: u8, object: *mut Value, key: *const c_char) -> f64 {
+    let value = thaw_json_get(object, key);
+    match kind {
+        0 => thaw_json_as_number(value),
+        1 => f64::from(thaw_json_as_bool(value)),
+        2 => f64::from_bits(thaw_json_as_string(value) as usize as u64),
+        _ => 0.0,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_array_new() -> *mut Value {
     leak(Value::Array(Vec::new()))
 }

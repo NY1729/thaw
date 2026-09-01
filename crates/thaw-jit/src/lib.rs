@@ -58,6 +58,7 @@ pub type ArraySplice = unsafe extern "C" fn(*mut *mut u8, f64, f64, *const u8) -
 pub type ArraySet = unsafe extern "C" fn(u8, *mut *mut u8, f64, f64) -> i8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 pub type NumberSource = unsafe extern "C" fn() -> f64;
+pub type DictionaryGet = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char) -> f64;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -93,8 +94,34 @@ thread_local! {
     static PERFORMANCE_NOW: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static PROCESS_PID: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static PROCESS_PPID: Cell<Option<NumberSource>> = const { Cell::new(None) };
+    static DICTIONARY_GET: Cell<Option<DictionaryGet>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
+}
+
+extern "C" fn dictionary_get(value: f64, key: f64, kind: u8) -> f64 {
+    let Some(get) = DICTIONARY_GET.with(Cell::get) else {
+        return 0.0;
+    };
+    unsafe {
+        get(
+            kind,
+            value.to_bits() as usize as *mut libc::c_void,
+            key.to_bits() as usize as *const c_char,
+        )
+    }
+}
+
+extern "C" fn number_dictionary_get(value: f64, key: f64) -> f64 {
+    dictionary_get(value, key, 0)
+}
+
+extern "C" fn bool_dictionary_get(value: f64, key: f64) -> f64 {
+    dictionary_get(value, key, 1)
+}
+
+extern "C" fn string_dictionary_get(value: f64, key: f64) -> f64 {
+    dictionary_get(value, key, 2)
 }
 
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
@@ -3228,6 +3255,9 @@ enum NumericValue {
     NumberArrayGet,
     BoolArrayGet,
     StringArrayGet,
+    NumberDictionaryGet,
+    BoolDictionaryGet,
+    StringDictionaryGet,
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
@@ -3468,6 +3498,9 @@ impl NumericProgram {
                     "rnget" => Some(NumericValue::NumberArrayGet),
                     "rbget" => Some(NumericValue::BoolArrayGet),
                     "rsget" => Some(NumericValue::StringArrayGet),
+                    "dnget" => Some(NumericValue::NumberDictionaryGet),
+                    "dbget" => Some(NumericValue::BoolDictionaryGet),
+                    "dsget" => Some(NumericValue::StringDictionaryGet),
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
@@ -3902,6 +3935,9 @@ impl NumericProgram {
                                 .or_else(|| value.strip_prefix("rn"))
                                 .or_else(|| value.strip_prefix("rb"))
                                 .or_else(|| value.strip_prefix("rs"))
+                                .or_else(|| value.strip_prefix("dn"))
+                                .or_else(|| value.strip_prefix("db"))
+                                .or_else(|| value.strip_prefix("ds"))
                                 .and_then(|index| index.parse::<u8>().ok())
                                 .filter(|index| *index < 16)
                                 .map(NumericValue::Argument)
@@ -5041,6 +5077,21 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
+                NumericValue::NumberDictionaryGet
+                | NumericValue::BoolDictionaryGet
+                | NumericValue::StringDictionaryGet => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberDictionaryGet => number_dictionary_get,
+                        NumericValue::BoolDictionaryGet => bool_dictionary_get,
+                        NumericValue::StringDictionaryGet => string_dictionary_get,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
                 NumericValue::NumberArrayJoin
                 | NumericValue::BoolArrayJoin
                 | NumericValue::StringArrayJoin => {
@@ -5617,6 +5668,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     string_to_array: Option<StringToArray>,
     string_from_char_code: Option<NumberToString>,
     string_from_code_point: Option<NumberToString>,
+    dictionary_get: Option<DictionaryGet>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -5681,6 +5733,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_performance_now = PERFORMANCE_NOW.with(|now| now.replace(performance_now));
     let previous_process_pid = PROCESS_PID.with(|pid| pid.replace(process_pid));
     let previous_process_ppid = PROCESS_PPID.with(|ppid| ppid.replace(process_ppid));
+    let previous_dictionary_get = DICTIONARY_GET.with(|get| get.replace(dictionary_get));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let mut value = function(args);
@@ -5722,6 +5775,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     PERFORMANCE_NOW.with(|now| now.set(previous_performance_now));
     PROCESS_PID.with(|pid| pid.set(previous_process_pid));
     PROCESS_PPID.with(|ppid| ppid.set(previous_process_ppid));
+    DICTIONARY_GET.with(|get| get.set(previous_dictionary_get));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -6056,6 +6110,7 @@ mod tests {
                 Some(convert_string),
                 Some(from_char_code),
                 Some(from_code_point),
+                None,
             )
         }
     }
@@ -6566,6 +6621,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,

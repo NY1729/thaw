@@ -1224,14 +1224,23 @@ fn resolves_finite_record_values_after_generic_substitution() {
 }
 
 #[test]
-fn rejects_dynamic_record_keys_without_a_foreign_dictionary_abi() {
-    let funcs =
-        parse_dts("export declare function inspect(value: Record<string, number>): string;")
-            .unwrap();
-    assert!(matches!(
-        classify(&funcs[0]),
-        Classification::Fallback { .. }
-    ));
+fn classifies_dynamic_records_and_index_signatures_as_dictionaries() {
+    let funcs = parse_dts(
+        "export interface Flags { [key: string]: boolean; } export interface Values<T> { [key: string]: T; } export declare function inspect(values: Record<string, number>, flags: Flags, labels: { [key: string]: string }, generic: Values<number>): string;",
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("dynamic string-keyed values should use the native dictionary ABI");
+    };
+    assert_eq!(
+        signature.params,
+        vec![
+            HirType::Dictionary(Box::new(HirType::F64)),
+            HirType::Dictionary(Box::new(HirType::Bool)),
+            HirType::Dictionary(Box::new(HirType::Str)),
+            HirType::Dictionary(Box::new(HirType::F64)),
+        ]
+    );
 }
 
 #[test]

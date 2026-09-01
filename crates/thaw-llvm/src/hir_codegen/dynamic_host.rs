@@ -32,6 +32,11 @@ fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
         {
             Some(1)
         }
+        HirType::Dictionary(element)
+            if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) =>
+        {
+            Some(1)
+        }
         HirType::Object(fields) => fields.iter().try_fold(0usize, |slots, (_, ty)| {
             jit_parameter_slots(ty).map(|count| slots + count)
         }),
@@ -1450,6 +1455,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             .into(),
                         self.module
                             .get_function("thaw_string_from_code_point")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
+                        self.module
+                            .get_function("thaw_jit_dictionary_get")
                             .unwrap()
                             .as_global_value()
                             .as_pointer_value()
