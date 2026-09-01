@@ -620,6 +620,7 @@ fn jit_numeric_export(
                 | "findIndex"
                 | "findLast"
                 | "findLastIndex"
+                | "filter"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -1312,7 +1313,13 @@ fn jit_numeric_export(
                     ));
                 } else if matches!(
                     method,
-                    "some" | "every" | "find" | "findIndex" | "findLast" | "findLastIndex"
+                    "some"
+                        | "every"
+                        | "find"
+                        | "findIndex"
+                        | "findLast"
+                        | "findLastIndex"
+                        | "filter"
                 ) {
                     let [callback] = call.args.as_slice() else {
                         return None;
@@ -3417,6 +3424,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token
+            .strip_prefix("rnfilter")
+            .is_some_and(|operation| matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne"))
+        {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if token == "arrayvalue" {
             if stack.pop()? != JitKind::Array {
                 return None;
