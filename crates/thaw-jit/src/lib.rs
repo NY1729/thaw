@@ -1542,6 +1542,12 @@ extern "C" fn is_not_array(_: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn absent_value() -> f64 {
+    CALL_PRESENT.with(|present| present.set(false));
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn array_at(value: f64, index: f64, kind: u8) -> f64 {
     let Some((data, length)) = (unsafe { array_data(value) }) else {
         CALL_PRESENT.with(|present| present.set(false));
@@ -3324,6 +3330,7 @@ enum NumericValue {
     ConditionalStart,
     ConditionalAlternate,
     ShortCircuitEnd,
+    Absent,
     AsBoolean,
     StrictMismatch(bool),
     Drop,
@@ -3571,6 +3578,7 @@ impl NumericProgram {
                     "if" => Some(NumericValue::ConditionalStart),
                     "else" => Some(NumericValue::ConditionalAlternate),
                     "end" => Some(NumericValue::ShortCircuitEnd),
+                    "absentn" | "absentb" | "absents" => Some(NumericValue::Absent),
                     "asbool" => Some(NumericValue::AsBoolean),
                     "strictfalse" => Some(NumericValue::StrictMismatch(false)),
                     "stricttrue" => Some(NumericValue::StrictMismatch(true)),
@@ -4914,7 +4922,8 @@ impl NumericProgram {
                 | NumericValue::DateNow
                 | NumericValue::PerformanceNow
                 | NumericValue::ProcessPid
-                | NumericValue::ProcessPpid => {
+                | NumericValue::ProcessPpid
+                | NumericValue::Absent => {
                     if depth > 7 {
                         return None;
                     }
@@ -4926,6 +4935,7 @@ impl NumericProgram {
                         NumericValue::PerformanceNow => performance_now,
                         NumericValue::ProcessPid => process_pid,
                         NumericValue::ProcessPpid => process_ppid,
+                        NumericValue::Absent => absent_value,
                         _ => unreachable!(),
                     };
                     code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
@@ -5990,6 +6000,17 @@ mod tests {
         let result = call(&alternate, &[]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 1.0);
+
+        let optional_present = CString::new(format!(
+            "expr:{one},if,{one},else,absentn,end:optional-present"
+        ))
+        .unwrap();
+        assert!(call(&optional_present, &[]).error.is_null());
+        let optional_absent = CString::new(format!(
+            "expr:{zero},if,{one},else,absentn,end:optional-absent"
+        ))
+        .unwrap();
+        assert_eq!(call(&optional_absent, &[]).error, ABSENT_STATUS);
     }
 
     #[test]
