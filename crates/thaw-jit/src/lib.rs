@@ -709,6 +709,64 @@ fn primitive_array_map(value: f64, encoded: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn primitive_array_convert(value: f64, encoded: f64) -> f64 {
+    let encoded = encoded as u8;
+    let source = encoded / 4;
+    let target = encoded % 4;
+    if source > 2 || target > 2 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let (Some(allocate), Some((array, length))) =
+        (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let Some(size) = length.checked_mul(8).and_then(|size| size.checked_add(8)) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let output = unsafe { allocate(size, 8) };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { output.cast::<u64>().write(length as u64) };
+    for index in 0..length {
+        let slot = unsafe { array.add(8 + index * 8).cast::<u64>().read_unaligned() };
+        let value = match source {
+            0 | 2 => f64::from_bits(slot),
+            1 => f64::from(u8::from(slot != 0)),
+            _ => unreachable!(),
+        };
+        let mapped = match (source, target) {
+            (_, 0) if source != 2 => value,
+            (2, 0) => string_to_number(value),
+            (0, 1) => f64::from(u8::from(value != 0.0 && !value.is_nan())),
+            (1, 1) => value,
+            (2, 1) => string_truthy(value),
+            (0, 2) => number_to_string(value),
+            (1, 2) => boolean_to_string(value),
+            (2, 2) => value,
+            _ => unreachable!(),
+        };
+        let mapped = if target == 1 {
+            u64::from(mapped != 0.0)
+        } else {
+            mapped.to_bits()
+        };
+        unsafe {
+            output
+                .add(8 + index * 8)
+                .cast::<u64>()
+                .write_unaligned(mapped)
+        };
+    }
+    array_result(output)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_map(value: f64, operation: impl Fn(f64) -> f64) -> f64 {
     let (Some(allocate), Some((array, length))) =
         (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
@@ -2798,6 +2856,7 @@ enum NumericValue {
     PrimitiveArrayTruthy(u8, u8),
     PrimitiveArrayCompare(u8, CompareOp, u8),
     PrimitiveArrayMap(u8, u8),
+    PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayUnaryMap(bool),
     NumberArrayMathMap(UnaryMath),
@@ -3223,6 +3282,24 @@ impl NumericProgram {
                                 _ => return None,
                             };
                             Some(NumericValue::PrimitiveArrayMap(kind, operation))
+                        })
+                        .or_else(|| {
+                            let (source, target) = value
+                                .strip_prefix("rnmapto")
+                                .map(|target| (0, target))
+                                .or_else(|| value.strip_prefix("rbmapto").map(|target| (1, target)))
+                                .or_else(|| {
+                                    value.strip_prefix("rsmapto").map(|target| (2, target))
+                                })?;
+                            Some(NumericValue::PrimitiveArrayConvert(
+                                source,
+                                match target {
+                                    "number" => 0,
+                                    "boolean" => 1,
+                                    "string" => 2,
+                                    _ => return None,
+                                },
+                            ))
                         })
                         .or_else(|| {
                             Some(NumericValue::NumberArrayUnaryMap(match value {
@@ -3814,6 +3891,19 @@ impl NumericProgram {
                     emit_binary_call(
                         &mut code,
                         primitive_array_map as *const () as u64,
+                        depth - 1,
+                    );
+                }
+                NumericValue::PrimitiveArrayConvert(source, target) => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(source * 4 + target).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_binary_call(
+                        &mut code,
+                        primitive_array_convert as *const () as u64,
                         depth - 1,
                     );
                 }
@@ -5844,6 +5934,37 @@ mod tests {
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 0.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 1.0);
         assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 0.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let string_booleans = CString::new("expr:rs0,rsmaptoboolean:string-map-boolean").unwrap();
+        let result = call(
+            &string_booleans,
+            &[f64::from_bits(string_handle as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.add(8).cast::<u64>().read() }, 0);
+        assert_eq!(unsafe { output.add(16).cast::<u64>().read() }, 1);
+        assert_eq!(unsafe { output.add(24).cast::<u64>().read() }, 0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let bool_numbers = CString::new("expr:rb0,rbmaptonumber:boolean-map-number").unwrap();
+        let result = call(
+            &bool_numbers,
+            &[f64::from_bits(bool_handle as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 0.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 1.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 0.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let number_strings = CString::new("expr:rn0,rnmaptostring:number-map-string").unwrap();
+        let result = call(&number_strings, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(
+            unsafe { CStr::from_ptr(output.add(8).cast::<*const c_char>().read()).to_bytes() },
+            b"42"
+        );
         unsafe { libc::free(output.cast_mut().cast()) };
         let map = CString::new("expr:rn0,c4000000000000000,rnmapmul:array-map").unwrap();
         let result = call(&map, &[f64::from_bits(handle as usize as u64)]);
