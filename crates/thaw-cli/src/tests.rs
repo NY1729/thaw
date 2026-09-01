@@ -417,6 +417,32 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,rnfindlastindexne".into())
     );
+    let filter = thaw_bridge::DtsFunction {
+        ret: spread_extreme.params[0].1.clone(),
+        ..quantifier.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, threshold) => values.filter(value => value >= threshold);",
+            "add",
+            false,
+            &filter,
+        ),
+        Some("expr:rn0,a1,rnfiltergte,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const positive = value => value > 0; module.exports.add = values => values.filter(positive);",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![spread_extreme.params[0].clone()],
+                required_params: 1,
+                ..filter.clone()
+            },
+        ),
+        Some("expr:rn0,c0000000000000000,rnfiltergt,arrayvalue".into())
+    );
     for (method, operation) in [("min", "rnmin"), ("max", "rnmax")] {
         assert_eq!(
             jit_numeric_export(

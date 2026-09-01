@@ -2129,6 +2129,8 @@ array and `NaN` comparison behavior.
 The same comparison callbacks work with `find`, `findIndex`, `findLast`, and
 `findLastIndex`; value searches preserve an explicit absent-result tag while
 index searches return `-1`.
+Comparison-based `number[]` `filter` calls use the same native scan and return
+a freshly allocated native array in one pass.
 Their `join` and zero-argument `toString` calls reuse the native array
 formatters through one arena-backed JIT callback as well.
 Computed numeric element reads (`values[index]`) use a distinct bounds-checked

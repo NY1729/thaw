@@ -491,6 +491,57 @@ number_array_finders!(
 );
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_filter(value: f64, operand: f64, predicate: impl Fn(f64, f64) -> bool) -> f64 {
+    let (Some(allocate), Some((array, length))) =
+        (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let Some(size) = length.checked_mul(8).and_then(|size| size.checked_add(8)) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let output = unsafe { allocate(size, 8) };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    let mut selected = 0;
+    for index in 0..length {
+        let value = unsafe { array.add(8 + index * 8).cast::<f64>().read() };
+        if predicate(value, operand) {
+            unsafe { output.add(8 + selected * 8).cast::<f64>().write(value) };
+            selected += 1;
+        }
+    }
+    unsafe { output.cast::<u64>().write(selected as u64) };
+    array_result(output)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! number_array_filters {
+    ($name:ident, $predicate:expr) => {
+        extern "C" fn $name(value: f64, operand: f64) -> f64 {
+            number_array_filter(value, operand, $predicate)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_filters!(number_array_filter_lt, |left, right| left < right);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_filters!(number_array_filter_lte, |left, right| left <= right);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_filters!(number_array_filter_gt, |left, right| left > right);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_filters!(number_array_filter_gte, |left, right| left >= right);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_filters!(number_array_filter_eq, |left, right| left == right);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_filters!(number_array_filter_ne, |left, right| left != right);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
     value.floor()
 }
@@ -2399,6 +2450,7 @@ enum NumericValue {
     NumberArrayReduce(NumericReduceOp, bool, bool),
     NumberArrayQuantifier(CompareOp, bool),
     NumberArrayFind(CompareOp, u8),
+    NumberArrayFilter(CompareOp),
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2742,6 +2794,18 @@ impl NumericProgram {
                                 _ => return None,
                             };
                             Some(NumericValue::NumberArrayFind(operation, mode))
+                        })
+                        .or_else(|| {
+                            let operation = match value.strip_prefix("rnfilter")? {
+                                "lt" => CompareOp::Less,
+                                "lte" => CompareOp::LessEqual,
+                                "gt" => CompareOp::Greater,
+                                "gte" => CompareOp::GreaterEqual,
+                                "eq" => CompareOp::Equal,
+                                "ne" => CompareOp::NotEqual,
+                                _ => return None,
+                            };
+                            Some(NumericValue::NumberArrayFilter(operation))
                         })
                         .or_else(|| {
                             value
@@ -3246,6 +3310,21 @@ impl NumericProgram {
                         functions[*mode as usize] as *const () as u64,
                         depth - 2,
                     );
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayFilter(operation) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match operation {
+                        CompareOp::Less => number_array_filter_lt,
+                        CompareOp::LessEqual => number_array_filter_lte,
+                        CompareOp::Greater => number_array_filter_gt,
+                        CompareOp::GreaterEqual => number_array_filter_gte,
+                        CompareOp::Equal => number_array_filter_eq,
+                        CompareOp::NotEqual => number_array_filter_ne,
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
                 NumericValue::ArraySlice => {
@@ -5057,6 +5136,14 @@ mod tests {
                 -1.0
             );
         }
+        let filter = CString::new("expr:rn0,c402e000000000000,rnfiltergt:array-filter").unwrap();
+        let result = call(&filter, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 2);
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 30.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();
         let empty_handle = &empty_data as *const *const u8;
