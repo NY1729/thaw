@@ -198,6 +198,11 @@ impl<'ctx> HirCompiler<'ctx> {
             json_as_number_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_jit_dictionary_get",
+            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         let number_to_string_type = i8_ptr.fn_type(&[f64_type.into()], false);
         self.module.add_function(
             "thaw_number_object_is",
@@ -1188,6 +1193,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         i8_ptr.into(),
                         i8_ptr.into(),
                         i64_type.into(),
+                        i8_ptr.into(),
                         i8_ptr.into(),
                         i8_ptr.into(),
                         i8_ptr.into(),

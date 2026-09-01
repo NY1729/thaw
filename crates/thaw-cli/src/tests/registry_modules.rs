@@ -306,6 +306,68 @@ fn primitive_recursion_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_dictionaries_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-dictionary-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-dictionary");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function readNumber(values: Record<string, number>, key: string): number;\nexport declare function readBool(values: Record<string, boolean>, key: string): boolean;\nexport declare function readString(values: Record<string, string>, key: string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function readNumber(values, key) { return values[key] + values.fixed; } function readBool(values, key) { return values[key] && values.enabled; } function readString(values, key) { return values.prefix + values[key]; } module.exports = { readNumber, readBool, readString };\n",
+    )
+    .unwrap();
+    let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
+    let functions = thaw_bridge::parse_dts(&declarations).unwrap();
+    assert_eq!(functions[0].params.len(), 2);
+    assert!(
+        matches!(
+            &functions[0].params[0].1,
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Dictionary(_))
+        ),
+        "{:?}",
+        functions[0]
+    );
+    let bundle = std::fs::read_to_string(package.join("bundle.js")).unwrap();
+    assert!(jit_numeric_export(
+        &bundle,
+        "readNumber",
+        false,
+        &functions[0]
+    )
+    .is_some());
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { readNumber, readBool, readString } from 'jit-dictionary';\nfunction main(): void { console.log(readNumber({ chosen: 40, fixed: 2 }, 'chosen')); console.log(readBool({ chosen: true, enabled: true }, 'chosen')); console.log(readBool({ chosen: false, enabled: true }, 'chosen')); console.log(readString({ prefix: 'th', suffix: 'aw' }, 'suffix')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "42\ntrue\nfalse\nthaw\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_aggregates_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-aggregate-{}",

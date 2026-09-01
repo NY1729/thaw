@@ -2242,6 +2242,11 @@ native aggregate layout directly into typed JIT argument slots, so property
 reads, tuple and array indexing, and composed expressions avoid JSON conversion
 and QuickJS; the total expanded signature is currently limited to the same
 16-slot callback ABI.
+String-keyed `Record<string, number | boolean | string>` parameters use the
+existing native dictionary pointer as one JIT slot. Static property names and
+runtime string keys call the dictionary host directly and restore the declared
+primitive result, so packages that only read typed dictionaries can omit
+QuickJS as well.
 Fixed-shape object and tuple results with the same recursively representable
 leaves are also assembled by an AOT wrapper from specialized JIT leaf
 expressions. Object literal source order, shorthand fields, nested objects and
