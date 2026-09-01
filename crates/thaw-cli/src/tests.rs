@@ -646,6 +646,48 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let same_number = thaw_bridge::DtsFunction {
+        required_params: 2,
+        params: vec![
+            (
+                "left".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "right".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        ..array_predicate.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.check = (left, right) => Object.is(left, right);",
+            "check",
+            false,
+            &same_number,
+        ),
+        Some("expr:a0,a1,numsame".into())
+    );
+    let shadowed_object = thaw_bridge::DtsFunction {
+        params: vec![
+            (
+                "Object".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            same_number.params[1].clone(),
+        ],
+        ..same_number
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.check = (Object, right) => Object.is(Object, right);",
+            "check",
+            false,
+            &shadowed_object,
+        ),
+        None
+    );
     let array_search = thaw_bridge::DtsFunction {
         params: vec![
             array_length.params[0].clone(),
