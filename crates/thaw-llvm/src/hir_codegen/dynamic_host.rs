@@ -975,7 +975,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if signature.backend == DynamicBackend::Jit {
             let return_type = match &signature.ret {
                 HirType::Optional(payload)
-                    if matches!(payload.as_ref(), HirType::F64 | HirType::Str) =>
+                    if matches!(payload.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) =>
                 {
                     payload.as_ref()
                 }
@@ -1085,6 +1085,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             .into(),
                         self.module
                             .get_function("thaw_jit_format_number")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
+                        self.module
+                            .get_function("thaw_jit_array_search")
                             .unwrap()
                             .as_global_value()
                             .as_pointer_value()

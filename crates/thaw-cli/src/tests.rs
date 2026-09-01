@@ -593,7 +593,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_length,
         ),
-        Some("expr:r0,arraylen".into())
+        Some("expr:rn0,arraylen".into())
     );
     assert_eq!(
         jit_numeric_export(
@@ -603,6 +603,62 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &array_length,
         ),
         None
+    );
+    let array_search = thaw_bridge::DtsFunction {
+        params: vec![
+            array_length.params[0].clone(),
+            (
+                "needle".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "from".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 3,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.has = (values, needle, from) => values.includes(needle, from);",
+            "has",
+            false,
+            &array_search,
+        ),
+        Some("expr:rn0,a1,a2,rnincludes".into())
+    );
+    let mut array_index = array_search.clone();
+    array_index.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::F64);
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.find = (values, needle, from) => values.indexOf(needle, from);",
+            "find",
+            false,
+            &array_index,
+        ),
+        Some("expr:rn0,a1,a2,rnindexof".into())
+    );
+    let array_at = thaw_bridge::DtsFunction {
+        params: vec![
+            array_length.params[0].clone(),
+            array_index.params[1].clone(),
+        ],
+        required_params: 2,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::F64,
+        ))),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.pick = (values, needle) => values.at(needle);",
+            "pick",
+            false,
+            &array_at,
+        ),
+        Some("expr:rn0,a1,rnat".into())
     );
     for source in [
         "module.exports.length = value => parseFloat(value);",
