@@ -610,6 +610,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rs0,rsmapidentity,arrayvalue".into())
     );
+    for (method, operation) in [
+        ("toLowerCase", "tolowercase"),
+        ("toUpperCase", "touppercase"),
+        ("trim", "trim"),
+        ("trimStart", "trimstart"),
+        ("trimEnd", "trimend"),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.add = values => values.map(value => value.{method}());"),
+                "add",
+                false,
+                &string_filter,
+            ),
+            Some(format!("expr:rs0,rsmap{operation},arrayvalue")),
+            "{method}"
+        );
+    }
     let bool_map = thaw_bridge::DtsFunction {
         ret: bool_array.clone(),
         ..bool_quantifier.clone()

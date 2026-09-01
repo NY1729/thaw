@@ -663,9 +663,9 @@ fn primitive_array_compare(value: f64, operand: f64, encoded: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn primitive_array_map(value: f64, encoded: f64) -> f64 {
     let encoded = encoded as u8;
-    let kind = encoded / 2;
-    let negate = !encoded.is_multiple_of(2);
-    if !(1..=2).contains(&kind) || (negate && kind != 1) {
+    let kind = encoded / 8;
+    let operation = encoded % 8;
+    if !(1..=2).contains(&kind) || !matches!((kind, operation), (1, 0 | 1) | (2, 0 | 2..=6)) {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     }
@@ -687,11 +687,21 @@ fn primitive_array_map(value: f64, encoded: f64) -> f64 {
     unsafe { output.cast::<u64>().write(length as u64) };
     for index in 0..length {
         let slot = unsafe { array.add(8 + index * 8).cast::<u64>().read_unaligned() };
+        let mapped = match operation {
+            0 => slot,
+            1 => u64::from(slot == 0),
+            2 => string_to_lower_case(f64::from_bits(slot)).to_bits(),
+            3 => string_to_upper_case(f64::from_bits(slot)).to_bits(),
+            4 => string_trim(f64::from_bits(slot)).to_bits(),
+            5 => string_trim_start(f64::from_bits(slot)).to_bits(),
+            6 => string_trim_end(f64::from_bits(slot)).to_bits(),
+            _ => unreachable!(),
+        };
         unsafe {
             output
                 .add(8 + index * 8)
                 .cast::<u64>()
-                .write_unaligned(if negate { u64::from(slot == 0) } else { slot })
+                .write_unaligned(mapped)
         };
     }
     array_result(output)
@@ -2786,7 +2796,7 @@ enum NumericValue {
     NumberArrayFilter(CompareOp),
     PrimitiveArrayTruthy(u8, u8),
     PrimitiveArrayCompare(u8, CompareOp, u8),
-    PrimitiveArrayMap(u8, bool),
+    PrimitiveArrayMap(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayUnaryMap(bool),
     NumberArrayMathMap(UnaryMath),
@@ -3200,13 +3210,17 @@ impl NumericProgram {
                                 .or_else(|| {
                                     value.strip_prefix("rsmap").map(|operation| (2, operation))
                                 })?;
-                            match operation {
-                                "identity" => Some(NumericValue::PrimitiveArrayMap(kind, false)),
-                                "not" if kind == 1 => {
-                                    Some(NumericValue::PrimitiveArrayMap(kind, true))
-                                }
-                                _ => None,
-                            }
+                            let operation = match operation {
+                                "identity" => 0,
+                                "not" if kind == 1 => 1,
+                                "tolowercase" if kind == 2 => 2,
+                                "touppercase" if kind == 2 => 3,
+                                "trim" if kind == 2 => 4,
+                                "trimstart" if kind == 2 => 5,
+                                "trimend" if kind == 2 => 6,
+                                _ => return None,
+                            };
+                            Some(NumericValue::PrimitiveArrayMap(kind, operation))
                         })
                         .or_else(|| {
                             Some(NumericValue::NumberArrayUnaryMap(match value {
@@ -3786,15 +3800,13 @@ impl NumericProgram {
                     );
                     depth -= 1;
                 }
-                NumericValue::PrimitiveArrayMap(kind, negate) => {
+                NumericValue::PrimitiveArrayMap(kind, operation) => {
                     if depth == 0 || depth == 8 {
                         return None;
                     }
                     code.extend_from_slice(&[0x48, 0xb8]);
                     code.extend_from_slice(
-                        &f64::from(kind * 2 + u8::from(*negate))
-                            .to_bits()
-                            .to_le_bytes(),
+                        &f64::from(kind * 8 + operation).to_bits().to_le_bytes(),
                     );
                     code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
                     emit_binary_call(
@@ -5804,6 +5816,19 @@ mod tests {
         assert_eq!(
             unsafe { output.add(16).cast::<*const c_char>().read() },
             nonempty_string.as_ptr()
+        );
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let string_upper = CString::new("expr:rs0,rsmaptouppercase:string-map-uppercase").unwrap();
+        let result = call(
+            &string_upper,
+            &[f64::from_bits(string_handle as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
+        assert_eq!(
+            unsafe { CStr::from_ptr(output.add(16).cast::<*const c_char>().read()).to_bytes() },
+            b"X"
         );
         unsafe { libc::free(output.cast_mut().cast()) };
         let map = CString::new("expr:rn0,c4000000000000000,rnmapmul:array-map").unwrap();

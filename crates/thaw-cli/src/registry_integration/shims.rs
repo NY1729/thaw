@@ -2993,11 +2993,39 @@ fn jit_numeric_export(
         if matches!(expression, Expr::Ident(identifier) if identifier.sym == value.id.sym) {
             return Some("identity");
         }
-        (boolean
+        if boolean
             && matches!(expression, Expr::Unary(unary)
                 if unary.op == UnaryOp::Bang
-                    && matches!(unary.arg.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym)))
-        .then_some("not")
+                    && matches!(unary.arg.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym))
+        {
+            return Some("not");
+        }
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        if boolean
+            || !call.args.is_empty()
+            || !matches!(member.obj.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym)
+        {
+            return None;
+        }
+        match property.sym.as_ref() {
+            "toLowerCase" => Some("tolowercase"),
+            "toUpperCase" => Some("touppercase"),
+            "trim" => Some("trim"),
+            "trimStart" => Some("trimstart"),
+            "trimEnd" => Some("trimend"),
+            _ => None,
+        }
     }
 
     fn encode_helper_call(
@@ -3800,7 +3828,17 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(result);
-        } else if matches!(token.as_str(), "rsmapidentity" | "rbmapidentity" | "rbmapnot") {
+        } else if matches!(
+            token.as_str(),
+            "rsmapidentity"
+                | "rsmaptolowercase"
+                | "rsmaptouppercase"
+                | "rsmaptrim"
+                | "rsmaptrimstart"
+                | "rsmaptrimend"
+                | "rbmapidentity"
+                | "rbmapnot"
+        ) {
             if stack.pop()? != JitKind::Array {
                 return None;
             }
