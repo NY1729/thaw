@@ -328,32 +328,59 @@ fn jit_numeric_export(
         Some((left.expr.as_ref(), right.expr.as_ref()))
     }
 
-    fn math_constant(
+    fn numeric_constant(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
     ) -> Option<f64> {
-        if parameters.contains_key("Math") || locals.contains_key("Math") {
-            return None;
+        if let Expr::Ident(identifier) = expression {
+            let name = identifier.sym.as_ref();
+            if parameters.contains_key(name)
+                || locals.contains_key(name)
+                || helpers.contains_key(name)
+            {
+                return None;
+            }
+            return match name {
+                "NaN" => Some(f64::NAN),
+                "Infinity" => Some(f64::INFINITY),
+                _ => None,
+            };
         }
         let Expr::Member(member) = expression else {
             return None;
         };
-        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Math") {
+        let Expr::Ident(object) = member.obj.as_ref() else {
+            return None;
+        };
+        let object = object.sym.as_ref();
+        if parameters.contains_key(object)
+            || locals.contains_key(object)
+            || helpers.contains_key(object)
+        {
             return None;
         }
         let MemberProp::Ident(property) = &member.prop else {
             return None;
         };
-        match property.sym.as_ref() {
-            "E" => Some(std::f64::consts::E),
-            "LN2" => Some(std::f64::consts::LN_2),
-            "LN10" => Some(std::f64::consts::LN_10),
-            "LOG2E" => Some(std::f64::consts::LOG2_E),
-            "LOG10E" => Some(std::f64::consts::LOG10_E),
-            "PI" => Some(std::f64::consts::PI),
-            "SQRT1_2" => Some(std::f64::consts::FRAC_1_SQRT_2),
-            "SQRT2" => Some(std::f64::consts::SQRT_2),
+        match (object, property.sym.as_ref()) {
+            ("Math", "E") => Some(std::f64::consts::E),
+            ("Math", "LN2") => Some(std::f64::consts::LN_2),
+            ("Math", "LN10") => Some(std::f64::consts::LN_10),
+            ("Math", "LOG2E") => Some(std::f64::consts::LOG2_E),
+            ("Math", "LOG10E") => Some(std::f64::consts::LOG10_E),
+            ("Math", "PI") => Some(std::f64::consts::PI),
+            ("Math", "SQRT1_2") => Some(std::f64::consts::FRAC_1_SQRT_2),
+            ("Math", "SQRT2") => Some(std::f64::consts::SQRT_2),
+            ("Number", "EPSILON") => Some(f64::EPSILON),
+            ("Number", "MAX_SAFE_INTEGER") => Some(9_007_199_254_740_991.0),
+            ("Number", "MIN_SAFE_INTEGER") => Some(-9_007_199_254_740_991.0),
+            ("Number", "MAX_VALUE") => Some(f64::MAX),
+            ("Number", "MIN_VALUE") => Some(f64::from_bits(1)),
+            ("Number", "NaN") => Some(f64::NAN),
+            ("Number", "POSITIVE_INFINITY") => Some(f64::INFINITY),
+            ("Number", "NEGATIVE_INFINITY") => Some(f64::NEG_INFINITY),
             _ => None,
         }
     }
@@ -749,6 +776,10 @@ fn jit_numeric_export(
             Expr::Ident(identifier) if parameters.contains_key(identifier.sym.as_ref()) => {
                 output.push(parameters.get(identifier.sym.as_ref())?.clone());
             }
+            Expr::Ident(_) => output.push(format!(
+                "c{:016x}",
+                numeric_constant(expression, parameters, locals, context.helpers)?.to_bits()
+            )),
             Expr::Lit(Lit::Num(number)) => {
                 output.push(format!("c{:016x}", number.value.to_bits()));
             }
@@ -861,7 +892,7 @@ fn jit_numeric_export(
                 } else {
                     output.push(format!(
                         "c{:016x}",
-                        math_constant(expression, parameters, locals)?.to_bits()
+                        numeric_constant(expression, parameters, locals, context.helpers)?.to_bits()
                     ));
                 }
             }
