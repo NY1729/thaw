@@ -33,7 +33,7 @@ fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
             Some(1)
         }
         HirType::Object(fields) => fields.iter().try_fold(0usize, |slots, (_, ty)| {
-            matches!(ty, HirType::F64 | HirType::Bool | HirType::Str).then_some(slots + 1)
+            jit_parameter_slots(ty).map(|count| slots + count)
         }),
         HirType::Optional(payload) if !matches!(payload.as_ref(), HirType::Object(_)) => {
             jit_parameter_slots(payload).map(|_| 2)
@@ -43,6 +43,56 @@ fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
 }
 
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_jit_argument_slots(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &HirType,
+        path: &str,
+        output: &mut Vec<BasicValueEnum<'ctx>>,
+    ) -> Result<(), String> {
+        if let HirType::Object(fields) = ty {
+            let object = value.into_pointer_value();
+            let mut offset = 0u64;
+            for (field, field_type) in fields {
+                let field_path = format!("{path}_{field}");
+                let pointer = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            object,
+                            &[self.context.i64_type().const_int(offset, false)],
+                            &field_path,
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                let field_value = self
+                    .builder
+                    .build_load(
+                        self.basic_type(field_type)?,
+                        pointer,
+                        &format!("{field_path}_value"),
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.compile_jit_argument_slots(field_value, field_type, &field_path, output)?;
+                offset += object_field_storage_bytes(field_type);
+            }
+            return Ok(());
+        }
+        output.push(if *ty == HirType::Bool {
+            self.builder
+                .build_unsigned_int_to_float(
+                    value.into_int_value(),
+                    self.context.f64_type(),
+                    "jit_boolean_slot",
+                )
+                .map_err(|error| error.to_string())?
+                .into()
+        } else {
+            value
+        });
+        Ok(())
+    }
+
     fn compile_napi_value_callback(
         &mut self,
         callback: &HirExpr,
@@ -1039,40 +1089,6 @@ impl<'ctx> HirCompiler<'ctx> {
             let mut argument_values = Vec::with_capacity(argument_slots);
             for (index, argument) in args.iter().enumerate() {
                 let value = self.compile_expr(argument)?;
-                if let HirType::Object(fields) = &signature.params[index] {
-                    let object = value.into_pointer_value();
-                    let mut offset = 0u64;
-                    for (field, ty) in fields {
-                        let pointer = unsafe {
-                            self.builder
-                                .build_in_bounds_gep(
-                                    self.context.i8_type(),
-                                    object,
-                                    &[self.context.i64_type().const_int(offset, false)],
-                                    &format!("jit_object_{field}"),
-                                )
-                                .map_err(|error| error.to_string())?
-                        };
-                        let field_value = self
-                            .builder
-                            .build_load(self.basic_type(ty)?, pointer, &format!("jit_object_{field}_value"))
-                            .map_err(|error| error.to_string())?;
-                        argument_values.push(if *ty == HirType::Bool {
-                            self.builder
-                                .build_unsigned_int_to_float(
-                                    field_value.into_int_value(),
-                                    self.context.f64_type(),
-                                    "jit_object_boolean_slot",
-                                )
-                                .map_err(|error| error.to_string())?
-                                .into()
-                        } else {
-                            field_value
-                        });
-                        offset += object_field_storage_bytes(ty);
-                    }
-                    continue;
-                }
                 if let HirType::Optional(payload) = &signature.params[index] {
                     let value = value.into_struct_value();
                     let present = self
@@ -1108,18 +1124,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     });
                     continue;
                 }
-                argument_values.push(if signature.params[index] == HirType::Bool {
-                    self.builder
-                        .build_unsigned_int_to_float(
-                            value.into_int_value(),
-                            self.context.f64_type(),
-                            "jit_boolean_argument",
-                        )
-                        .map_err(|error| error.to_string())?
-                        .into()
-                } else {
-                    value
-                });
+                self.compile_jit_argument_slots(
+                    value,
+                    &signature.params[index],
+                    &format!("jit_argument_{index}"),
+                    &mut argument_values,
+                )?;
             }
             for (index, value) in argument_values.into_iter().enumerate() {
                 let slot = unsafe {

@@ -91,7 +91,7 @@ fn bare_imports_automatically_resolve_registry_packages() {
 }
 
 #[test]
-fn flat_primitive_objects_use_jit_without_quickjs() {
+fn nested_primitive_objects_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-object-fields-{}",
         std::process::id()
@@ -101,18 +101,18 @@ fn flat_primitive_objects_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Payload { value: number; label: string; enabled: boolean; }\nexport declare function summarize(record: Payload, offset: number): string;\nexport declare function score(record: Payload, multiplier: number): number;\n",
+        "export interface Meta { label: string; enabled: boolean; }\nexport interface Payload { value: number; meta: Meta; values: number[]; flags: boolean[]; names: string[]; }\nexport declare function summarize(record: Payload, offset: number): string;\nexport declare function score(record: Payload, multiplier: number): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.summarize = (record, offset) => record.enabled ? record.label + ':' + (record.value + offset) : 'disabled'; module.exports.score = (record, multiplier) => record.enabled ? record.value * multiplier + record.label.length : 0;\n",
+        "module.exports.summarize = (record, offset) => record.meta.enabled ? record.meta.label + ':' + (record.value + record.values[0] + offset) : 'disabled'; module.exports.score = (record, multiplier) => record.meta.enabled ? record.value * multiplier + record.meta.label.length + record.values.length + (record.flags[0] ? 1 : 0) + record.names[0].length : 0;\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { summarize, score } from 'jit-object-fields';\nfunction main(): void { const active = { value: 40, label: 'ok', enabled: true }; const inactive = { value: 40, label: 'no', enabled: false }; console.log(summarize(active, 2)); console.log(score(active, 1)); console.log(summarize(inactive, 2)); console.log(score(inactive, 1)); }\n",
+        "import { summarize, score } from 'jit-object-fields';\nfunction main(): void { const active = { value: 39, meta: { label: 'ok', enabled: true }, values: [1, 2], flags: [true], names: ['x'] }; const inactive = { value: 40, meta: { label: 'no', enabled: false }, values: [1], flags: [true], names: ['x'] }; console.log(summarize(active, 2)); console.log(score(active, 1)); console.log(summarize(inactive, 2)); console.log(score(inactive, 1)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -128,7 +128,7 @@ fn flat_primitive_objects_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "ok:42\n42\ndisabled\n0\n"
+        "ok:42\n45\ndisabled\n0\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

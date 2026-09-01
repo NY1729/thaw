@@ -74,18 +74,59 @@ fn jit_numeric_export(
                 Some(1)
             }
             thaw_hir::HirType::Object(fields) => fields.iter().try_fold(0usize, |slots, (_, ty)| {
-                matches!(
-                    ty,
-                    thaw_hir::HirType::F64
-                        | thaw_hir::HirType::Bool
-                        | thaw_hir::HirType::Str
-                )
-                .then_some(slots + 1)
+                jit_parameter_slots(ty).map(|count| slots + count)
             }),
             thaw_hir::HirType::Optional(payload)
                 if !matches!(payload.as_ref(), thaw_hir::HirType::Object(_)) =>
             {
                 jit_parameter_slots(payload).map(|_| 2)
+            }
+            _ => None,
+        }
+    }
+
+    fn bind_jit_object_fields(
+        path: &str,
+        ty: &thaw_hir::HirType,
+        parameters: &mut std::collections::HashMap<String, String>,
+        slot: &mut usize,
+    ) -> Option<()> {
+        let prefix = match ty {
+            thaw_hir::HirType::Str => Some("s"),
+            thaw_hir::HirType::Bool => Some("b"),
+            thaw_hir::HirType::F64 => Some("a"),
+            thaw_hir::HirType::Array(element) => match element.as_ref() {
+                thaw_hir::HirType::F64 => Some("rn"),
+                thaw_hir::HirType::Bool => Some("rb"),
+                thaw_hir::HirType::Str => Some("rs"),
+                _ => None,
+            },
+            thaw_hir::HirType::Object(fields) => {
+                for (field, field_type) in fields {
+                    bind_jit_object_fields(
+                        &format!("{path}.{field}"),
+                        field_type,
+                        parameters,
+                        slot,
+                    )?;
+                }
+                return Some(());
+            }
+            _ => None,
+        }?;
+        parameters.insert(path.into(), format!("{prefix}{slot}"));
+        *slot += 1;
+        Some(())
+    }
+
+    fn member_path(expression: &Expr) -> Option<String> {
+        match expression {
+            Expr::Ident(identifier) => Some(identifier.sym.to_string()),
+            Expr::Member(member) => {
+                let MemberProp::Ident(property) = &member.prop else {
+                    return None;
+                };
+                Some(format!("{}.{}", member_path(member.obj.as_ref())?, property.sym))
             }
             _ => None,
         }
@@ -920,12 +961,7 @@ fn jit_numeric_export(
                 }
             }
             Expr::Member(member) => {
-                let object_field = match (member.obj.as_ref(), &member.prop) {
-                    (Expr::Ident(object), MemberProp::Ident(property)) => {
-                        parameters.get(&format!("{}.{}", object.sym, property.sym))
-                    }
-                    _ => None,
-                };
+                let object_field = member_path(expression).and_then(|path| parameters.get(&path));
                 if matches!(
                     (member.obj.as_ref(), &member.prop),
                     (Expr::Ident(object), MemberProp::Ident(property))
@@ -4028,20 +4064,11 @@ fn jit_numeric_export(
             ty => (*ty, false),
         };
         let optional = *optional_parameter || optional_type;
-        if let thaw_hir::HirType::Object(fields) = ty {
+        if matches!(ty, thaw_hir::HirType::Object(_)) {
             if optional || default.is_some() {
                 return None;
             }
-            for (field, field_type) in fields {
-                let prefix = match field_type {
-                    thaw_hir::HirType::Str => "s",
-                    thaw_hir::HirType::Bool => "b",
-                    thaw_hir::HirType::F64 => "a",
-                    _ => return None,
-                };
-                parameters.insert(format!("{parameter}.{field}"), format!("{prefix}{slot}"));
-                slot += 1;
-            }
+            bind_jit_object_fields(parameter, ty, &mut parameters, &mut slot)?;
             continue;
         }
         let prefix = match ty {
