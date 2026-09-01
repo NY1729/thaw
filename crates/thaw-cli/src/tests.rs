@@ -994,6 +994,26 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
                 .into()
         )
     );
+    let string_characters = thaw_bridge::DtsFunction {
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        )],
+        required_params: 1,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+            thaw_hir::HirType::Str,
+        ))),
+        ..copy_array.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.values = value => Array.from(value);",
+            "values",
+            false,
+            &string_characters,
+        ),
+        Some("expr:s0,strarray,arrayvalue".into())
+    );
     let array_search = thaw_bridge::DtsFunction {
         params: vec![
             array_length.params[0].clone(),

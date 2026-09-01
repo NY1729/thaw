@@ -559,6 +559,9 @@ fn jit_numeric_export(
 
     fn array_prefix(expression: &[String]) -> Option<&'static str> {
         expression.iter().find_map(|token| {
+            if token == "strarray" {
+                return Some("rs");
+            }
             ["rn", "rb", "rs"]
                 .into_iter()
                 .find(|prefix| token.starts_with(prefix))
@@ -1159,13 +1162,19 @@ fn jit_numeric_export(
                             context,
                             &mut encoded,
                         )?;
-                        if jit_expression_kind(&encoded)?.0 != JitKind::Array {
-                            return None;
+                        match jit_expression_kind(&encoded)?.0 {
+                            JitKind::Array => {
+                                output.extend(encoded);
+                                output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                                output.push(format!("c{:016x}", f64::INFINITY.to_bits()));
+                                output.push("arrayslice".into());
+                            }
+                            JitKind::String => {
+                                output.extend(encoded);
+                                output.push("strarray".into());
+                            }
+                            JitKind::Number | JitKind::Boolean => return None,
                         }
-                        output.extend(encoded);
-                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
-                        output.push(format!("c{:016x}", f64::INFINITY.to_bits()));
-                        output.push("arrayslice".into());
                     }
                     _ => unreachable!(),
                 }
@@ -3055,6 +3064,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             }
             stack.push(JitKind::Array);
         } else if token == "arrayempty" {
+            stack.push(JitKind::Array);
+        } else if token == "strarray" {
+            if stack.pop()? != JitKind::String {
+                return None;
+            }
             stack.push(JitKind::Array);
         } else if token == "arrayslice" {
             if stack.pop()? != JitKind::Number
