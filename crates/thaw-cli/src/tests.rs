@@ -457,6 +457,60 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(expected.into())
         );
     }
+    let number_format = thaw_bridge::DtsFunction {
+        name: "format".into(),
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "argument".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        ..string_length.clone()
+    };
+    for (method, operation) in [
+        ("toFixed", "tofixed"),
+        ("toPrecision", "toprecision"),
+        ("toString", "toradix"),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.format = (value, argument) => value.{method}(argument);"),
+                "format",
+                false,
+                &number_format,
+            ),
+            Some(format!("expr:a0,a1,{operation}"))
+        );
+    }
+    let number_to_string = thaw_bridge::DtsFunction {
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        )],
+        required_params: 1,
+        ..number_format.clone()
+    };
+    for (method, expected) in [
+        ("toFixed", "expr:a0,c0000000000000000,tofixed"),
+        ("toPrecision", "expr:a0,numstr"),
+        ("toString", "expr:a0,numstr"),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.format = value => value.{method}();"),
+                "format",
+                false,
+                &number_to_string,
+            ),
+            Some(expected.into())
+        );
+    }
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",

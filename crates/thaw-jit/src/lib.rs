@@ -18,12 +18,19 @@ static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 static ALLOCATION_FAILED: &[u8] = b"failed to allocate JIT code\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 static INVALID_REPEAT_COUNT: &[u8] = b"invalid string repeat count\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static INVALID_FIXED_DIGITS: &[u8] = b"toFixed() digits argument must be between 0 and 100\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static INVALID_PRECISION: &[u8] = b"toPrecision() argument must be between 1 and 100\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static INVALID_RADIX: &[u8] = b"toString() radix argument must be between 2 and 36\0";
 
 pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 pub type NumberToString = unsafe extern "C" fn(f64) -> *const c_char;
 pub type StringToNumber = unsafe extern "C" fn(*const c_char) -> f64;
 pub type ParseFloat = unsafe extern "C" fn(*const c_char) -> f64;
 pub type ParseInt = unsafe extern "C" fn(*const c_char, f64) -> f64;
+pub type NumberFormat = unsafe extern "C" fn(u8, f64, f64) -> *const c_char;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -31,6 +38,7 @@ thread_local! {
     static STRING_TO_NUMBER: Cell<Option<StringToNumber>> = const { Cell::new(None) };
     static PARSE_FLOAT: Cell<Option<ParseFloat>> = const { Cell::new(None) };
     static PARSE_INT: Cell<Option<ParseInt>> = const { Cell::new(None) };
+    static NUMBER_FORMAT: Cell<Option<NumberFormat>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -511,6 +519,58 @@ extern "C" fn parse_int(value: f64, radix: f64) -> f64 {
     } else {
         unsafe { parse(value, radix) }
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn formatted_number(operation: u8, value: f64, argument: f64) -> f64 {
+    let Some(format) = NUMBER_FORMAT.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return f64::from_bits(0);
+    };
+    let value = unsafe { format(operation, value, argument) };
+    if value.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        f64::from_bits(0)
+    } else {
+        f64::from_bits(value as usize as u64)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_to_fixed(value: f64, digits: f64) -> f64 {
+    let digits = if digits.is_nan() { 0.0 } else { digits.trunc() };
+    if !(0.0..=100.0).contains(&digits) {
+        CALL_ERROR.with(|error| error.set(INVALID_FIXED_DIGITS.as_ptr().cast()));
+        return f64::from_bits(0);
+    }
+    formatted_number(0, value, digits)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_to_precision(value: f64, precision: f64) -> f64 {
+    let precision = if precision.is_nan() {
+        0.0
+    } else {
+        precision.trunc()
+    };
+    if !(1.0..=100.0).contains(&precision) {
+        CALL_ERROR.with(|error| error.set(INVALID_PRECISION.as_ptr().cast()));
+        return f64::from_bits(0);
+    }
+    formatted_number(1, value, precision)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_to_radix_string(value: f64, radix: f64) -> f64 {
+    let radix = if radix.is_nan() { 0.0 } else { radix.trunc() };
+    if !(2.0..=36.0).contains(&radix) {
+        CALL_ERROR.with(|error| error.set(INVALID_RADIX.as_ptr().cast()));
+        return f64::from_bits(0);
+    }
+    if radix == 10.0 {
+        return number_to_string(value);
+    }
+    formatted_number(2, value, radix)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1033,6 +1093,9 @@ enum NumericValue {
     StringToNumber,
     ParseFloat,
     ParseInt,
+    NumberToFixed,
+    NumberToPrecision,
+    NumberToRadixString,
     StringConstant(*const c_char),
     StringEndsWith,
     StringEndsWithAt,
@@ -1120,6 +1183,9 @@ impl NumericProgram {
                     "strnum" => Some(NumericValue::StringToNumber),
                     "parsefloat" => Some(NumericValue::ParseFloat),
                     "parseint" => Some(NumericValue::ParseInt),
+                    "tofixed" => Some(NumericValue::NumberToFixed),
+                    "toprecision" => Some(NumericValue::NumberToPrecision),
+                    "toradix" => Some(NumericValue::NumberToRadixString),
                     "endswith" => Some(NumericValue::StringEndsWith),
                     "endswith2" => Some(NumericValue::StringEndsWithAt),
                     "includes" => Some(NumericValue::StringIncludes),
@@ -1401,11 +1467,21 @@ impl NumericProgram {
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
-                NumericValue::ParseInt => {
+                NumericValue::ParseInt
+                | NumericValue::NumberToFixed
+                | NumericValue::NumberToPrecision
+                | NumericValue::NumberToRadixString => {
                     if depth < 2 {
                         return None;
                     }
-                    emit_binary_call(&mut code, parse_int as *const () as u64, depth - 2);
+                    let function = match value {
+                        NumericValue::ParseInt => parse_int,
+                        NumericValue::NumberToFixed => number_to_fixed,
+                        NumericValue::NumberToPrecision => number_to_precision,
+                        NumericValue::NumberToRadixString => number_to_radix_string,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
                 NumericValue::StringStartsWith
@@ -1792,6 +1868,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     string_to_number: Option<StringToNumber>,
     parse_float: Option<ParseFloat>,
     parse_int: Option<ParseInt>,
+    number_format: Option<NumberFormat>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -1824,6 +1901,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_parser = STRING_TO_NUMBER.with(|parser| parser.replace(string_to_number));
     let previous_parse_float = PARSE_FLOAT.with(|parser| parser.replace(parse_float));
     let previous_parse_int = PARSE_INT.with(|parser| parser.replace(parse_int));
+    let previous_number_format = NUMBER_FORMAT.with(|format| format.replace(number_format));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let value = function(args);
@@ -1834,6 +1912,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     STRING_TO_NUMBER.with(|parser| parser.set(previous_parser));
     PARSE_FLOAT.with(|parser| parser.set(previous_parse_float));
     PARSE_INT.with(|parser| parser.set(previous_parse_int));
+    NUMBER_FORMAT.with(|format| format.set(previous_number_format));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -1858,7 +1937,7 @@ mod tests {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }
         }
-        unsafe extern "C" fn format_number(_: f64) -> *const c_char {
+        unsafe extern "C" fn format_number_string(_: f64) -> *const c_char {
             c"42".as_ptr()
         }
         unsafe extern "C" fn parse_string(_: *const c_char) -> f64 {
@@ -1876,16 +1955,35 @@ mod tests {
                 _ => 42.0,
             }
         }
+        unsafe extern "C" fn format_method(
+            operation: u8,
+            value: f64,
+            argument: f64,
+        ) -> *const c_char {
+            let text = match (operation, value, argument) {
+                (0, 12.5, 1.0) => "12.5",
+                (1, 12.5, 3.0) => "12.5",
+                (2, 255.0, 16.0) => "ff",
+                _ => return ptr::null(),
+            };
+            let output = unsafe { libc::malloc(text.len() + 1).cast::<u8>() };
+            unsafe {
+                ptr::copy_nonoverlapping(text.as_ptr(), output, text.len());
+                output.add(text.len()).write(0);
+            }
+            output.cast()
+        }
         unsafe {
             thaw_jit_call_f64(
                 symbol.as_ptr(),
                 args.as_ptr(),
                 args.len(),
                 Some(allocate),
-                Some(format_number),
+                Some(format_number_string),
                 Some(parse_string),
                 Some(parse_float),
                 Some(parse_int),
+                Some(format_method),
             )
         }
     }
@@ -2306,6 +2404,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         assert!(!missing_allocator.error.is_null());
@@ -2390,5 +2489,22 @@ mod tests {
             call(&symbol, &[f64::from_bits(integer.as_ptr() as usize as u64)]).value,
             3.0
         );
+        for (operation, value, argument, expected) in [
+            ("tofixed", 12.5, 1.0, "12.5"),
+            ("toprecision", 12.5, 3.0, "12.5"),
+            ("toradix", 255.0, 16.0, "ff"),
+        ] {
+            let symbol = CString::new(format!("expr:a0,a1,{operation}:{operation}")).unwrap();
+            let result = call(&symbol, &[value, argument]);
+            assert!(result.error.is_null());
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+                expected
+            );
+            unsafe { libc::free(result.cast()) };
+        }
+        let invalid = CString::new("expr:a0,a1,tofixed:invalid-fixed").unwrap();
+        assert!(!call(&invalid, &[1.0, 101.0]).error.is_null());
     }
 }
