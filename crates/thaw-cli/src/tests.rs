@@ -950,6 +950,38 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:t".into())
     );
+    let string_codes = thaw_bridge::DtsFunction {
+        params: vec![
+            (
+                "left".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "right".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        ..zero_arg_string.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.text = (left, right) => String.fromCharCode(left, right);",
+            "text",
+            false,
+            &string_codes,
+        ),
+        Some("expr:a0,fromcharcode,a1,fromcharcode,concat".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.text = (left, right) => String.fromCodePoint(left, right);",
+            "text",
+            false,
+            &string_codes,
+        ),
+        Some("expr:a0,fromcodepoint,a1,fromcodepoint,concat".into())
+    );
     let zero_arg_boolean = thaw_bridge::DtsFunction {
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
         ..zero_arg_number

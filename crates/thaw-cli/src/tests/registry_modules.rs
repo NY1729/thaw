@@ -314,18 +314,18 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function describe(value: string, flag: boolean): string;\n",
+        "export declare function describe(value: string, flag: boolean): string;\nexport declare function codes(left: number, right: number): string;\nexport declare function points(left: number, right: number): string;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.describe = function(value, flag) { const parsed = Number(value.valueOf()); const rounded = Math.round(parsed).valueOf(); const matched = '421'.includes(rounded); const padded = 'x'.padEnd('2', flag); const replaced = '42'.replace(rounded, flag); const picked = 'abc'.charAt('1'); const repeated = 'x'.repeat('2'); let text = `value=${rounded}`; text += ':'; text += flag.toString(); return text.concat(':', rounded, ':', matched, ':', padded, ':', replaced, ':', picked, ':', repeated, ':', String(rounded > 0)); };\n",
+        "module.exports.describe = function(value, flag) { const parsed = Number(value.valueOf()); const rounded = Math.round(parsed).valueOf(); const matched = '421'.includes(rounded); const padded = 'x'.padEnd('2', flag); const replaced = '42'.replace(rounded, flag); const picked = 'abc'.charAt('1'); const repeated = 'x'.repeat('2'); let text = `value=${rounded}`; text += ':'; text += flag.toString(); return text.concat(':', rounded, ':', matched, ':', padded, ':', replaced, ':', picked, ':', repeated, ':', String(rounded > 0)); }; module.exports.codes = (left, right) => String.fromCharCode(left, right); module.exports.points = (left, right) => String.fromCodePoint(left, right);\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { describe } from 'jit-coercion';\nfunction main(): void { console.log(describe('42.4', true)); }\n",
+        "import { describe, codes, points } from 'jit-coercion';\nfunction main(): void { console.log(describe('42.4', true)); console.log(codes(65, 66)); console.log(points(0x1f600, 0x1f680)); try { points(0x110000, 65); } catch { console.log('range'); } }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -337,7 +337,7 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "value=42:true:42:true:xt:true:b:xx:true\n"
+        "value=42:true:42:true:xt:true:b:xx:true\nAB\n😀🚀\nrange\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
