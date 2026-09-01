@@ -2228,6 +2228,10 @@ chains, preserving lazy branch execution while removing the QuickJS bundle.
 Mutable primitive locals before an aggregate return are converted to ordered
 SSA-style JIT intermediates. Plain and compound assignment, prefix/postfix
 updates, and encodable effect statements retain their source evaluation order.
+Logical `&&` and `||` return expressions now use AOT branch wrappers around
+typed JIT leaves. The left operand executes exactly once, and stateful right
+operands execute only when selected, including nested logical expressions and
+primitive leaves inside fixed object or tuple results.
 
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections and the
