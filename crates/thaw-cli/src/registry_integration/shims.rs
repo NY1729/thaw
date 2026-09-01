@@ -1168,15 +1168,21 @@ fn jit_numeric_export(
                 if parameters.contains_key("String") || locals.contains_key("String") {
                     return None;
                 }
-                let [argument] = call.args.as_slice() else {
-                    return None;
-                };
-                if argument.spread.is_some() {
-                    return None;
+                match call.args.as_slice() {
+                    [] => encode_string("", output)?,
+                    [argument] if argument.spread.is_none() => {
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        append_string(encoded, output)?;
+                    }
+                    _ => return None,
                 }
-                let mut encoded = Vec::new();
-                encode_expression(argument.expr.as_ref(), parameters, locals, context, &mut encoded)?;
-                append_string(encoded, output)?;
             }
             Expr::Call(call)
                 if matches!(
@@ -1188,15 +1194,21 @@ fn jit_numeric_export(
                 if parameters.contains_key("Number") || locals.contains_key("Number") {
                     return None;
                 }
-                let [argument] = call.args.as_slice() else {
-                    return None;
-                };
-                if argument.spread.is_some() {
-                    return None;
+                match call.args.as_slice() {
+                    [] => output.push(format!("c{:016x}", 0.0f64.to_bits())),
+                    [argument] if argument.spread.is_none() => {
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        append_number(encoded, output)?;
+                    }
+                    _ => return None,
                 }
-                let mut encoded = Vec::new();
-                encode_expression(argument.expr.as_ref(), parameters, locals, context, &mut encoded)?;
-                append_number(encoded, output)?;
             }
             Expr::Call(call)
                 if matches!(
@@ -1208,15 +1220,21 @@ fn jit_numeric_export(
                 if parameters.contains_key("Boolean") || locals.contains_key("Boolean") {
                     return None;
                 }
-                let [argument] = call.args.as_slice() else {
-                    return None;
-                };
-                if argument.spread.is_some() {
-                    return None;
+                match call.args.as_slice() {
+                    [] => output.push(format!("c{:016x}", 0.0f64.to_bits())),
+                    [argument] if argument.spread.is_none() => {
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        append_boolean(encoded, output)?;
+                    }
+                    _ => return None,
                 }
-                let mut encoded = Vec::new();
-                encode_expression(argument.expr.as_ref(), parameters, locals, context, &mut encoded)?;
-                append_boolean(encoded, output)?;
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
