@@ -489,6 +489,49 @@ fn primitive_array_removal_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_array_splice_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-splice-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-splice");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numbers(values: number[], start: number, count: number, first: number, second: number): number[];\nexport declare function strings(values: string[], start: number, count: number, value: string): string[];\nexport declare function flags(values: boolean[], start: number): boolean[];\nexport declare function none(values: number[]): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.numbers = (values, start, count, first, second) => values.splice(start, count, first, second); module.exports.strings = (values, start, count, value) => values.splice(start, count, value); module.exports.flags = (values, start) => values.splice(start); module.exports.none = values => values.splice();\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numbers, strings, flags, none } from 'jit-array-splice';\nfunction main(): void { const ns = [1, 2, 3, 4]; console.log(numbers(ns, 1, 2, 8, 9).join('|')); console.log(ns.join('|')); const ss = ['a', 'b', 'c']; console.log(strings(ss, -2, 1, 'x').join('|')); console.log(ss.join('|')); const bs = [true, false, true]; console.log(flags(bs, 1).join('|')); console.log(bs.join('|')); const emptyRemoval = [1, 2]; console.log(none(emptyRemoval).length); console.log(emptyRemoval.join('|')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2|3\n1|8|9|4\nb\na|x|c\nfalse|true\ntrue\n0\n1|2\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn string_truthiness_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-truthiness-{}",

@@ -2022,6 +2022,9 @@ caller's native array handle after each arena-backed growth and return the final
 length in typed JIT IR while preserving argument order.
 Primitive `pop()` and `shift()` likewise replace that handle after removal and
 return typed optional values, preserving `undefined` for empty arrays.
+Primitive `splice(start?, deleteCount?, ...items)` builds its fixed-signature
+insertion list inside typed JIT IR, replaces the shared receiver handle once,
+and returns the removed typed array without loading QuickJS.
 `concat(...)` accepts zero or more arrays and scalar values of the
 same primitive element type, chaining native shallow allocations while keeping
 intermediate arrays inside the JIT. Primitive-array `with(index, value)` performs the same native

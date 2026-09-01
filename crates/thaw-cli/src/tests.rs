@@ -1031,6 +1031,43 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,a2,a3,arraycopywithin".into())
     );
+    let array_splice = thaw_bridge::DtsFunction {
+        name: "splice".into(),
+        params: vec![
+            array_length.params[0].clone(),
+            (
+                "start".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "deleteCount".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "first".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "second".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 5,
+        ret: array_length.params[0].1.clone(),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.splice = (values, start, deleteCount, first, second) => values.splice(start, deleteCount, first, second);",
+            "splice",
+            false,
+            &array_splice,
+        ),
+        Some(
+            "expr:rn0,a1,a2,rn0,c0000000000000000,c0000000000000000,arrayslice,a3,rnappend,a4,rnappend,arraysplice"
+                .into()
+        )
+    );
     let array_push = thaw_bridge::DtsFunction {
         name: "push".into(),
         params: vec![
