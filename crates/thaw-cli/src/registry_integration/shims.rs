@@ -1273,21 +1273,30 @@ fn jit_numeric_export(
                 let encoded_receiver = encoded.clone();
                 output.extend(encoded);
                 if method == "reduce" {
-                    let [callback, initial] = call.args.as_slice() else {
-                        return None;
+                    let (callback, initial) = match call.args.as_slice() {
+                        [callback] => (callback, None),
+                        [callback, initial] => (callback, Some(initial)),
+                        _ => return None,
                     };
                     if prefix != "rn" {
                         return None;
                     }
                     let operation = numeric_reducer(callback.expr.as_ref())?;
-                    encode_number(
-                        initial.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        output,
-                    )?;
-                    output.push(format!("rnreduce{operation}"));
+                    if let Some(initial) = initial {
+                        encode_number(
+                            initial.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?;
+                    } else {
+                        output.push("c0000000000000000".into());
+                    }
+                    output.push(format!(
+                        "rnreduce{operation}{}",
+                        if initial.is_some() { "" } else { "0" }
+                    ));
                 } else if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
                         [] => encode_string(",", output)?,
@@ -3229,15 +3238,15 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(
-            token.as_str(),
-            "rnreduceadd"
-                | "rnreducesub"
-                | "rnreducemul"
-                | "rnreducediv"
-                | "rnreducerem"
-                | "rnreducepow"
-        ) {
+        } else if token
+            .strip_prefix("rnreduce")
+            .is_some_and(|operation| {
+                matches!(
+                    operation.strip_suffix('0').unwrap_or(operation),
+                    "add" | "sub" | "mul" | "div" | "rem" | "pow"
+                )
+            })
+        {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
                 return None;
             }
