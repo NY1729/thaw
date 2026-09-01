@@ -685,7 +685,16 @@ fn jit_numeric_export(
                 }
             }
             Expr::Member(member) => {
-                if let MemberProp::Computed(computed) = &member.prop {
+                if matches!(
+                    (member.obj.as_ref(), &member.prop),
+                    (Expr::Ident(object), MemberProp::Ident(property))
+                        if object.sym == "process"
+                            && property.sym == "pid"
+                            && !parameters.contains_key("process")
+                            && !locals.contains_key("process")
+                ) {
+                    output.push("processpid".into());
+                } else if let MemberProp::Computed(computed) = &member.prop {
                     let mut receiver = Vec::new();
                     encode_expression(
                         member.obj.as_ref(),

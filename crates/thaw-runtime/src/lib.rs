@@ -493,6 +493,11 @@ pub extern "C" fn thaw_performance_now() -> f64 {
         * 1000.0
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_process_pid() -> f64 {
+    f64::from(std::process::id())
+}
+
 /// Drives ready continuations and timers until `promise` settles. Returns its
 /// result/error pointer; use `thaw_promise_state` to distinguish fulfillment
 /// from rejection. Returns null for an invalid handle or no possible progress.
