@@ -503,6 +503,25 @@ extern "C" fn string_compare(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_same_value(left: f64, right: f64) -> f64 {
+    f64::from(u8::from(
+        (left.is_nan() && right.is_nan()) || left.to_bits() == right.to_bits(),
+    ))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_same_value(left: f64, right: f64) -> f64 {
+    f64::from(u8::from(unsafe {
+        string_argument(left) == string_argument(right)
+    }))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn reference_same_value(left: f64, right: f64) -> f64 {
+    f64::from(u8::from(left.to_bits() == right.to_bits()))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_is_well_formed(_: f64) -> f64 {
     1.0
 }
@@ -1270,6 +1289,9 @@ enum NumericValue {
     IsInteger,
     IsNaN,
     IsSafeInteger,
+    NumberSameValue,
+    StringSameValue,
+    ReferenceSameValue,
     StringCompare,
     StringCharAt,
     StringCharCodeAt,
@@ -1383,6 +1405,9 @@ impl NumericProgram {
                     "isinteger" => Some(NumericValue::IsInteger),
                     "isnan" => Some(NumericValue::IsNaN),
                     "issafeinteger" => Some(NumericValue::IsSafeInteger),
+                    "numsame" => Some(NumericValue::NumberSameValue),
+                    "strsame" => Some(NumericValue::StringSameValue),
+                    "refsame" => Some(NumericValue::ReferenceSameValue),
                     "strcmp" => Some(NumericValue::StringCompare),
                     "charat" => Some(NumericValue::StringCharAt),
                     "charcodeat" => Some(NumericValue::StringCharCodeAt),
@@ -1662,6 +1687,21 @@ impl NumericProgram {
                         return None;
                     }
                     emit_binary_call(&mut code, string_compare as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::NumberSameValue
+                | NumericValue::StringSameValue
+                | NumericValue::ReferenceSameValue => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberSameValue => number_same_value,
+                        NumericValue::StringSameValue => string_same_value,
+                        NumericValue::ReferenceSameValue => reference_same_value,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
                 NumericValue::StringCharAt
@@ -2896,6 +2936,26 @@ mod tests {
         );
         let symbol = CString::new("expr:a0,isnotarray:is-not-array").unwrap();
         assert_eq!(call(&symbol, &[42.0]).value, 0.0);
+        let symbol = CString::new("expr:a0,a1,numsame:number-same-value").unwrap();
+        assert_eq!(call(&symbol, &[f64::NAN, f64::NAN]).value, 1.0);
+        assert_eq!(call(&symbol, &[0.0, -0.0]).value, 0.0);
+        let symbol = CString::new("expr:s0,s1,strsame:string-same-value").unwrap();
+        let text = CString::new("hello").unwrap();
+        let other_text = CString::new("hello").unwrap();
+        assert_eq!(
+            call(
+                &symbol,
+                &[
+                    f64::from_bits(text.as_ptr() as usize as u64),
+                    f64::from_bits(other_text.as_ptr() as usize as u64),
+                ],
+            )
+            .value,
+            1.0
+        );
+        let symbol = CString::new("expr:rn0,rn1,refsame:reference-same-value").unwrap();
+        let array = f64::from_bits(handle as usize as u64);
+        assert_eq!(call(&symbol, &[array, array]).value, 1.0);
         for (operation, from, expected) in [
             ("rnindexof", 0.0f64, 1.0),
             ("rnincludes", 0.0, 1.0),

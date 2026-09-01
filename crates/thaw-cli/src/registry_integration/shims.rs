@@ -208,6 +208,38 @@ fn jit_numeric_export(
         Some(argument.expr.as_ref())
     }
 
+    fn object_same_value<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<(&'a Expr, &'a Expr)> {
+        if parameters.contains_key("Object")
+            || locals.contains_key("Object")
+            || helpers.contains_key("Object")
+        {
+            return None;
+        }
+        let [left, right] = call.args.as_slice() else {
+            return None;
+        };
+        if left.spread.is_some() || right.spread.is_some() {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Object")
+            || !matches!(&member.prop, MemberProp::Ident(property) if property.sym == "is")
+        {
+            return None;
+        }
+        Some((left.expr.as_ref(), right.expr.as_ref()))
+    }
+
     fn math_constant(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -791,6 +823,33 @@ fn jit_numeric_export(
                     }
                     _ => return None,
                 }
+            }
+            Expr::Call(call)
+                if object_same_value(call, parameters, locals, context.helpers).is_some() =>
+            {
+                let (left, right) =
+                    object_same_value(call, parameters, locals, context.helpers)?;
+                let mut encoded_left = Vec::new();
+                let mut encoded_right = Vec::new();
+                encode_expression(left, parameters, locals, context, &mut encoded_left)?;
+                encode_expression(right, parameters, locals, context, &mut encoded_right)?;
+                let left_kind = jit_expression_kind(&encoded_left)?.0;
+                let right_kind = jit_expression_kind(&encoded_right)?.0;
+                output.extend(encoded_left);
+                output.extend(encoded_right);
+                output.push(
+                    if left_kind != right_kind {
+                        "strictfalse"
+                    } else {
+                        match left_kind {
+                            JitKind::Number => "numsame",
+                            JitKind::Boolean => "==",
+                            JitKind::String => "strsame",
+                            JitKind::Array => "refsame",
+                        }
+                    }
+                    .into(),
+                );
             }
             Expr::Call(call)
                 if array_predicate(call, parameters, locals, context.helpers).is_some() =>
@@ -1982,10 +2041,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(token.as_str(), "<" | "<=" | ">" | ">=" | "==" | "!=") {
+        } else if matches!(
+            token.as_str(),
+            "<" | "<=" | ">" | ">=" | "==" | "!=" | "numsame"
+        ) {
             if !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean)
                 || !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean)
             {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
+        } else if token == "strsame" {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
+        } else if token == "refsame" {
+            if stack.pop()? != JitKind::Array || stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(JitKind::Boolean);
