@@ -542,12 +542,7 @@ number_array_filters!(number_array_filter_eq, |left, right| left == right);
 number_array_filters!(number_array_filter_ne, |left, right| left != right);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn number_array_map(
-    value: f64,
-    operand: f64,
-    reverse: bool,
-    operation: impl Fn(f64, f64) -> f64,
-) -> f64 {
+fn number_array_map(value: f64, operation: impl Fn(f64) -> f64) -> f64 {
     let (Some(allocate), Some((array, length))) =
         (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
     else {
@@ -566,11 +561,7 @@ fn number_array_map(
     unsafe { output.cast::<u64>().write(length as u64) };
     for index in 0..length {
         let element = unsafe { array.add(8 + index * 8).cast::<f64>().read() };
-        let mapped = if reverse {
-            operation(operand, element)
-        } else {
-            operation(element, operand)
-        };
+        let mapped = operation(element);
         unsafe { output.add(8 + index * 8).cast::<f64>().write(mapped) };
     }
     array_result(output)
@@ -580,10 +571,10 @@ fn number_array_map(
 macro_rules! number_array_maps {
     ($forward:ident, $reverse:ident, $operation:expr) => {
         extern "C" fn $forward(value: f64, operand: f64) -> f64 {
-            number_array_map(value, operand, false, $operation)
+            number_array_map(value, |element| $operation(element, operand))
         }
         extern "C" fn $reverse(value: f64, operand: f64) -> f64 {
-            number_array_map(value, operand, true, $operation)
+            number_array_map(value, |element| $operation(operand, element))
         }
     };
 }
@@ -624,6 +615,16 @@ number_array_maps!(
     number_array_map_power_reverse,
     |left, right| power(left, right)
 );
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_map_negate(value: f64) -> f64 {
+    number_array_map(value, |element| -element)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_map_absolute(value: f64) -> f64 {
+    number_array_map(value, f64::abs)
+}
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
@@ -2536,6 +2537,7 @@ enum NumericValue {
     NumberArrayFind(CompareOp, u8),
     NumberArrayFilter(CompareOp),
     NumberArrayMap(NumericReduceOp, bool),
+    NumberArrayUnaryMap(bool),
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2891,6 +2893,13 @@ impl NumericProgram {
                                 _ => return None,
                             };
                             Some(NumericValue::NumberArrayFilter(operation))
+                        })
+                        .or_else(|| {
+                            Some(NumericValue::NumberArrayUnaryMap(match value {
+                                "rnmapneg" => false,
+                                "rnmapabs" => true,
+                                _ => return None,
+                            }))
                         })
                         .or_else(|| {
                             let operation = value.strip_prefix("rnmap")?;
@@ -3458,6 +3467,17 @@ impl NumericProgram {
                         depth - 2,
                     );
                     depth -= 1;
+                }
+                NumericValue::NumberArrayUnaryMap(absolute) => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = if *absolute {
+                        number_array_map_absolute
+                    } else {
+                        number_array_map_negate
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::ArraySlice => {
                     if depth < 3 {
@@ -5302,6 +5322,14 @@ mod tests {
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 90.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 80.0);
         assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 70.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let negate = CString::new("expr:rn0,rnmapneg:array-map-negate").unwrap();
+        let result = call(&negate, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, -10.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, -20.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, -30.0);
         unsafe { libc::free(output.cast_mut().cast()) };
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();

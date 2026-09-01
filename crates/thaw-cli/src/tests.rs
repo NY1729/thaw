@@ -478,6 +478,38 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let unary_map = thaw_bridge::DtsFunction {
+        params: vec![spread_extreme.params[0].clone()],
+        required_params: 1,
+        ..filter.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.map(value => -value);",
+            "add",
+            false,
+            &unary_map,
+        ),
+        Some("expr:rn0,rnmapneg,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const absolute = value => Math.abs(value); module.exports.add = values => values.map(absolute);",
+            "add",
+            false,
+            &unary_map,
+        ),
+        Some("expr:rn0,rnmapabs,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const Math = { abs: value => value }; module.exports.add = values => values.map(value => Math.abs(value));",
+            "add",
+            false,
+            &unary_map,
+        ),
+        None
+    );
     for (method, operation) in [("min", "rnmin"), ("max", "rnmax")] {
         assert_eq!(
             jit_numeric_export(
