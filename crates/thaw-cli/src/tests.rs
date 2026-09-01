@@ -298,6 +298,37 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(format!("expr:rn0,{operation}"))
         );
     }
+    let mixed_extreme = thaw_bridge::DtsFunction {
+        params: vec![
+            (
+                "left".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            spread_extreme.params[0].clone(),
+            ("tail".into(), spread_extreme.params[0].1.clone()),
+            (
+                "right".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 4,
+        ..spread_extreme.clone()
+    };
+    for (method, operation) in [("min", "rnmin"), ("max", "rnmax")] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!(
+                    "module.exports.add = (left, values, tail, right) => Math.{method}(left, ...values, ...tail, right);"
+                ),
+                "add",
+                false,
+                &mixed_extreme,
+            ),
+            Some(format!(
+                "expr:a0,rn1,{operation},{method},rn2,{operation},{method},a3,{method}"
+            ))
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = values => Math.hypot(...values);",

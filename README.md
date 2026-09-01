@@ -1299,10 +1299,10 @@ The workspace crates have narrow responsibilities:
   left-to-right numeric coercion. Empty extrema return signed infinity, `NaN`
   propagates, zero ties retain JavaScript's sign ordering, and unary negation
   preserves negative zero
-- `Math.min`/`Math.max` also accept a single spread of a runtime-length
-  `number[]` (`Math.min(...values)`, not just a fixed argument list or an
-  array-literal/tuple spread, both of which already unroll into individual
-  arguments at compile time): it folds pairwise through the same native
+- `Math.min`/`Math.max` also accept runtime-length `number[]` spreads
+  (`Math.min(left, ...values, ...tail, right)`, not just a fixed argument list
+  or an array-literal/tuple spread, both of which already unroll into individual
+  arguments at compile time): each folds pairwise through the same native
   `__thaw_math_min`/`__thaw_math_max` intrinsic via a runtime loop instead,
   seeded with `Infinity`/`-Infinity` so an empty array matches the
   zero-argument form's result
@@ -1983,8 +1983,9 @@ IR during CommonJS extraction. `Number.EPSILON`, `MAX_VALUE`, `MIN_VALUE`,
 safe-integer bounds, `NaN`, signed infinities, and the unshadowed global
 `NaN`/`Infinity` names likewise become exact JIT constants. Native helper calls
 spill live numeric values, so Math calls can appear at any supported expression
-depth. `Math.min(...number[])`, `Math.max(...number[])`, and
-`Math.hypot(...number[])` fold native array storage directly in the JIT,
+depth. `Math.min`/`Math.max` can interleave fixed numeric arguments and multiple
+`...number[]` spreads, while `Math.hypot(...number[])` accepts one spread; all
+three fold native array storage directly in the JIT,
 preserving empty-array identities, large finite magnitudes, infinities, `NaN`,
 and signed zero. Its end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
