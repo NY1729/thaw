@@ -1276,9 +1276,10 @@ fn jit_numeric_export(
                     let [callback, initial] = call.args.as_slice() else {
                         return None;
                     };
-                    if prefix != "rn" || !additive_reducer(callback.expr.as_ref()) {
+                    if prefix != "rn" {
                         return None;
                     }
+                    let operation = numeric_reducer(callback.expr.as_ref())?;
                     encode_number(
                         initial.expr.as_ref(),
                         parameters,
@@ -1286,7 +1287,7 @@ fn jit_numeric_export(
                         context,
                         output,
                     )?;
-                    output.push("rnreduceadd".into());
+                    output.push(format!("rnreduce{operation}"));
                 } else if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
                         [] => encode_string(",", output)?,
@@ -2445,37 +2446,43 @@ fn jit_numeric_export(
         }
     }
 
-    fn additive_reducer(expression: &Expr) -> bool {
+    fn numeric_reducer(expression: &Expr) -> Option<&'static str> {
         let callable = match expression {
             Expr::Fn(function) => NumericCallable::Function(function.function.as_ref()),
             Expr::Arrow(function) => NumericCallable::Arrow(function),
-            _ => return false,
+            _ => return None,
         };
-        let Some((parameters, steps, body)) = callable_parts(callable) else {
-            return false;
-        };
+        let (parameters, steps, body) = callable_parts(callable)?;
         let [Pat::Ident(accumulator), Pat::Ident(value)] = parameters.as_slice() else {
-            return false;
+            return None;
         };
         if !steps.is_empty() || accumulator.id.sym == value.id.sym {
-            return false;
+            return None;
         }
         let expression = match body {
             NumericBody::Expression(expression) => expression,
             NumericBody::Statements([Stmt::Return(statement)]) => {
-                let Some(expression) = statement.arg.as_deref() else {
-                    return false;
-                };
-                expression
+                statement.arg.as_deref()?
             }
-            _ => return false,
+            _ => return None,
         };
-        matches!(expression,
-            Expr::Bin(binary)
-                if binary.op == BinaryOp::Add
-                    && matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == accumulator.id.sym)
-                    && matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
-        )
+        let Expr::Bin(binary) = expression else {
+            return None;
+        };
+        if !matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == accumulator.id.sym)
+            || !matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
+        {
+            return None;
+        }
+        match binary.op {
+            BinaryOp::Add => Some("add"),
+            BinaryOp::Sub => Some("sub"),
+            BinaryOp::Mul => Some("mul"),
+            BinaryOp::Div => Some("div"),
+            BinaryOp::Mod => Some("rem"),
+            BinaryOp::Exp => Some("pow"),
+            _ => None,
+        }
     }
 
     fn encode_helper_call(
@@ -3222,7 +3229,15 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if token == "rnreduceadd" {
+        } else if matches!(
+            token.as_str(),
+            "rnreduceadd"
+                | "rnreducesub"
+                | "rnreducemul"
+                | "rnreducediv"
+                | "rnreducerem"
+                | "rnreducepow"
+        ) {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
                 return None;
             }
