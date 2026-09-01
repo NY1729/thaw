@@ -52,6 +52,7 @@ pub type ArrayCopyWithin = unsafe extern "C" fn(*mut u8, usize, f64, f64, f64) -
 pub type ArrayPush = unsafe extern "C" fn(u8, *mut *mut u8, f64) -> f64;
 pub type ArrayRemove = unsafe extern "C" fn(u8, *mut *mut u8, *mut f64) -> i8;
 pub type ArraySplice = unsafe extern "C" fn(*mut *mut u8, f64, f64, *const u8) -> *mut u8;
+pub type ArraySet = unsafe extern "C" fn(u8, *mut *mut u8, f64, f64) -> i8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 
 thread_local! {
@@ -78,6 +79,7 @@ thread_local! {
     static ARRAY_UNSHIFT: Cell<Option<ArrayPush>> = const { Cell::new(None) };
     static ARRAY_REMOVE: Cell<Option<ArrayRemove>> = const { Cell::new(None) };
     static ARRAY_SPLICE: Cell<Option<ArraySplice>> = const { Cell::new(None) };
+    static ARRAY_SET: Cell<Option<ArraySet>> = const { Cell::new(None) };
     static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
@@ -299,6 +301,17 @@ fn array_result(pointer: *mut u8) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_length(value: f64) -> f64 {
     unsafe { array_data(value) }.map_or(0.0, |(_, length)| length as f64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_value(value: f64) -> f64 {
+    match unsafe { array_data(value) } {
+        Some((data, _)) => array_result(data.cast_mut()),
+        None => {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            0.0
+        }
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -677,6 +690,36 @@ fn array_unshift(operation: u8, array: f64, value: f64) -> f64 {
         result
     }
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_set(operation: u8, array: f64, index: f64, value: f64) -> f64 {
+    let Some(set) = ARRAY_SET.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let bits = array.to_bits();
+    if bits & ARRAY_RESULT_TAG != 0
+        || unsafe { set(operation, bits as usize as *mut *mut u8, index, value) } != 1
+    {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        value
+    }
+}
+
+macro_rules! array_set_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(array: f64, index: f64, value: f64) -> f64 {
+            array_set($operation, array, index, value)
+        }
+    };
+}
+
+array_set_fn!(number_array_set, 0);
+array_set_fn!(string_array_set, 1);
+array_set_fn!(bool_array_set, 2);
 
 macro_rules! array_unshift_fn {
     ($name:ident, $operation:expr) => {
@@ -1863,6 +1906,10 @@ enum NumericValue {
     NumberArrayUnshift,
     StringArrayUnshift,
     BoolArrayUnshift,
+    NumberArraySet,
+    StringArraySet,
+    BoolArraySet,
+    ArrayValue,
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -1930,6 +1977,7 @@ impl NumericProgram {
                     | NumericValue::ArrayCopyWithin
                     | NumericValue::ArraySplice
                     | NumericValue::ArrayToSpliced
+                    | NumericValue::ArrayValue
                     | NumericValue::NumberArrayWith
                     | NumericValue::StringArrayWith
                     | NumericValue::BoolArrayWith
@@ -2052,6 +2100,10 @@ impl NumericProgram {
                     "rnunshift" => Some(NumericValue::NumberArrayUnshift),
                     "rsunshift" => Some(NumericValue::StringArrayUnshift),
                     "rbunshift" => Some(NumericValue::BoolArrayUnshift),
+                    "rnset" => Some(NumericValue::NumberArraySet),
+                    "rsset" => Some(NumericValue::StringArraySet),
+                    "rbset" => Some(NumericValue::BoolArraySet),
+                    "arrayvalue" => Some(NumericValue::ArrayValue),
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
@@ -2598,6 +2650,27 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
+                NumericValue::NumberArraySet
+                | NumericValue::StringArraySet
+                | NumericValue::BoolArraySet => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArraySet => number_array_set,
+                        NumericValue::StringArraySet => string_array_set,
+                        NumericValue::BoolArraySet => bool_array_set,
+                        _ => unreachable!(),
+                    };
+                    emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                    depth -= 2;
+                }
+                NumericValue::ArrayValue => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, array_value as *const () as u64, depth - 1);
+                }
                 NumericValue::NumberArrayPop
                 | NumericValue::StringArrayPop
                 | NumericValue::BoolArrayPop
@@ -3082,6 +3155,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     array_unshift: Option<ArrayPush>,
     array_remove: Option<ArrayRemove>,
     array_splice: Option<ArraySplice>,
+    array_set: Option<ArraySet>,
     array_with: Option<ArrayWith>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
@@ -3135,6 +3209,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_array_unshift = ARRAY_UNSHIFT.with(|unshift| unshift.replace(array_unshift));
     let previous_array_remove = ARRAY_REMOVE.with(|remove| remove.replace(array_remove));
     let previous_array_splice = ARRAY_SPLICE.with(|splice| splice.replace(array_splice));
+    let previous_array_set = ARRAY_SET.with(|set| set.replace(array_set));
     let previous_array_with = ARRAY_WITH.with(|replace| replace.replace(array_with));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
@@ -3167,6 +3242,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     ARRAY_UNSHIFT.with(|unshift| unshift.set(previous_array_unshift));
     ARRAY_REMOVE.with(|remove| remove.set(previous_array_remove));
     ARRAY_SPLICE.with(|splice| splice.set(previous_array_splice));
+    ARRAY_SET.with(|set| set.set(previous_array_set));
     ARRAY_WITH.with(|replace| replace.set(previous_array_with));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
@@ -3453,6 +3529,7 @@ mod tests {
                 Some(push_array_value),
                 Some(push_array_value),
                 Some(remove_array_value),
+                None,
                 None,
                 Some(replace_array),
             )
@@ -3870,6 +3947,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,

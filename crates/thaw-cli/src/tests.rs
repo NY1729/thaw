@@ -852,6 +852,41 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,rnget".into())
     );
+    let array_set = thaw_bridge::DtsFunction {
+        params: vec![
+            array_length.params[0].clone(),
+            array_index.params[1].clone(),
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 3,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.set = (values, index, value) => values[index] = value;",
+            "set",
+            false,
+            &array_set,
+        ),
+        Some("expr:rn0,a1,a2,rnset".into())
+    );
+    let array_set_and_return = thaw_bridge::DtsFunction {
+        ret: array_length.params[0].1.clone(),
+        ..array_set.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.set = (values, index, value) => { values[index] = value; return values; };",
+            "set",
+            false,
+            &array_set_and_return,
+        ),
+        Some("expr:rn0,a1,a2,rnset,drop,rn0,arrayvalue".into())
+    );
     let array_join = thaw_bridge::DtsFunction {
         params: vec![
             array_length.params[0].clone(),
@@ -911,7 +946,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_slice,
         ),
-        Some("expr:rn0,a1,a2,arrayslice".into())
+        Some("expr:rn0,a1,a2,arrayslice,arrayvalue".into())
     );
     let array_slice_all = thaw_bridge::DtsFunction {
         params: vec![array_length.params[0].clone()],
@@ -925,7 +960,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_slice_all,
         ),
-        Some("expr:rn0,c0000000000000000,c7ff0000000000000,arrayslice".into())
+        Some("expr:rn0,c0000000000000000,c7ff0000000000000,arrayslice,arrayvalue".into())
     );
     let array_reversed = thaw_bridge::DtsFunction {
         name: "reversed".into(),
@@ -938,7 +973,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_reversed,
         ),
-        Some("expr:rn0,arrayreversed".into())
+        Some("expr:rn0,arrayreversed,arrayvalue".into())
     );
     assert_eq!(
         jit_numeric_export(
@@ -947,7 +982,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_reversed,
         ),
-        Some("expr:rn0,arrayreverse".into())
+        Some("expr:rn0,arrayreverse,arrayvalue".into())
     );
     let array_sorted = thaw_bridge::DtsFunction {
         name: "sorted".into(),
@@ -960,7 +995,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_sorted,
         ),
-        Some("expr:rn0,rnsorted".into())
+        Some("expr:rn0,rnsorted,arrayvalue".into())
     );
     assert_eq!(
         jit_numeric_export(
@@ -969,7 +1004,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_sorted,
         ),
-        Some("expr:rn0,rnsort".into())
+        Some("expr:rn0,rnsort,arrayvalue".into())
     );
     let array_fill = thaw_bridge::DtsFunction {
         name: "fill".into(),
@@ -999,7 +1034,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_fill,
         ),
-        Some("expr:rn0,a1,a2,a3,rnfill".into())
+        Some("expr:rn0,a1,a2,a3,rnfill,arrayvalue".into())
     );
     let array_copy_within = thaw_bridge::DtsFunction {
         name: "copy".into(),
@@ -1029,7 +1064,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_copy_within,
         ),
-        Some("expr:rn0,a1,a2,a3,arraycopywithin".into())
+        Some("expr:rn0,a1,a2,a3,arraycopywithin,arrayvalue".into())
     );
     let array_splice = thaw_bridge::DtsFunction {
         name: "splice".into(),
@@ -1064,7 +1099,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &array_splice,
         ),
         Some(
-            "expr:rn0,a1,a2,rn0,c0000000000000000,c0000000000000000,arrayslice,a3,rnappend,a4,rnappend,arraysplice"
+            "expr:rn0,a1,a2,rn0,c0000000000000000,c0000000000000000,arrayslice,a3,rnappend,a4,rnappend,arraysplice,arrayvalue"
                 .into()
         )
     );
@@ -1076,7 +1111,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &array_splice,
         ),
         Some(
-            "expr:rn0,a1,a2,rn0,c0000000000000000,c0000000000000000,arrayslice,a3,rnappend,a4,rnappend,arraytospliced"
+            "expr:rn0,a1,a2,rn0,c0000000000000000,c0000000000000000,arrayslice,a3,rnappend,a4,rnappend,arraytospliced,arrayvalue"
                 .into()
         )
     );
@@ -1174,7 +1209,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_with,
         ),
-        Some("expr:rn0,a1,a2,rnwith".into())
+        Some("expr:rn0,a1,a2,rnwith,arrayvalue".into())
     );
     let array_concat = thaw_bridge::DtsFunction {
         name: "concat".into(),
@@ -1193,7 +1228,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_concat,
         ),
-        Some("expr:rn0,rn1,arrayconcat".into())
+        Some("expr:rn0,rn1,arrayconcat,arrayvalue".into())
     );
     assert_eq!(
         jit_numeric_export(
@@ -1202,7 +1237,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_slice_all,
         ),
-        Some("expr:rn0,c0000000000000000,c7ff0000000000000,arrayslice".into())
+        Some("expr:rn0,c0000000000000000,c7ff0000000000000,arrayslice,arrayvalue".into())
     );
     let array_concat_mixed = thaw_bridge::DtsFunction {
         params: vec![
@@ -1227,7 +1262,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &array_concat_mixed,
         ),
-        Some("expr:rn0,a1,rnappend,rn2,arrayconcat,a3,rnappend".into())
+        Some("expr:rn0,a1,rnappend,rn2,arrayconcat,a3,rnappend,arrayvalue".into())
     );
     for source in [
         "module.exports.length = value => parseFloat(value);",
@@ -1721,7 +1756,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &split,
         ),
-        Some("expr:s0,s1,c7ff0000000000000,split".into())
+        Some("expr:s0,s1,c7ff0000000000000,split,arrayvalue".into())
     );
     let split_limit = thaw_bridge::DtsFunction {
         params: vec![
@@ -1742,7 +1777,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &split_limit,
         ),
-        Some("expr:s0,s1,a2,split".into())
+        Some("expr:s0,s1,a2,split,arrayvalue".into())
     );
     assert_eq!(
         jit_numeric_export(

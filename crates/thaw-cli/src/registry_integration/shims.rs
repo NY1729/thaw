@@ -699,6 +699,48 @@ fn jit_numeric_export(
                     ));
                 }
             }
+            Expr::Assign(assignment) if assignment.op == AssignOp::Assign => {
+                let AssignTarget::Simple(SimpleAssignTarget::Member(target)) = &assignment.left
+                else {
+                    return None;
+                };
+                let MemberProp::Computed(index) = &target.prop else {
+                    return None;
+                };
+                let mut receiver = Vec::new();
+                encode_expression(
+                    target.obj.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut receiver,
+                )?;
+                if jit_expression_kind(&receiver)?.0 != JitKind::Array {
+                    return None;
+                }
+                let prefix = array_prefix(&receiver)?;
+                let expected = match prefix {
+                    "rn" => JitKind::Number,
+                    "rs" => JitKind::String,
+                    "rb" => JitKind::Boolean,
+                    _ => return None,
+                };
+                output.extend(receiver);
+                encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
+                let mut value = Vec::new();
+                encode_expression(
+                    assignment.right.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut value,
+                )?;
+                if jit_expression_kind(&value)?.0 != expected {
+                    return None;
+                }
+                output.extend(value);
+                output.push(format!("{prefix}set"));
+            }
             Expr::Unary(unary)
                 if matches!(
                     unary.op,
@@ -1797,6 +1839,7 @@ fn jit_numeric_export(
             name: &'a Ident,
             operation: UpdateOp,
         },
+        Effect(&'a Expr),
     }
 
     fn split_numeric_body(statements: &[Stmt]) -> Option<(Vec<LocalStep<'_>>, NumericBody<'_>)> {
@@ -1818,16 +1861,17 @@ fn jit_numeric_export(
                 }
                 Some(Stmt::Expr(statement)) => match statement.expr.as_ref() {
                     Expr::Assign(assignment) => {
-                        let AssignTarget::Simple(SimpleAssignTarget::Ident(name)) =
+                        if let AssignTarget::Simple(SimpleAssignTarget::Ident(name)) =
                             &assignment.left
-                        else {
-                            break;
-                        };
-                        steps.push(LocalStep::Assign {
-                            name: &name.id,
-                            operation: assignment.op,
-                            value: assignment.right.as_ref(),
-                        });
+                        {
+                            steps.push(LocalStep::Assign {
+                                name: &name.id,
+                                operation: assignment.op,
+                                value: assignment.right.as_ref(),
+                            });
+                        } else {
+                            steps.push(LocalStep::Effect(statement.expr.as_ref()));
+                        }
                     }
                     Expr::Update(update) => {
                         let Expr::Ident(name) = update.arg.as_ref() else {
@@ -1934,6 +1978,10 @@ fn jit_numeric_export(
                         .into(),
                     );
                     locals.insert(name.sym.to_string(), encoded);
+                }
+                LocalStep::Effect(expression) => {
+                    encode_expression(expression, parameters, &locals, context, output)?;
+                    output.push("drop".into());
                 }
             }
         }
@@ -2633,6 +2681,21 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if matches!(token.as_str(), "rnset" | "rsset" | "rbset") {
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Array
+                || value
+                    != match &token[..2] {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    }
+            {
+                return None;
+            }
+            stack.push(value);
         } else if token == "drop" {
             stack.pop()?;
         } else if matches!(token.as_str(), "rnwith" | "rswith" | "rbwith") {
@@ -2711,6 +2774,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token == "arrayvalue" {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if token == "arrayslice" {
             if stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Number
@@ -2865,13 +2933,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     Some((*kind, maximum_depth))
 }
 
-fn validated_jit_expression(expression: Vec<String>, expected: JitKind) -> Option<String> {
+fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> Option<String> {
     let (kind, maximum_depth) = jit_expression_kind(&expression)?;
     let compatible = kind == expected
         || (matches!(kind, JitKind::Number | JitKind::Boolean)
             && matches!(expected, JitKind::Number | JitKind::Boolean));
     if !compatible || maximum_depth > 8 {
         return None;
+    }
+    if expected == JitKind::Array {
+        expression.push("arrayvalue".into());
     }
     Some(format!("expr:{}", expression.join(",")))
 }
