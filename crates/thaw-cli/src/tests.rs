@@ -1335,6 +1335,38 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.normalize = value => value.normalize();",
+            "normalize",
+            false,
+            &string_case,
+        ),
+        Some("expr:s0,t4e4643,normalize".into())
+    );
+    let normalize_form = thaw_bridge::DtsFunction {
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+            (
+                "form".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+        ],
+        required_params: 2,
+        ..string_case.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.normalize = (value, form) => value.normalize(form);",
+            "normalize",
+            false,
+            &normalize_form,
+        ),
+        Some("expr:s0,s1,normalize".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.matches = value => value.isWellFormed();",
             "matches",
             false,
