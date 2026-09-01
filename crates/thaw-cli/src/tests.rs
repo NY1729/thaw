@@ -347,6 +347,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,c4014000000000000,rnreduceadd".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "const addValues = (accumulator, value) => accumulator + value; module.exports.add = values => values.reduce(addValues, 0);",
+            "add",
+            false,
+            &spread_extreme,
+        ),
+        Some("expr:rn0,c0000000000000000,rnreduceadd".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.reduce(addValues, 0); function addValues(accumulator, value) { return accumulator + value; }",
+            "add",
+            false,
+            &spread_extreme,
+        ),
+        Some("expr:rn0,c0000000000000000,rnreduceadd".into())
+    );
     for (operator, operation) in [
         ("+", "add"),
         ("-", "sub"),
@@ -434,6 +452,26 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             "add",
             false,
             &shadowed_math,
+        ),
+        None
+    );
+    let shadowed_reducer = thaw_bridge::DtsFunction {
+        params: vec![
+            spread_extreme.params[0].clone(),
+            (
+                "addValues".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        ..spread_extreme.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "const addValues = (accumulator, value) => accumulator + value; module.exports.add = (values, addValues) => values.reduce(addValues, 0);",
+            "add",
+            false,
+            &shadowed_reducer,
         ),
         None
     );

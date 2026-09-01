@@ -2468,11 +2468,13 @@ fn jit_numeric_export(
         outer_locals: &std::collections::HashMap<String, Vec<String>>,
         helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
     ) -> Option<&'static str> {
-        let callable = match expression {
-            Expr::Fn(function) => NumericCallable::Function(function.function.as_ref()),
-            Expr::Arrow(function) => NumericCallable::Arrow(function),
-            _ => return None,
-        };
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, helpers)?;
         let (parameters, steps, body) = callable_parts(callable)?;
         let [Pat::Ident(accumulator), Pat::Ident(value)] = parameters.as_slice() else {
             return None;
