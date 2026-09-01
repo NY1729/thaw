@@ -2256,7 +2256,8 @@ left-to-right evaluation order. `Object.keys` returns a native string array,
 performs a direct host query for these dictionaries. `Object.fromEntries`
 converts those typed entry arrays back to native dictionaries, so enumeration,
 round trips, length/array operations and ownership checks remain on the
-QuickJS-free path.
+QuickJS-free path. `Object.assign` also mutates and returns a same-typed target
+there, applying any number of dictionary sources in left-to-right order.
 Fixed-shape object and tuple results with the same recursively representable
 leaves are also assembled by an AOT wrapper from specialized JIT leaf
 expressions. Object literal source order, shorthand fields, nested objects and

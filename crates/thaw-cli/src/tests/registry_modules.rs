@@ -426,6 +426,58 @@ fn object_from_entries_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn object_assign_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-object-assign-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-object-assign");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function assignNumbers(target: Record<string, number>, first: Record<string, number>, second: Record<string, number>): Record<string, number>;\nexport declare function assignBools(target: Record<string, boolean>, source: Record<string, boolean>): Record<string, boolean>;\nexport declare function assignStrings(target: Record<string, string>, source: Record<string, string>): Record<string, string>;\nexport declare function assignAndRead(target: Record<string, number>, first: Record<string, number>, second: Record<string, number>): number;\nexport declare function identity(target: Record<string, number>): Record<string, number>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function assignNumbers(target, first, second) { return Object.assign(target, first, second); } function assignBools(target, source) { return Object.assign(target, source); } function assignStrings(target, source) { return Object.assign(target, source); } function assignAndRead(target, first, second) { return Object.assign(target, first, second).chosen; } function identity(target) { return Object.assign(target); } module.exports = { assignNumbers, assignBools, assignStrings, assignAndRead, identity };\n",
+    )
+    .unwrap();
+    let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
+    let functions = thaw_bridge::parse_dts(&declarations).unwrap();
+    let bundle = std::fs::read_to_string(package.join("bundle.js")).unwrap();
+    for function in &functions {
+        assert!(
+            jit_numeric_export(&bundle, &function.name, false, function).is_some(),
+            "{function:?} did not specialize"
+        );
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { assignNumbers, assignBools, assignStrings, assignAndRead, identity } from 'jit-object-assign';\nfunction main(): void { const numbers = assignNumbers({ base: 1, chosen: 0 }, { chosen: 2, first: 3 }, { chosen: 4, second: 5 }); console.log(numbers.base); console.log(numbers.chosen); console.log(numbers.first); console.log(numbers.second); console.log(assignBools({ ready: false }, { ready: true }).ready); console.log(assignStrings({ left: 'th' }, { right: 'aw' }).left + assignStrings({ left: 'th' }, { right: 'aw' }).right); console.log(assignAndRead({ chosen: 1 }, { chosen: 2 }, { chosen: 42 })); console.log(identity({ answer: 42 }).answer); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1\n4\n3\n5\ntrue\nthaw\n42\n42\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_aggregates_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-aggregate-{}",
