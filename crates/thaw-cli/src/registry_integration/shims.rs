@@ -865,6 +865,9 @@ fn jit_export(
     ) -> bool {
         match expression {
             Expr::Ident(_) => string_parameter(expression, parameters).is_some(),
+            Expr::Member(_) => member_path(expression)
+                .and_then(|path| parameters.get(&path))
+                .is_some_and(|token| token.starts_with('s')),
             Expr::Lit(Lit::Str(_)) => true,
             Expr::Tpl(template) => template.quasis.len() == template.exprs.len() + 1,
             Expr::Paren(parenthesized) => {
@@ -1278,44 +1281,76 @@ fn jit_export(
             locals: &std::collections::HashMap<String, Vec<String>>,
             context: &mut InlineContext<'_>,
         ) -> Option<(String, Vec<String>)> {
-            let (receiver, ordinary) = match chain.base.as_ref() {
-                OptChainBase::Member(member) => {
-                    (member.obj.as_ref(), Expr::Member(member.clone()))
+            fn ordinary_expression(expression: &Expr) -> Option<Expr> {
+                match expression {
+                    Expr::OptChain(chain) => ordinary_chain(chain),
+                    Expr::Member(member) => {
+                        let mut member = member.clone();
+                        member.obj = Box::new(ordinary_expression(member.obj.as_ref())?);
+                        Some(Expr::Member(member))
+                    }
+                    Expr::Call(call) => {
+                        let mut call = call.clone();
+                        if let Callee::Expr(callee) = &mut call.callee {
+                            **callee = ordinary_expression(callee.as_ref())?;
+                        }
+                        Some(Expr::Call(call))
+                    }
+                    Expr::Paren(parenthesized) => {
+                        let mut parenthesized = parenthesized.clone();
+                        parenthesized.expr =
+                            Box::new(ordinary_expression(parenthesized.expr.as_ref())?);
+                        Some(Expr::Paren(parenthesized))
+                    }
+                    expression => Some(expression.clone()),
                 }
-                OptChainBase::Call(call) => {
-                    let callee = call.callee.as_ref();
-                    let member = match callee {
-                        Expr::Member(member) => Some(member),
-                        Expr::OptChain(chain) => match chain.base.as_ref() {
-                            OptChainBase::Member(member) => Some(member),
-                            OptChainBase::Call(_) => None,
-                        },
-                        _ => None,
-                    };
-                    if let Some(member) = member {
-                        let mut ordinary = CallExpr::from(call.clone());
-                        ordinary.callee = Callee::Expr(Box::new(Expr::Member(member.clone())));
-                        (member.obj.as_ref(), Expr::Call(ordinary))
-                    } else if matches!(callee, Expr::Ident(_)) {
-                        (callee, Expr::Call(CallExpr::from(call.clone())))
-                    } else {
-                        return None;
+            }
+
+            fn ordinary_chain(chain: &thaw_parser::ast::OptChainExpr) -> Option<Expr> {
+                match chain.base.as_ref() {
+                    OptChainBase::Member(member) => {
+                        let mut member = member.clone();
+                        member.obj = Box::new(ordinary_expression(member.obj.as_ref())?);
+                        Some(Expr::Member(member))
+                    }
+                    OptChainBase::Call(call) => {
+                        let mut call = CallExpr::from(call.clone());
+                        if let Callee::Expr(callee) = &mut call.callee {
+                            **callee = ordinary_expression(callee.as_ref())?;
+                        }
+                        Some(Expr::Call(call))
                     }
                 }
-            };
-            let receiver = match receiver {
-                Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
-                receiver => receiver,
-            };
-            let Expr::Ident(identifier) = receiver else {
-                return None;
-            };
-            let (presence, value) = parameters
-                .get(identifier.sym.as_ref())?
-                .strip_prefix("optional:")?
-                .split_once(':')?;
+            }
+
+            fn optional_root<'a>(
+                expression: &Expr,
+                parameters: &'a std::collections::HashMap<String, String>,
+            ) -> Option<(&'a str, &'a str, String)> {
+                match expression {
+                    Expr::Ident(identifier) => {
+                        let (presence, value) = parameters
+                            .get(identifier.sym.as_ref())?
+                            .strip_prefix("optional:")?
+                            .split_once(':')?;
+                        Some((presence, value, identifier.sym.to_string()))
+                    }
+                    Expr::Member(member) => optional_root(member.obj.as_ref(), parameters),
+                    Expr::Call(call) => match &call.callee {
+                        Callee::Expr(callee) => optional_root(callee.as_ref(), parameters),
+                        _ => None,
+                    },
+                    Expr::Paren(parenthesized) => {
+                        optional_root(parenthesized.expr.as_ref(), parameters)
+                    }
+                    _ => None,
+                }
+            }
+
+            let ordinary = ordinary_chain(chain)?;
+            let (presence, value, receiver) = optional_root(&ordinary, parameters)?;
             let mut unwrapped = parameters.clone();
-            unwrapped.insert(identifier.sym.to_string(), value.into());
+            unwrapped.insert(receiver, value.into());
             let mut operation = Vec::new();
             encode_expression(
                 &ordinary,
