@@ -1210,7 +1210,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &function,
         ),
-        Some("expr:a0,asbool,a0,a1,?,a0,asbool,a1,a0,?,+".into())
+        Some("expr:a0,dup,asbool,||,a1,end,a0,dup,asbool,&&,a1,end,+".into())
     );
     for source in [
         "module.exports.add = (left, right) => left ** right;",
@@ -2891,11 +2891,11 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     for (source, expected) in [
         (
             "module.exports.greet = value => value && 'yes';",
-            "expr:s0,strbool,t796573,s0,?",
+            "expr:s0,dup,strbool,&&,t796573,end",
         ),
         (
             "module.exports.greet = value => value || 'fallback';",
-            "expr:s0,strbool,s0,t66616c6c6261636b,?",
+            "expr:s0,dup,strbool,||,t66616c6c6261636b,end",
         ),
         (
             "module.exports.greet = value => value ? 'yes' : 'no';",
