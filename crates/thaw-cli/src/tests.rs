@@ -371,6 +371,52 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let finder = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::F64,
+        ))),
+        ..quantifier.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, threshold) => values.find(value => value > threshold);",
+            "add",
+            false,
+            &finder,
+        ),
+        Some("expr:rn0,a1,rnfindgt".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, threshold) => values.findLast(value => threshold <= value);",
+            "add",
+            false,
+            &finder,
+        ),
+        Some("expr:rn0,a1,rnfindlastgte".into())
+    );
+    let finder_index = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..quantifier.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, threshold) => values.findIndex(value => value === threshold);",
+            "add",
+            false,
+            &finder_index,
+        ),
+        Some("expr:rn0,a1,rnfindindexeq".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, threshold) => values.findLastIndex(value => value !== threshold);",
+            "add",
+            false,
+            &finder_index,
+        ),
+        Some("expr:rn0,a1,rnfindlastindexne".into())
+    );
     for (method, operation) in [("min", "rnmin"), ("max", "rnmax")] {
         assert_eq!(
             jit_numeric_export(
