@@ -374,6 +374,58 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
 }
 
 #[test]
+fn object_from_entries_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-from-entries-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-from-entries");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function fromNumbers(entries: [string, number][]): Record<string, number>;\nexport declare function fromBools(entries: [string, boolean][]): Record<string, boolean>;\nexport declare function fromStrings(entries: [string, string][]): Record<string, string>;\nexport declare function roundTrip(values: Record<string, number>): Record<string, number>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function fromNumbers(entries) { return Object.fromEntries(entries); } function fromBools(entries) { return Object.fromEntries(entries); } function fromStrings(entries) { return Object.fromEntries(entries); } function roundTrip(values) { return Object.fromEntries(Object.entries(values)); } module.exports = { fromNumbers, fromBools, fromStrings, roundTrip };\n",
+    )
+    .unwrap();
+    let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
+    let functions = thaw_bridge::parse_dts(&declarations).unwrap();
+    let bundle = std::fs::read_to_string(package.join("bundle.js")).unwrap();
+    for function in &functions {
+        assert!(
+            jit_numeric_export(&bundle, &function.name, false, function).is_some(),
+            "{function:?} did not specialize"
+        );
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { fromNumbers, fromBools, fromStrings, roundTrip } from 'jit-from-entries';\nfunction main(): void { const numbers = fromNumbers([['first', 1], ['first', 2], ['second', 3]]); console.log(numbers.first); console.log(numbers.second); const bools = fromBools([['ready', true]]); console.log(bools.ready); const strings = fromStrings([['left', 'th'], ['right', 'aw']]); console.log(strings.left + strings.right); const values = roundTrip({ zebra: 1, alpha: 2 }); console.log(values.zebra); console.log(values.alpha); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2\n3\ntrue\nthaw\n1\n2\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_aggregates_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-aggregate-{}",
