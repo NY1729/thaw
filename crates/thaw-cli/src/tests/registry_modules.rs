@@ -177,6 +177,49 @@ fn fixed_aggregate_results_use_jit_without_quickjs() {
 }
 
 #[test]
+fn logical_expressions_short_circuit_in_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-logical-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-logical");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Result { value: number; remaining: number; }\nexport declare function orPop(values: number[]): number;\nexport declare function andPop(values: number[]): number;\nexport declare function nested(values: number[]): number;\nexport declare function object(values: number[]): Result;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.orPop = values => values.pop() || values.pop(); module.exports.andPop = values => values.pop() && values.pop(); module.exports.nested = values => values.pop() || values.pop() || values.pop(); module.exports.object = values => ({ value: values.pop() || values.pop(), remaining: values.length });\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { orPop, andPop, nested, object } from 'jit-logical';\nfunction main(): void { const orHit = [1, 2, 3]; console.log(orPop(orHit) + ':' + orHit.length); const orMiss = [1, 2, 0]; console.log(orPop(orMiss) + ':' + orMiss.length); const andMiss = [1, 2, 0]; console.log(andPop(andMiss) + ':' + andMiss.length); const andHit = [1, 2, 3]; console.log(andPop(andHit) + ':' + andHit.length); const nestedValues = [1, 4, 0, 0]; console.log(nested(nestedValues) + ':' + nestedValues.length); const nestedHit = [1, 2, 3]; console.log(nested(nestedHit) + ':' + nestedHit.length); const objectValues = [1, 5, 0]; const result = object(objectValues); console.log(result.value + ':' + result.remaining + ':' + objectValues.length); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "3:2\n2:1\n0:2\n2:1\n4:1\n3:2\n5:1:1\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-{}",
