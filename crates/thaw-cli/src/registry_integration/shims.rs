@@ -1614,8 +1614,8 @@ fn jit_numeric_export(
                     let suffix = if method == "sort" { "sort" } else { "sorted" };
                     match call.args.as_slice() {
                         [] => output.push(format!("{prefix}{suffix}")),
-                        [callback] if callback.spread.is_none() && prefix == "rn" => {
-                            output.push(format!(
+                        [callback] if callback.spread.is_none() && prefix == "rn" => output.push(
+                            format!(
                                 "rn{suffix}{}",
                                 if numeric_sort_callback(
                                     callback.expr.as_ref(),
@@ -1627,7 +1627,19 @@ fn jit_numeric_export(
                                 } else {
                                     "asc"
                                 }
-                            ));
+                            ),
+                        ),
+                        [callback] if callback.spread.is_none() && prefix == "rs" => {
+                            if string_sort_callback(
+                                callback.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                            )? {
+                                output.push(format!("rs{suffix}desc"));
+                            } else {
+                                output.push(format!("rs{suffix}"));
+                            }
                         }
                         _ => return None,
                     }
@@ -2730,6 +2742,62 @@ fn jit_numeric_export(
             Some(false)
         } else if matches!(binary.left.as_ref(), Expr::Ident(identifier) if identifier.sym == right.id.sym)
             && matches!(binary.right.as_ref(), Expr::Ident(identifier) if identifier.sym == left.id.sym)
+        {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    fn string_sort_callback(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &InlineContext<'_>,
+    ) -> Option<bool> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(left), Pat::Ident(right)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() || left.id.sym == right.id.sym {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        let [argument] = call.args.as_slice() else {
+            return None;
+        };
+        if argument.spread.is_some() || property.sym != "localeCompare" {
+            return None;
+        }
+        if matches!(member.obj.as_ref(), Expr::Ident(identifier) if identifier.sym == left.id.sym)
+            && matches!(argument.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == right.id.sym)
+        {
+            Some(false)
+        } else if matches!(member.obj.as_ref(), Expr::Ident(identifier) if identifier.sym == right.id.sym)
+            && matches!(argument.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == left.id.sym)
         {
             Some(true)
         } else {
@@ -4309,6 +4377,8 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "rnsorteddesc"
                 | "rnsortasc"
                 | "rnsortdesc"
+                | "rssorteddesc"
+                | "rssortdesc"
         ) {
             if stack.pop()? != JitKind::Array {
                 return None;
