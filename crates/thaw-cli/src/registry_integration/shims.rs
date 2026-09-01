@@ -322,6 +322,7 @@ fn jit_numeric_export(
                     | "trimEnd" => {
                         call.args.is_empty()
                     }
+                    "normalize" => call.args.len() <= 1,
                     "charAt" => call.args.len() <= 1,
                     "at" => call.args.len() <= 1,
                     "concat" => call.args.iter().all(|argument| argument.spread.is_none()),
@@ -377,6 +378,7 @@ fn jit_numeric_export(
             "trimEnd" => "trimend",
             "concat" => "concat",
             "repeat" => "repeat",
+            "normalize" => "normalize",
             "replace" => "replace",
             "replaceAll" => "replaceall",
             "charAt" => "charat",
@@ -1012,6 +1014,22 @@ fn jit_numeric_export(
                 ) {
                     if !call.args.is_empty() {
                         return None;
+                    }
+                } else if operation == "normalize" {
+                    match call.args.as_slice() {
+                        [] => output.push("t4e4643".into()),
+                        [form] => {
+                            let mut encoded = Vec::new();
+                            encode_expression(
+                                form.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut encoded,
+                            )?;
+                            append_string(encoded, output)?;
+                        }
+                        _ => return None,
                     }
                 } else if operation == "repeat" {
                     let [count] = call.args.as_slice() else {
@@ -2239,6 +2257,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Boolean);
         } else if matches!(token.as_str(), "repeat" | "slice" | "substring") {
             if stack.pop()? == JitKind::String || stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::String);
+        } else if token == "normalize" {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
                 return None;
             }
             stack.push(JitKind::String);

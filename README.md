@@ -2005,7 +2005,9 @@ JavaScript's left-to-right coercion order on that path. One-argument `startsWith
 `endsWith`, `includes`, `indexOf`, and `lastIndexOf`, plus zero-argument
 `toLowerCase`, `toUpperCase`, `trim`, `trimStart`, and `trimEnd`, and numeric
 `repeat(count)`, `slice(start?, end?)`, and `substring(start?, end?)` use the
-same typed string IR. `charAt(index?)` and `charCodeAt(index?)` also use that
+same typed string IR. Unicode `normalize(form?)` calls the native ICU-backed
+runtime directly through the JIT callback ABI and defaults to NFC without
+loading QuickJS. `charAt(index?)` and `charCodeAt(index?)` also use that
 JIT path with UTF-16 code-unit indexing. `padStart(target, pad?)` and
 `padEnd(target, pad?)` use the same arena-backed JIT string return path.
 `at(index?)` and `codePointAt(index?)` use an explicit JIT presence tag so
