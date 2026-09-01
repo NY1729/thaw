@@ -262,6 +262,14 @@ fn jit_export(
                 locals,
                 context,
             ),
+            Stmt::Switch(switch) => {
+                let mut encoded = Vec::new();
+                encode_returning_switch(switch, parameters, locals, context, &mut encoded)?;
+                Some(JitExport::Value(validated_jit_expression(
+                    encoded,
+                    jit_return_kind(ty)?,
+                )?))
+            }
             _ => None,
         }
     }
@@ -275,6 +283,12 @@ fn jit_export(
     ) -> Option<JitExport> {
         let (first, rest) = statements.split_first()?;
         if let Stmt::Return(_) = first {
+            if !rest.is_empty() {
+                return None;
+            }
+            return encode_aggregate_statement(first, ty, parameters, locals, context);
+        }
+        if let Stmt::Switch(_) = first {
             if !rest.is_empty() {
                 return None;
             }
@@ -3729,6 +3743,90 @@ fn jit_export(
         Statements(&'a [Stmt]),
     }
 
+    fn encode_switch_case_return(
+        switch: &thaw_parser::ast::SwitchStmt,
+        start: usize,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        switch.cases[start..]
+            .iter()
+            .find(|case| !case.cons.is_empty())
+            .and_then(|case| {
+                encode_returning_statements(&case.cons, parameters, locals, context, output)
+            })
+    }
+
+    fn encode_returning_switch(
+        switch: &thaw_parser::ast::SwitchStmt,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut discriminant = Vec::new();
+        encode_expression(
+            switch.discriminant.as_ref(),
+            parameters,
+            locals,
+            context,
+            &mut discriminant,
+        )?;
+        let boolean_literal = |expression: &Expr| {
+            let mut expression = expression;
+            while let Expr::Paren(parenthesized) = expression {
+                expression = parenthesized.expr.as_ref();
+            }
+            matches!(expression, Expr::Lit(Lit::Bool(_)))
+        };
+        let kind = if boolean_literal(switch.discriminant.as_ref()) {
+            JitKind::Boolean
+        } else {
+            jit_expression_kind(&discriminant)?.0
+        };
+        if matches!(kind, JitKind::Array | JitKind::Dictionary) {
+            return None;
+        }
+        let default = switch.cases.iter().position(|case| case.test.is_none())?;
+        output.extend(discriminant);
+        let mut branches = 0;
+        for (index, case) in switch.cases.iter().enumerate() {
+            let Some(test) = case.test.as_deref() else {
+                continue;
+            };
+            output.push("dup".into());
+            let mut encoded = Vec::new();
+            encode_expression(test, parameters, locals, context, &mut encoded)?;
+            let test_kind = if boolean_literal(test) {
+                JitKind::Boolean
+            } else {
+                jit_expression_kind(&encoded)?.0
+            };
+            output.extend(encoded);
+            if kind == JitKind::String && test_kind == JitKind::String {
+                output.push("strcmp".into());
+                output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                output.push("==".into());
+            } else if kind == test_kind
+                && matches!(kind, JitKind::Number | JitKind::Boolean)
+            {
+                output.push("==".into());
+            } else {
+                output.push("strictfalse".into());
+            }
+            output.push("if".into());
+            encode_switch_case_return(switch, index, parameters, locals, context, output)?;
+            output.push("else".into());
+            branches += 1;
+        }
+        encode_switch_case_return(switch, default, parameters, locals, context, output)?;
+        output.extend(std::iter::repeat_n("end".into(), branches));
+        output.push("nip".into());
+        (output.len() <= 128).then_some(())
+    }
+
     fn encode_returning_statement(
         statement: &Stmt,
         parameters: &std::collections::HashMap<String, String>,
@@ -3754,6 +3852,9 @@ fn jit_export(
                 context,
                 output,
             ),
+            Stmt::Switch(switch) => {
+                encode_returning_switch(switch, parameters, locals, context, output)
+            }
             _ => None,
         }
     }
@@ -3771,6 +3872,12 @@ fn jit_export(
                 return None;
             }
             return encode_returning_statement(first, parameters, locals, context, output);
+        }
+        if let Stmt::Switch(switch) = first {
+            if !rest.is_empty() {
+                return None;
+            }
+            return encode_returning_switch(switch, parameters, locals, context, output);
         }
         let Stmt::If(branch) = first else {
             return None;
@@ -6180,6 +6287,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Number);
         } else if token == "drop" {
             stack.pop()?;
+        } else if token == "nip" {
+            let value = stack.pop()?;
+            stack.pop()?;
+            stack.push(value);
         } else if token == "dup" {
             stack.push(*stack.last()?);
         } else if token == "dup2" {
