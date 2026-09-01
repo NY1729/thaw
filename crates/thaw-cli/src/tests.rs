@@ -81,7 +81,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &function,
         ),
         Some(
-            "expr:a0,a1,<,a0,a1,+,c4000000000000000,*,a0,a1,-,?".into()
+            "expr:a0,a1,<,if,a0,a1,+,c4000000000000000,*,else,a0,a1,-,end".into()
         )
     );
     assert_eq!(
@@ -168,7 +168,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &function,
         ),
         Some(
-            "expr:a0,a1,+,round,c0000000000000000,>,a0,a1,+,round,c0000000000000000,?"
+            "expr:a0,a1,+,round,c0000000000000000,>,if,a0,a1,+,round,else,c0000000000000000,end"
                 .into()
         )
     );
@@ -2899,7 +2899,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         (
             "module.exports.greet = value => value ? 'yes' : 'no';",
-            "expr:s0,strbool,t796573,t6e6f,?",
+            "expr:s0,strbool,if,t796573,else,t6e6f,end",
         ),
     ] {
         assert_eq!(
