@@ -17,10 +17,16 @@ struct ResolvedPackage {
 enum JitExport {
     Value(String),
     Object(Vec<(String, JitExport)>),
-    Dictionary(Vec<(String, JitExport)>),
+    Dictionary(Vec<JitDictionaryEntry>),
     Tuple(Vec<JitExport>),
     Conditional(String, Box<JitExport>, Box<JitExport>),
     WithLocals(Vec<JitLocal>, Box<JitExport>),
+}
+
+enum JitDictionaryEntry {
+    Static(String, JitExport),
+    Computed(JitExport, JitExport),
+    Spread(JitExport),
 }
 
 struct JitLocal {
@@ -381,32 +387,79 @@ fn jit_export(
         locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
     ) -> Option<JitExport> {
-        let mut names = std::collections::HashSet::new();
         object
             .props
             .iter()
             .map(|property| {
-                let (name, expression) = object_property(property)?;
-                if !names.insert(name.clone()) {
-                    return None;
-                }
-                let value = match expression {
-                    ObjectReturnValue::Expression(expression) => encode_return_expression(
-                        expression, element, parameters, locals, context,
-                    ),
-                    ObjectReturnValue::Shorthand(identifier) => {
+                let PropOrSpread::Prop(property) = property else {
+                    let PropOrSpread::Spread(spread) = property else {
+                        unreachable!()
+                    };
+                    return encode_return_expression(
+                        spread.expr.as_ref(),
+                        &thaw_hir::HirType::Dictionary(Box::new(element.clone())),
+                        parameters,
+                        locals,
+                        context,
+                    )
+                    .map(JitDictionaryEntry::Spread);
+                };
+                let (key, value) = match property.as_ref() {
+                    Prop::KeyValue(property) => {
+                        let value = encode_return_expression(
+                            property.value.as_ref(),
+                            element,
+                            parameters,
+                            locals,
+                            context,
+                        )?;
+                        let key = match &property.key {
+                            PropName::Ident(identifier) => {
+                                return Some(JitDictionaryEntry::Static(
+                                    identifier.sym.to_string(),
+                                    value,
+                                ));
+                            }
+                            PropName::Str(string) => {
+                                return Some(JitDictionaryEntry::Static(
+                                    string.value.to_string_lossy().into_owned(),
+                                    value,
+                                ));
+                            }
+                            PropName::Num(number) => {
+                                return Some(JitDictionaryEntry::Static(
+                                    number.value.to_string(),
+                                    value,
+                                ));
+                            }
+                            PropName::Computed(computed) => encode_return_expression(
+                                computed.expr.as_ref(),
+                                &thaw_hir::HirType::Str,
+                                parameters,
+                                locals,
+                                context,
+                            )?,
+                            _ => return None,
+                        };
+                        (key, value)
+                    }
+                    Prop::Shorthand(identifier) => {
                         let encoded = if let Some(value) = locals.get(identifier.sym.as_ref()) {
                             value.clone()
                         } else {
                             vec![parameters.get(identifier.sym.as_ref())?.clone()]
                         };
-                        Some(JitExport::Value(validated_jit_expression(
+                        return Some(JitDictionaryEntry::Static(
+                            identifier.sym.to_string(),
+                            JitExport::Value(validated_jit_expression(
                             encoded,
                             jit_return_kind(element)?,
-                        )?))
+                            )?),
+                        ));
                     }
-                }?;
-                Some((name, value))
+                    _ => return None,
+                };
+                Some(JitDictionaryEntry::Computed(key, value))
             })
             .collect::<Option<Vec<_>>>()
             .map(JitExport::Dictionary)
@@ -6505,22 +6558,83 @@ fn jit_numeric_declaration(
                 };
                 let values = fields
                     .iter()
-                    .map(|(name, value)| {
-                        path.push(name.clone());
-                        let expression = emit_aggregate_call(
-                            runtime_name,
-                            value,
-                            element,
-                            path,
-                            direct_params,
-                            arguments,
-                            declaration,
-                        );
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        path.push(format!("entry{index}"));
+                        let expression = match entry {
+                            JitDictionaryEntry::Static(name, value) => format!(
+                                "result[{}] = {};",
+                                serde_json::to_string(name).unwrap(),
+                                emit_aggregate_call(
+                                    runtime_name,
+                                    value,
+                                    element,
+                                    path,
+                                    direct_params,
+                                    arguments,
+                                    declaration,
+                                )
+                            ),
+                            JitDictionaryEntry::Computed(key, value) => {
+                                path.push("key".into());
+                                let key = emit_aggregate_call(
+                                    runtime_name,
+                                    key,
+                                    &thaw_hir::HirType::Str,
+                                    path,
+                                    direct_params,
+                                    arguments,
+                                    declaration,
+                                );
+                                path.pop();
+                                path.push("value".into());
+                                let value = emit_aggregate_call(
+                                    runtime_name,
+                                    value,
+                                    element,
+                                    path,
+                                    direct_params,
+                                    arguments,
+                                    declaration,
+                                );
+                                path.pop();
+                                format!("result[{key}] = {value};")
+                            }
+                            JitDictionaryEntry::Spread(value) => format!(
+                                "Object.assign(result, {});",
+                                emit_aggregate_call(
+                                    runtime_name,
+                                    value,
+                                    ty,
+                                    path,
+                                    direct_params,
+                                    arguments,
+                                    declaration,
+                                )
+                            ),
+                        };
                         path.pop();
-                        format!("{}: {expression}", serde_json::to_string(name).unwrap())
+                        expression
                     })
                     .collect::<Vec<_>>();
-                format!("{{ {} }}", values.join(", "))
+                if values.is_empty() {
+                    "{}".into()
+                } else {
+                    let ty = render_dynamic_type(ty).unwrap();
+                    let helper = format!(
+                        "__thaw_jit_dictionary_{}",
+                        format!("{runtime_name}:{}", path.join("."))
+                            .as_bytes()
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    );
+                    declaration.push_str(&format!(
+                        "function {helper}({direct_params}): {ty} {{ const result: {ty} = {{}}; {} return result; }}\n",
+                        values.join(" ")
+                    ));
+                    format!("{helper}({arguments})")
+                }
             }
             JitExport::Tuple(values) => {
                 let thaw_hir::HirType::Tuple(types) = ty else {
