@@ -850,30 +850,81 @@ fn call_jit_callback(callback: JitCallback, builtins: &[f64], captures: &[f64]) 
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_jit_map(value: f64, callback: f64) -> f64 {
-    let Some((callback, required)) = compile_jit_callback(callback) else {
-        return 0.0;
-    };
-    if required > 3 {
+fn primitive_array_jit_map_impl(
+    value: f64,
+    callback: f64,
+    encoded: f64,
+    captures: Option<f64>,
+) -> f64 {
+    let encoded = encoded as u8;
+    let source = encoded / 4;
+    let target = encoded % 4;
+    if source > 2 || target > 2 {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     }
-    number_array_map(value, |element, index| {
-        callback([element, index, value].as_ptr())
-    })
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_jit_map_captured(value: f64, callback: f64, captures: f64) -> f64 {
     let Some((callback, required)) = compile_jit_callback(callback) else {
         return 0.0;
     };
-    let Some(captures) = capture_arguments(captures, 3, required) else {
+    let captures = if let Some(captures) = captures {
+        let Some(captures) = capture_arguments(captures, 3, required) else {
+            return 0.0;
+        };
+        captures
+    } else {
+        if required > 3 {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return 0.0;
+        }
+        Vec::new()
+    };
+    let (Some(allocate), Some((array, length))) =
+        (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     };
-    number_array_map(value, |element, index| {
-        call_jit_callback(callback, &[element, index, value], &captures)
-    })
+    let Some(size) = length.checked_mul(8).and_then(|size| size.checked_add(8)) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let output = unsafe { allocate(size, 8) };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { output.cast::<u64>().write(length as u64) };
+    for index in 0..length {
+        let element = unsafe { array_element(array, index, source) };
+        let mapped = call_jit_callback(callback, &[element, index as f64, value], &captures);
+        let mapped = if target == 1 {
+            u64::from(mapped != 0.0 && !mapped.is_nan())
+        } else {
+            mapped.to_bits()
+        };
+        unsafe {
+            output
+                .add(8 + index * 8)
+                .cast::<u64>()
+                .write_unaligned(mapped)
+        };
+    }
+    array_result(output)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn primitive_array_jit_map(value: f64, callback: f64, encoded: f64) -> f64 {
+    primitive_array_jit_map_impl(value, callback, encoded, None)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn primitive_array_jit_map_captured(
+    value: f64,
+    callback: f64,
+    captures: f64,
+    encoded: f64,
+) -> f64 {
+    primitive_array_jit_map_impl(value, callback, encoded, Some(captures))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -3224,7 +3275,7 @@ enum NumericValue {
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
-    NumberArrayJitMap(bool),
+    PrimitiveArrayJitMap(u8, u8, bool),
     PrimitiveArrayJitScan(u8, u8, bool),
     NumberArrayIndexMap(NumericReduceOp, bool),
     NumberArraySelectMap(CompareOp, u8),
@@ -3303,7 +3354,7 @@ impl NumericProgram {
                     | NumericValue::NumberArraySort
                     | NumericValue::StringArraySort
                     | NumericValue::BoolArraySort
-                    | NumericValue::NumberArrayJitMap(_)
+                    | NumericValue::PrimitiveArrayJitMap(_, _, _)
                     | NumericValue::PrimitiveArrayJitScan(_, 6, _)
                     | NumericValue::StringArrayToSortedDescending
                     | NumericValue::StringArraySortDescending
@@ -3738,9 +3789,29 @@ impl NumericProgram {
                             }))
                         })
                         .or(match value {
-                            "rnmapjit" => Some(NumericValue::NumberArrayJitMap(false)),
-                            "rnmapjitc" => Some(NumericValue::NumberArrayJitMap(true)),
+                            "rnmapjit" => Some(NumericValue::PrimitiveArrayJitMap(0, 0, false)),
+                            "rnmapjitc" => Some(NumericValue::PrimitiveArrayJitMap(0, 0, true)),
                             _ => None,
+                        })
+                        .or_else(|| {
+                            let (source, suffix) = ["rn", "rb", "rs"].iter().enumerate().find_map(
+                                |(source, prefix)| {
+                                    value
+                                        .strip_prefix(prefix)
+                                        .map(|suffix| (source as u8, suffix))
+                                },
+                            )?;
+                            let suffix = suffix.strip_prefix("mapjit")?;
+                            let (target, captured) = match suffix {
+                                "n" => (0, false),
+                                "b" => (1, false),
+                                "s" => (2, false),
+                                "nc" => (0, true),
+                                "bc" => (1, true),
+                                "sc" => (2, true),
+                                _ => return None,
+                            };
+                            Some(NumericValue::PrimitiveArrayJitMap(source, target, captured))
                         })
                         .or_else(|| {
                             let (kind, suffix) = ["rn", "rb", "rs"].iter().enumerate().find_map(
@@ -4428,14 +4499,20 @@ impl NumericProgram {
                     );
                     depth -= 1;
                 }
-                NumericValue::NumberArrayJitMap(captured) => {
+                NumericValue::PrimitiveArrayJitMap(source, target, captured) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(source * 4 + target).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
                     if *captured {
                         if depth < 3 {
                             return None;
                         }
-                        emit_ternary_call(
+                        emit_quaternary_call(
                             &mut code,
-                            number_array_jit_map_captured as *const () as u64,
+                            primitive_array_jit_map_captured as *const () as u64,
                             depth - 3,
                         );
                         depth -= 2;
@@ -4443,9 +4520,9 @@ impl NumericProgram {
                         if depth < 2 {
                             return None;
                         }
-                        emit_binary_call(
+                        emit_ternary_call(
                             &mut code,
-                            number_array_jit_map as *const () as u64,
+                            primitive_array_jit_map as *const () as u64,
                             depth - 2,
                         );
                         depth -= 1;
