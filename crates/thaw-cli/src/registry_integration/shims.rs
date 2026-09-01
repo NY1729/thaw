@@ -769,6 +769,41 @@ fn jit_numeric_export(
                 }
                 output.push(format!("{prefix}set"));
             }
+            Expr::Update(update) => {
+                let Expr::Member(target) = update.arg.as_ref() else {
+                    return None;
+                };
+                let MemberProp::Computed(index) = &target.prop else {
+                    return None;
+                };
+                let mut receiver = Vec::new();
+                encode_expression(
+                    target.obj.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut receiver,
+                )?;
+                if array_prefix(&receiver)? != "rn" {
+                    return None;
+                }
+                output.extend(receiver);
+                encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
+                output.push("dup2".into());
+                output.push("rnget".into());
+                if !update.prefix {
+                    output.push("dup".into());
+                }
+                output.push(format!("c{:016x}", 1.0f64.to_bits()));
+                output.push(
+                    match update.op {
+                        UpdateOp::PlusPlus => "+",
+                        UpdateOp::MinusMinus => "-",
+                    }
+                    .into(),
+                );
+                output.push(if update.prefix { "rnset" } else { "rnpostset" }.into());
+            }
             Expr::Unary(unary)
                 if matches!(
                     unary.op,
@@ -1902,13 +1937,14 @@ fn jit_numeric_export(
                         }
                     }
                     Expr::Update(update) => {
-                        let Expr::Ident(name) = update.arg.as_ref() else {
-                            break;
-                        };
-                        steps.push(LocalStep::Update {
-                            name,
-                            operation: update.op,
-                        });
+                        if let Expr::Ident(name) = update.arg.as_ref() {
+                            steps.push(LocalStep::Update {
+                                name,
+                                operation: update.op,
+                            });
+                        } else {
+                            steps.push(LocalStep::Effect(statement.expr.as_ref()));
+                        }
                     }
                     _ => break,
                 },
@@ -2724,8 +2760,19 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(value);
+        } else if token == "rnpostset" {
+            if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Array
+            {
+                return None;
+            }
+            stack.push(JitKind::Number);
         } else if token == "drop" {
             stack.pop()?;
+        } else if token == "dup" {
+            stack.push(*stack.last()?);
         } else if token == "dup2" {
             let length = stack.len();
             if length < 2 {

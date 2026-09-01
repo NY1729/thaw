@@ -1907,6 +1907,7 @@ enum NumericValue {
     StringArrayUnshift,
     BoolArrayUnshift,
     NumberArraySet,
+    NumberArrayPostSet,
     StringArraySet,
     BoolArraySet,
     ArrayValue,
@@ -1948,6 +1949,7 @@ enum NumericValue {
     AsBoolean,
     StrictMismatch(bool),
     Drop,
+    Duplicate,
     DuplicatePair,
 }
 
@@ -2102,6 +2104,7 @@ impl NumericProgram {
                     "rsunshift" => Some(NumericValue::StringArrayUnshift),
                     "rbunshift" => Some(NumericValue::BoolArrayUnshift),
                     "rnset" => Some(NumericValue::NumberArraySet),
+                    "rnpostset" => Some(NumericValue::NumberArrayPostSet),
                     "rsset" => Some(NumericValue::StringArraySet),
                     "rbset" => Some(NumericValue::BoolArraySet),
                     "arrayvalue" => Some(NumericValue::ArrayValue),
@@ -2112,6 +2115,7 @@ impl NumericProgram {
                     "rsshift" => Some(NumericValue::StringArrayShift),
                     "rbshift" => Some(NumericValue::BoolArrayShift),
                     "drop" => Some(NumericValue::Drop),
+                    "dup" => Some(NumericValue::Duplicate),
                     "dup2" => Some(NumericValue::DuplicatePair),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
@@ -2667,6 +2671,22 @@ impl NumericProgram {
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
                     depth -= 2;
                 }
+                NumericValue::NumberArrayPostSet => {
+                    if depth < 4 {
+                        return None;
+                    }
+                    let left = depth - 4;
+                    emit_spill(&mut code, depth);
+                    emit_move(&mut code, 0, left);
+                    emit_move(&mut code, 1, left + 1);
+                    emit_move(&mut code, 2, left + 3);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(number_array_set as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_restore(&mut code, depth);
+                    emit_move(&mut code, left, left + 2);
+                    depth -= 3;
+                }
                 NumericValue::ArrayValue => {
                     if depth == 0 {
                         return None;
@@ -2698,6 +2718,13 @@ impl NumericProgram {
                         return None;
                     }
                     depth -= 1;
+                }
+                NumericValue::Duplicate => {
+                    if !(1..=7).contains(&depth) {
+                        return None;
+                    }
+                    emit_move(&mut code, depth, depth - 1);
+                    depth += 1;
                 }
                 NumericValue::DuplicatePair => {
                     if !(2..=6).contains(&depth) {
