@@ -418,6 +418,25 @@ pub unsafe extern "C" fn thaw_array_push_values(
 }
 
 #[no_mangle]
+/// Appends one typed primitive value for the residual JIT.
+///
+/// # Safety
+/// `array` must point to a readable primitive Thaw array matching `operation`.
+pub unsafe extern "C" fn thaw_jit_array_append(
+    operation: u8,
+    array: *const u8,
+    value: f64,
+) -> *mut u8 {
+    let slot = match operation {
+        0 => value.to_bits(),
+        1 => value.to_bits(),
+        2 => u64::from(value != 0.0),
+        _ => return std::ptr::null_mut(),
+    };
+    unsafe { thaw_array_push_values(array, 8, (&slot as *const u64).cast(), 1) }
+}
+
+#[no_mangle]
 /// `Array.prototype.unshift`. Prepends `count` elements (each
 /// `element_width` bytes, read consecutively from `values`) to `array` and
 /// returns a fresh buffer with the combined contents. See
