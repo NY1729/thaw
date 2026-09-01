@@ -499,18 +499,18 @@ fn primitive_array_splice_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function numbers(values: number[], start: number, count: number, first: number, second: number): number[];\nexport declare function strings(values: string[], start: number, count: number, value: string): string[];\nexport declare function flags(values: boolean[], start: number): boolean[];\nexport declare function none(values: number[]): number[];\n",
+        "export declare function numbers(values: number[], start: number, count: number, first: number, second: number): number[];\nexport declare function strings(values: string[], start: number, count: number, value: string): string[];\nexport declare function flags(values: boolean[], start: number): boolean[];\nexport declare function none(values: number[]): number[];\nexport declare function copyNumbers(values: number[], start: number, count: number, first: number, second: number): number[];\nexport declare function copyStrings(values: string[], start: number): string[];\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.numbers = (values, start, count, first, second) => values.splice(start, count, first, second); module.exports.strings = (values, start, count, value) => values.splice(start, count, value); module.exports.flags = (values, start) => values.splice(start); module.exports.none = values => values.splice();\n",
+        "module.exports.numbers = (values, start, count, first, second) => values.splice(start, count, first, second); module.exports.strings = (values, start, count, value) => values.splice(start, count, value); module.exports.flags = (values, start) => values.splice(start); module.exports.none = values => values.splice(); module.exports.copyNumbers = (values, start, count, first, second) => values.toSpliced(start, count, first, second); module.exports.copyStrings = (values, start) => values.toSpliced(start);\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { numbers, strings, flags, none } from 'jit-array-splice';\nfunction main(): void { const ns = [1, 2, 3, 4]; console.log(numbers(ns, 1, 2, 8, 9).join('|')); console.log(ns.join('|')); const ss = ['a', 'b', 'c']; console.log(strings(ss, -2, 1, 'x').join('|')); console.log(ss.join('|')); const bs = [true, false, true]; console.log(flags(bs, 1).join('|')); console.log(bs.join('|')); const emptyRemoval = [1, 2]; console.log(none(emptyRemoval).length); console.log(emptyRemoval.join('|')); }\n",
+        "import { numbers, strings, flags, none, copyNumbers, copyStrings } from 'jit-array-splice';\nfunction main(): void { const ns = [1, 2, 3, 4]; console.log(numbers(ns, 1, 2, 8, 9).join('|')); console.log(ns.join('|')); const ss = ['a', 'b', 'c']; console.log(strings(ss, -2, 1, 'x').join('|')); console.log(ss.join('|')); const bs = [true, false, true]; console.log(flags(bs, 1).join('|')); console.log(bs.join('|')); const emptyRemoval = [1, 2]; console.log(none(emptyRemoval).length); console.log(emptyRemoval.join('|')); const copied = [1, 2, 3, 4]; console.log(copyNumbers(copied, -3, 2, 8, 9).join('|')); console.log(copied.join('|')); const copiedStrings = ['a', 'b', 'c']; console.log(copyStrings(copiedStrings, 1).join('|')); console.log(copiedStrings.join('|')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -526,7 +526,7 @@ fn primitive_array_splice_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "2|3\n1|8|9|4\nb\na|x|c\nfalse|true\ntrue\n0\n1|2\n"
+        "2|3\n1|8|9|4\nb\na|x|c\nfalse|true\ntrue\n0\n1|2\n1|8|9|4\n1|2|3|4\na\na|b|c\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

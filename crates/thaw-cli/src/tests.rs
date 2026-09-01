@@ -1068,6 +1068,18 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
                 .into()
         )
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.splice = (values, start, deleteCount, first, second) => values.toSpliced(start, deleteCount, first, second);",
+            "splice",
+            false,
+            &array_splice,
+        ),
+        Some(
+            "expr:rn0,a1,a2,rn0,c0000000000000000,c0000000000000000,arrayslice,a3,rnappend,a4,rnappend,arraytospliced"
+                .into()
+        )
+    );
     let array_push = thaw_bridge::DtsFunction {
         name: "push".into(),
         params: vec![

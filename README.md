@@ -2025,6 +2025,8 @@ return typed optional values, preserving `undefined` for empty arrays.
 Primitive `splice(start?, deleteCount?, ...items)` builds its fixed-signature
 insertion list inside typed JIT IR, replaces the shared receiver handle once,
 and returns the removed typed array without loading QuickJS.
+Its non-mutating `toSpliced` counterpart reuses the same native operation with
+a temporary handle and returns the replacement array while preserving the source.
 `concat(...)` accepts zero or more arrays and scalar values of the
 same primitive element type, chaining native shallow allocations while keeping
 intermediate arrays inside the JIT. Primitive-array `with(index, value)` performs the same native
