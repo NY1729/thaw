@@ -2090,6 +2090,8 @@ QuickJS-free path. `Array.of(...)` uses the same construction path, while
 types without loading QuickJS. `Array.from(string)` reuses the native string
 iterator conversion, preserving Unicode code points such as astral characters
 as one `string[]` element instead of splitting their UTF-16 surrogate pair.
+String spreads in array literals and `Array.of(...string)` reuse that same
+conversion and concatenation path.
 Statically typed `Array.isArray` calls also stay in that IR: array arguments
 produce `true`, supported primitive arguments produce `false`, and the argument
 expression is still evaluated before the typed result is returned.

@@ -464,18 +464,18 @@ fn primitive_array_constructors_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function numbers(value: number, tail: number[]): number[];\nexport declare function strings(value: string, tail: string[]): string[];\nexport declare function flags(value: boolean, tail: boolean[]): boolean[];\nexport declare function copyNumbers(values: number[]): number[];\nexport declare function copyStrings(values: string[]): string[];\nexport declare function copyFlags(values: boolean[]): boolean[];\nexport declare function characters(value: string): string[];\nexport declare function empty(): number[];\n",
+        "export declare function numbers(value: number, tail: number[]): number[];\nexport declare function strings(value: string, tail: string[]): string[];\nexport declare function flags(value: boolean, tail: boolean[]): boolean[];\nexport declare function copyNumbers(values: number[]): number[];\nexport declare function copyStrings(values: string[]): string[];\nexport declare function copyFlags(values: boolean[]): boolean[];\nexport declare function characters(value: string): string[];\nexport declare function spreadCharacters(value: string): string[];\nexport declare function ofCharacters(value: string): string[];\nexport declare function empty(): number[];\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.numbers = (value, tail) => Array.of(1, value, ...tail); module.exports.strings = (value, tail) => Array.of('a', value, ...tail); module.exports.flags = (value, tail) => Array.of(true, value, ...tail); module.exports.copyNumbers = values => Array.from(values); module.exports.copyStrings = values => Array.from(values); module.exports.copyFlags = values => Array.from(values); module.exports.characters = value => Array.from(value); module.exports.empty = () => Array.of();\n",
+        "module.exports.numbers = (value, tail) => Array.of(1, value, ...tail); module.exports.strings = (value, tail) => Array.of('a', value, ...tail); module.exports.flags = (value, tail) => Array.of(true, value, ...tail); module.exports.copyNumbers = values => Array.from(values); module.exports.copyStrings = values => Array.from(values); module.exports.copyFlags = values => Array.from(values); module.exports.characters = value => Array.from(value); module.exports.spreadCharacters = value => ['<', ...value, '>']; module.exports.ofCharacters = value => Array.of(...value); module.exports.empty = () => Array.of();\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { numbers, strings, flags, copyNumbers, copyStrings, copyFlags, characters, empty } from 'jit-array-constructors';\nfunction main(): void { console.log(numbers(2, [3, 4]).join('|')); console.log(strings('b', ['c']).join('|')); console.log(flags(false, [true]).join('|')); console.log(copyNumbers([1, 2]).join('|')); console.log(copyStrings(['a', 'b']).join('|')); console.log(copyFlags([true, false]).join('|')); console.log(characters('A😀B').join('|')); console.log(empty().length); }\n",
+        "import { numbers, strings, flags, copyNumbers, copyStrings, copyFlags, characters, spreadCharacters, ofCharacters, empty } from 'jit-array-constructors';\nfunction main(): void { console.log(numbers(2, [3, 4]).join('|')); console.log(strings('b', ['c']).join('|')); console.log(flags(false, [true]).join('|')); console.log(copyNumbers([1, 2]).join('|')); console.log(copyStrings(['a', 'b']).join('|')); console.log(copyFlags([true, false]).join('|')); console.log(characters('A😀B').join('|')); console.log(spreadCharacters('A😀B').join('|')); console.log(ofCharacters('A😀B').join('|')); console.log(empty().length); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -487,7 +487,7 @@ fn primitive_array_constructors_use_jit_without_quickjs() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "1|2|3|4\na|b|c\ntrue|false|true\n1|2\na|b\ntrue|false\nA|😀|B\n0\n"
+        "1|2|3|4\na|b|c\ntrue|false|true\n1|2\na|b\ntrue|false\nA|😀|B\n<|A|😀|B|>\nA|😀|B\n0\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
