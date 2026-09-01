@@ -919,22 +919,38 @@ fn jit_numeric_export(
                     }
                     output.push(format!("{prefix}join"));
                 } else if method == "concat" {
-                    let [argument] = call.args.as_slice() else {
-                        return None;
-                    };
-                    let mut encoded_argument = Vec::new();
-                    encode_expression(
-                        argument.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        &mut encoded_argument,
-                    )?;
-                    if array_prefix(&encoded_argument)? != prefix {
-                        return None;
+                    if call.args.is_empty() {
+                        output.push("c0000000000000000".into());
+                        output.push("c7ff0000000000000".into());
+                        output.push("arrayslice".into());
                     }
-                    output.extend(encoded_argument);
-                    output.push("arrayconcat".into());
+                    let scalar_kind = match prefix {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    };
+                    for argument in &call.args {
+                        let mut encoded_argument = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded_argument,
+                        )?;
+                        match jit_expression_kind(&encoded_argument)?.0 {
+                            JitKind::Array if array_prefix(&encoded_argument)? == prefix => {
+                                output.extend(encoded_argument);
+                                output.push("arrayconcat".into());
+                            }
+                            kind if kind == scalar_kind => {
+                                output.extend(encoded_argument);
+                                output.push(format!("{prefix}append"));
+                            }
+                            _ => return None,
+                        }
+                    }
                 } else if method == "toReversed" {
                     if !call.args.is_empty() {
                         return None;
@@ -2463,6 +2479,20 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Array);
         } else if token == "arrayconcat" {
             if stack.pop()? != JitKind::Array || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if matches!(token.as_str(), "rnappend" | "rsappend" | "rbappend") {
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::Array
+                || value
+                    != match &token[..2] {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    }
+            {
                 return None;
             }
             stack.push(JitKind::Array);

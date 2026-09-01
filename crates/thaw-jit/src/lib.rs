@@ -12,6 +12,7 @@ use std::sync::{Mutex, OnceLock};
 
 static INVALID_SYMBOL: &[u8] = b"invalid JIT symbol\0";
 const ABSENT_STATUS: *const c_char = ptr::dangling();
+const ARRAY_RESULT_TAG: u64 = 1;
 #[cfg(not(all(target_arch = "x86_64", target_family = "unix")))]
 static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -41,6 +42,7 @@ pub type StringNormalize = unsafe extern "C" fn(*const c_char, *const c_char) ->
 pub type StringSplit = unsafe extern "C" fn(*const c_char, *const c_char, f64) -> *mut u8;
 pub type ArraySlice = unsafe extern "C" fn(*const u8, usize, f64, f64) -> *mut u8;
 pub type ArrayConcat = unsafe extern "C" fn(*const u8, *const u8, usize) -> *mut u8;
+pub type ArrayAppend = unsafe extern "C" fn(u8, *const u8, f64) -> *mut u8;
 pub type ArrayToReversed = unsafe extern "C" fn(*const u8, usize) -> *mut u8;
 pub type ArrayToSorted = unsafe extern "C" fn(u8, *const u8) -> *mut u8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
@@ -58,6 +60,7 @@ thread_local! {
     static STRING_SPLIT: Cell<Option<StringSplit>> = const { Cell::new(None) };
     static ARRAY_SLICE: Cell<Option<ArraySlice>> = const { Cell::new(None) };
     static ARRAY_CONCAT: Cell<Option<ArrayConcat>> = const { Cell::new(None) };
+    static ARRAY_APPEND: Cell<Option<ArrayAppend>> = const { Cell::new(None) };
     static ARRAY_TO_REVERSED: Cell<Option<ArrayToReversed>> = const { Cell::new(None) };
     static ARRAY_TO_SORTED: Cell<Option<ArrayToSorted>> = const { Cell::new(None) };
     static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
@@ -256,7 +259,13 @@ extern "C" fn string_length(value: f64) -> f64 {
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn array_data(value: f64) -> Option<(*const u8, usize)> {
-    let handle = value.to_bits() as usize as *const *const u8;
+    let bits = value.to_bits();
+    if bits & ARRAY_RESULT_TAG != 0 {
+        let data = (bits & !ARRAY_RESULT_TAG) as usize as *const u8;
+        return (!data.is_null())
+            .then(|| (data, unsafe { data.cast::<i64>().read() }.max(0) as usize));
+    }
+    let handle = bits as usize as *const *const u8;
     if handle.is_null() {
         return None;
     }
@@ -265,6 +274,11 @@ unsafe fn array_data(value: f64) -> Option<(*const u8, usize)> {
         return None;
     }
     Some((data, unsafe { data.cast::<i64>().read() }.max(0) as usize))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_result(pointer: *mut u8) -> f64 {
+    f64::from_bits(pointer as usize as u64 | ARRAY_RESULT_TAG)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -402,7 +416,7 @@ extern "C" fn array_slice(value: f64, start: f64, end: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
         0.0
     } else {
-        f64::from_bits(result as usize as u64)
+        array_result(result)
     }
 }
 
@@ -421,9 +435,39 @@ extern "C" fn array_concat(left: f64, right: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
         0.0
     } else {
-        f64::from_bits(result as usize as u64)
+        array_result(result)
     }
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_append(operation: u8, array: f64, value: f64) -> f64 {
+    let (Some(append), Some((array, _))) =
+        (ARRAY_APPEND.with(Cell::get), unsafe { array_data(array) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { append(operation, array, value) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        array_result(result)
+    }
+}
+
+macro_rules! array_append_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(array: f64, value: f64) -> f64 {
+            array_append($operation, array, value)
+        }
+    };
+}
+
+array_append_fn!(number_array_append, 0);
+array_append_fn!(string_array_append, 1);
+array_append_fn!(bool_array_append, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_to_reversed(value: f64) -> f64 {
@@ -438,7 +482,7 @@ extern "C" fn array_to_reversed(value: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
         0.0
     } else {
-        f64::from_bits(result as usize as u64)
+        array_result(result)
     }
 }
 
@@ -455,7 +499,7 @@ fn array_to_sorted(operation: u8, value: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
         0.0
     } else {
-        f64::from_bits(result as usize as u64)
+        array_result(result)
     }
 }
 
@@ -487,7 +531,7 @@ fn array_with(operation: u8, array: f64, index: f64, value: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(INVALID_ARRAY_WITH_INDEX.as_ptr().cast()));
         0.0
     } else {
-        f64::from_bits(result as usize as u64)
+        array_result(result)
     }
 }
 
@@ -1058,7 +1102,7 @@ extern "C" fn string_split(value: f64, separator: f64, limit: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
         0.0
     } else {
-        f64::from_bits(result as usize as u64)
+        array_result(result)
     }
 }
 
@@ -1538,6 +1582,9 @@ enum NumericValue {
     StringArrayJoin,
     ArraySlice,
     ArrayConcat,
+    NumberArrayAppend,
+    StringArrayAppend,
+    BoolArrayAppend,
     ArrayToReversed,
     NumberArrayToSorted,
     StringArrayToSorted,
@@ -1576,6 +1623,27 @@ enum NumericValue {
 struct NumericProgram(Vec<NumericValue>);
 
 impl NumericProgram {
+    fn returns_tagged_array(&self) -> bool {
+        matches!(
+            self.0.last(),
+            Some(
+                NumericValue::StringSplit
+                    | NumericValue::ArraySlice
+                    | NumericValue::ArrayConcat
+                    | NumericValue::NumberArrayAppend
+                    | NumericValue::StringArrayAppend
+                    | NumericValue::BoolArrayAppend
+                    | NumericValue::ArrayToReversed
+                    | NumericValue::NumberArrayToSorted
+                    | NumericValue::StringArrayToSorted
+                    | NumericValue::BoolArrayToSorted
+                    | NumericValue::NumberArrayWith
+                    | NumericValue::StringArrayWith
+                    | NumericValue::BoolArrayWith
+            )
+        )
+    }
+
     fn parse(symbol: &str) -> Option<Self> {
         if let Some(encoded) = symbol.strip_prefix("expr:") {
             let encoded = encoded.split_once(':')?.0;
@@ -1668,6 +1736,9 @@ impl NumericProgram {
                     "rsjoin" => Some(NumericValue::StringArrayJoin),
                     "arrayslice" => Some(NumericValue::ArraySlice),
                     "arrayconcat" => Some(NumericValue::ArrayConcat),
+                    "rnappend" => Some(NumericValue::NumberArrayAppend),
+                    "rsappend" => Some(NumericValue::StringArrayAppend),
+                    "rbappend" => Some(NumericValue::BoolArrayAppend),
                     "arrayreversed" => Some(NumericValue::ArrayToReversed),
                     "rnsorted" => Some(NumericValue::NumberArrayToSorted),
                     "rssorted" => Some(NumericValue::StringArrayToSorted),
@@ -2080,6 +2151,21 @@ impl NumericProgram {
                         return None;
                     }
                     emit_binary_call(&mut code, array_concat as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayAppend
+                | NumericValue::StringArrayAppend
+                | NumericValue::BoolArrayAppend => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArrayAppend => number_array_append,
+                        NumericValue::StringArrayAppend => string_array_append,
+                        NumericValue::BoolArrayAppend => bool_array_append,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
                 NumericValue::ArrayToReversed => {
@@ -2535,6 +2621,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     string_split: Option<StringSplit>,
     array_slice: Option<ArraySlice>,
     array_concat: Option<ArrayConcat>,
+    array_append: Option<ArrayAppend>,
     array_to_reversed: Option<ArrayToReversed>,
     array_to_sorted: Option<ArrayToSorted>,
     array_with: Option<ArrayWith>,
@@ -2578,13 +2665,17 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_string_split = STRING_SPLIT.with(|split| split.replace(string_split));
     let previous_array_slice = ARRAY_SLICE.with(|slice| slice.replace(array_slice));
     let previous_array_concat = ARRAY_CONCAT.with(|concat| concat.replace(array_concat));
+    let previous_array_append = ARRAY_APPEND.with(|append| append.replace(array_append));
     let previous_array_to_reversed =
         ARRAY_TO_REVERSED.with(|reverse| reverse.replace(array_to_reversed));
     let previous_array_to_sorted = ARRAY_TO_SORTED.with(|sort| sort.replace(array_to_sorted));
     let previous_array_with = ARRAY_WITH.with(|replace| replace.replace(array_with));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
-    let value = function(args);
+    let mut value = function(args);
+    if program.returns_tagged_array() && value.to_bits() & ARRAY_RESULT_TAG != 0 {
+        value = f64::from_bits(value.to_bits() & !ARRAY_RESULT_TAG);
+    }
     let error = CALL_ERROR.with(|error| error.replace(previous_error));
     let present = CALL_PRESENT.with(|state| state.replace(previous_present));
     ARENA_ALLOC.with(|allocator| allocator.set(previous_allocator));
@@ -2599,6 +2690,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     STRING_SPLIT.with(|split| split.set(previous_string_split));
     ARRAY_SLICE.with(|slice| slice.set(previous_array_slice));
     ARRAY_CONCAT.with(|concat| concat.set(previous_array_concat));
+    ARRAY_APPEND.with(|append| append.set(previous_array_append));
     ARRAY_TO_REVERSED.with(|reverse| reverse.set(previous_array_to_reversed));
     ARRAY_TO_SORTED.with(|sort| sort.set(previous_array_to_sorted));
     ARRAY_WITH.with(|replace| replace.set(previous_array_with));
@@ -2762,6 +2854,21 @@ mod tests {
             }
             output
         }
+        unsafe extern "C" fn append_array_value(
+            operation: u8,
+            array: *const u8,
+            value: f64,
+        ) -> *mut u8 {
+            assert_eq!(operation, 0);
+            let length = unsafe { array.cast::<u64>().read() } as usize;
+            let output = unsafe { libc::malloc(8 + (length + 1) * 8).cast::<u8>() };
+            unsafe {
+                output.cast::<u64>().write((length + 1) as u64);
+                std::ptr::copy_nonoverlapping(array.add(8), output.add(8), length * 8);
+                output.add(8 + length * 8).cast::<f64>().write(value);
+            }
+            output
+        }
         unsafe extern "C" fn sort_array(operation: u8, array: *const u8) -> *mut u8 {
             assert_eq!(operation, 0);
             assert!(!array.is_null());
@@ -2808,6 +2915,7 @@ mod tests {
                 Some(split_string),
                 Some(slice_array),
                 Some(concatenate_arrays),
+                Some(append_array_value),
                 Some(reverse_array),
                 Some(sort_array),
                 Some(replace_array),
@@ -3226,6 +3334,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,
