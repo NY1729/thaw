@@ -45,6 +45,8 @@ pub type ArrayConcat = unsafe extern "C" fn(*const u8, *const u8, usize) -> *mut
 pub type ArrayAppend = unsafe extern "C" fn(u8, *const u8, f64) -> *mut u8;
 pub type ArrayToReversed = unsafe extern "C" fn(*const u8, usize) -> *mut u8;
 pub type ArrayToSorted = unsafe extern "C" fn(u8, *const u8) -> *mut u8;
+pub type ArrayReverse = unsafe extern "C" fn(*mut u8, usize) -> *mut u8;
+pub type ArraySort = unsafe extern "C" fn(u8, *mut u8) -> *mut u8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 
 thread_local! {
@@ -63,6 +65,8 @@ thread_local! {
     static ARRAY_APPEND: Cell<Option<ArrayAppend>> = const { Cell::new(None) };
     static ARRAY_TO_REVERSED: Cell<Option<ArrayToReversed>> = const { Cell::new(None) };
     static ARRAY_TO_SORTED: Cell<Option<ArrayToSorted>> = const { Cell::new(None) };
+    static ARRAY_REVERSE: Cell<Option<ArrayReverse>> = const { Cell::new(None) };
+    static ARRAY_SORT: Cell<Option<ArraySort>> = const { Cell::new(None) };
     static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
@@ -487,6 +491,23 @@ extern "C" fn array_to_reversed(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_reverse(value: f64) -> f64 {
+    let (Some(reverse), Some((data, _))) =
+        (ARRAY_REVERSE.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { reverse(data.cast_mut(), 8) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        array_result(result)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_to_sorted(operation: u8, value: f64) -> f64 {
     let (Some(sort), Some((data, _))) = (ARRAY_TO_SORTED.with(Cell::get), unsafe {
         array_data(value)
@@ -517,6 +538,35 @@ extern "C" fn string_array_to_sorted(value: f64) -> f64 {
 extern "C" fn bool_array_to_sorted(value: f64) -> f64 {
     array_to_sorted(2, value)
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_sort(operation: u8, value: f64) -> f64 {
+    let (Some(sort), Some((data, _))) = (ARRAY_SORT.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { sort(operation, data.cast_mut()) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        array_result(result)
+    }
+}
+
+macro_rules! array_sort_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(value: f64) -> f64 {
+            array_sort($operation, value)
+        }
+    };
+}
+
+array_sort_fn!(number_array_sort, 0);
+array_sort_fn!(string_array_sort, 1);
+array_sort_fn!(bool_array_sort, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_with(operation: u8, array: f64, index: f64, value: f64) -> f64 {
@@ -1586,9 +1636,13 @@ enum NumericValue {
     StringArrayAppend,
     BoolArrayAppend,
     ArrayToReversed,
+    ArrayReverse,
     NumberArrayToSorted,
     StringArrayToSorted,
     BoolArrayToSorted,
+    NumberArraySort,
+    StringArraySort,
+    BoolArraySort,
     NumberArrayWith,
     StringArrayWith,
     BoolArrayWith,
@@ -1634,9 +1688,13 @@ impl NumericProgram {
                     | NumericValue::StringArrayAppend
                     | NumericValue::BoolArrayAppend
                     | NumericValue::ArrayToReversed
+                    | NumericValue::ArrayReverse
                     | NumericValue::NumberArrayToSorted
                     | NumericValue::StringArrayToSorted
                     | NumericValue::BoolArrayToSorted
+                    | NumericValue::NumberArraySort
+                    | NumericValue::StringArraySort
+                    | NumericValue::BoolArraySort
                     | NumericValue::NumberArrayWith
                     | NumericValue::StringArrayWith
                     | NumericValue::BoolArrayWith
@@ -1740,9 +1798,13 @@ impl NumericProgram {
                     "rsappend" => Some(NumericValue::StringArrayAppend),
                     "rbappend" => Some(NumericValue::BoolArrayAppend),
                     "arrayreversed" => Some(NumericValue::ArrayToReversed),
+                    "arrayreverse" => Some(NumericValue::ArrayReverse),
                     "rnsorted" => Some(NumericValue::NumberArrayToSorted),
                     "rssorted" => Some(NumericValue::StringArrayToSorted),
                     "rbsorted" => Some(NumericValue::BoolArrayToSorted),
+                    "rnsort" => Some(NumericValue::NumberArraySort),
+                    "rssort" => Some(NumericValue::StringArraySort),
+                    "rbsort" => Some(NumericValue::BoolArraySort),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -2174,6 +2236,12 @@ impl NumericProgram {
                     }
                     emit_unary_call(&mut code, array_to_reversed as *const () as u64, depth - 1);
                 }
+                NumericValue::ArrayReverse => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, array_reverse as *const () as u64, depth - 1);
+                }
                 NumericValue::NumberArrayToSorted
                 | NumericValue::StringArrayToSorted
                 | NumericValue::BoolArrayToSorted => {
@@ -2184,6 +2252,20 @@ impl NumericProgram {
                         NumericValue::NumberArrayToSorted => number_array_to_sorted,
                         NumericValue::StringArrayToSorted => string_array_to_sorted,
                         NumericValue::BoolArrayToSorted => bool_array_to_sorted,
+                        _ => unreachable!(),
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::NumberArraySort
+                | NumericValue::StringArraySort
+                | NumericValue::BoolArraySort => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArraySort => number_array_sort,
+                        NumericValue::StringArraySort => string_array_sort,
+                        NumericValue::BoolArraySort => bool_array_sort,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
@@ -2624,6 +2706,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     array_append: Option<ArrayAppend>,
     array_to_reversed: Option<ArrayToReversed>,
     array_to_sorted: Option<ArrayToSorted>,
+    array_reverse: Option<ArrayReverse>,
+    array_sort: Option<ArraySort>,
     array_with: Option<ArrayWith>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
@@ -2669,6 +2753,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_array_to_reversed =
         ARRAY_TO_REVERSED.with(|reverse| reverse.replace(array_to_reversed));
     let previous_array_to_sorted = ARRAY_TO_SORTED.with(|sort| sort.replace(array_to_sorted));
+    let previous_array_reverse = ARRAY_REVERSE.with(|reverse| reverse.replace(array_reverse));
+    let previous_array_sort = ARRAY_SORT.with(|sort| sort.replace(array_sort));
     let previous_array_with = ARRAY_WITH.with(|replace| replace.replace(array_with));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
@@ -2693,6 +2779,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     ARRAY_APPEND.with(|append| append.set(previous_array_append));
     ARRAY_TO_REVERSED.with(|reverse| reverse.set(previous_array_to_reversed));
     ARRAY_TO_SORTED.with(|sort| sort.set(previous_array_to_sorted));
+    ARRAY_REVERSE.with(|reverse| reverse.set(previous_array_reverse));
+    ARRAY_SORT.with(|sort| sort.set(previous_array_sort));
     ARRAY_WITH.with(|replace| replace.set(previous_array_with));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
@@ -2833,6 +2921,14 @@ mod tests {
             }
             output
         }
+        unsafe extern "C" fn reverse_array_in_place(
+            array: *mut u8,
+            element_width: usize,
+        ) -> *mut u8 {
+            assert!(!array.is_null());
+            assert_eq!(element_width, 8);
+            array
+        }
         unsafe extern "C" fn concatenate_arrays(
             left: *const u8,
             right: *const u8,
@@ -2881,6 +2977,11 @@ mod tests {
             }
             output
         }
+        unsafe extern "C" fn sort_array_in_place(operation: u8, array: *mut u8) -> *mut u8 {
+            assert_eq!(operation, 0);
+            assert!(!array.is_null());
+            array
+        }
         unsafe extern "C" fn replace_array(
             operation: u8,
             array: *const u8,
@@ -2918,6 +3019,8 @@ mod tests {
                 Some(append_array_value),
                 Some(reverse_array),
                 Some(sort_array),
+                Some(reverse_array_in_place),
+                Some(sort_array_in_place),
                 Some(replace_array),
             )
         }
@@ -3334,6 +3437,8 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
+                None,
                 None,
                 None,
                 None,
