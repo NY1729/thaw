@@ -754,6 +754,44 @@ pub unsafe extern "C" fn thaw_array_splice(
     output
 }
 
+#[no_mangle]
+/// Mutates a primitive array handle for residual-JIT `splice` and returns the
+/// removed primitive array.
+///
+/// # Safety
+/// `array` must point to a writable Thaw primitive-array handle and `inserts`
+/// must point to a readable Thaw primitive array with the same element type.
+pub unsafe extern "C" fn thaw_jit_array_splice(
+    array: *mut *mut u8,
+    start: f64,
+    delete_count: f64,
+    inserts: *const u8,
+) -> *mut u8 {
+    let (Some(current), Some(insert_count)) = (
+        unsafe { array.as_ref() }.copied(),
+        unsafe { native_array_length(inserts) },
+    ) else {
+        return std::ptr::null_mut();
+    };
+    let mut removed = std::ptr::null_mut();
+    let output = unsafe {
+        thaw_array_splice(
+            current,
+            8,
+            start,
+            delete_count,
+            inserts.add(8),
+            insert_count,
+            &mut removed,
+        )
+    };
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { array.write(output) };
+    removed
+}
+
 unsafe fn native_array_slots(array: *mut u8) -> Option<&'static mut [u64]> {
     let length = unsafe { native_array_length(array) }?;
     Some(unsafe { std::slice::from_raw_parts_mut(array.add(8).cast::<u64>(), length) })

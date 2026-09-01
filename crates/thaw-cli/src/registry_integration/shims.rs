@@ -491,6 +491,7 @@ fn jit_numeric_export(
                 | "unshift"
                 | "pop"
                 | "shift"
+                | "splice"
                 | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
@@ -968,6 +969,65 @@ fn jit_numeric_export(
                         return None;
                     }
                     output.push(format!("{prefix}{method}"));
+                } else if method == "splice" {
+                    let scalar_kind = match prefix {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    };
+                    match call.args.as_slice() {
+                        [] => {
+                            output.push("c0000000000000000".into());
+                            output.push("c0000000000000000".into());
+                        }
+                        [start] => {
+                            encode_number(
+                                start.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                output,
+                            )?;
+                            output.push("c7ff0000000000000".into());
+                        }
+                        [start, delete_count, ..] => {
+                            encode_number(
+                                start.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                output,
+                            )?;
+                            encode_number(
+                                delete_count.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                output,
+                            )?;
+                        }
+                    }
+                    output.extend(encoded_receiver.iter().cloned());
+                    output.push("c0000000000000000".into());
+                    output.push("c0000000000000000".into());
+                    output.push("arrayslice".into());
+                    for argument in call.args.iter().skip(2) {
+                        let mut encoded_value = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded_value,
+                        )?;
+                        if jit_expression_kind(&encoded_value)?.0 != scalar_kind {
+                            return None;
+                        }
+                        output.extend(encoded_value);
+                        output.push(format!("{prefix}append"));
+                    }
+                    output.push("arraysplice".into());
                 } else if method == "concat" {
                     if call.args.is_empty() {
                         output.push("c0000000000000000".into());
@@ -2532,6 +2592,15 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Array);
         } else if token == "arraycopywithin" {
             if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Array
+            {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if token == "arraysplice" {
+            if stack.pop()? != JitKind::Array
                 || stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Array
