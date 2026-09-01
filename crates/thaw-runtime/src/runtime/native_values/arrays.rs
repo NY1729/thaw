@@ -279,6 +279,26 @@ pub unsafe extern "C" fn thaw_array_fill(
 }
 
 #[no_mangle]
+/// Fills a primitive array range for the residual JIT.
+///
+/// # Safety
+/// `array` must point to a writable primitive Thaw array matching `operation`.
+pub unsafe extern "C" fn thaw_jit_array_fill(
+    operation: u8,
+    array: *mut u8,
+    value: f64,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    let slot = match operation {
+        0 | 1 => value.to_bits(),
+        2 => u64::from(value != 0.0),
+        _ => return std::ptr::null_mut(),
+    };
+    unsafe { thaw_array_fill(array, (&slot as *const u64).cast(), 8, start, end) }
+}
+
+#[no_mangle]
 /// Returns an arena-owned shallow copy of a native array range.
 ///
 /// # Safety

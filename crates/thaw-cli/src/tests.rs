@@ -971,6 +971,36 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,rnsort".into())
     );
+    let array_fill = thaw_bridge::DtsFunction {
+        name: "fill".into(),
+        params: vec![
+            array_length.params[0].clone(),
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "start".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "end".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 4,
+        ret: array_length.params[0].1.clone(),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.fill = (values, value, start, end) => values.fill(value, start, end);",
+            "fill",
+            false,
+            &array_fill,
+        ),
+        Some("expr:rn0,a1,a2,a3,rnfill".into())
+    );
     let array_with = thaw_bridge::DtsFunction {
         name: "replace".into(),
         params: vec![
