@@ -2232,6 +2232,9 @@ Logical `&&` and `||` use explicit short-circuit regions in typed JIT IR. The
 left operand executes exactly once and machine-code branches skip unselected
 stateful right operands, including nested logical expressions, logical values
 embedded in larger expressions, and primitive leaves inside fixed results.
+Embedded and return-only ternary expressions use the same native branch
+regions. Nested conditions preserve source evaluation order, while only the
+selected branch can call stateful JIT helpers or mutate primitive arrays.
 
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections and the
