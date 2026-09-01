@@ -382,18 +382,18 @@ fn primitive_array_copies_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function numbers(values: number[], start: number, end: number): number[];\nexport declare function strings(values: string[], start: number, end: number): string[];\nexport declare function flags(values: boolean[], start: number, end: number): boolean[];\nexport declare function reverseNumbers(values: number[]): number[];\nexport declare function reverseStrings(values: string[]): string[];\nexport declare function reverseFlags(values: boolean[]): boolean[];\nexport declare function sortNumbers(values: number[]): number[];\nexport declare function sortStrings(values: string[]): string[];\nexport declare function sortFlags(values: boolean[]): boolean[];\n",
+        "export declare function numbers(values: number[], start: number, end: number): number[];\nexport declare function strings(values: string[], start: number, end: number): string[];\nexport declare function flags(values: boolean[], start: number, end: number): boolean[];\nexport declare function reverseNumbers(values: number[]): number[];\nexport declare function reverseStrings(values: string[]): string[];\nexport declare function reverseFlags(values: boolean[]): boolean[];\nexport declare function sortNumbers(values: number[]): number[];\nexport declare function sortStrings(values: string[]): string[];\nexport declare function sortFlags(values: boolean[]): boolean[];\nexport declare function withNumber(values: number[], index: number, value: number): number[];\nexport declare function withString(values: string[], index: number, value: string): string[];\nexport declare function withFlag(values: boolean[], index: number, value: boolean): boolean[];\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.numbers = (values, start, end) => values.slice(start, end); module.exports.strings = (values, start, end) => values.slice(start, end); module.exports.flags = (values, start, end) => values.slice(start, end); module.exports.reverseNumbers = values => values.toReversed(); module.exports.reverseStrings = values => values.toReversed(); module.exports.reverseFlags = values => values.toReversed(); module.exports.sortNumbers = values => values.toSorted(); module.exports.sortStrings = values => values.toSorted(); module.exports.sortFlags = values => values.toSorted();\n",
+        "module.exports.numbers = (values, start, end) => values.slice(start, end); module.exports.strings = (values, start, end) => values.slice(start, end); module.exports.flags = (values, start, end) => values.slice(start, end); module.exports.reverseNumbers = values => values.toReversed(); module.exports.reverseStrings = values => values.toReversed(); module.exports.reverseFlags = values => values.toReversed(); module.exports.sortNumbers = values => values.toSorted(); module.exports.sortStrings = values => values.toSorted(); module.exports.sortFlags = values => values.toSorted(); module.exports.withNumber = (values, index, value) => values.with(index, value); module.exports.withString = (values, index, value) => values.with(index, value); module.exports.withFlag = (values, index, value) => values.with(index, value);\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { numbers, strings, flags, reverseNumbers, reverseStrings, reverseFlags, sortNumbers, sortStrings, sortFlags } from 'jit-array-slice';\nfunction main(): void { console.log(numbers([1, 2, 3, 4], 1, -1).join('|')); console.log(strings(['a', 'b', 'c'], 0, 2).join('|')); console.log(flags([true, false, true], 1, 3).join('|')); console.log(reverseNumbers([1, 2, 3]).join('|')); console.log(reverseStrings(['a', 'b', 'c']).join('|')); console.log(reverseFlags([true, false]).join('|')); console.log(sortNumbers([10, 2, 1]).join('|')); console.log(sortStrings(['z', 'a', 'b']).join('|')); console.log(sortFlags([true, false, true]).join('|')); }\n",
+        "import { numbers, strings, flags, reverseNumbers, reverseStrings, reverseFlags, sortNumbers, sortStrings, sortFlags, withNumber, withString, withFlag } from 'jit-array-slice';\nfunction main(): void { console.log(numbers([1, 2, 3, 4], 1, -1).join('|')); console.log(strings(['a', 'b', 'c'], 0, 2).join('|')); console.log(flags([true, false, true], 1, 3).join('|')); console.log(reverseNumbers([1, 2, 3]).join('|')); console.log(reverseStrings(['a', 'b', 'c']).join('|')); console.log(reverseFlags([true, false]).join('|')); console.log(sortNumbers([10, 2, 1]).join('|')); console.log(sortStrings(['z', 'a', 'b']).join('|')); console.log(sortFlags([true, false, true]).join('|')); const source = [1, 2, 3]; console.log(withNumber(source, -1, 9).join('|')); console.log(source.join('|')); console.log(withString(['a', 'b'], 0, 'z').join('|')); console.log(withFlag([true, false], 1, true).join('|')); try { withNumber(source, 3, 0); } catch { console.log('range'); } }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -405,7 +405,7 @@ fn primitive_array_copies_use_jit_without_quickjs() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "2|3\na|b\nfalse|true\n3|2|1\nc|b|a\nfalse|true\n1|10|2\na|b|z\nfalse|true|true\n"
+        "2|3\na|b\nfalse|true\n3|2|1\nc|b|a\nfalse|true\n1|10|2\na|b|z\nfalse|true|true\n1|2|9\n1|2|3\nz|b\ntrue|true\nrange\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

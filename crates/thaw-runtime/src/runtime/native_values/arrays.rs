@@ -681,6 +681,48 @@ pub unsafe extern "C" fn thaw_jit_array_to_sorted(operation: u8, array: *const u
 }
 
 #[no_mangle]
+/// Returns a primitive-array shallow copy with one element replaced.
+/// `operation` selects number, string, or boolean element storage.
+///
+/// # Safety
+/// `array` must point to a readable primitive Thaw array matching `operation`.
+pub unsafe extern "C" fn thaw_jit_array_with(
+    operation: u8,
+    array: *const u8,
+    index: f64,
+    value: f64,
+) -> *mut u8 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null_mut();
+    };
+    let index = if index.is_nan() { 0.0 } else { index.trunc() };
+    let index = if index < 0.0 {
+        length as f64 + index
+    } else {
+        index
+    };
+    if !index.is_finite() || index < 0.0 || index >= length as f64 || operation > 2 {
+        return std::ptr::null_mut();
+    }
+    let output = unsafe { thaw_array_slice(array, 8, 0.0, f64::INFINITY) };
+    if output.is_null() {
+        return output;
+    }
+    let slot = unsafe { output.add(8 + index as usize * 8) };
+    unsafe {
+        match operation {
+            0 => slot.cast::<f64>().write_unaligned(value),
+            1 => slot
+                .cast::<usize>()
+                .write_unaligned(value.to_bits() as usize),
+            2 => slot.cast::<u64>().write_unaligned(u64::from(value != 0.0)),
+            _ => unreachable!(),
+        }
+    }
+    output
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `array` must point to a Thaw array containing `f64` element slots.

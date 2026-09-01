@@ -953,6 +953,32 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,rnsorted".into())
     );
+    let array_with = thaw_bridge::DtsFunction {
+        name: "replace".into(),
+        params: vec![
+            array_length.params[0].clone(),
+            (
+                "index".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 3,
+        ret: array_length.params[0].1.clone(),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.replace = (values, index, value) => values.with(index, value);",
+            "replace",
+            false,
+            &array_with,
+        ),
+        Some("expr:rn0,a1,a2,rnwith".into())
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",
