@@ -2029,7 +2029,7 @@ Global `isNaN`/`isFinite` preserve their numeric coercion, while
 `Number.isSafeInteger` use strict typed predicates in the same JIT IR.
 Global and `Number.parseFloat`/`parseInt` calls reuse Thaw runtime's tested
 ECMAScript prefix and radix parsers through the JIT callback ABI.
-Numeric `toFixed`, `toPrecision`, and radix-aware `toString` likewise reuse
+Numeric `toFixed`, `toPrecision`, `toExponential`, and radix-aware `toString` likewise reuse
 the native arena-backed formatters, including argument normalization and
 range-error propagation without loading QuickJS.
 Relational and equality comparisons inspect those IR types as well:

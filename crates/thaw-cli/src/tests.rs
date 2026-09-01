@@ -477,6 +477,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ("toFixed", "tofixed"),
         ("toPrecision", "toprecision"),
         ("toString", "toradix"),
+        ("toExponential", "toexponential"),
     ] {
         assert_eq!(
             jit_numeric_export(
@@ -500,6 +501,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ("toFixed", "expr:a0,c0000000000000000,tofixed"),
         ("toPrecision", "expr:a0,numstr"),
         ("toString", "expr:a0,numstr"),
+        ("toExponential", "expr:a0,toexponential0"),
     ] {
         assert_eq!(
             jit_numeric_export(

@@ -24,6 +24,8 @@ static INVALID_FIXED_DIGITS: &[u8] = b"toFixed() digits argument must be between
 static INVALID_PRECISION: &[u8] = b"toPrecision() argument must be between 1 and 100\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 static INVALID_RADIX: &[u8] = b"toString() radix argument must be between 2 and 36\0";
+static INVALID_EXPONENTIAL_DIGITS: &[u8] =
+    b"toExponential() digits argument must be between 0 and 100\0";
 
 pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 pub type NumberToString = unsafe extern "C" fn(f64) -> *const c_char;
@@ -574,6 +576,21 @@ extern "C" fn number_to_radix_string(value: f64, radix: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_to_exponential(value: f64, digits: f64) -> f64 {
+    let digits = if digits.is_nan() { 0.0 } else { digits.trunc() };
+    if !(0.0..=100.0).contains(&digits) {
+        CALL_ERROR.with(|error| error.set(INVALID_EXPONENTIAL_DIGITS.as_ptr().cast()));
+        return f64::from_bits(0);
+    }
+    formatted_number(3, value, digits)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_to_exponential_shortest(value: f64) -> f64 {
+    formatted_number(3, value, -1.0)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_to_lower_case(value: f64) -> f64 {
     unsafe {
         string_argument(value).map_or(f64::from_bits(0), |value| {
@@ -1096,6 +1113,8 @@ enum NumericValue {
     NumberToFixed,
     NumberToPrecision,
     NumberToRadixString,
+    NumberToExponential,
+    NumberToExponentialShortest,
     StringConstant(*const c_char),
     StringEndsWith,
     StringEndsWithAt,
@@ -1186,6 +1205,8 @@ impl NumericProgram {
                     "tofixed" => Some(NumericValue::NumberToFixed),
                     "toprecision" => Some(NumericValue::NumberToPrecision),
                     "toradix" => Some(NumericValue::NumberToRadixString),
+                    "toexponential" => Some(NumericValue::NumberToExponential),
+                    "toexponential0" => Some(NumericValue::NumberToExponentialShortest),
                     "endswith" => Some(NumericValue::StringEndsWith),
                     "endswith2" => Some(NumericValue::StringEndsWithAt),
                     "includes" => Some(NumericValue::StringIncludes),
@@ -1454,7 +1475,8 @@ impl NumericProgram {
                 NumericValue::NumberToString
                 | NumericValue::BooleanToString
                 | NumericValue::StringToNumber
-                | NumericValue::ParseFloat => {
+                | NumericValue::ParseFloat
+                | NumericValue::NumberToExponentialShortest => {
                     if depth == 0 {
                         return None;
                     }
@@ -1463,6 +1485,7 @@ impl NumericProgram {
                         NumericValue::BooleanToString => boolean_to_string,
                         NumericValue::StringToNumber => string_to_number,
                         NumericValue::ParseFloat => parse_float,
+                        NumericValue::NumberToExponentialShortest => number_to_exponential_shortest,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
@@ -1470,7 +1493,8 @@ impl NumericProgram {
                 NumericValue::ParseInt
                 | NumericValue::NumberToFixed
                 | NumericValue::NumberToPrecision
-                | NumericValue::NumberToRadixString => {
+                | NumericValue::NumberToRadixString
+                | NumericValue::NumberToExponential => {
                     if depth < 2 {
                         return None;
                     }
@@ -1479,6 +1503,7 @@ impl NumericProgram {
                         NumericValue::NumberToFixed => number_to_fixed,
                         NumericValue::NumberToPrecision => number_to_precision,
                         NumericValue::NumberToRadixString => number_to_radix_string,
+                        NumericValue::NumberToExponential => number_to_exponential,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
@@ -1964,6 +1989,8 @@ mod tests {
                 (0, 12.5, 1.0) => "12.5",
                 (1, 12.5, 3.0) => "12.5",
                 (2, 255.0, 16.0) => "ff",
+                (3, 12.5, 1.0) => "1.3e+1",
+                (3, 12.5, -1.0) => "1.25e+1",
                 _ => return ptr::null(),
             };
             let output = unsafe { libc::malloc(text.len() + 1).cast::<u8>() };
@@ -2493,6 +2520,7 @@ mod tests {
             ("tofixed", 12.5, 1.0, "12.5"),
             ("toprecision", 12.5, 3.0, "12.5"),
             ("toradix", 255.0, 16.0, "ff"),
+            ("toexponential", 12.5, 1.0, "1.3e+1"),
         ] {
             let symbol = CString::new(format!("expr:a0,a1,{operation}:{operation}")).unwrap();
             let result = call(&symbol, &[value, argument]);
@@ -2504,6 +2532,15 @@ mod tests {
             );
             unsafe { libc::free(result.cast()) };
         }
+        let shortest = CString::new("expr:a0,toexponential0:toexponential0").unwrap();
+        let result = call(&shortest, &[12.5]);
+        assert!(result.error.is_null());
+        let result = result.value.to_bits() as usize as *mut c_char;
+        assert_eq!(
+            unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+            "1.25e+1"
+        );
+        unsafe { libc::free(result.cast()) };
         let invalid = CString::new("expr:a0,a1,tofixed:invalid-fixed").unwrap();
         assert!(!call(&invalid, &[1.0, 101.0]).error.is_null());
     }

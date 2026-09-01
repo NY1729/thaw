@@ -348,6 +348,7 @@ fn jit_numeric_export(
             "toFixed" => "tofixed",
             "toPrecision" => "toprecision",
             "toString" => "toradix",
+            "toExponential" => "toexponential",
             _ => return None,
         };
         Some((operation, member.obj.as_ref()))
@@ -620,6 +621,10 @@ fn jit_numeric_export(
                         output.extend(encoded);
                         output.push(format!("c{:016x}", 0.0f64.to_bits()));
                         output.push(operation.into());
+                    }
+                    [] if operation == "toexponential" => {
+                        output.extend(encoded);
+                        output.push("toexponential0".into());
                     }
                     [] => append_string(encoded, output)?,
                     [argument] => {
@@ -1746,10 +1751,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(token.as_str(), "tofixed" | "toprecision" | "toradix") {
+        } else if matches!(
+            token.as_str(),
+            "tofixed" | "toprecision" | "toradix" | "toexponential"
+        ) {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Number {
                 return None;
             }
+            stack.push(JitKind::String);
+        } else if token == "toexponential0" {
+            (stack.pop()? == JitKind::Number).then_some(())?;
             stack.push(JitKind::String);
         } else if token == "strbool" {
             if stack.pop()? != JitKind::String {
