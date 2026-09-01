@@ -27,6 +27,7 @@ static INVALID_RADIX: &[u8] = b"toString() radix argument must be between 2 and 
 static INVALID_EXPONENTIAL_DIGITS: &[u8] =
     b"toExponential() digits argument must be between 0 and 100\0";
 static INVALID_NORMALIZATION_FORM: &[u8] = b"invalid Unicode normalization form\0";
+static INVALID_ARRAY_WITH_INDEX: &[u8] = b"Invalid index for Array.prototype.with\0";
 
 pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 pub type NumberToString = unsafe extern "C" fn(f64) -> *const c_char;
@@ -41,6 +42,7 @@ pub type StringSplit = unsafe extern "C" fn(*const c_char, *const c_char, f64) -
 pub type ArraySlice = unsafe extern "C" fn(*const u8, usize, f64, f64) -> *mut u8;
 pub type ArrayToReversed = unsafe extern "C" fn(*const u8, usize) -> *mut u8;
 pub type ArrayToSorted = unsafe extern "C" fn(u8, *const u8) -> *mut u8;
+pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -56,6 +58,7 @@ thread_local! {
     static ARRAY_SLICE: Cell<Option<ArraySlice>> = const { Cell::new(None) };
     static ARRAY_TO_REVERSED: Cell<Option<ArrayToReversed>> = const { Cell::new(None) };
     static ARRAY_TO_SORTED: Cell<Option<ArrayToSorted>> = const { Cell::new(None) };
+    static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -449,6 +452,36 @@ extern "C" fn string_array_to_sorted(value: f64) -> f64 {
 extern "C" fn bool_array_to_sorted(value: f64) -> f64 {
     array_to_sorted(2, value)
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_with(operation: u8, array: f64, index: f64, value: f64) -> f64 {
+    let (Some(replace), Some((data, _))) =
+        (ARRAY_WITH.with(Cell::get), unsafe { array_data(array) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { replace(operation, data, index, value) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(INVALID_ARRAY_WITH_INDEX.as_ptr().cast()));
+        0.0
+    } else {
+        f64::from_bits(result as usize as u64)
+    }
+}
+
+macro_rules! array_with_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(array: f64, index: f64, value: f64) -> f64 {
+            array_with($operation, array, index, value)
+        }
+    };
+}
+
+array_with_fn!(number_array_with, 0);
+array_with_fn!(string_array_with, 1);
+array_with_fn!(bool_array_with, 2);
 
 macro_rules! array_format_fn {
     ($name:ident, $operation:expr) => {
@@ -1487,6 +1520,9 @@ enum NumericValue {
     NumberArrayToSorted,
     StringArrayToSorted,
     BoolArrayToSorted,
+    NumberArrayWith,
+    StringArrayWith,
+    BoolArrayWith,
     StringTruthy,
     StringPadEnd,
     StringPadStart,
@@ -1613,6 +1649,9 @@ impl NumericProgram {
                     "rnsorted" => Some(NumericValue::NumberArrayToSorted),
                     "rssorted" => Some(NumericValue::StringArrayToSorted),
                     "rbsorted" => Some(NumericValue::BoolArrayToSorted),
+                    "rnwith" => Some(NumericValue::NumberArrayWith),
+                    "rswith" => Some(NumericValue::StringArrayWith),
+                    "rbwith" => Some(NumericValue::BoolArrayWith),
                     "strbool" => Some(NumericValue::StringTruthy),
                     "padend" => Some(NumericValue::StringPadEnd),
                     "padstart" => Some(NumericValue::StringPadStart),
@@ -2033,6 +2072,21 @@ impl NumericProgram {
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
+                NumericValue::NumberArrayWith
+                | NumericValue::StringArrayWith
+                | NumericValue::BoolArrayWith => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArrayWith => number_array_with,
+                        NumericValue::StringArrayWith => string_array_with,
+                        NumericValue::BoolArrayWith => bool_array_with,
+                        _ => unreachable!(),
+                    };
+                    emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                    depth -= 2;
+                }
                 NumericValue::StringToLowerCase
                 | NumericValue::StringToUpperCase
                 | NumericValue::StringTrim
@@ -2452,6 +2506,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     array_slice: Option<ArraySlice>,
     array_to_reversed: Option<ArrayToReversed>,
     array_to_sorted: Option<ArrayToSorted>,
+    array_with: Option<ArrayWith>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -2494,6 +2549,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_array_to_reversed =
         ARRAY_TO_REVERSED.with(|reverse| reverse.replace(array_to_reversed));
     let previous_array_to_sorted = ARRAY_TO_SORTED.with(|sort| sort.replace(array_to_sorted));
+    let previous_array_with = ARRAY_WITH.with(|replace| replace.replace(array_with));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let value = function(args);
@@ -2512,6 +2568,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     ARRAY_SLICE.with(|slice| slice.set(previous_array_slice));
     ARRAY_TO_REVERSED.with(|reverse| reverse.set(previous_array_to_reversed));
     ARRAY_TO_SORTED.with(|sort| sort.set(previous_array_to_sorted));
+    ARRAY_WITH.with(|replace| replace.set(previous_array_with));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -2663,6 +2720,23 @@ mod tests {
             }
             output
         }
+        unsafe extern "C" fn replace_array(
+            operation: u8,
+            array: *const u8,
+            index: f64,
+            value: f64,
+        ) -> *mut u8 {
+            assert_eq!((operation, index, value), (0, 1.0, 99.0));
+            assert!(!array.is_null());
+            let output = unsafe { libc::malloc(32).cast::<u8>() };
+            unsafe {
+                output.cast::<u64>().write(3);
+                for (index, value) in [10.0_f64, 99.0, 30.0].into_iter().enumerate() {
+                    output.add(8 + index * 8).cast::<f64>().write(value);
+                }
+            }
+            output
+        }
         unsafe {
             thaw_jit_call_f64(
                 symbol.as_ptr(),
@@ -2681,6 +2755,7 @@ mod tests {
                 Some(slice_array),
                 Some(reverse_array),
                 Some(sort_array),
+                Some(replace_array),
             )
         }
     }
@@ -3109,6 +3184,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         assert!(!missing_allocator.error.is_null());
@@ -3153,6 +3229,13 @@ mod tests {
         ];
         let data = values.as_ptr().cast::<u8>();
         let handle = &data as *const *const u8;
+        let replaced =
+            CString::new("expr:rn0,c3ff0000000000000,c4058c00000000000,rnwith:with").unwrap();
+        let result = call(&replaced, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = result.value.to_bits() as usize as *mut u8;
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 99.0);
+        unsafe { libc::free(output.cast()) };
         let sorted = CString::new("expr:rn0,rnsorted:sorted").unwrap();
         let result = call(&sorted, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());

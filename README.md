@@ -2012,7 +2012,9 @@ loading QuickJS. String-separator `split(separator, limit?)` reuses the native
 Primitive `number[]`, `string[]`, and `boolean[]` `slice(start?, end?)` calls
 reuse the native shallow-copy runtime through that same JIT array return ABI;
 their non-mutating `toReversed()` copies and default `toSorted()` ordering use
-it as well.
+it as well. Primitive-array `with(index, value)` performs the same native
+shallow copy, replaces one typed slot, and reports out-of-range indices through
+the JIT exception path.
 `charAt(index?)` and `charCodeAt(index?)` also use that
 JIT path with UTF-16 code-unit indexing. `padStart(target, pad?)` and
 `padEnd(target, pad?)` use the same arena-backed JIT string return path.
