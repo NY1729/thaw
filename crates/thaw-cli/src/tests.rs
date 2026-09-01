@@ -741,6 +741,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.uptime = () => process.uptime();",
+            "uptime",
+            false,
+            &zero_arg_number,
+        ),
+        Some("expr:performancenow,c408f400000000000,/".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.now = Date => Date.now();",
             "now",
             false,

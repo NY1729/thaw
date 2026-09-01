@@ -142,18 +142,18 @@ fn dynamic_number_sources_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function random(): number;\nexport declare function dateNow(): number;\nexport declare function performanceNow(): number;\n",
+        "export declare function random(): number;\nexport declare function dateNow(): number;\nexport declare function performanceNow(): number;\nexport declare function processUptime(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.random = () => 1 + Math.random(); module.exports.dateNow = () => Date.now(); module.exports.performanceNow = () => performance.now();\n",
+        "module.exports.random = () => 1 + Math.random(); module.exports.dateNow = () => Date.now(); module.exports.performanceNow = () => performance.now(); module.exports.processUptime = () => process.uptime();\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { random, dateNow, performanceNow } from 'jit-random';\nfunction main(): void { const value = random(); const first = performanceNow(); const second = performanceNow(); console.log(value >= 1 && value < 2); console.log(dateNow() > 0); console.log(first >= 0 && second >= first); }\n",
+        "import { random, dateNow, performanceNow, processUptime } from 'jit-random';\nfunction main(): void { const value = random(); const first = performanceNow(); const second = performanceNow(); console.log(value >= 1 && value < 2); console.log(dateNow() > 0); console.log(first >= 0 && second >= first); console.log(processUptime() >= 0); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -169,7 +169,7 @@ fn dynamic_number_sources_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\ntrue\ntrue\n"
+        "true\ntrue\ntrue\ntrue\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
