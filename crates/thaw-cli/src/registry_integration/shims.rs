@@ -267,6 +267,35 @@ fn jit_numeric_export(
         matches!(property.sym.as_ref(), "of" | "from").then_some(property.sym.as_ref())
     }
 
+    fn string_static_constructor<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<&'a str> {
+        if parameters.contains_key("String")
+            || locals.contains_key("String")
+            || helpers.contains_key("String")
+            || call.args.iter().any(|argument| argument.spread.is_some())
+        {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "String") {
+            return None;
+        }
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        matches!(property.sym.as_ref(), "fromCharCode" | "fromCodePoint")
+            .then_some(property.sym.as_ref())
+    }
+
     fn object_same_value<'a>(
         call: &'a CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -1758,6 +1787,38 @@ fn jit_numeric_export(
                 }
             }
             Expr::Call(call)
+                if string_static_constructor(call, parameters, locals, context.helpers).is_some() =>
+            {
+                let operation = match string_static_constructor(
+                    call,
+                    parameters,
+                    locals,
+                    context.helpers,
+                )? {
+                    "fromCharCode" => "fromcharcode",
+                    "fromCodePoint" => "fromcodepoint",
+                    _ => unreachable!(),
+                };
+                if call.args.is_empty() {
+                    encode_string("", output)?;
+                }
+                for (index, argument) in call.args.iter().enumerate() {
+                    let mut encoded = Vec::new();
+                    encode_expression(
+                        argument.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut encoded,
+                    )?;
+                    append_number(encoded, output)?;
+                    output.push(operation.into());
+                    if index != 0 {
+                        output.push("concat".into());
+                    }
+                }
+            }
+            Expr::Call(call)
                 if matches!(
                     &call.callee,
                     Callee::Expr(callee)
@@ -2812,7 +2873,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::String);
-        } else if token == "numstr" {
+        } else if matches!(
+            token.as_str(),
+            "numstr" | "fromcharcode" | "fromcodepoint"
+        ) {
             if stack.pop()? != JitKind::Number {
                 return None;
             }

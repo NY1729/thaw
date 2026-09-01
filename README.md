@@ -2005,7 +2005,10 @@ JavaScript's left-to-right coercion order on that path. One-argument `startsWith
 `endsWith`, `includes`, `indexOf`, and `lastIndexOf`, plus zero-argument
 `toLowerCase`, `toUpperCase`, `trim`, `trimStart`, and `trimEnd`, and numeric
 `repeat(count)`, `slice(start?, end?)`, and `substring(start?, end?)` use the
-same typed string IR. Unicode `normalize(form?)` calls the native ICU-backed
+same typed string IR. Variadic `String.fromCharCode(...)` and
+`String.fromCodePoint(...)` reuse the native UTF-16/code-point constructors;
+invalid code points propagate through the JIT exception path. Unicode
+`normalize(form?)` calls the native ICU-backed
 runtime directly through the JIT callback ABI and defaults to NFC without
 loading QuickJS. String-separator `split(separator, limit?)` reuses the native
 `string[]` builder and returns its result through the typed JIT array ABI.
