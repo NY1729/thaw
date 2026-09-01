@@ -38,11 +38,7 @@ fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
         HirType::Tuple(elements) => elements.iter().try_fold(0usize, |slots, ty| {
             jit_parameter_slots(ty).map(|count| slots + count)
         }),
-        HirType::Optional(payload)
-            if !matches!(payload.as_ref(), HirType::Object(_) | HirType::Tuple(_)) =>
-        {
-            jit_parameter_slots(payload).map(|_| 2)
-        }
+        HirType::Optional(payload) => jit_parameter_slots(payload).map(|slots| slots + 1),
         _ => None,
     }
 }
@@ -1154,18 +1150,77 @@ impl<'ctx> HirCompiler<'ctx> {
                         .builder
                         .build_extract_value(value, 1, "jit_optional_argument_payload")
                         .map_err(|error| error.to_string())?;
-                    argument_values.push(if **payload == HirType::Bool {
+                    if matches!(payload.as_ref(), HirType::Object(_) | HirType::Tuple(_)) {
+                        let function = self.current_function();
+                        let present_block = self
+                            .context
+                            .append_basic_block(function, "jit_optional_aggregate_present");
+                        let absent_block = self
+                            .context
+                            .append_basic_block(function, "jit_optional_aggregate_absent");
+                        let merge_block = self
+                            .context
+                            .append_basic_block(function, "jit_optional_aggregate_merge");
                         self.builder
-                            .build_unsigned_int_to_float(
-                                payload_value.into_int_value(),
-                                self.context.f64_type(),
-                                "jit_optional_boolean_slot",
-                            )
-                            .map_err(|error| error.to_string())?
-                            .into()
-                    } else {
-                        payload_value
-                    });
+                            .build_conditional_branch(present, present_block, absent_block)
+                            .map_err(|error| error.to_string())?;
+
+                        self.builder.position_at_end(present_block);
+                        let mut present_values = Vec::new();
+                        self.compile_jit_argument_slots(
+                            payload_value,
+                            payload,
+                            &format!("jit_optional_argument_{index}"),
+                            &mut present_values,
+                        )?;
+                        let present_end = self.builder.get_insert_block().unwrap();
+                        self.builder
+                            .build_unconditional_branch(merge_block)
+                            .map_err(|error| error.to_string())?;
+
+                        self.builder.position_at_end(absent_block);
+                        let absent_values = present_values
+                            .iter()
+                            .map(|value| match value {
+                                BasicValueEnum::FloatValue(value) => {
+                                    Ok(value.get_type().const_zero().into())
+                                }
+                                BasicValueEnum::IntValue(value) => {
+                                    Ok(value.get_type().const_zero().into())
+                                }
+                                BasicValueEnum::PointerValue(value) => {
+                                    Ok(value.get_type().const_null().into())
+                                }
+                                _ => Err("JIT aggregate slots require scalar or pointer leaves"),
+                            })
+                            .collect::<Result<Vec<BasicValueEnum<'ctx>>, _>>()?;
+                        let absent_end = self.builder.get_insert_block().unwrap();
+                        self.builder
+                            .build_unconditional_branch(merge_block)
+                            .map_err(|error| error.to_string())?;
+
+                        self.builder.position_at_end(merge_block);
+                        for (present_value, absent_value) in
+                            present_values.iter().zip(&absent_values)
+                        {
+                            let phi = self
+                                .builder
+                                .build_phi(present_value.get_type(), "jit_optional_aggregate_slot")
+                                .map_err(|error| error.to_string())?;
+                            phi.add_incoming(&[
+                                (present_value, present_end),
+                                (absent_value, absent_end),
+                            ]);
+                            argument_values.push(phi.as_basic_value());
+                        }
+                        continue;
+                    }
+                    self.compile_jit_argument_slots(
+                        payload_value,
+                        payload,
+                        &format!("jit_optional_argument_{index}"),
+                        &mut argument_values,
+                    )?;
                     continue;
                 }
                 self.compile_jit_argument_slots(
