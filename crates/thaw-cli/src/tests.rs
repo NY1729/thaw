@@ -750,6 +750,31 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.pid = () => process.pid;",
+            "pid",
+            false,
+            &zero_arg_number,
+        ),
+        Some("expr:processpid".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.pid = process => process.pid;",
+            "pid",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![(
+                    "process".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+                )],
+                required_params: 1,
+                ..zero_arg_number.clone()
+            },
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.now = Date => Date.now();",
             "now",
             false,

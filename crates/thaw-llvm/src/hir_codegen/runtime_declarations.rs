@@ -665,6 +665,11 @@ impl<'ctx> HirCompiler<'ctx> {
             f64_type.fn_type(&[], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_process_pid",
+            f64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
         let date_getter_type = f64_type.fn_type(&[f64_type.into()], false);
         for name in [
             "thaw_date_get_full_year",
@@ -1178,6 +1183,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         i8_ptr.into(),
                         i8_ptr.into(),
                         i64_type.into(),
+                        i8_ptr.into(),
                         i8_ptr.into(),
                         i8_ptr.into(),
                         i8_ptr.into(),

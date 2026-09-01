@@ -85,6 +85,7 @@ thread_local! {
     static MATH_RANDOM: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static DATE_NOW: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static PERFORMANCE_NOW: Cell<Option<NumberSource>> = const { Cell::new(None) };
+    static PROCESS_PID: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -747,6 +748,11 @@ extern "C" fn date_now() -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn performance_now() -> f64 {
     number_source(&PERFORMANCE_NOW)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn process_pid() -> f64 {
+    number_source(&PROCESS_PID)
 }
 
 macro_rules! array_unshift_fn {
@@ -1982,6 +1988,7 @@ enum NumericValue {
     MathRandom,
     DateNow,
     PerformanceNow,
+    ProcessPid,
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -2151,6 +2158,7 @@ impl NumericProgram {
                     "random" => Some(NumericValue::MathRandom),
                     "datenow" => Some(NumericValue::DateNow),
                     "performancenow" => Some(NumericValue::PerformanceNow),
+                    "processpid" => Some(NumericValue::ProcessPid),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -2768,7 +2776,10 @@ impl NumericProgram {
                     emit_move(&mut code, depth + 1, depth - 1);
                     depth += 2;
                 }
-                NumericValue::MathRandom | NumericValue::DateNow | NumericValue::PerformanceNow => {
+                NumericValue::MathRandom
+                | NumericValue::DateNow
+                | NumericValue::PerformanceNow
+                | NumericValue::ProcessPid => {
                     if depth > 7 {
                         return None;
                     }
@@ -2778,6 +2789,7 @@ impl NumericProgram {
                         NumericValue::MathRandom => math_random,
                         NumericValue::DateNow => date_now,
                         NumericValue::PerformanceNow => performance_now,
+                        NumericValue::ProcessPid => process_pid,
                         _ => unreachable!(),
                     };
                     code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
@@ -3251,6 +3263,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     math_random: Option<NumberSource>,
     date_now: Option<NumberSource>,
     performance_now: Option<NumberSource>,
+    process_pid: Option<NumberSource>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -3308,6 +3321,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_math_random = MATH_RANDOM.with(|random| random.replace(math_random));
     let previous_date_now = DATE_NOW.with(|now| now.replace(date_now));
     let previous_performance_now = PERFORMANCE_NOW.with(|now| now.replace(performance_now));
+    let previous_process_pid = PROCESS_PID.with(|pid| pid.replace(process_pid));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let mut value = function(args);
@@ -3344,6 +3358,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     MATH_RANDOM.with(|random| random.set(previous_math_random));
     DATE_NOW.with(|now| now.set(previous_date_now));
     PERFORMANCE_NOW.with(|now| now.set(previous_performance_now));
+    PROCESS_PID.with(|pid| pid.set(previous_process_pid));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -3382,6 +3397,9 @@ mod tests {
         }
         unsafe extern "C" fn monotonic_now() -> f64 {
             10.0
+        }
+        unsafe extern "C" fn pid() -> f64 {
+            123.0
         }
         unsafe extern "C" fn parse_float(value: *const c_char) -> f64 {
             match unsafe { CStr::from_ptr(value) }.to_bytes() {
@@ -3644,6 +3662,7 @@ mod tests {
                 Some(random),
                 Some(wall_now),
                 Some(monotonic_now),
+                Some(pid),
             )
         }
     }
@@ -4059,6 +4078,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,
