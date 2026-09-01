@@ -483,6 +483,8 @@ fn jit_numeric_export(
                 | "concat"
                 | "toReversed"
                 | "toSorted"
+                | "reverse"
+                | "sort"
                 | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
@@ -951,16 +953,23 @@ fn jit_numeric_export(
                             _ => return None,
                         }
                     }
-                } else if method == "toReversed" {
+                } else if matches!(method, "toReversed" | "reverse") {
                     if !call.args.is_empty() {
                         return None;
                     }
-                    output.push("arrayreversed".into());
-                } else if method == "toSorted" {
+                    output.push(if method == "reverse" {
+                        "arrayreverse".into()
+                    } else {
+                        "arrayreversed".into()
+                    });
+                } else if matches!(method, "toSorted" | "sort") {
                     if !call.args.is_empty() {
                         return None;
                     }
-                    output.push(format!("{prefix}sorted"));
+                    output.push(format!(
+                        "{prefix}{}",
+                        if method == "sort" { "sort" } else { "sorted" }
+                    ));
                 } else if method == "with" {
                     let [index, value] = call.args.as_slice() else {
                         return None;
@@ -2498,7 +2507,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Array);
         } else if matches!(
             token.as_str(),
-            "arrayreversed" | "rnsorted" | "rssorted" | "rbsorted"
+            "arrayreversed"
+                | "arrayreverse"
+                | "rnsorted"
+                | "rssorted"
+                | "rbsorted"
+                | "rnsort"
+                | "rssort"
+                | "rbsort"
         ) {
             if stack.pop()? != JitKind::Array {
                 return None;

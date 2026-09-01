@@ -411,6 +411,45 @@ fn primitive_array_copies_use_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_array_mutation_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-mutation-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-mutation");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function reverse(values: number[]): number[];\nexport declare function sortNumbers(values: number[]): number[];\nexport declare function sortStrings(values: string[]): string[];\nexport declare function sortFlags(values: boolean[]): boolean[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.reverse = values => values.reverse(); module.exports.sortNumbers = values => values.sort(); module.exports.sortStrings = values => values.sort(); module.exports.sortFlags = values => values.sort();\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { reverse, sortNumbers, sortStrings, sortFlags } from 'jit-array-mutation';\nfunction main(): void { const reversed = [1, 2, 3]; console.log(reverse(reversed).join('|')); console.log(reversed.join('|')); const numbers = [10, 2, 1]; console.log(sortNumbers(numbers).join('|')); console.log(numbers.join('|')); const strings = ['z', 'a', 'b']; console.log(sortStrings(strings).join('|')); const flags = [true, false, true]; console.log(sortFlags(flags).join('|')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "3|2|1\n3|2|1\n1|10|2\n1|10|2\na|b|z\nfalse|true|true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn string_truthiness_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-truthiness-{}",
