@@ -1716,34 +1716,61 @@ fn jit_export(
             Expr::Bin(binary) if binary.op == BinaryOp::NullishCoalescing => {
                 let mut operands = Vec::new();
                 flatten_nullish(expression, &mut operands);
-                let mut opened = 0;
-                for (index, operand) in operands.iter().enumerate() {
-                    let optional = optional_tokens(operand, parameters)
-                        .map(|(presence, value)| (presence.into(), vec![value.into()]))
-                        .or_else(|| {
-                            let Expr::OptChain(chain) = operand else {
-                                return None;
-                            };
-                            optional_chain_operation(chain, parameters, locals, context)
-                        });
-                    if let Some((presence, value)) = optional {
-                        if index + 1 == operands.len() {
-                            return None;
+                let mut selected = Vec::new();
+                encode_expression(
+                    operands.pop()?,
+                    parameters,
+                    locals,
+                    context,
+                    &mut selected,
+                )?;
+                while let Some(operand) = operands.pop() {
+                    let fallback = selected;
+                    if let Some((presence, value)) = optional_tokens(operand, parameters) {
+                        selected = vec![
+                            presence.into(),
+                            "asbool".into(),
+                            "if".into(),
+                            value.into(),
+                            "else".into(),
+                        ];
+                        selected.extend(fallback);
+                        selected.push("end".into());
+                    } else if let Expr::OptChain(chain) = operand {
+                        let (presence, operation) =
+                            optional_chain_operation(chain, parameters, locals, context)?;
+                        selected = vec![presence, "asbool".into(), "if".into()];
+                        selected.extend(operation.clone());
+                        if jit_operation_may_be_absent(&operation) {
+                            selected.push("ifpresent".into());
+                            selected.push("else".into());
+                            selected.extend(fallback.clone());
+                            selected.push("end".into());
                         }
-                        output.push(presence);
-                        output.push("asbool".into());
-                        output.push("if".into());
-                        output.extend(value);
-                        output.push("else".into());
-                        opened += 1;
+                        selected.push("else".into());
+                        selected.extend(fallback);
+                        selected.push("end".into());
                     } else {
-                        encode_expression(operand, parameters, locals, context, output)?;
-                        break;
+                        let mut operation = Vec::new();
+                        encode_expression(
+                            operand,
+                            parameters,
+                            locals,
+                            context,
+                            &mut operation,
+                        )?;
+                        if jit_operation_may_be_absent(&operation) {
+                            selected = operation;
+                            selected.push("ifpresent".into());
+                            selected.push("else".into());
+                            selected.extend(fallback);
+                            selected.push("end".into());
+                        } else {
+                            selected = operation;
+                        }
                     }
                 }
-                for _ in 0..opened {
-                    output.push("end".into());
-                }
+                output.extend(selected);
             }
             Expr::OptChain(chain) => {
                 let (presence, operation) =
@@ -4901,6 +4928,35 @@ enum JitKind {
     Array,
 }
 
+fn jit_operation_may_be_absent(operation: &[String]) -> bool {
+    let Some(token) = operation.last().map(String::as_str) else {
+        return false;
+    };
+    matches!(
+        token,
+        "at"
+            | "codepointat"
+            | "rnat"
+            | "rbat"
+            | "rsat"
+            | "rnget"
+            | "rbget"
+            | "rsget"
+            | "rnpop"
+            | "rspop"
+            | "rbpop"
+            | "rnshift"
+            | "rsshift"
+            | "rbshift"
+    ) || ["rn", "rb", "rs"].iter().any(|prefix| {
+        token.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.starts_with("find")
+                && !suffix.starts_with("findindex")
+                && !suffix.starts_with("findlastindex")
+        })
+    })
+}
+
 fn primitive_truthy_result(token: &str) -> Option<JitKind> {
     let (element, operation) = token
         .strip_prefix("rn")
@@ -5009,6 +5065,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             branches.push((stack.len(), None, true));
+        } else if token == "ifpresent" {
+            let result = *stack.last()?;
+            branches.push((stack.len() - 1, Some(result), true));
         } else if token == "else" {
             let (base, expected, awaits_alternate) = branches.last_mut()?;
             if !*awaits_alternate || stack.len() != *base + 1 {
