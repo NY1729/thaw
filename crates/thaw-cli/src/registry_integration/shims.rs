@@ -684,6 +684,51 @@ fn jit_numeric_export(
                     output.push("t".into());
                 }
             }
+            Expr::Array(array) => {
+                output.push("arrayempty".into());
+                let mut prefix = None;
+                for element in &array.elems {
+                    let element = element.as_ref()?;
+                    let mut encoded = Vec::new();
+                    encode_expression(
+                        element.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut encoded,
+                    )?;
+                    if element.spread.is_none()
+                        && matches!(element.expr.as_ref(), Expr::Lit(Lit::Bool(_)))
+                    {
+                        encoded.push("asbool".into());
+                    }
+                    let (element_prefix, operation) = if element.spread.is_some() {
+                        if jit_expression_kind(&encoded)?.0 != JitKind::Array {
+                            return None;
+                        }
+                        (array_prefix(&encoded)?, "arrayconcat")
+                    } else {
+                        let element_prefix = match jit_expression_kind(&encoded)?.0 {
+                            JitKind::Number => "rn",
+                            JitKind::String => "rs",
+                            JitKind::Boolean => "rb",
+                            JitKind::Array => return None,
+                        };
+                        (element_prefix, match element_prefix {
+                            "rn" => "rnappend",
+                            "rs" => "rsappend",
+                            "rb" => "rbappend",
+                            _ => unreachable!(),
+                        })
+                    };
+                    if prefix.is_some_and(|prefix| prefix != element_prefix) {
+                        return None;
+                    }
+                    prefix = Some(element_prefix);
+                    output.extend(encoded);
+                    output.push(operation.into());
+                }
+            }
             Expr::Member(member) => {
                 if matches!(
                     (member.obj.as_ref(), &member.prop),
@@ -2919,6 +2964,8 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             if stack.pop()? != JitKind::Array {
                 return None;
             }
+            stack.push(JitKind::Array);
+        } else if token == "arrayempty" {
             stack.push(JitKind::Array);
         } else if token == "arrayslice" {
             if stack.pop()? != JitKind::Number

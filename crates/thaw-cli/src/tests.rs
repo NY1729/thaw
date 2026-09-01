@@ -604,6 +604,106 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let array_return = thaw_bridge::DtsFunction {
+        params: Vec::new(),
+        required_params: 0,
+        ret: array_length.params[0].1.clone(),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.values = () => [1, 2];",
+            "values",
+            false,
+            &array_return,
+        ),
+        Some(
+            "expr:arrayempty,c3ff0000000000000,rnappend,c4000000000000000,rnappend,arrayvalue"
+                .into()
+        )
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.values = () => [];",
+            "values",
+            false,
+            &array_return,
+        ),
+        Some("expr:arrayempty,arrayvalue".into())
+    );
+    let spread_array = thaw_bridge::DtsFunction {
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            ("tail".into(), array_length.params[0].1.clone()),
+        ],
+        required_params: 2,
+        ..array_return
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.values = (value, tail) => [1, value, ...tail];",
+            "values",
+            false,
+            &spread_array,
+        ),
+        Some(
+            "expr:arrayempty,c3ff0000000000000,rnappend,a0,rnappend,rn1,arrayconcat,arrayvalue"
+                .into()
+        )
+    );
+    let spread_strings = thaw_bridge::DtsFunction {
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+            (
+                "tail".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+                    thaw_hir::HirType::Str,
+                ))),
+            ),
+        ],
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+            thaw_hir::HirType::Str,
+        ))),
+        ..spread_array.clone()
+    };
+    assert!(jit_numeric_export(
+        "module.exports.values = (value, tail) => ['a', value, ...tail];",
+        "values",
+        false,
+        &spread_strings,
+    )
+    .is_some());
+    let spread_flags = thaw_bridge::DtsFunction {
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+            ),
+            (
+                "tail".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+                    thaw_hir::HirType::Bool,
+                ))),
+            ),
+        ],
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+            thaw_hir::HirType::Bool,
+        ))),
+        ..spread_array
+    };
+    assert!(jit_numeric_export(
+        "module.exports.values = (value, tail) => [true, value, ...tail];",
+        "values",
+        false,
+        &spread_flags,
+    )
+    .is_some());
     let array_predicate = thaw_bridge::DtsFunction {
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
         ..array_length.clone()
