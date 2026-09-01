@@ -372,7 +372,7 @@ fn string_split_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_array_slice_uses_jit_without_quickjs() {
+fn primitive_array_copies_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-slice-{}",
         std::process::id()
@@ -382,18 +382,18 @@ fn primitive_array_slice_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function numbers(values: number[], start: number, end: number): number[];\nexport declare function strings(values: string[], start: number, end: number): string[];\nexport declare function flags(values: boolean[], start: number, end: number): boolean[];\n",
+        "export declare function numbers(values: number[], start: number, end: number): number[];\nexport declare function strings(values: string[], start: number, end: number): string[];\nexport declare function flags(values: boolean[], start: number, end: number): boolean[];\nexport declare function reverseNumbers(values: number[]): number[];\nexport declare function reverseStrings(values: string[]): string[];\nexport declare function reverseFlags(values: boolean[]): boolean[];\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.numbers = (values, start, end) => values.slice(start, end); module.exports.strings = (values, start, end) => values.slice(start, end); module.exports.flags = (values, start, end) => values.slice(start, end);\n",
+        "module.exports.numbers = (values, start, end) => values.slice(start, end); module.exports.strings = (values, start, end) => values.slice(start, end); module.exports.flags = (values, start, end) => values.slice(start, end); module.exports.reverseNumbers = values => values.toReversed(); module.exports.reverseStrings = values => values.toReversed(); module.exports.reverseFlags = values => values.toReversed();\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { numbers, strings, flags } from 'jit-array-slice';\nfunction main(): void { console.log(numbers([1, 2, 3, 4], 1, -1).join('|')); console.log(strings(['a', 'b', 'c'], 0, 2).join('|')); console.log(flags([true, false, true], 1, 3).join('|')); }\n",
+        "import { numbers, strings, flags, reverseNumbers, reverseStrings, reverseFlags } from 'jit-array-slice';\nfunction main(): void { console.log(numbers([1, 2, 3, 4], 1, -1).join('|')); console.log(strings(['a', 'b', 'c'], 0, 2).join('|')); console.log(flags([true, false, true], 1, 3).join('|')); console.log(reverseNumbers([1, 2, 3]).join('|')); console.log(reverseStrings(['a', 'b', 'c']).join('|')); console.log(reverseFlags([true, false]).join('|')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -403,7 +403,10 @@ fn primitive_array_slice_uses_jit_without_quickjs() {
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "2|3\na|b\nfalse|true\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2|3\na|b\nfalse|true\n3|2|1\nc|b|a\nfalse|true\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
