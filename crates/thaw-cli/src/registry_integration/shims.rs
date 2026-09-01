@@ -89,6 +89,36 @@ fn jit_numeric_export(
         }
     }
 
+    fn time_method(
+        call: &CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<&'static str> {
+        if !call.args.is_empty() {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let Expr::Ident(object) = member.obj.as_ref() else {
+            return None;
+        };
+        if parameters.contains_key(object.sym.as_ref()) || locals.contains_key(object.sym.as_ref()) {
+            return None;
+        }
+        if !matches!(&member.prop, MemberProp::Ident(property) if property.sym == "now") {
+            return None;
+        }
+        match object.sym.as_ref() {
+            "Date" => Some("datenow"),
+            "performance" => Some("performancenow"),
+            _ => None,
+        }
+    }
+
     fn number_predicate(
         call: &CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -1648,6 +1678,9 @@ fn jit_numeric_export(
                     }
                     _ => return None,
                 }
+            }
+            Expr::Call(call) if time_method(call, parameters, locals).is_some() => {
+                output.push(time_method(call, parameters, locals)?.into());
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;

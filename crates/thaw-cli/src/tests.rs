@@ -730,6 +730,31 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:c3ff0000000000000,random,+".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.now = () => Date.now() + performance.now();",
+            "now",
+            false,
+            &zero_arg_number,
+        ),
+        Some("expr:datenow,performancenow,+".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.now = Date => Date.now();",
+            "now",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![(
+                    "Date".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+                )],
+                required_params: 1,
+                ..zero_arg_number.clone()
+            },
+        ),
+        None
+    );
     let zero_arg_string = thaw_bridge::DtsFunction {
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
         ..zero_arg_number.clone()
