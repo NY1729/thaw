@@ -928,6 +928,42 @@ fn jit_export(
         Some((left.expr.as_ref(), right.expr.as_ref()))
     }
 
+    fn object_dictionary_call<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<(&'static str, &'a Expr, Option<&'a Expr>)> {
+        if parameters.contains_key("Object")
+            || locals.contains_key("Object")
+            || helpers.contains_key("Object")
+            || call.args.iter().any(|argument| argument.spread.is_some())
+        {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Object") {
+            return None;
+        }
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        match (property.sym.as_ref(), call.args.as_slice()) {
+            ("keys", [object]) => Some(("dkeys", object.expr.as_ref(), None)),
+            ("hasOwn", [object, key]) => Some((
+                "dhasown",
+                object.expr.as_ref(),
+                Some(key.expr.as_ref()),
+            )),
+            _ => None,
+        }
+    }
+
     fn numeric_constant(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -1228,7 +1264,7 @@ fn jit_export(
 
     fn array_prefix(expression: &[String]) -> Option<&'static str> {
         expression.iter().find_map(|token| {
-            if token == "strarray" {
+            if matches!(token.as_str(), "strarray" | "dkeys") {
                 return Some("rs");
             }
             ["rn", "rb", "rs"]
@@ -2256,6 +2292,27 @@ fn jit_export(
                     }
                     _ => return None,
                 }
+            }
+            Expr::Call(call)
+                if object_dictionary_call(call, parameters, locals, context.helpers).is_some() =>
+            {
+                let (operation, object, key) =
+                    object_dictionary_call(call, parameters, locals, context.helpers)?;
+                let mut encoded = Vec::new();
+                encode_expression(object, parameters, locals, context, &mut encoded)?;
+                if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                output.extend(encoded);
+                if let Some(key) = key {
+                    let mut encoded = Vec::new();
+                    encode_expression(key, parameters, locals, context, &mut encoded)?;
+                    if jit_expression_kind(&encoded)?.0 != JitKind::String {
+                        return None;
+                    }
+                    output.extend(encoded);
+                }
+                output.push(operation.into());
             }
             Expr::Call(call)
                 if object_same_value(call, parameters, locals, context.helpers).is_some() =>
@@ -6328,11 +6385,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if token == "ddelete" {
+        } else if matches!(token.as_str(), "ddelete" | "dhasown") {
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Dictionary {
                 return None;
             }
             stack.push(JitKind::Boolean);
+        } else if token == "dkeys" {
+            if stack.pop()? != JitKind::Dictionary {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if matches!(
             token.as_str(),
             "rnat" | "rbat" | "rsat" | "rnget" | "rbget" | "rsget"

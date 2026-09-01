@@ -327,6 +327,23 @@ pub extern "C" fn thaw_jit_dictionary_mutate(
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `object` must point to a valid JSON value. For operation `0`, `key` must
+/// point to a valid NUL-terminated string.
+pub unsafe extern "C" fn thaw_jit_dictionary_query(
+    operation: u8,
+    object: *mut Value,
+    key: *const c_char,
+) -> f64 {
+    match operation {
+        0 => f64::from(unsafe { thaw_json_has_own(object, key) }),
+        1 => f64::from_bits(wrap_array_handle(unsafe { thaw_json_keys(object) }) as usize as u64),
+        _ => 0.0,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_array_new() -> *mut Value {
     leak(Value::Array(Vec::new()))
 }
