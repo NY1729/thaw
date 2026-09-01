@@ -47,6 +47,7 @@ pub type ArrayToReversed = unsafe extern "C" fn(*const u8, usize) -> *mut u8;
 pub type ArrayToSorted = unsafe extern "C" fn(u8, *const u8) -> *mut u8;
 pub type ArrayReverse = unsafe extern "C" fn(*mut u8, usize) -> *mut u8;
 pub type ArraySort = unsafe extern "C" fn(u8, *mut u8) -> *mut u8;
+pub type ArrayFill = unsafe extern "C" fn(u8, *mut u8, f64, f64, f64) -> *mut u8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 
 thread_local! {
@@ -67,6 +68,7 @@ thread_local! {
     static ARRAY_TO_SORTED: Cell<Option<ArrayToSorted>> = const { Cell::new(None) };
     static ARRAY_REVERSE: Cell<Option<ArrayReverse>> = const { Cell::new(None) };
     static ARRAY_SORT: Cell<Option<ArraySort>> = const { Cell::new(None) };
+    static ARRAY_FILL: Cell<Option<ArrayFill>> = const { Cell::new(None) };
     static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
@@ -567,6 +569,35 @@ macro_rules! array_sort_fn {
 array_sort_fn!(number_array_sort, 0);
 array_sort_fn!(string_array_sort, 1);
 array_sort_fn!(bool_array_sort, 2);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_fill(operation: u8, array: f64, value: f64, start: f64, end: f64) -> f64 {
+    let (Some(fill), Some((data, _))) = (ARRAY_FILL.with(Cell::get), unsafe { array_data(array) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { fill(operation, data.cast_mut(), value, start, end) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        array_result(result)
+    }
+}
+
+macro_rules! array_fill_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(array: f64, value: f64, start: f64, end: f64) -> f64 {
+            array_fill($operation, array, value, start, end)
+        }
+    };
+}
+
+array_fill_fn!(number_array_fill, 0);
+array_fill_fn!(string_array_fill, 1);
+array_fill_fn!(bool_array_fill, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_with(operation: u8, array: f64, index: f64, value: f64) -> f64 {
@@ -1643,6 +1674,9 @@ enum NumericValue {
     NumberArraySort,
     StringArraySort,
     BoolArraySort,
+    NumberArrayFill,
+    StringArrayFill,
+    BoolArrayFill,
     NumberArrayWith,
     StringArrayWith,
     BoolArrayWith,
@@ -1695,6 +1729,9 @@ impl NumericProgram {
                     | NumericValue::NumberArraySort
                     | NumericValue::StringArraySort
                     | NumericValue::BoolArraySort
+                    | NumericValue::NumberArrayFill
+                    | NumericValue::StringArrayFill
+                    | NumericValue::BoolArrayFill
                     | NumericValue::NumberArrayWith
                     | NumericValue::StringArrayWith
                     | NumericValue::BoolArrayWith
@@ -1805,6 +1842,9 @@ impl NumericProgram {
                     "rnsort" => Some(NumericValue::NumberArraySort),
                     "rssort" => Some(NumericValue::StringArraySort),
                     "rbsort" => Some(NumericValue::BoolArraySort),
+                    "rnfill" => Some(NumericValue::NumberArrayFill),
+                    "rsfill" => Some(NumericValue::StringArrayFill),
+                    "rbfill" => Some(NumericValue::BoolArrayFill),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -2270,6 +2310,21 @@ impl NumericProgram {
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
+                NumericValue::NumberArrayFill
+                | NumericValue::StringArrayFill
+                | NumericValue::BoolArrayFill => {
+                    if depth < 4 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArrayFill => number_array_fill,
+                        NumericValue::StringArrayFill => string_array_fill,
+                        NumericValue::BoolArrayFill => bool_array_fill,
+                        _ => unreachable!(),
+                    };
+                    emit_quaternary_call(&mut code, function as *const () as u64, depth - 4);
+                    depth -= 3;
+                }
                 NumericValue::NumberArrayWith
                 | NumericValue::StringArrayWith
                 | NumericValue::BoolArrayWith => {
@@ -2587,6 +2642,20 @@ fn emit_ternary_call(code: &mut Vec<u8>, function: u64, left: u8) {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_quaternary_call(code: &mut Vec<u8>, function: u64, left: u8) {
+    emit_spill(code, left);
+    emit_move(code, 0, left);
+    emit_move(code, 1, left + 1);
+    emit_move(code, 2, left + 2);
+    emit_move(code, 3, left + 3);
+    code.extend_from_slice(&[0x48, 0xb8]);
+    code.extend_from_slice(&function.to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0]);
+    emit_move(code, left, 0);
+    emit_restore(code, left);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn emit_compare(code: &mut Vec<u8>, left: u8, right: u8, operation: CompareOp) {
     code.extend_from_slice(&[0x66, 0x0f, 0x2e, 0xc0 | (left << 3) | right]);
     let condition = match operation {
@@ -2708,6 +2777,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     array_to_sorted: Option<ArrayToSorted>,
     array_reverse: Option<ArrayReverse>,
     array_sort: Option<ArraySort>,
+    array_fill: Option<ArrayFill>,
     array_with: Option<ArrayWith>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
@@ -2755,6 +2825,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_array_to_sorted = ARRAY_TO_SORTED.with(|sort| sort.replace(array_to_sorted));
     let previous_array_reverse = ARRAY_REVERSE.with(|reverse| reverse.replace(array_reverse));
     let previous_array_sort = ARRAY_SORT.with(|sort| sort.replace(array_sort));
+    let previous_array_fill = ARRAY_FILL.with(|fill| fill.replace(array_fill));
     let previous_array_with = ARRAY_WITH.with(|replace| replace.replace(array_with));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
@@ -2781,6 +2852,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     ARRAY_TO_SORTED.with(|sort| sort.set(previous_array_to_sorted));
     ARRAY_REVERSE.with(|reverse| reverse.set(previous_array_reverse));
     ARRAY_SORT.with(|sort| sort.set(previous_array_sort));
+    ARRAY_FILL.with(|fill| fill.set(previous_array_fill));
     ARRAY_WITH.with(|replace| replace.set(previous_array_with));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
@@ -2982,6 +3054,17 @@ mod tests {
             assert!(!array.is_null());
             array
         }
+        unsafe extern "C" fn fill_array_in_place(
+            operation: u8,
+            array: *mut u8,
+            value: f64,
+            start: f64,
+            end: f64,
+        ) -> *mut u8 {
+            assert_eq!((operation, value, start, end), (0, 20.0, 1.0, 2.0));
+            assert!(!array.is_null());
+            array
+        }
         unsafe extern "C" fn replace_array(
             operation: u8,
             array: *const u8,
@@ -3021,6 +3104,7 @@ mod tests {
                 Some(sort_array),
                 Some(reverse_array_in_place),
                 Some(sort_array_in_place),
+                Some(fill_array_in_place),
                 Some(replace_array),
             )
         }
@@ -3437,6 +3521,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,

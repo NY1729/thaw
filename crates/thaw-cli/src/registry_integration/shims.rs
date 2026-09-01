@@ -485,6 +485,7 @@ fn jit_numeric_export(
                 | "toSorted"
                 | "reverse"
                 | "sort"
+                | "fill"
                 | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
@@ -970,6 +971,41 @@ fn jit_numeric_export(
                         "{prefix}{}",
                         if method == "sort" { "sort" } else { "sorted" }
                     ));
+                } else if method == "fill" {
+                    let [value, range @ ..] = call.args.as_slice() else {
+                        return None;
+                    };
+                    if range.len() > 2 {
+                        return None;
+                    }
+                    let mut encoded = Vec::new();
+                    encode_expression(value.expr.as_ref(), parameters, locals, context, &mut encoded)?;
+                    let expected = match prefix {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    };
+                    if jit_expression_kind(&encoded)?.0 != expected {
+                        return None;
+                    }
+                    output.extend(encoded);
+                    match range {
+                        [] => {
+                            output.push("c0000000000000000".into());
+                            output.push("c7ff0000000000000".into());
+                        }
+                        [start] => {
+                            encode_number(start.expr.as_ref(), parameters, locals, context, output)?;
+                            output.push("c7ff0000000000000".into());
+                        }
+                        [start, end] => {
+                            encode_number(start.expr.as_ref(), parameters, locals, context, output)?;
+                            encode_number(end.expr.as_ref(), parameters, locals, context, output)?;
+                        }
+                        _ => unreachable!(),
+                    }
+                    output.push(format!("{prefix}fill"));
                 } else if method == "with" {
                     let [index, value] = call.args.as_slice() else {
                         return None;
@@ -2398,6 +2434,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             if stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::String
                 || stack.pop()? != JitKind::String
+            {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if matches!(token.as_str(), "rnfill" | "rsfill" | "rbfill") {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Number {
+                return None;
+            }
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::Array
+                || value
+                    != match &token[..2] {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    }
             {
                 return None;
             }
