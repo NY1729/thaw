@@ -24,6 +24,24 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
     }
 }
 
+fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
+    match ty {
+        HirType::F64 | HirType::Bool | HirType::Str => Some(1),
+        HirType::Array(element)
+            if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) =>
+        {
+            Some(1)
+        }
+        HirType::Object(fields) => fields.iter().try_fold(0usize, |slots, (_, ty)| {
+            matches!(ty, HirType::F64 | HirType::Bool | HirType::Str).then_some(slots + 1)
+        }),
+        HirType::Optional(payload) if !matches!(payload.as_ref(), HirType::Object(_)) => {
+            jit_parameter_slots(payload).map(|_| 2)
+        }
+        _ => None,
+    }
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_napi_value_callback(
         &mut self,
@@ -992,16 +1010,12 @@ impl<'ctx> HirCompiler<'ctx> {
             let argument_slots = signature
                 .params
                 .iter()
-                .map(|ty| usize::from(matches!(ty, HirType::Optional(_))) + 1)
+                .map(jit_parameter_slots)
+                .collect::<Option<Vec<_>>>()
+                .ok_or("JIT calls require primitive, primitive-array, or flat primitive-object arguments")?
+                .into_iter()
                 .sum::<usize>();
             if argument_slots > 16
-                || !signature.params.iter().all(|ty| {
-                    let ty = match ty {
-                        HirType::Optional(payload) => payload.as_ref(),
-                        ty => ty,
-                    };
-                    matches!(ty, HirType::F64 | HirType::Bool | HirType::Str | HirType::Array(_))
-                })
                 || args.len() != signature.params.len()
             {
                 return Err(
@@ -1025,6 +1039,40 @@ impl<'ctx> HirCompiler<'ctx> {
             let mut argument_values = Vec::with_capacity(argument_slots);
             for (index, argument) in args.iter().enumerate() {
                 let value = self.compile_expr(argument)?;
+                if let HirType::Object(fields) = &signature.params[index] {
+                    let object = value.into_pointer_value();
+                    let mut offset = 0u64;
+                    for (field, ty) in fields {
+                        let pointer = unsafe {
+                            self.builder
+                                .build_in_bounds_gep(
+                                    self.context.i8_type(),
+                                    object,
+                                    &[self.context.i64_type().const_int(offset, false)],
+                                    &format!("jit_object_{field}"),
+                                )
+                                .map_err(|error| error.to_string())?
+                        };
+                        let field_value = self
+                            .builder
+                            .build_load(self.basic_type(ty)?, pointer, &format!("jit_object_{field}_value"))
+                            .map_err(|error| error.to_string())?;
+                        argument_values.push(if *ty == HirType::Bool {
+                            self.builder
+                                .build_unsigned_int_to_float(
+                                    field_value.into_int_value(),
+                                    self.context.f64_type(),
+                                    "jit_object_boolean_slot",
+                                )
+                                .map_err(|error| error.to_string())?
+                                .into()
+                        } else {
+                            field_value
+                        });
+                        offset += object_field_storage_bytes(ty);
+                    }
+                    continue;
+                }
                 if let HirType::Optional(payload) = &signature.params[index] {
                     let value = value.into_struct_value();
                     let present = self
