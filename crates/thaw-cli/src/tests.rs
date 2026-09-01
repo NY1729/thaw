@@ -2007,6 +2007,77 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,asbool,if,s1,touppercase,else,t6d697373696e67,end".into())
     );
+    let optional_object_number = thaw_bridge::DtsFunction {
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                thaw_hir::HirType::Object(vec![
+                    (
+                        "nested".into(),
+                        thaw_hir::HirType::Object(vec![("score".into(), thaw_hir::HirType::F64)]),
+                    ),
+                    (
+                        "pair".into(),
+                        thaw_hir::HirType::Tuple(vec![
+                            thaw_hir::HirType::F64,
+                            thaw_hir::HirType::Str,
+                        ]),
+                    ),
+                    (
+                        "flags".into(),
+                        thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Bool)),
+                    ),
+                    ("label".into(), thaw_hir::HirType::Str),
+                ]),
+            ))),
+        )],
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::F64,
+        ))),
+        ..optional_number.clone()
+    };
+    assert!(jit_numeric_export(
+        "module.exports.score = value => value?.nested.score;",
+        "score",
+        false,
+        &optional_object_number,
+    )
+    .is_some());
+    let optional_object_string = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::Str,
+        ))),
+        ..optional_object_number.clone()
+    };
+    assert!(jit_numeric_export(
+        "module.exports.name = value => value?.pair[1];",
+        "name",
+        false,
+        &optional_object_string,
+    )
+    .is_some());
+    let object_array_length = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..optional_object_number.clone()
+    };
+    assert!(jit_numeric_export(
+        "module.exports.length = value => value?.flags.length ?? 42;",
+        "length",
+        false,
+        &object_array_length,
+    )
+    .is_some());
+    let object_upper = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        ..optional_object_number.clone()
+    };
+    assert!(jit_numeric_export(
+        "module.exports.upper = value => value?.label.toUpperCase() ?? 'missing';",
+        "upper",
+        false,
+        &object_upper,
+    )
+    .is_some());
     let optional_push = thaw_bridge::DtsFunction {
         params: vec![
             (
