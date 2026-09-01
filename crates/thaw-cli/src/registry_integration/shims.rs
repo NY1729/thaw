@@ -1389,20 +1389,29 @@ fn jit_numeric_export(
                     if prefix != "rn" {
                         return None;
                     }
-                    let operation = encode_numeric_quantifier_operand(
-                        callback.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        output,
-                    )?;
                     let method = match method {
                         "findIndex" => "findindex",
                         "findLast" => "findlast",
                         "findLastIndex" => "findlastindex",
                         method => method,
                     };
-                    output.push(format!("rn{method}{operation}"));
+                    if numeric_truthy_callback(
+                        callback.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                    ) {
+                        output.push(format!("rn{method}truthy"));
+                    } else {
+                        let operation = encode_numeric_quantifier_operand(
+                            callback.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?;
+                        output.push(format!("rn{method}{operation}"));
+                    }
                 } else if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
                         [] => encode_string(",", output)?,
@@ -2708,6 +2717,75 @@ fn jit_numeric_export(
         Some(operation)
     }
 
+    fn numeric_truthy_callback(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &InlineContext<'_>,
+    ) -> bool {
+        let boolean_is_shadowed = outer_parameters.contains_key("Boolean")
+            || outer_locals.contains_key("Boolean")
+            || context.module_locals.contains_key("Boolean")
+            || context.helpers.contains_key("Boolean");
+        if matches!(expression, Expr::Ident(identifier) if identifier.sym == "Boolean") {
+            return !boolean_is_shadowed;
+        }
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return false;
+        }
+        let Some(callable) = resolve_callable(expression, context.helpers) else {
+            return false;
+        };
+        let Some((parameters, steps, body)) = callable_parts(callable) else {
+            return false;
+        };
+        let [Pat::Ident(value)] = parameters.as_slice() else {
+            return false;
+        };
+        if !steps.is_empty() {
+            return false;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => {
+                let Some(expression) = statement.arg.as_deref() else {
+                    return false;
+                };
+                expression
+            }
+            _ => return false,
+        };
+        if matches!(expression, Expr::Ident(identifier) if identifier.sym == value.id.sym) {
+            return true;
+        }
+        if matches!(expression, Expr::Unary(outer)
+            if outer.op == UnaryOp::Bang
+                && matches!(outer.arg.as_ref(), Expr::Unary(inner)
+                    if inner.op == UnaryOp::Bang
+                        && matches!(inner.arg.as_ref(), Expr::Ident(identifier)
+                            if identifier.sym == value.id.sym)))
+        {
+            return true;
+        }
+        let Expr::Call(call) = expression else {
+            return false;
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return false;
+        };
+        let [argument] = call.args.as_slice() else {
+            return false;
+        };
+        !boolean_is_shadowed
+            && value.id.sym != "Boolean"
+            && matches!(callee.as_ref(), Expr::Ident(identifier) if identifier.sym == "Boolean")
+            && argument.spread.is_none()
+            && matches!(argument.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym)
+    }
+
     fn encode_numeric_map_operand(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
@@ -3590,6 +3668,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
+        } else if matches!(token.as_str(), "rnsometruthy" | "rneverytruthy") {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if token
             .strip_prefix("rnfindlastindex")
             .or_else(|| token.strip_prefix("rnfindlast"))
@@ -3598,6 +3681,17 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             .is_some_and(|operation| matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne"))
         {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if matches!(
+            token.as_str(),
+            "rnfindtruthy"
+                | "rnfindindextruthy"
+                | "rnfindlasttruthy"
+                | "rnfindlastindextruthy"
+        ) {
+            if stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(JitKind::Number);
@@ -3617,6 +3711,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             }
             stack.push(JitKind::Array);
         } else if token == "arrayvalue"
+            || token == "rnfiltertruthy"
             || matches!(token.as_str(), "rnmapneg" | "rnmapabs")
             || token
                 .strip_prefix("rnmap")

@@ -443,6 +443,76 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,c0000000000000000,rnfiltergt,arrayvalue".into())
     );
+    let unary_quantifier = thaw_bridge::DtsFunction {
+        params: vec![spread_extreme.params[0].clone()],
+        required_params: 1,
+        ..quantifier.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.some(Boolean);",
+            "add",
+            false,
+            &unary_quantifier,
+        ),
+        Some("expr:rn0,rnsometruthy".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.every(value => !!value);",
+            "add",
+            false,
+            &unary_quantifier,
+        ),
+        Some("expr:rn0,rneverytruthy".into())
+    );
+    for (method, suffix, function) in [
+        ("find", "find", &finder),
+        ("findLast", "findlast", &finder),
+        ("findIndex", "findindex", &finder_index),
+        ("findLastIndex", "findlastindex", &finder_index),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.add = values => values.{method}(value => value);"),
+                "add",
+                false,
+                &thaw_bridge::DtsFunction {
+                    params: vec![spread_extreme.params[0].clone()],
+                    required_params: 1,
+                    ..function.clone()
+                },
+            ),
+            Some(format!("expr:rn0,rn{suffix}truthy")),
+            "{method}"
+        );
+    }
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.filter(Boolean);",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![spread_extreme.params[0].clone()],
+                required_params: 1,
+                ..filter.clone()
+            },
+        ),
+        Some("expr:rn0,rnfiltertruthy,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const Boolean = value => false; module.exports.add = values => values.filter(Boolean);",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![spread_extreme.params[0].clone()],
+                required_params: 1,
+                ..filter.clone()
+            },
+        ),
+        None
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = (values, factor) => values.map(value => value * factor);",
