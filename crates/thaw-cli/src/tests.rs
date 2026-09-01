@@ -356,7 +356,10 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &string_quantifier,
         ),
-        None
+        Some(
+            "expr:rn0,t61302c73332c73747269637466616c7365,arrayempty,s1,captureappend,rnsomejitc"
+                .into()
+        )
     );
     assert_eq!(
         jit_numeric_export(

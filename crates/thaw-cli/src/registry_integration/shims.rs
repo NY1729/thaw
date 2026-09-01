@@ -1352,7 +1352,7 @@ fn jit_numeric_export(
                             if initial.is_some() { "" } else { "0" }
                         ));
                     } else {
-                        let (callback, kind) = encode_numeric_jit_callback(
+                        let (callback, kind, captures) = encode_numeric_jit_callback(
                             callback.expr.as_ref(),
                             parameters,
                             locals,
@@ -1364,9 +1364,14 @@ fn jit_numeric_export(
                             return None;
                         }
                         encode_string(&callback.join(","), output)?;
+                        let captured = !captures.is_empty();
+                        if captured {
+                            append_jit_captures(captures, output);
+                        }
                         output.push(format!(
-                            "rnreduce{}jit{}",
+                            "rnreduce{}jit{}{}",
                             if method == "reduceRight" { "right" } else { "" },
+                            if captured { "c" } else { "" },
                             if initial.is_some() { "" } else { "0" }
                         ));
                     }
@@ -1427,7 +1432,7 @@ fn jit_numeric_export(
                                 if reverse { "r" } else { "" }
                             ));
                         } else {
-                            let (callback, kind) = encode_numeric_jit_callback(
+                            let (callback, kind, captures) = encode_numeric_jit_callback(
                                 callback.expr.as_ref(),
                                 parameters,
                                 locals,
@@ -1439,7 +1444,15 @@ fn jit_numeric_export(
                                 return None;
                             }
                             encode_string(&callback.join(","), output)?;
-                            output.push("rnmapjit".into());
+                            let captured = !captures.is_empty();
+                            if captured {
+                                append_jit_captures(captures, output);
+                            }
+                            output.push(if captured {
+                                "rnmapjitc".into()
+                            } else {
+                                "rnmapjit".into()
+                            });
                         }
                     }
                 } else if matches!(
@@ -1492,7 +1505,7 @@ fn jit_numeric_export(
                             output.extend(operand);
                             output.push(format!("{prefix}{method}{operation}"));
                         } else if prefix == "rn" {
-                            let (callback, kind) = encode_numeric_jit_callback(
+                            let (callback, kind, captures) = encode_numeric_jit_callback(
                                 callback.expr.as_ref(),
                                 parameters,
                                 locals,
@@ -1504,7 +1517,14 @@ fn jit_numeric_export(
                                 return None;
                             }
                             encode_string(&callback.join(","), output)?;
-                            output.push(format!("rn{method}jit"));
+                            let captured = !captures.is_empty();
+                            if captured {
+                                append_jit_captures(captures, output);
+                            }
+                            output.push(format!(
+                                "rn{method}jit{}",
+                                if captured { "c" } else { "" }
+                            ));
                         } else {
                             return None;
                         }
@@ -3345,29 +3365,11 @@ fn jit_numeric_export(
         context: &mut InlineContext<'_>,
         max_parameters: usize,
         array_parameter: Option<usize>,
-    ) -> Option<(Vec<String>, JitKind)> {
+    ) -> Option<(Vec<String>, JitKind, Vec<Vec<String>>)> {
         if matches!(expression, Expr::Ident(identifier)
             if outer_parameters.contains_key(identifier.sym.as_ref())
                 || outer_locals.contains_key(identifier.sym.as_ref()))
         {
-            return None;
-        }
-        if [
-            "Array",
-            "Boolean",
-            "Date",
-            "Math",
-            "Number",
-            "Object",
-            "String",
-            "performance",
-            "process",
-        ]
-        .iter()
-        .any(|name| {
-            outer_parameters.contains_key(*name)
-                || outer_locals.contains_key(*name)
-        }) {
             return None;
         }
         let callable = resolve_callable(expression, context.helpers)?;
@@ -3394,17 +3396,70 @@ fn jit_numeric_export(
                 return None;
             }
         }
+        let mut captures = outer_parameters
+            .iter()
+            .filter(|(name, _)| !callback_parameters.contains_key(name.as_str()))
+            .map(|(name, token)| (name.clone(), vec![token.clone()]))
+            .chain(
+                outer_locals
+                    .iter()
+                    .filter(|(name, _)| !callback_parameters.contains_key(name.as_str()))
+                    .map(|(name, tokens)| (name.clone(), tokens.clone())),
+            )
+            .collect::<Vec<_>>();
+        captures.sort_by(|left, right| left.0.cmp(&right.0));
+        if max_parameters + captures.len() > 16 {
+            return None;
+        }
+        let mut callback_locals = context.module_locals.clone();
+        let mut capture_tokens = Vec::new();
+        for (offset, (name, tokens)) in captures.iter().enumerate() {
+            let prefix = match jit_expression_kind(tokens)?.0 {
+                JitKind::Number => "a",
+                JitKind::Boolean => "b",
+                JitKind::String => "s",
+                JitKind::Array => array_prefix(tokens)?,
+            };
+            let token = format!("{prefix}{}", max_parameters + offset);
+            capture_tokens.push(token.clone());
+            if outer_parameters.contains_key(name) {
+                callback_parameters.insert(name.clone(), token);
+            } else {
+                callback_locals.insert(name.clone(), vec![token]);
+            }
+        }
         let mut encoded = Vec::new();
         encode_steps_and_body(
             steps,
             body,
             &callback_parameters,
-            context.module_locals.clone(),
+            callback_locals,
             context,
             &mut encoded,
         )?;
+        let mut selected_captures = Vec::new();
+        for ((_, capture), token) in captures.into_iter().zip(capture_tokens) {
+            if encoded.iter().any(|encoded| encoded == &token) {
+                let prefix = token.trim_end_matches(|character: char| character.is_ascii_digit());
+                let replacement = format!("{prefix}{}", max_parameters + selected_captures.len());
+                for encoded in &mut encoded {
+                    if encoded == &token {
+                        *encoded = replacement.clone();
+                    }
+                }
+                selected_captures.push(capture);
+            }
+        }
         let kind = jit_expression_kind(&encoded)?.0;
-        stable_jit_tokens(&encoded).then_some((encoded, kind))
+        stable_jit_tokens(&encoded).then_some((encoded, kind, selected_captures))
+    }
+
+    fn append_jit_captures(captures: Vec<Vec<String>>, output: &mut Vec<String>) {
+        output.push("arrayempty".into());
+        for capture in captures {
+            output.extend(capture);
+            output.push("captureappend".into());
+        }
     }
 
     fn stable_jit_tokens(tokens: &[String]) -> bool {
@@ -4396,8 +4451,18 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Number);
         } else if matches!(
             token.as_str(),
-            "rnreducejit" | "rnreducejit0" | "rnreducerightjit" | "rnreducerightjit0"
+            "rnreducejit"
+                | "rnreducejit0"
+                | "rnreducerightjit"
+                | "rnreducerightjit0"
+                | "rnreducejitc"
+                | "rnreducejitc0"
+                | "rnreducerightjitc"
+                | "rnreducerightjitc0"
         ) {
+            if token.contains("jitc") && stack.pop()? != JitKind::Array {
+                return None;
+            }
             if stack.pop()? != JitKind::String
                 || stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Array
@@ -4461,7 +4526,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if token == "rnmapjit" {
+        } else if matches!(token.as_str(), "rnmapjit" | "rnmapjitc") {
+            if token == "rnmapjitc" && stack.pop()? != JitKind::Array {
+                return None;
+            }
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Array {
                 return None;
             }
@@ -4475,13 +4543,26 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "rnfindlastjit"
                 | "rnfindlastindexjit"
                 | "rnfilterjit"
+                | "rnsomejitc"
+                | "rneveryjitc"
+                | "rnfindjitc"
+                | "rnfindindexjitc"
+                | "rnfindlastjitc"
+                | "rnfindlastindexjitc"
+                | "rnfilterjitc"
         ) {
+            if token.ends_with("jitc") && stack.pop()? != JitKind::Array {
+                return None;
+            }
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Array {
                 return None;
             }
-            stack.push(if token == "rnfilterjit" {
+            stack.push(if matches!(token.as_str(), "rnfilterjit" | "rnfilterjitc") {
                 JitKind::Array
-            } else if matches!(token.as_str(), "rnsomejit" | "rneveryjit") {
+            } else if matches!(
+                token.as_str(),
+                "rnsomejit" | "rneveryjit" | "rnsomejitc" | "rneveryjitc"
+            ) {
                 JitKind::Boolean
             } else {
                 JitKind::Number
@@ -4528,6 +4609,12 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Array);
         } else if token == "arrayconcat" {
             if stack.pop()? != JitKind::Array || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if token == "captureappend" {
+            stack.pop()?;
+            if stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(JitKind::Array);
