@@ -215,6 +215,10 @@ extern "C" fn dictionary_from_string_entries(entries: f64) -> f64 {
     dictionary_query(entries, 0.0, 10)
 }
 
+extern "C" fn dictionary_assign(target: f64, source: f64) -> f64 {
+    dictionary_query(target, source, 11)
+}
+
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -3365,6 +3369,7 @@ enum NumericValue {
     DictionaryFromNumberEntries,
     DictionaryFromBoolEntries,
     DictionaryFromStringEntries,
+    DictionaryAssign,
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
@@ -3624,6 +3629,7 @@ impl NumericProgram {
                     "dnfromentries" => Some(NumericValue::DictionaryFromNumberEntries),
                     "dbfromentries" => Some(NumericValue::DictionaryFromBoolEntries),
                     "dsfromentries" => Some(NumericValue::DictionaryFromStringEntries),
+                    "dassign" => Some(NumericValue::DictionaryAssign),
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
@@ -5207,7 +5213,8 @@ impl NumericProgram {
                 | NumericValue::BoolDictionaryGet
                 | NumericValue::StringDictionaryGet
                 | NumericValue::DictionaryDelete
-                | NumericValue::DictionaryHasOwn => {
+                | NumericValue::DictionaryHasOwn
+                | NumericValue::DictionaryAssign => {
                     if depth < 2 {
                         return None;
                     }
@@ -5217,6 +5224,7 @@ impl NumericProgram {
                         NumericValue::StringDictionaryGet => string_dictionary_get,
                         NumericValue::DictionaryDelete => dictionary_delete,
                         NumericValue::DictionaryHasOwn => dictionary_has_own,
+                        NumericValue::DictionaryAssign => dictionary_assign,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
