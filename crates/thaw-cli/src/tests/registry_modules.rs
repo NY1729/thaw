@@ -268,18 +268,18 @@ fn arithmetic_array_reduce_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function sum(values: number[], initial: number): number;\nexport declare function sumFirst(values: number[]): number;\nexport declare function subtractFirst(values: number[]): number;\nexport declare function subtract(values: number[], initial: number): number;\nexport declare function multiply(values: number[], initial: number): number;\nexport declare function divide(values: number[], initial: number): number;\nexport declare function remainder(values: number[], initial: number): number;\nexport declare function power(values: number[], initial: number): number;\n",
+        "export declare function sum(values: number[], initial: number): number;\nexport declare function sumFirst(values: number[]): number;\nexport declare function subtractFirst(values: number[]): number;\nexport declare function subtractRightFirst(values: number[]): number;\nexport declare function powerRightFirst(values: number[]): number;\nexport declare function subtract(values: number[], initial: number): number;\nexport declare function multiply(values: number[], initial: number): number;\nexport declare function divide(values: number[], initial: number): number;\nexport declare function remainder(values: number[], initial: number): number;\nexport declare function power(values: number[], initial: number): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports = { sum: (values, initial) => values.reduce(function(accumulator, value) { return accumulator + value; }, initial), sumFirst: values => values.reduce((accumulator, value) => accumulator + value), subtractFirst: values => values.reduce((accumulator, value) => accumulator - value), subtract: (values, initial) => values.reduce((accumulator, value) => accumulator - value, initial), multiply: (values, initial) => values.reduce((accumulator, value) => accumulator * value, initial), divide: (values, initial) => values.reduce((accumulator, value) => accumulator / value, initial), remainder: (values, initial) => values.reduce((accumulator, value) => accumulator % value, initial), power: (values, initial) => values.reduce((accumulator, value) => accumulator ** value, initial) };\n",
+        "module.exports = { sum: (values, initial) => values.reduce(function(accumulator, value) { return accumulator + value; }, initial), sumFirst: values => values.reduce((accumulator, value) => accumulator + value), subtractFirst: values => values.reduce((accumulator, value) => accumulator - value), subtractRightFirst: values => values.reduceRight((accumulator, value) => accumulator - value), powerRightFirst: values => values.reduceRight((accumulator, value) => accumulator ** value), subtract: (values, initial) => values.reduce((accumulator, value) => accumulator - value, initial), multiply: (values, initial) => values.reduce((accumulator, value) => accumulator * value, initial), divide: (values, initial) => values.reduce((accumulator, value) => accumulator / value, initial), remainder: (values, initial) => values.reduce((accumulator, value) => accumulator % value, initial), power: (values, initial) => values.reduce((accumulator, value) => accumulator ** value, initial) };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { sum, sumFirst, subtractFirst, subtract, multiply, divide, remainder, power } from 'jit-array-reduce';\nfunction main(): void { console.log(sum([1e16, -1e16, 1], 1)); console.log(Object.is(sum([], -0), -0)); console.log(sum([10, 20, 12], 0)); console.log(subtract([1, 2, 3], 10)); console.log(multiply([2, 3, 4], 1)); console.log(divide([2, 5], 100)); console.log(remainder([6, 4], 20)); console.log(power([3, 2], 2)); console.log(Object.is(power([3], -0), -0)); console.log(sumFirst([10, 20, 12])); console.log(subtractFirst([10, 2, 3])); try { sumFirst([]); } catch { console.log('empty'); } }\n",
+        "import { sum, sumFirst, subtractFirst, subtractRightFirst, powerRightFirst, subtract, multiply, divide, remainder, power } from 'jit-array-reduce';\nfunction main(): void { console.log(sum([1e16, -1e16, 1], 1)); console.log(Object.is(sum([], -0), -0)); console.log(sum([10, 20, 12], 0)); console.log(subtract([1, 2, 3], 10)); console.log(multiply([2, 3, 4], 1)); console.log(divide([2, 5], 100)); console.log(remainder([6, 4], 20)); console.log(power([3, 2], 2)); console.log(Object.is(power([3], -0), -0)); console.log(sumFirst([10, 20, 12])); console.log(subtractFirst([10, 2, 3])); console.log(subtractRightFirst([10, 2, 3])); console.log(powerRightFirst([2, 3])); try { sumFirst([]); } catch { console.log('empty'); } try { subtractRightFirst([]); } catch { console.log('right-empty'); } }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -295,7 +295,7 @@ fn arithmetic_array_reduce_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "1\ntrue\n42\n4\n24\n10\n2\n64\ntrue\n42\n5\nempty\n"
+        "1\ntrue\n42\n4\n24\n10\n2\n64\ntrue\n42\n5\n-9\n9\nempty\nright-empty\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
