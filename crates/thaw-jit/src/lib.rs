@@ -661,6 +661,43 @@ fn primitive_array_compare(value: f64, operand: f64, encoded: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn primitive_array_map(value: f64, encoded: f64) -> f64 {
+    let encoded = encoded as u8;
+    let kind = encoded / 2;
+    let negate = !encoded.is_multiple_of(2);
+    if !(1..=2).contains(&kind) || (negate && kind != 1) {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let (Some(allocate), Some((array, length))) =
+        (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let Some(size) = length.checked_mul(8).and_then(|size| size.checked_add(8)) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let output = unsafe { allocate(size, 8) };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { output.cast::<u64>().write(length as u64) };
+    for index in 0..length {
+        let slot = unsafe { array.add(8 + index * 8).cast::<u64>().read_unaligned() };
+        unsafe {
+            output
+                .add(8 + index * 8)
+                .cast::<u64>()
+                .write_unaligned(if negate { u64::from(slot == 0) } else { slot })
+        };
+    }
+    array_result(output)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_map(value: f64, operation: impl Fn(f64) -> f64) -> f64 {
     let (Some(allocate), Some((array, length))) =
         (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
@@ -2749,6 +2786,7 @@ enum NumericValue {
     NumberArrayFilter(CompareOp),
     PrimitiveArrayTruthy(u8, u8),
     PrimitiveArrayCompare(u8, CompareOp, u8),
+    PrimitiveArrayMap(u8, bool),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayUnaryMap(bool),
     NumberArrayMathMap(UnaryMath),
@@ -3154,6 +3192,21 @@ impl NumericProgram {
                                 CompareOp::parse(operation)?,
                                 mode,
                             ))
+                        })
+                        .or_else(|| {
+                            let (kind, operation) = value
+                                .strip_prefix("rbmap")
+                                .map(|operation| (1, operation))
+                                .or_else(|| {
+                                    value.strip_prefix("rsmap").map(|operation| (2, operation))
+                                })?;
+                            match operation {
+                                "identity" => Some(NumericValue::PrimitiveArrayMap(kind, false)),
+                                "not" if kind == 1 => {
+                                    Some(NumericValue::PrimitiveArrayMap(kind, true))
+                                }
+                                _ => None,
+                            }
                         })
                         .or_else(|| {
                             Some(NumericValue::NumberArrayUnaryMap(match value {
@@ -3732,6 +3785,23 @@ impl NumericProgram {
                         depth - 2,
                     );
                     depth -= 1;
+                }
+                NumericValue::PrimitiveArrayMap(kind, negate) => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(
+                        &f64::from(kind * 2 + u8::from(*negate))
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_binary_call(
+                        &mut code,
+                        primitive_array_map as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::NumberArrayMap(operation, reverse) => {
                     if depth < 2 {
@@ -5698,6 +5768,15 @@ mod tests {
             .value,
             1.0
         );
+        let bool_not = CString::new("expr:rb0,rbmapnot:bool-map-not").unwrap();
+        let result = call(&bool_not, &[f64::from_bits(bool_handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
+        assert_eq!(unsafe { output.add(8).cast::<u64>().read() }, 1);
+        assert_eq!(unsafe { output.add(16).cast::<u64>().read() }, 0);
+        assert_eq!(unsafe { output.add(24).cast::<u64>().read() }, 1);
+        unsafe { libc::free(output.cast_mut().cast()) };
         let string_filter = CString::new("expr:rs0,s1,rsfiltergte:string-filter-gte").unwrap();
         let result = call(
             &string_filter,
@@ -5711,6 +5790,19 @@ mod tests {
         assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
         assert_eq!(
             unsafe { output.add(8).cast::<*const c_char>().read() },
+            nonempty_string.as_ptr()
+        );
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let string_identity = CString::new("expr:rs0,rsmapidentity:string-map-identity").unwrap();
+        let result = call(
+            &string_identity,
+            &[f64::from_bits(string_handle as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
+        assert_eq!(
+            unsafe { output.add(16).cast::<*const c_char>().read() },
             nonempty_string.as_ptr()
         );
         unsafe { libc::free(output.cast_mut().cast()) };
