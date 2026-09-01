@@ -2047,6 +2047,9 @@ Unary `typeof` on supported typed values returns `number`, `boolean`, `string`,
 or `object` from the same JIT while preserving operand evaluation.
 Zero-argument `Number()`, `String()`, and `Boolean()` calls fold to their
 ECMAScript primitive defaults in that IR.
+Defaulted optional primitive parameters use a presence-and-value JIT ABI;
+defaults are selected in typed IR in declaration order, including explicit
+`undefined` and defaults that reference earlier parameters.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
