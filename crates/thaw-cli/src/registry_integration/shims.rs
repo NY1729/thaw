@@ -195,13 +195,97 @@ fn jit_export(
         }
     }
 
-    fn return_expression(body: NumericBody<'_>) -> Option<&Expr> {
+    fn encode_aggregate_body(
+        body: NumericBody<'_>,
+        ty: &thaw_hir::HirType,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<JitExport> {
         match body {
-            NumericBody::Expression(expression) => expression,
-            NumericBody::Statements([Stmt::Return(returned)]) => returned.arg.as_deref()?,
-            _ => return None,
+            NumericBody::Expression(expression) => {
+                encode_return_expression(expression, ty, parameters, locals, context)
+            }
+            NumericBody::Statements(statements) => {
+                encode_aggregate_statements(statements, ty, parameters, locals, context)
+            }
         }
-        .into()
+    }
+
+    fn encode_aggregate_statement(
+        statement: &Stmt,
+        ty: &thaw_hir::HirType,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<JitExport> {
+        match statement {
+            Stmt::Return(returned) => encode_return_expression(
+                returned.arg.as_deref()?,
+                ty,
+                parameters,
+                locals,
+                context,
+            ),
+            Stmt::Block(block) => {
+                encode_aggregate_statements(&block.stmts, ty, parameters, locals, context)
+            }
+            Stmt::If(_) => encode_aggregate_statements(
+                std::slice::from_ref(statement),
+                ty,
+                parameters,
+                locals,
+                context,
+            ),
+            _ => None,
+        }
+    }
+
+    fn encode_aggregate_statements(
+        statements: &[Stmt],
+        ty: &thaw_hir::HirType,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<JitExport> {
+        let (first, rest) = statements.split_first()?;
+        if let Stmt::Return(_) = first {
+            if !rest.is_empty() {
+                return None;
+            }
+            return encode_aggregate_statement(first, ty, parameters, locals, context);
+        }
+        let Stmt::If(branch) = first else {
+            return None;
+        };
+        let mut condition = Vec::new();
+        encode_condition(
+            branch.test.as_ref(),
+            parameters,
+            locals,
+            context,
+            &mut condition,
+        )?;
+        let consequent = encode_aggregate_statement(
+            branch.cons.as_ref(),
+            ty,
+            parameters,
+            locals,
+            context,
+        )?;
+        let alternate = if let Some(alternate) = branch.alt.as_deref() {
+            if !rest.is_empty() {
+                return None;
+            }
+            encode_aggregate_statement(alternate, ty, parameters, locals, context)?
+        } else {
+            encode_aggregate_statements(rest, ty, parameters, locals, context)?
+        };
+        Some(JitExport::Conditional(
+            validated_jit_expression(condition, JitKind::Boolean)?,
+            Box::new(consequent),
+            Box::new(alternate),
+        ))
     }
 
     enum ObjectReturnValue<'a> {
@@ -4443,8 +4527,8 @@ fn jit_export(
             jit_locals.push(JitLocal { ty, operation });
             slot += 1;
         }
-        let result = encode_return_expression(
-            return_expression(body)?,
+        let result = encode_aggregate_body(
+            body,
             ty,
             &parameters,
             &locals,
