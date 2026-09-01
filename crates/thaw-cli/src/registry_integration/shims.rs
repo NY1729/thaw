@@ -482,6 +482,7 @@ fn jit_numeric_export(
                 | "slice"
                 | "toReversed"
                 | "toSorted"
+                | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -926,6 +927,24 @@ fn jit_numeric_export(
                         return None;
                     }
                     output.push(format!("{prefix}sorted"));
+                } else if method == "with" {
+                    let [index, value] = call.args.as_slice() else {
+                        return None;
+                    };
+                    encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
+                    let mut encoded = Vec::new();
+                    encode_expression(value.expr.as_ref(), parameters, locals, context, &mut encoded)?;
+                    let expected = match prefix {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    };
+                    if jit_expression_kind(&encoded)?.0 != expected {
+                        return None;
+                    }
+                    output.extend(encoded);
+                    output.push(format!("{prefix}with"));
                 } else if method == "slice" {
                     match call.args.as_slice() {
                         [] => {
@@ -2336,6 +2355,21 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             if stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::String
                 || stack.pop()? != JitKind::String
+            {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if matches!(token.as_str(), "rnwith" | "rswith" | "rbwith") {
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Array
+                || value
+                    != match &token[..2] {
+                        "rn" => JitKind::Number,
+                        "rs" => JitKind::String,
+                        "rb" => JitKind::Boolean,
+                        _ => return None,
+                    }
             {
                 return None;
             }
