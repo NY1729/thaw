@@ -721,6 +721,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:c0000000000000000".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.random = () => 1 + Math.random();",
+            "random",
+            false,
+            &zero_arg_number,
+        ),
+        Some("expr:c3ff0000000000000,random,+".into())
+    );
     let zero_arg_string = thaw_bridge::DtsFunction {
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
         ..zero_arg_number.clone()

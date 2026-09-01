@@ -77,6 +77,7 @@ fn jit_numeric_export(
             "max" => Some("max"),
             "pow" => Some("pow"),
             "round" => Some("round"),
+            "random" => Some("random"),
             "sign" => Some("sign"),
             "sin" => Some("sin"),
             "sinh" => Some("sinh"),
@@ -1650,7 +1651,12 @@ fn jit_numeric_export(
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;
-                if matches!(
+                if method == "random" {
+                    if !call.args.is_empty() {
+                        return None;
+                    }
+                    output.push("random".into());
+                } else if matches!(
                     method,
                     "abs"
                         | "acos"
