@@ -2216,6 +2216,10 @@ Fixed-shape object and tuple results with the same recursively representable
 leaves are also assembled by an AOT wrapper from specialized JIT leaf
 expressions. Object literal source order, shorthand fields, nested objects and
 nested tuples are preserved without embedding the fallback bundle.
+Primitive and primitive-array local `const` bindings that feed aggregate
+results are emitted as ordered intermediate JIT calls. Stateful array
+operations and dynamic sources such as `Math.random()` therefore execute once,
+and later fields reuse the exact native result instead of duplicating work.
 
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections and the
