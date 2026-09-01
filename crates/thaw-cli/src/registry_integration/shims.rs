@@ -1403,12 +1403,15 @@ fn jit_numeric_export(
                                 if reverse { "r" } else { "" }
                             ));
                         } else {
-                            let callback = encode_numeric_jit_map(
+                            let (callback, kind) = encode_numeric_jit_callback(
                                 callback.expr.as_ref(),
                                 parameters,
                                 locals,
                                 context,
                             )?;
+                            if kind != JitKind::Number {
+                                return None;
+                            }
                             encode_string(&callback.join(","), output)?;
                             output.push("rnmapjit".into());
                         }
@@ -1440,10 +1443,15 @@ fn jit_numeric_export(
                     ) {
                         output.push(format!("{prefix}{method}truthy"));
                     } else {
+                        let mut operand = Vec::new();
                         let operation = if prefix == "rn" {
                             encode_numeric_quantifier_operand(
-                                callback.expr.as_ref(), parameters, locals, context, output,
-                            )?
+                                callback.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut operand,
+                            )
                         } else {
                             encode_primitive_comparison_operand(
                                 callback.expr.as_ref(),
@@ -1451,10 +1459,27 @@ fn jit_numeric_export(
                                 locals,
                                 context,
                                 if prefix == "rs" { JitKind::String } else { JitKind::Boolean },
-                                output,
-                            )?
+                                &mut operand,
+                            )
                         };
-                        output.push(format!("{prefix}{method}{operation}"));
+                        if let Some(operation) = operation {
+                            output.extend(operand);
+                            output.push(format!("{prefix}{method}{operation}"));
+                        } else if prefix == "rn" {
+                            let (callback, kind) = encode_numeric_jit_callback(
+                                callback.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                            )?;
+                            if !matches!(kind, JitKind::Number | JitKind::Boolean) {
+                                return None;
+                            }
+                            encode_string(&callback.join(","), output)?;
+                            output.push(format!("rn{method}jit"));
+                        } else {
+                            return None;
+                        }
                     }
                 } else if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
@@ -3279,12 +3304,12 @@ fn jit_numeric_export(
         ))
     }
 
-    fn encode_numeric_jit_map(
+    fn encode_numeric_jit_callback(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
         outer_locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
-    ) -> Option<Vec<String>> {
+    ) -> Option<(Vec<String>, JitKind)> {
         if matches!(expression, Expr::Ident(identifier)
             if outer_parameters.contains_key(identifier.sym.as_ref())
                 || outer_locals.contains_key(identifier.sym.as_ref()))
@@ -3314,11 +3339,11 @@ fn jit_numeric_export(
             context,
             &mut encoded,
         )?;
-        (jit_expression_kind(&encoded)?.0 == JitKind::Number
-            && !encoded
+        let kind = jit_expression_kind(&encoded)?.0;
+        (!encoded
                 .iter()
                 .any(|token| matches!(token.as_str(), "random" | "datenow" | "performancenow")))
-        .then_some(encoded)
+        .then_some((encoded, kind))
     }
 
     fn numeric_unary_map(
@@ -4363,6 +4388,26 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
+        } else if matches!(
+            token.as_str(),
+            "rnsomejit"
+                | "rneveryjit"
+                | "rnfindjit"
+                | "rnfindindexjit"
+                | "rnfindlastjit"
+                | "rnfindlastindexjit"
+                | "rnfilterjit"
+        ) {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(if token == "rnfilterjit" {
+                JitKind::Array
+            } else if matches!(token.as_str(), "rnsomejit" | "rneveryjit") {
+                JitKind::Boolean
+            } else {
+                JitKind::Number
+            });
         } else if token
             .strip_prefix("rnfilter")
             .is_some_and(|operation| matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne"))

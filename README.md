@@ -2160,6 +2160,9 @@ More general pure numeric `map` bodies are compiled as cached JIT callbacks
 and invoked by one native array loop. This covers composed expressions such as
 `value * value + 1`, index-dependent expressions, local temporaries, and named
 callbacks without loading QuickJS.
+The same cached callback and native scan serve compound `some`, `every`,
+`find`, `findIndex`, `findLast`, `findLastIndex`, and `filter` predicates,
+including value-and-index expressions.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
 including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array
