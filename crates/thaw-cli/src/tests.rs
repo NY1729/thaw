@@ -1001,6 +1001,36 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,a2,a3,rnfill".into())
     );
+    let array_copy_within = thaw_bridge::DtsFunction {
+        name: "copy".into(),
+        params: vec![
+            array_length.params[0].clone(),
+            (
+                "target".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "start".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            (
+                "end".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 4,
+        ret: array_length.params[0].1.clone(),
+        ..array_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.copy = (values, target, start, end) => values.copyWithin(target, start, end);",
+            "copy",
+            false,
+            &array_copy_within,
+        ),
+        Some("expr:rn0,a1,a2,a3,arraycopywithin".into())
+    );
     let array_with = thaw_bridge::DtsFunction {
         name: "replace".into(),
         params: vec![

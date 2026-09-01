@@ -486,6 +486,7 @@ fn jit_numeric_export(
                 | "reverse"
                 | "sort"
                 | "fill"
+                | "copyWithin"
                 | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
@@ -1006,6 +1007,21 @@ fn jit_numeric_export(
                         _ => unreachable!(),
                     }
                     output.push(format!("{prefix}fill"));
+                } else if method == "copyWithin" {
+                    match call.args.as_slice() {
+                        [target, start] => {
+                            encode_number(target.expr.as_ref(), parameters, locals, context, output)?;
+                            encode_number(start.expr.as_ref(), parameters, locals, context, output)?;
+                            output.push("c7ff0000000000000".into());
+                        }
+                        [target, start, end] => {
+                            encode_number(target.expr.as_ref(), parameters, locals, context, output)?;
+                            encode_number(start.expr.as_ref(), parameters, locals, context, output)?;
+                            encode_number(end.expr.as_ref(), parameters, locals, context, output)?;
+                        }
+                        _ => return None,
+                    }
+                    output.push("arraycopywithin".into());
                 } else if method == "with" {
                     let [index, value] = call.args.as_slice() else {
                         return None;
@@ -2451,6 +2467,15 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                         "rb" => JitKind::Boolean,
                         _ => return None,
                     }
+            {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if token == "arraycopywithin" {
+            if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Array
             {
                 return None;
             }
