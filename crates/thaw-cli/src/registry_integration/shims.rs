@@ -734,10 +734,14 @@ fn jit_numeric_export(
             encoded.push("asbool".into());
         }
         let (element_prefix, operation) = if element.spread.is_some() {
-            if jit_expression_kind(&encoded)?.0 != JitKind::Array {
-                return None;
+            match jit_expression_kind(&encoded)?.0 {
+                JitKind::Array => (array_prefix(&encoded)?, "arrayconcat"),
+                JitKind::String => {
+                    encoded.push("strarray".into());
+                    ("rs", "arrayconcat")
+                }
+                JitKind::Number | JitKind::Boolean => return None,
             }
-            (array_prefix(&encoded)?, "arrayconcat")
         } else {
             let element_prefix = match jit_expression_kind(&encoded)?.0 {
                 JitKind::Number => "rn",
