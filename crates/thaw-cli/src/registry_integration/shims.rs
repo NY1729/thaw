@@ -47,7 +47,7 @@ fn jit_numeric_export(
             return None;
         };
         if call.args.iter().any(|argument| argument.spread.is_some())
-            && !(matches!(property.sym.as_ref(), "min" | "max")
+            && !(matches!(property.sym.as_ref(), "min" | "max" | "hypot")
                 && matches!(call.args.as_slice(), [argument] if argument.spread.is_some()))
         {
             return None;
@@ -2002,7 +2002,26 @@ fn jit_numeric_export(
                     encode_number(x.expr.as_ref(), parameters, locals, context, output)?;
                     output.push(method.into());
                 } else if method == "hypot" {
-                    if call.args.is_empty() {
+                    if matches!(call.args.as_slice(), [argument] if argument.spread.is_some()) {
+                        let [argument] = call.args.as_slice() else {
+                            unreachable!();
+                        };
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        if jit_expression_kind(&encoded)?.0 != JitKind::Array
+                            || array_prefix(&encoded)? != "rn"
+                        {
+                            return None;
+                        }
+                        output.extend(encoded);
+                        output.push("rnhypot".into());
+                    } else if call.args.is_empty() {
                         output.push(format!("c{:016x}", 0.0f64.to_bits()));
                     } else {
                         encode_number(
@@ -3176,7 +3195,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(token.as_str(), "arraylen" | "rnmin" | "rnmax") {
+        } else if matches!(
+            token.as_str(),
+            "arraylen" | "rnmin" | "rnmax" | "rnhypot"
+        ) {
             if stack.pop()? != JitKind::Array {
                 return None;
             }
