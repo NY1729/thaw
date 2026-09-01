@@ -154,6 +154,28 @@ fn type_property_name(key: &Expr) -> Option<String> {
     }
 }
 
+fn index_signature_value(signature: &swc_ecma_ast::TsIndexSignature) -> Result<&TsType, String> {
+    let [TsFnParam::Ident(key)] = signature.params.as_slice() else {
+        return Err("index signature requires one identifier key".into());
+    };
+    let key_type = key
+        .type_ann
+        .as_ref()
+        .ok_or("index signature key needs a type annotation")?;
+    if !matches!(
+        key_type.type_ann.as_ref(),
+        TsType::TsKeywordType(keyword)
+            if keyword.kind == TsKeywordTypeKind::TsStringKeyword
+    ) {
+        return Err("native dictionary index signatures require a string key".into());
+    }
+    signature
+        .type_ann
+        .as_ref()
+        .map(|annotation| annotation.type_ann.as_ref())
+        .ok_or_else(|| "index signature needs a value type annotation".into())
+}
+
 fn lower_class_params(
     params: &[ParamOrTsParamProp],
     interfaces: &HashMap<String, DtsType>,
@@ -505,6 +527,7 @@ fn resolve_interface(
     // interface's own fields; any name collision degrades the whole
     // interface to `Unsupported` rather than guessing an override rule.
     let mut fields: Vec<(String, HirType)> = Vec::new();
+    let mut dictionary = None;
     let mut failure = None;
     'extends: for base in &iface.extends {
         if base.type_args.is_some() {
@@ -531,6 +554,19 @@ fn resolve_interface(
                     fields.push((field_name, field_ty));
                 }
             }
+            DtsType::Native(HirType::Dictionary(element)) => {
+                if dictionary
+                    .as_ref()
+                    .is_some_and(|existing| existing != element.as_ref())
+                    || fields.iter().any(|(_, field)| field != element.as_ref())
+                {
+                    failure = Some(format!(
+                        "inherits an incompatible dictionary value from `{base_name}`"
+                    ));
+                    break;
+                }
+                dictionary = Some(*element);
+            }
             DtsType::Native(_) => {
                 unreachable!("resolve_interface always returns an Object or Unsupported")
             }
@@ -543,6 +579,35 @@ fn resolve_interface(
 
     if failure.is_none() {
         for member in &iface.body.body {
+            if let TsTypeElement::TsIndexSignature(signature) = member {
+                let value = match index_signature_value(signature) {
+                    Ok(value) => resolve_type_with_interfaces(
+                        value,
+                        raw,
+                        generic,
+                        resolved,
+                        in_progress,
+                    ),
+                    Err(reason) => DtsType::Unsupported(reason),
+                };
+                match value {
+                    DtsType::Native(value)
+                        if dictionary.as_ref().is_none_or(|existing| existing == &value)
+                            && fields.iter().all(|(_, field)| field == &value) =>
+                    {
+                        dictionary = Some(value);
+                    }
+                    DtsType::Native(_) => {
+                        failure = Some("declares an incompatible dictionary value type".into());
+                        break;
+                    }
+                    DtsType::Unsupported(reason) => {
+                        failure = Some(reason);
+                        break;
+                    }
+                }
+                continue;
+            }
             let TsTypeElement::TsPropertySignature(prop) = member else {
                 failure = Some("has a non-property member (method/index signature)".to_string());
                 break;
@@ -576,14 +641,20 @@ fn resolve_interface(
                 // as a field now (fields are word-sized regardless of
                 // their own type -- see hir_codegen.rs's `basic_type` for
                 // the `HirType::Object` case), including a nested object.
-                DtsType::Native(ty) => fields.push((
-                    field_name,
-                    if prop.optional {
+                DtsType::Native(ty) => {
+                    let ty = if prop.optional {
                         optional_hir_type(ty)
                     } else {
                         ty
-                    },
-                )),
+                    };
+                    if dictionary.as_ref().is_some_and(|element| element != &ty) {
+                        failure = Some(format!(
+                            "field `{field_name}` does not match its index value type"
+                        ));
+                        break;
+                    }
+                    fields.push((field_name, ty));
+                }
                 DtsType::Unsupported(reason) => {
                     failure = Some(format!("field `{field_name}`: {reason}"));
                     break;
@@ -596,7 +667,9 @@ fn resolve_interface(
 
     let result = match failure {
         Some(reason) => DtsType::Unsupported(format!("interface `{name}` {reason}")),
-        None => DtsType::Native(HirType::Object(fields)),
+        None => DtsType::Native(dictionary.map_or(HirType::Object(fields), |element| {
+            HirType::Dictionary(Box::new(element))
+        })),
     };
     resolved.insert(name.to_string(), result.clone());
     result
@@ -1647,7 +1720,31 @@ fn classify_ts_type(
 
         TsType::TsTypeLit(type_lit) => {
             let mut fields = Vec::with_capacity(type_lit.members.len());
+            let mut dictionary = None;
             for member in &type_lit.members {
+                if let TsTypeElement::TsIndexSignature(signature) = member {
+                    let value = match index_signature_value(signature) {
+                        Ok(value) => {
+                            classify_ts_type(value, interfaces, generic_interfaces)
+                        }
+                        Err(reason) => return DtsType::Unsupported(reason),
+                    };
+                    match value {
+                        DtsType::Native(value)
+                            if dictionary.as_ref().is_none_or(|existing| existing == &value)
+                                && fields.iter().all(|(_, field)| field == &value) =>
+                        {
+                            dictionary = Some(value);
+                        }
+                        DtsType::Native(_) => {
+                            return DtsType::Unsupported(
+                                "object type literal has incompatible dictionary values".into(),
+                            )
+                        }
+                        unsupported => return unsupported,
+                    }
+                    continue;
+                }
                 let TsTypeElement::TsPropertySignature(prop) = member else {
                     return DtsType::Unsupported(
                         "object type literal has a non-property member (method/index signature)"
@@ -1668,14 +1765,19 @@ fn classify_ts_type(
                 match field_ty {
                     // See the parallel comment in `resolve_interface`:
                     // any representable type works as a field now.
-                    DtsType::Native(ty) => fields.push((
-                        field_name,
-                        if prop.optional {
+                    DtsType::Native(ty) => {
+                        let ty = if prop.optional {
                             optional_hir_type(ty)
                         } else {
                             ty
-                        },
-                    )),
+                        };
+                        if dictionary.as_ref().is_some_and(|element| element != &ty) {
+                            return DtsType::Unsupported(format!(
+                                "object field `{field_name}` does not match its index value type"
+                            ));
+                        }
+                        fields.push((field_name, ty));
+                    }
                     DtsType::Unsupported(reason) => {
                         return DtsType::Unsupported(format!(
                             "object field `{field_name}`: {reason}"
@@ -1683,7 +1785,9 @@ fn classify_ts_type(
                     }
                 }
             }
-            DtsType::Native(HirType::Object(fields))
+            DtsType::Native(dictionary.map_or(HirType::Object(fields), |element| {
+                HirType::Dictionary(Box::new(element))
+            }))
         }
 
         TsType::TsTypeRef(ty_ref) => {
@@ -1780,10 +1884,20 @@ fn classify_ts_type(
                         "Record<K, V> requires exactly two type arguments".into(),
                     );
                 };
-                return apply_record(
-                    classify_ts_type(value, interfaces, generic_interfaces),
-                    utility_keys(keys, interfaces, generic_interfaces),
-                );
+                let value = classify_ts_type(value, interfaces, generic_interfaces);
+                if matches!(
+                    keys.as_ref(),
+                    TsType::TsKeywordType(keyword)
+                        if keyword.kind == TsKeywordTypeKind::TsStringKeyword
+                ) {
+                    return match value {
+                        DtsType::Native(value) => {
+                            DtsType::Native(HirType::Dictionary(Box::new(value)))
+                        }
+                        unsupported => unsupported,
+                    };
+                }
+                return apply_record(value, utility_keys(keys, interfaces, generic_interfaces));
             }
             if matches!(ref_name.as_str(), "Pick" | "Omit") {
                 let [object, keys] = ty_ref
@@ -1896,8 +2010,38 @@ fn resolve_generic_interface(
     in_progress.push(name.to_string());
 
     let mut fields = Vec::with_capacity(decl.body.body.len());
+    let mut dictionary = None;
     let mut failure = None;
     for member in &decl.body.body {
+        if let TsTypeElement::TsIndexSignature(signature) = member {
+            let value = match index_signature_value(signature) {
+                Ok(value) => resolve_ts_type_with_substitution(
+                    value,
+                    &substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                ),
+                Err(reason) => DtsType::Unsupported(reason),
+            };
+            match value {
+                DtsType::Native(value)
+                    if dictionary.as_ref().is_none_or(|existing| existing == &value)
+                        && fields.iter().all(|(_, field)| field == &value) =>
+                {
+                    dictionary = Some(value);
+                }
+                DtsType::Native(_) => {
+                    failure = Some("declares an incompatible dictionary value type".into());
+                    break;
+                }
+                DtsType::Unsupported(reason) => {
+                    failure = Some(reason);
+                    break;
+                }
+            }
+            continue;
+        }
         let TsTypeElement::TsPropertySignature(prop) = member else {
             failure = Some("has a non-property member (method/index signature)".to_string());
             break;
@@ -1917,14 +2061,20 @@ fn resolve_generic_interface(
             None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
         };
         match field_ty {
-            DtsType::Native(ty) => fields.push((
-                field_name,
-                if prop.optional {
+            DtsType::Native(ty) => {
+                let ty = if prop.optional {
                     optional_hir_type(ty)
                 } else {
                     ty
-                },
-            )),
+                };
+                if dictionary.as_ref().is_some_and(|element| element != &ty) {
+                    failure = Some(format!(
+                        "field `{field_name}` does not match its index value type"
+                    ));
+                    break;
+                }
+                fields.push((field_name, ty));
+            }
             DtsType::Unsupported(reason) => {
                 failure = Some(format!("field `{field_name}`: {reason}"));
                 break;
@@ -1936,7 +2086,9 @@ fn resolve_generic_interface(
 
     match failure {
         Some(reason) => DtsType::Unsupported(format!("interface `{name}` {reason}")),
-        None => DtsType::Native(HirType::Object(fields)),
+        None => DtsType::Native(dictionary.map_or(HirType::Object(fields), |element| {
+            HirType::Dictionary(Box::new(element))
+        })),
     }
 }
 
@@ -2144,6 +2296,18 @@ fn resolve_ts_type_with_substitution(
                     generic_interfaces,
                     in_progress,
                 );
+                if matches!(
+                    keys.as_ref(),
+                    TsType::TsKeywordType(keyword)
+                        if keyword.kind == TsKeywordTypeKind::TsStringKeyword
+                ) {
+                    return match value {
+                        DtsType::Native(value) => {
+                            DtsType::Native(HirType::Dictionary(Box::new(value)))
+                        }
+                        unsupported => unsupported,
+                    };
+                }
                 let keys = substituted_utility_keys(
                     keys,
                     substitution,
@@ -2428,7 +2592,35 @@ fn resolve_ts_type_with_substitution(
         }
         TsType::TsTypeLit(type_lit) => {
             let mut fields = Vec::with_capacity(type_lit.members.len());
+            let mut dictionary = None;
             for member in &type_lit.members {
+                if let TsTypeElement::TsIndexSignature(signature) = member {
+                    let value = match index_signature_value(signature) {
+                        Ok(value) => resolve_ts_type_with_substitution(
+                            value,
+                            substitution,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        ),
+                        Err(reason) => return DtsType::Unsupported(reason),
+                    };
+                    match value {
+                        DtsType::Native(value)
+                            if dictionary.as_ref().is_none_or(|existing| existing == &value)
+                                && fields.iter().all(|(_, field)| field == &value) =>
+                        {
+                            dictionary = Some(value);
+                        }
+                        DtsType::Native(_) => {
+                            return DtsType::Unsupported(
+                                "object type literal has incompatible dictionary values".into(),
+                            )
+                        }
+                        unsupported => return unsupported,
+                    }
+                    continue;
+                }
                 let TsTypeElement::TsPropertySignature(prop) = member else {
                     return DtsType::Unsupported(
                         "object type literal has a non-property member (method/index signature)"
@@ -2453,14 +2645,19 @@ fn resolve_ts_type_with_substitution(
                     }
                 };
                 match field_ty {
-                    DtsType::Native(ty) => fields.push((
-                        field_name,
-                        if prop.optional {
+                    DtsType::Native(ty) => {
+                        let ty = if prop.optional {
                             optional_hir_type(ty)
                         } else {
                             ty
-                        },
-                    )),
+                        };
+                        if dictionary.as_ref().is_some_and(|element| element != &ty) {
+                            return DtsType::Unsupported(format!(
+                                "object field `{field_name}` does not match its index value type"
+                            ));
+                        }
+                        fields.push((field_name, ty));
+                    }
                     DtsType::Unsupported(reason) => {
                         return DtsType::Unsupported(format!(
                             "object field `{field_name}`: {reason}"
@@ -2468,7 +2665,9 @@ fn resolve_ts_type_with_substitution(
                     }
                 }
             }
-            DtsType::Native(HirType::Object(fields))
+            DtsType::Native(dictionary.map_or(HirType::Object(fields), |element| {
+                HirType::Dictionary(Box::new(element))
+            }))
         }
         other => classify_ts_type(other, interfaces, generic_interfaces),
     }
