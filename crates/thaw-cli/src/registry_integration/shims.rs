@@ -3006,7 +3006,7 @@ fn jit_export(
                             steps.push(LocalStep::Effect(statement.expr.as_ref()));
                         }
                     }
-                    _ => break,
+                    _ => steps.push(LocalStep::Effect(statement.expr.as_ref())),
                 },
                 _ => break,
             }
@@ -4478,29 +4478,116 @@ fn jit_export(
     ) = &function.ret
     {
         let mut jit_locals = Vec::new();
+        let mut mutable = std::collections::HashSet::new();
         for step in local_steps {
-            let LocalStep::Declare {
-                name,
-                initializer,
-                mutable: false,
-            } = step
-            else {
-                return None;
-            };
-            if parameters.contains_key(name.sym.as_ref())
-                || locals.contains_key(name.sym.as_ref())
-                || slot == 16
-            {
+            if slot == 16 {
                 return None;
             }
             let mut encoded = Vec::new();
-            encode_expression(
-                initializer,
-                &parameters,
-                &locals,
-                &mut context,
-                &mut encoded,
-            )?;
+            let binding = match step {
+                LocalStep::Declare {
+                    name,
+                    initializer,
+                    mutable: is_mutable,
+                } => {
+                    if parameters.contains_key(name.sym.as_ref())
+                        || locals.contains_key(name.sym.as_ref())
+                    {
+                        return None;
+                    }
+                    encode_expression(
+                        initializer,
+                        &parameters,
+                        &locals,
+                        &mut context,
+                        &mut encoded,
+                    )?;
+                    if is_mutable {
+                        mutable.insert(name.sym.to_string());
+                    }
+                    Some(name)
+                }
+                LocalStep::Assign {
+                    name,
+                    operation,
+                    value,
+                } => {
+                    if !mutable.contains(name.sym.as_ref()) {
+                        return None;
+                    }
+                    if operation == AssignOp::AddAssign {
+                        let mut right = Vec::new();
+                        encode_expression(
+                            value,
+                            &parameters,
+                            &locals,
+                            &mut context,
+                            &mut right,
+                        )?;
+                        append_add(
+                            locals.get(name.sym.as_ref())?.clone(),
+                            right,
+                            &mut encoded,
+                        )?;
+                    } else {
+                        if operation != AssignOp::Assign {
+                            encoded.extend(locals.get(name.sym.as_ref())?.iter().cloned());
+                        }
+                        encode_expression(
+                            value,
+                            &parameters,
+                            &locals,
+                            &mut context,
+                            &mut encoded,
+                        )?;
+                        if operation != AssignOp::Assign {
+                            encoded.push(
+                                match operation {
+                                    AssignOp::SubAssign => "-",
+                                    AssignOp::MulAssign => "*",
+                                    AssignOp::DivAssign => "/",
+                                    AssignOp::ModAssign => "%",
+                                    AssignOp::LShiftAssign => "shl",
+                                    AssignOp::RShiftAssign => "shr",
+                                    AssignOp::ZeroFillRShiftAssign => "ushr",
+                                    AssignOp::BitOrAssign => "bor",
+                                    AssignOp::BitXorAssign => "bxor",
+                                    AssignOp::BitAndAssign => "band",
+                                    AssignOp::ExpAssign => "pow",
+                                    _ => return None,
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                    Some(name)
+                }
+                LocalStep::Update { name, operation } => {
+                    if !mutable.contains(name.sym.as_ref()) {
+                        return None;
+                    }
+                    encoded.extend(locals.get(name.sym.as_ref())?.iter().cloned());
+                    encoded.push(format!("c{:016x}", 1.0f64.to_bits()));
+                    encoded.push(
+                        match operation {
+                            UpdateOp::PlusPlus => "+",
+                            UpdateOp::MinusMinus => "-",
+                        }
+                        .into(),
+                    );
+                    Some(name)
+                }
+                LocalStep::Effect(expression) => {
+                    encode_expression(
+                        expression,
+                        &parameters,
+                        &locals,
+                        &mut context,
+                        &mut encoded,
+                    )?;
+                    None
+                }
+            };
             let kind = jit_expression_kind(&encoded)?.0;
             let (ty, prefix) = match kind {
                 JitKind::Number => (thaw_hir::HirType::F64, "a"),
@@ -4523,7 +4610,9 @@ fn jit_export(
                 },
             };
             let operation = validated_jit_expression(encoded, kind)?;
-            locals.insert(name.sym.to_string(), vec![format!("{prefix}{slot}")]);
+            if let Some(name) = binding {
+                locals.insert(name.sym.to_string(), vec![format!("{prefix}{slot}")]);
+            }
             jit_locals.push(JitLocal { ty, operation });
             slot += 1;
         }
