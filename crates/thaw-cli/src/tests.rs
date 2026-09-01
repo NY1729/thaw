@@ -459,6 +459,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (values, pivot) => values.map(value => value >= pivot ? value - pivot : pivot - value);",
+            "add",
+            false,
+            &filter,
+        ),
+        Some("expr:rn0,a1,rnmapbranch933,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "const positive = value => value > 0; module.exports.add = values => values.filter(positive);",
             "add",
             false,

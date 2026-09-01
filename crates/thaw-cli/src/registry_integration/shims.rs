@@ -1366,14 +1366,14 @@ fn jit_numeric_export(
                             prefix == "rb",
                         )?;
                         output.push(format!("{prefix}map{operation}"));
-                    } else if let Some((operation, mode)) = encode_numeric_select_map(
+                    } else if let Some(operation) = encode_numeric_conditional_map(
                         callback.expr.as_ref(),
                         parameters,
                         locals,
                         context,
                         output,
                     ) {
-                        output.push(format!("rnmapselect{operation}{mode}"));
+                        output.push(operation);
                     } else if let Some(operation) = numeric_unary_map(
                         callback.expr.as_ref(), parameters, locals, context,
                     ) {
@@ -2945,13 +2945,13 @@ fn jit_numeric_export(
         Some((operation, reverse))
     }
 
-    fn encode_numeric_select_map(
+    fn encode_numeric_conditional_map(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
         outer_locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
-    ) -> Option<(&'static str, u8)> {
+    ) -> Option<String> {
         if matches!(expression, Expr::Ident(identifier)
             if outer_parameters.contains_key(identifier.sym.as_ref())
                 || outer_locals.contains_key(identifier.sym.as_ref()))
@@ -3010,29 +3010,83 @@ fn jit_numeric_export(
         {
             return None;
         }
-        let branch_is_value = |branch: &Expr, context: &mut InlineContext<'_>| {
+        let branch_mode = |branch: &Expr, context: &mut InlineContext<'_>| {
             if matches!(branch, Expr::Ident(identifier) if identifier.sym == value.id.sym) {
-                return Some(true);
+                return Some(0u8);
             }
             let mut branch_encoded = Vec::new();
-            encode_expression(
+            if encode_expression(
                 branch,
                 outer_parameters,
                 outer_locals,
                 context,
                 &mut branch_encoded,
+            )
+            .is_some()
+                && branch_encoded == encoded
+            {
+                return Some(1);
+            }
+            let Expr::Bin(binary) = branch else {
+                return None;
+            };
+            let (other, reverse) = if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == value.id.sym)
+            {
+                (binary.right.as_ref(), false)
+            } else if matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
+            {
+                (binary.left.as_ref(), true)
+            } else {
+                return None;
+            };
+            let mut other_encoded = Vec::new();
+            encode_expression(
+                other,
+                outer_parameters,
+                outer_locals,
+                context,
+                &mut other_encoded,
             )?;
-            (branch_encoded == encoded).then_some(false)
+            if other_encoded != encoded {
+                return None;
+            }
+            let operation = match binary.op {
+                BinaryOp::Add => 0,
+                BinaryOp::Sub => 1,
+                BinaryOp::Mul => 2,
+                BinaryOp::Div => 3,
+                BinaryOp::Mod => 4,
+                BinaryOp::Exp => 5,
+                _ => return None,
+            };
+            Some(if reverse { 8 } else { 2 } + operation)
         };
-        let true_is_value = branch_is_value(conditional.cons.as_ref(), context)?;
-        if branch_is_value(conditional.alt.as_ref(), context)? == true_is_value {
+        let true_branch = branch_mode(conditional.cons.as_ref(), context)?;
+        let false_branch = branch_mode(conditional.alt.as_ref(), context)?;
+        if true_branch == false_branch {
             return None;
         }
         output.extend(encoded);
-        Some((
-            operation,
-            u8::from(reverse) | if true_is_value { 0 } else { 2 },
-        ))
+        if matches!((true_branch, false_branch), (0, 1) | (1, 0)) {
+            return Some(format!(
+                "rnmapselect{operation}{}",
+                u8::from(reverse) | if true_branch == 0 { 0 } else { 2 }
+            ));
+        }
+        let comparison = match operation {
+            "lt" => 0,
+            "lte" => 1,
+            "gt" => 2,
+            "gte" => 3,
+            "eq" => 4,
+            "ne" => 5,
+            _ => unreachable!(),
+        };
+        let encoded = comparison
+            | (u16::from(reverse) << 3)
+            | (u16::from(true_branch) << 4)
+            | (u16::from(false_branch) << 8);
+        Some(format!("rnmapbranch{encoded:03x}"))
     }
 
     fn numeric_index_map(
@@ -4090,14 +4144,22 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             }
             stack.push(JitKind::Number);
         } else if token
-            .strip_prefix("rnmapselect")
+            .strip_prefix("rnmapbranch")
+            .and_then(|encoded| u16::from_str_radix(encoded, 16).ok())
             .is_some_and(|encoded| {
-                encoded
-                    .strip_suffix(['0', '1', '2', '3'])
-                    .is_some_and(|operation| {
-                        matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne")
-                    })
+                encoded & 7 <= 5
+                    && (encoded >> 4) & 15 <= 13
+                    && (encoded >> 8) & 15 <= 13
             })
+            || token
+                .strip_prefix("rnmapselect")
+                .is_some_and(|encoded| {
+                    encoded
+                        .strip_suffix(['0', '1', '2', '3'])
+                        .is_some_and(|operation| {
+                            matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne")
+                        })
+                })
         {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
                 return None;
