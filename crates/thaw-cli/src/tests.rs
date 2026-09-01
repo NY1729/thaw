@@ -688,6 +688,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let type_of_number = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        required_params: 1,
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        )],
+        ..array_predicate.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.kind = value => typeof value;",
+            "kind",
+            false,
+            &type_of_number,
+        ),
+        Some("expr:a0,typeofnumber".into())
+    );
     let array_search = thaw_bridge::DtsFunction {
         params: vec![
             array_length.params[0].clone(),

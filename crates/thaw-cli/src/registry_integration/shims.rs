@@ -700,6 +700,18 @@ fn jit_numeric_export(
                     _ => {}
                 }
             }
+            Expr::Unary(unary) if unary.op == UnaryOp::TypeOf => {
+                let mut encoded = Vec::new();
+                encode_expression(unary.arg.as_ref(), parameters, locals, context, &mut encoded)?;
+                let operation = match jit_expression_kind(&encoded)?.0 {
+                    JitKind::Number => "typeofnumber",
+                    JitKind::Boolean => "typeofboolean",
+                    JitKind::String => "typeofstring",
+                    JitKind::Array => "typeofobject",
+                };
+                output.extend(encoded);
+                output.push(operation.into());
+            }
             Expr::Paren(parenthesized) => {
                 encode_expression(parenthesized.expr.as_ref(), parameters, locals, context, output)?;
             }
@@ -2130,6 +2142,12 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
+        } else if matches!(
+            token.as_str(),
+            "typeofnumber" | "typeofboolean" | "typeofstring" | "typeofobject"
+        ) {
+            stack.pop()?;
+            stack.push(JitKind::String);
         } else if token == "asbool" {
             if !matches!(*stack.last()?, JitKind::Number | JitKind::Boolean) {
                 return None;

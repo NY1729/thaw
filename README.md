@@ -2043,6 +2043,8 @@ expression is still evaluated before the typed result is returned.
 `Object.is` uses typed SameValue instructions there as well, including equal
 `NaN` values, distinct positive/negative zero, string contents, and native array
 identity.
+Unary `typeof` on supported typed values returns `number`, `boolean`, `string`,
+or `object` from the same JIT while preserving operand evaluation.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
