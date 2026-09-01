@@ -26,6 +26,7 @@ static INVALID_PRECISION: &[u8] = b"toPrecision() argument must be between 1 and
 static INVALID_RADIX: &[u8] = b"toString() radix argument must be between 2 and 36\0";
 static INVALID_EXPONENTIAL_DIGITS: &[u8] =
     b"toExponential() digits argument must be between 0 and 100\0";
+static INVALID_NORMALIZATION_FORM: &[u8] = b"invalid Unicode normalization form\0";
 
 pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 pub type NumberToString = unsafe extern "C" fn(f64) -> *const c_char;
@@ -35,6 +36,7 @@ pub type ParseInt = unsafe extern "C" fn(*const c_char, f64) -> f64;
 pub type NumberFormat = unsafe extern "C" fn(u8, f64, f64) -> *const c_char;
 pub type ArraySearch = unsafe extern "C" fn(u8, *const u8, f64, f64) -> f64;
 pub type ArrayFormat = unsafe extern "C" fn(u8, *const u8, *const c_char) -> *const c_char;
+pub type StringNormalize = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -45,6 +47,7 @@ thread_local! {
     static NUMBER_FORMAT: Cell<Option<NumberFormat>> = const { Cell::new(None) };
     static ARRAY_SEARCH: Cell<Option<ArraySearch>> = const { Cell::new(None) };
     static ARRAY_FORMAT: Cell<Option<ArrayFormat>> = const { Cell::new(None) };
+    static STRING_NORMALIZE: Cell<Option<StringNormalize>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -891,6 +894,26 @@ extern "C" fn string_repeat(value: f64, count: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_normalize(value: f64, form: f64) -> f64 {
+    let Some(normalize) = STRING_NORMALIZE.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let normalized = unsafe {
+        normalize(
+            value.to_bits() as usize as *const c_char,
+            form.to_bits() as usize as *const c_char,
+        )
+    };
+    if normalized.is_null() {
+        CALL_ERROR.with(|error| error.set(INVALID_NORMALIZATION_FORM.as_ptr().cast()));
+        0.0
+    } else {
+        f64::from_bits(normalized as usize as u64)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn normalize_string_index(index: f64, length: f64, negative_from_end: bool) -> usize {
     let index = if index.is_nan() { 0.0 } else { index.trunc() };
     if negative_from_end && index < 0.0 {
@@ -1370,6 +1393,7 @@ enum NumericValue {
     StringStartsWith,
     StringStartsWithAt,
     StringRepeat,
+    StringNormalize,
     StringReplace,
     StringReplaceAll,
     StringSlice,
@@ -1489,6 +1513,7 @@ impl NumericProgram {
                     "startswith" => Some(NumericValue::StringStartsWith),
                     "startswith2" => Some(NumericValue::StringStartsWithAt),
                     "repeat" => Some(NumericValue::StringRepeat),
+                    "normalize" => Some(NumericValue::StringNormalize),
                     "replace" => Some(NumericValue::StringReplace),
                     "replaceall" => Some(NumericValue::StringReplaceAll),
                     "slice" => Some(NumericValue::StringSlice),
@@ -1815,6 +1840,7 @@ impl NumericProgram {
                 | NumericValue::StringIndexOf
                 | NumericValue::StringLastIndexOf
                 | NumericValue::StringRepeat
+                | NumericValue::StringNormalize
                 | NumericValue::StringSlice
                 | NumericValue::StringSubstring => {
                     if depth < 2 {
@@ -1827,6 +1853,7 @@ impl NumericProgram {
                         NumericValue::StringIndexOf => string_index_of,
                         NumericValue::StringLastIndexOf => string_last_index_of,
                         NumericValue::StringRepeat => string_repeat,
+                        NumericValue::StringNormalize => string_normalize,
                         NumericValue::StringSlice => string_slice,
                         NumericValue::StringSubstring => string_substring,
                         _ => unreachable!(),
@@ -2279,6 +2306,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     number_format: Option<NumberFormat>,
     array_search: Option<ArraySearch>,
     array_format: Option<ArrayFormat>,
+    string_normalize: Option<StringNormalize>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -2314,6 +2342,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_number_format = NUMBER_FORMAT.with(|format| format.replace(number_format));
     let previous_array_search = ARRAY_SEARCH.with(|search| search.replace(array_search));
     let previous_array_format = ARRAY_FORMAT.with(|format| format.replace(array_format));
+    let previous_string_normalize =
+        STRING_NORMALIZE.with(|normalize| normalize.replace(string_normalize));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let value = function(args);
@@ -2327,6 +2357,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     NUMBER_FORMAT.with(|format| format.set(previous_number_format));
     ARRAY_SEARCH.with(|search| search.set(previous_array_search));
     ARRAY_FORMAT.with(|format| format.set(previous_array_format));
+    STRING_NORMALIZE.with(|normalize| normalize.set(previous_string_normalize));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -2413,6 +2444,16 @@ mod tests {
             assert_eq!(unsafe { CStr::from_ptr(separator) }.to_bytes(), b"|");
             c"10|20|30".as_ptr()
         }
+        unsafe extern "C" fn normalize_string(
+            value: *const c_char,
+            form: *const c_char,
+        ) -> *const c_char {
+            assert_eq!(unsafe { CStr::from_ptr(value) }.to_bytes(), "é".as_bytes());
+            match unsafe { CStr::from_ptr(form) }.to_bytes() {
+                b"NFC" => c"é".as_ptr(),
+                _ => ptr::null(),
+            }
+        }
         unsafe {
             thaw_jit_call_f64(
                 symbol.as_ptr(),
@@ -2426,6 +2467,7 @@ mod tests {
                 Some(format_method),
                 Some(search_array),
                 Some(format_array),
+                Some(normalize_string),
             )
         }
     }
@@ -2849,9 +2891,29 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         assert!(!missing_allocator.error.is_null());
+
+        let decomposed = CString::new("é").unwrap();
+        let normalize = CString::new("expr:s0,t4e4643,normalize:normalize").unwrap();
+        let result = call(
+            &normalize,
+            &[f64::from_bits(decomposed.as_ptr() as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }.to_bytes(),
+            "é".as_bytes()
+        );
+        let invalid = CString::new("expr:s0,t626f677573,normalize:normalize_invalid").unwrap();
+        assert!(!call(
+            &invalid,
+            &[f64::from_bits(decomposed.as_ptr() as usize as u64)]
+        )
+        .error
+        .is_null());
 
         for (expression, args, expected) in [
             ("a0,a1,bor", [4_294_967_297.0, 0.0], 1.0),
