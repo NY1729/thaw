@@ -175,6 +175,49 @@ fn numeric_predicates_use_jit_without_quickjs() {
 }
 
 #[test]
+fn typed_typeof_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-typeof-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-typeof");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numberKind(value: number): string;\nexport declare function booleanKind(value: boolean): string;\nexport declare function stringKind(value: string): string;\nexport declare function arrayKind(value: number[]): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { numberKind: value => typeof value, booleanKind: value => typeof value, stringKind: value => typeof value, arrayKind: value => typeof value };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numberKind, booleanKind, stringKind, arrayKind } from 'jit-typeof';\nfunction main(): void { console.log(numberKind(1)); console.log(booleanKind(true)); console.log(stringKind('x')); console.log(arrayKind([1])); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "number\nboolean\nstring\nobject\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_string_coercion_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-coercion-{}",
