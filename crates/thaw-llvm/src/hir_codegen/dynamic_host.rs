@@ -1165,6 +1165,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             .as_global_value()
                             .as_pointer_value()
                             .into(),
+                        self.module
+                            .get_function("thaw_array_to_reversed")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
                     ],
                     "jit_numeric_result",
                 )

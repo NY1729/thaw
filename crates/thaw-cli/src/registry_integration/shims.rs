@@ -473,7 +473,14 @@ fn jit_numeric_export(
         }
         matches!(
             property.sym.as_ref(),
-            "at" | "includes" | "indexOf" | "lastIndexOf" | "join" | "toString" | "slice"
+            "at"
+                | "includes"
+                | "indexOf"
+                | "lastIndexOf"
+                | "join"
+                | "toString"
+                | "slice"
+                | "toReversed"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -908,6 +915,11 @@ fn jit_numeric_export(
                         _ => return None,
                     }
                     output.push(format!("{prefix}join"));
+                } else if method == "toReversed" {
+                    if !call.args.is_empty() {
+                        return None;
+                    }
+                    output.push("arrayreversed".into());
                 } else if method == "slice" {
                     match call.args.as_slice() {
                         [] => {
@@ -2388,6 +2400,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 || stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Array
             {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if token == "arrayreversed" {
+            if stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(JitKind::Array);

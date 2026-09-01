@@ -927,6 +927,19 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,c0000000000000000,c7ff0000000000000,arrayslice".into())
     );
+    let array_reversed = thaw_bridge::DtsFunction {
+        name: "reversed".into(),
+        ..array_slice_all.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.reversed = values => values.toReversed();",
+            "reversed",
+            false,
+            &array_reversed,
+        ),
+        Some("expr:rn0,arrayreversed".into())
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",
