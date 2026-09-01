@@ -54,7 +54,7 @@ pub type ArrayRemove = unsafe extern "C" fn(u8, *mut *mut u8, *mut f64) -> i8;
 pub type ArraySplice = unsafe extern "C" fn(*mut *mut u8, f64, f64, *const u8) -> *mut u8;
 pub type ArraySet = unsafe extern "C" fn(u8, *mut *mut u8, f64, f64) -> i8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
-pub type MathRandom = unsafe extern "C" fn() -> f64;
+pub type NumberSource = unsafe extern "C" fn() -> f64;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -82,7 +82,9 @@ thread_local! {
     static ARRAY_SPLICE: Cell<Option<ArraySplice>> = const { Cell::new(None) };
     static ARRAY_SET: Cell<Option<ArraySet>> = const { Cell::new(None) };
     static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
-    static MATH_RANDOM: Cell<Option<MathRandom>> = const { Cell::new(None) };
+    static MATH_RANDOM: Cell<Option<NumberSource>> = const { Cell::new(None) };
+    static DATE_NOW: Cell<Option<NumberSource>> = const { Cell::new(None) };
+    static PERFORMANCE_NOW: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -724,12 +726,27 @@ array_set_fn!(string_array_set, 1);
 array_set_fn!(bool_array_set, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn math_random() -> f64 {
-    let Some(random) = MATH_RANDOM.with(Cell::get) else {
+fn number_source(source: &'static std::thread::LocalKey<Cell<Option<NumberSource>>>) -> f64 {
+    let Some(source) = source.with(Cell::get) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     };
-    unsafe { random() }
+    unsafe { source() }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn math_random() -> f64 {
+    number_source(&MATH_RANDOM)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn date_now() -> f64 {
+    number_source(&DATE_NOW)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn performance_now() -> f64 {
+    number_source(&PERFORMANCE_NOW)
 }
 
 macro_rules! array_unshift_fn {
@@ -1963,6 +1980,8 @@ enum NumericValue {
     Duplicate,
     DuplicatePair,
     MathRandom,
+    DateNow,
+    PerformanceNow,
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -2130,6 +2149,8 @@ impl NumericProgram {
                     "dup" => Some(NumericValue::Duplicate),
                     "dup2" => Some(NumericValue::DuplicatePair),
                     "random" => Some(NumericValue::MathRandom),
+                    "datenow" => Some(NumericValue::DateNow),
+                    "performancenow" => Some(NumericValue::PerformanceNow),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -2747,13 +2768,19 @@ impl NumericProgram {
                     emit_move(&mut code, depth + 1, depth - 1);
                     depth += 2;
                 }
-                NumericValue::MathRandom => {
+                NumericValue::MathRandom | NumericValue::DateNow | NumericValue::PerformanceNow => {
                     if depth > 7 {
                         return None;
                     }
                     emit_spill(&mut code, depth);
                     code.extend_from_slice(&[0x48, 0xb8]);
-                    code.extend_from_slice(&(math_random as *const () as u64).to_le_bytes());
+                    let function = match value {
+                        NumericValue::MathRandom => math_random,
+                        NumericValue::DateNow => date_now,
+                        NumericValue::PerformanceNow => performance_now,
+                        _ => unreachable!(),
+                    };
+                    code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
                     code.extend_from_slice(&[0xff, 0xd0]);
                     emit_move(&mut code, depth, 0);
                     emit_restore(&mut code, depth);
@@ -3189,7 +3216,8 @@ fn compile(_symbol: &str, _program: &NumericProgram) -> Result<*mut libc::c_void
 /// writable allocation of the requested size and alignment. `number_to_string`
 /// must return an arena-backed NUL-terminated string when numeric coercion is
 /// used. String parser callbacks must accept live NUL-terminated strings, and
-/// `math_random`, when supplied, must be safe to call for the duration of this call.
+/// zero-argument number callbacks, when supplied, must be safe to call for the
+/// duration of this call.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_jit_call_f64(
     symbol: *const c_char,
@@ -3220,7 +3248,9 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     array_splice: Option<ArraySplice>,
     array_set: Option<ArraySet>,
     array_with: Option<ArrayWith>,
-    math_random: Option<MathRandom>,
+    math_random: Option<NumberSource>,
+    date_now: Option<NumberSource>,
+    performance_now: Option<NumberSource>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -3276,6 +3306,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_array_set = ARRAY_SET.with(|set| set.replace(array_set));
     let previous_array_with = ARRAY_WITH.with(|replace| replace.replace(array_with));
     let previous_math_random = MATH_RANDOM.with(|random| random.replace(math_random));
+    let previous_date_now = DATE_NOW.with(|now| now.replace(date_now));
+    let previous_performance_now = PERFORMANCE_NOW.with(|now| now.replace(performance_now));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let mut value = function(args);
@@ -3310,6 +3342,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     ARRAY_SET.with(|set| set.set(previous_array_set));
     ARRAY_WITH.with(|replace| replace.set(previous_array_with));
     MATH_RANDOM.with(|random| random.set(previous_math_random));
+    DATE_NOW.with(|now| now.set(previous_date_now));
+    PERFORMANCE_NOW.with(|now| now.set(previous_performance_now));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -3342,6 +3376,12 @@ mod tests {
         }
         unsafe extern "C" fn random() -> f64 {
             0.25
+        }
+        unsafe extern "C" fn wall_now() -> f64 {
+            1_000.0
+        }
+        unsafe extern "C" fn monotonic_now() -> f64 {
+            10.0
         }
         unsafe extern "C" fn parse_float(value: *const c_char) -> f64 {
             match unsafe { CStr::from_ptr(value) }.to_bytes() {
@@ -3602,6 +3642,8 @@ mod tests {
                 None,
                 Some(replace_array),
                 Some(random),
+                Some(wall_now),
+                Some(monotonic_now),
             )
         }
     }
@@ -4017,6 +4059,8 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
+                None,
                 None,
                 None,
                 None,

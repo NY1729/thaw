@@ -132,7 +132,7 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn math_random_uses_jit_without_quickjs() {
+fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
         std::process::id()
@@ -142,18 +142,18 @@ fn math_random_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function random(): number;\n",
+        "export declare function random(): number;\nexport declare function dateNow(): number;\nexport declare function performanceNow(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.random = () => 1 + Math.random();\n",
+        "module.exports.random = () => 1 + Math.random(); module.exports.dateNow = () => Date.now(); module.exports.performanceNow = () => performance.now();\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { random } from 'jit-random';\nfunction main(): void { const value = random(); console.log(value >= 1 && value < 2); }\n",
+        "import { random, dateNow, performanceNow } from 'jit-random';\nfunction main(): void { const value = random(); const first = performanceNow(); const second = performanceNow(); console.log(value >= 1 && value < 2); console.log(dateNow() > 0); console.log(first >= 0 && second >= first); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -167,7 +167,10 @@ fn math_random_uses_jit_without_quickjs() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\ntrue\ntrue\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
