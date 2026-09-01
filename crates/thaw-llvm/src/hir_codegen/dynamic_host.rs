@@ -987,20 +987,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                 }
             };
-            if signature.params.len() > 16
-                || !signature
-                    .params
-                    .iter()
-                    .all(|ty| {
-                        matches!(
-                            ty,
-                            HirType::F64 | HirType::Bool | HirType::Str | HirType::Array(_)
-                        )
-                    })
+            let argument_slots = signature
+                .params
+                .iter()
+                .map(|ty| usize::from(matches!(ty, HirType::Optional(_))) + 1)
+                .sum::<usize>();
+            if argument_slots > 16
+                || !signature.params.iter().all(|ty| {
+                    let ty = match ty {
+                        HirType::Optional(payload) => payload.as_ref(),
+                        ty => ty,
+                    };
+                    matches!(ty, HirType::F64 | HirType::Bool | HirType::Str | HirType::Array(_))
+                })
                 || args.len() != signature.params.len()
             {
                 return Err(
-                    "JIT calls currently require 0-16 primitive or array arguments".into(),
+                    "JIT calls currently require primitive or array arguments fitting 16 ABI slots"
+                        .into(),
                 );
             }
             let name = self
@@ -1010,13 +1014,51 @@ impl<'ctx> HirCompiler<'ctx> {
             let argument_storage = self
                 .builder
                 .build_alloca(
-                    self.context.i8_type().array_type((args.len() * 8) as u32),
+                    self.context
+                        .i8_type()
+                        .array_type((argument_slots * 8) as u32),
                     "jit_arguments",
                 )
                 .map_err(|error| error.to_string())?;
+            let mut argument_values = Vec::with_capacity(argument_slots);
             for (index, argument) in args.iter().enumerate() {
                 let value = self.compile_expr(argument)?;
-                let value = if signature.params[index] == HirType::Bool {
+                if let HirType::Optional(payload) = &signature.params[index] {
+                    let value = value.into_struct_value();
+                    let present = self
+                        .builder
+                        .build_extract_value(value, 0, "jit_optional_argument_present")
+                        .map_err(|error| error.to_string())?
+                        .into_int_value();
+                    argument_values.push(
+                        self.builder
+                            .build_unsigned_int_to_float(
+                                present,
+                                self.context.f64_type(),
+                                "jit_optional_presence_slot",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .into(),
+                    );
+                    let payload_value = self
+                        .builder
+                        .build_extract_value(value, 1, "jit_optional_argument_payload")
+                        .map_err(|error| error.to_string())?;
+                    argument_values.push(if **payload == HirType::Bool {
+                        self.builder
+                            .build_unsigned_int_to_float(
+                                payload_value.into_int_value(),
+                                self.context.f64_type(),
+                                "jit_optional_boolean_slot",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .into()
+                    } else {
+                        payload_value
+                    });
+                    continue;
+                }
+                argument_values.push(if signature.params[index] == HirType::Bool {
                     self.builder
                         .build_unsigned_int_to_float(
                             value.into_int_value(),
@@ -1027,7 +1069,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         .into()
                 } else {
                     value
-                };
+                });
+            }
+            for (index, value) in argument_values.into_iter().enumerate() {
                 let slot = unsafe {
                     self.builder
                         .build_in_bounds_gep(
@@ -1051,7 +1095,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         argument_storage.into(),
                         self.context
                             .i64_type()
-                            .const_int(args.len() as u64, false)
+                            .const_int(argument_slots as u64, false)
                             .into(),
                         self.module
                             .get_function("thaw_arena_alloc")

@@ -747,6 +747,37 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:c0000000000000000".into())
     );
+    let defaulted_numbers = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        required_params: 0,
+        params: vec![
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                    thaw_hir::HirType::F64,
+                ))),
+            ),
+            (
+                "factor".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                    thaw_hir::HirType::F64,
+                ))),
+            ),
+        ],
+        ..array_predicate.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.scale = (value = 2, factor = value + 1) => value * factor;",
+            "scale",
+            false,
+            &defaulted_numbers,
+        ),
+        Some(
+            "expr:a0,a1,c4000000000000000,?,a2,a3,a0,a1,c4000000000000000,?,c3ff0000000000000,+,?,*"
+                .into()
+        )
+    );
     let array_search = thaw_bridge::DtsFunction {
         params: vec![
             array_length.params[0].clone(),

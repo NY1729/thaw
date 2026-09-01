@@ -1852,23 +1852,22 @@ fn jit_numeric_export(
     }
 
     if function.generic.is_some()
-        || function.required_params != function.params.len()
         || function.params.len() > 16
         || function.rest_param.is_some()
         || !function
             .params
             .iter()
             .all(|(_, ty)| {
-                matches!(
-                    ty,
-                    thaw_bridge::DtsType::Native(
-                        thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
-                    )
-                ) || matches!(
-                    ty,
-                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-                        if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str)
-                )
+                let thaw_bridge::DtsType::Native(ty) = ty else {
+                    return false;
+                };
+                let ty = match ty {
+                    thaw_hir::HirType::Optional(payload) => payload.as_ref(),
+                    ty => ty,
+                };
+                matches!(ty, thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str)
+                    || matches!(ty, thaw_hir::HirType::Array(element)
+                        if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str))
             })
         || !match &function.ret {
             thaw_bridge::DtsType::Native(
@@ -1979,33 +1978,35 @@ fn jit_numeric_export(
     let callable = callable?;
 
     let (params, local_steps, body) = callable_parts(callable)?;
-    let mut parameters = std::collections::HashMap::new();
+    if params.len() != function.params.len() {
+        return None;
+    }
+    let mut bindings = Vec::with_capacity(params.len());
+    let mut names = std::collections::HashSet::new();
     for (index, (parameter, (_, ty))) in params.iter().zip(&function.params).enumerate() {
-        let Pat::Ident(parameter) = parameter else {
-            return None;
+        let (parameter, default) = match parameter {
+            Pat::Ident(parameter) => (parameter, None),
+            Pat::Assign(assignment) => {
+                let Pat::Ident(parameter) = assignment.left.as_ref() else {
+                    return None;
+                };
+                (parameter, Some(assignment.right.as_ref()))
+            }
+            _ => return None,
         };
-        let prefix = match ty {
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "s",
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "b",
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => match element.as_ref() {
-                thaw_hir::HirType::F64 => "rn",
-                thaw_hir::HirType::Bool => "rb",
-                thaw_hir::HirType::Str => "rs",
-                _ => return None,
-            },
-            _ => "a",
-        };
-        if parameters
-            .insert(parameter.id.sym.to_string(), format!("{prefix}{index}"))
-            .is_some()
-        {
+        let name = parameter.id.sym.to_string();
+        if !names.insert(name.clone()) {
             return None;
         }
+        let thaw_bridge::DtsType::Native(ty) = ty else {
+            return None;
+        };
+        bindings.push((name, ty, default, index >= function.required_params));
     }
     let mut expression = Vec::new();
     let helper_module_locals = module_locals.clone();
     let mut locals = module_locals;
-    for parameter in parameters.keys() {
+    for (parameter, _, _, _) in &bindings {
         locals.remove(parameter);
     }
     let mut context = InlineContext {
@@ -2013,6 +2014,53 @@ fn jit_numeric_export(
         module_locals: helper_module_locals,
         active: Vec::new(),
     };
+    let mut parameters = std::collections::HashMap::new();
+    let mut slot = 0usize;
+    for (parameter, ty, default, optional_parameter) in &bindings {
+        let (ty, optional_type) = match ty {
+            thaw_hir::HirType::Optional(payload) => (payload.as_ref(), true),
+            ty => (*ty, false),
+        };
+        let optional = *optional_parameter || optional_type;
+        let prefix = match ty {
+            thaw_hir::HirType::Str => "s",
+            thaw_hir::HirType::Bool => "b",
+            thaw_hir::HirType::Array(element) => match element.as_ref() {
+                thaw_hir::HirType::F64 => "rn",
+                thaw_hir::HirType::Bool => "rb",
+                thaw_hir::HirType::Str => "rs",
+                _ => return None,
+            },
+            _ => "a",
+        };
+        if optional {
+            let mut fallback = Vec::new();
+            encode_expression(
+                *default.as_ref()?,
+                &parameters,
+                &locals,
+                &mut context,
+                &mut fallback,
+            )?;
+            if *ty == thaw_hir::HirType::Bool {
+                let mut boolean = Vec::new();
+                append_boolean(fallback, &mut boolean)?;
+                fallback = boolean;
+            }
+            let mut selected = vec![format!("a{slot}"), format!("{prefix}{}", slot + 1)];
+            selected.extend(fallback);
+            selected.push("?".into());
+            jit_expression_kind(&selected)?;
+            locals.insert(parameter.clone(), selected);
+            slot += 2;
+        } else {
+            parameters.insert(parameter.clone(), format!("{prefix}{slot}"));
+            slot += 1;
+        }
+    }
+    if slot > 16 {
+        return None;
+    }
     encode_steps_and_body(
         local_steps,
         body,
@@ -2390,18 +2438,21 @@ fn jit_numeric_declaration(
     let params = function
         .params
         .iter()
-        .map(|(name, ty)| {
-            let ty = if matches!(
-                ty,
-                thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool)
-            ) {
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            let (ty, optional_type) = match ty {
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
+                    (payload.as_ref(), true)
+                }
+                thaw_bridge::DtsType::Native(ty) => (ty, false),
+                thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+            };
+            let optional = index >= function.required_params || optional_type;
+            let ty = if *ty == thaw_hir::HirType::Bool {
                 "boolean"
-            } else if matches!(
-                ty,
-                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str)
-            ) {
+            } else if *ty == thaw_hir::HirType::Str {
                 "string"
-            } else if let thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) = ty {
+            } else if let thaw_hir::HirType::Array(element) = ty {
                 match element.as_ref() {
                     thaw_hir::HirType::F64 => "number[]",
                     thaw_hir::HirType::Bool => "boolean[]",
@@ -2411,10 +2462,9 @@ fn jit_numeric_declaration(
             } else {
                 "number"
             };
-            format!("{name}: {ty}")
+            (name, ty, optional)
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
     let ret = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "string",
@@ -2435,8 +2485,42 @@ fn jit_numeric_declaration(
         }
         _ => "number",
     };
-    let declaration = format!("declare function {symbol}({params}): {ret};\n");
-    (symbol, declaration)
+    let direct_params = params
+        .iter()
+        .map(|(name, ty, optional)| {
+            format!(
+                "{name}: {ty}{}",
+                if *optional { " | undefined" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut declaration = format!("declare function {symbol}({direct_params}): {ret};\n");
+    if function.required_params == params.len() {
+        return (symbol, declaration);
+    }
+    let wrapper_key = format!("{package}::{}", function.name)
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let wrapper = format!("__thaw_jit_wrapper_{wrapper_key}");
+    let wrapper_params = params
+        .iter()
+        .map(|(name, ty, optional)| {
+            format!("{name}{}: {ty}", if *optional { "?" } else { "" })
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = params
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    declaration.push_str(&format!(
+        "function {wrapper}({wrapper_params}): {ret} {{ return {symbol}({arguments}); }}\n"
+    ));
+    (wrapper, declaration)
 }
 
 /// A valid JS/Thaw identifier fragment from an arbitrary package name --
