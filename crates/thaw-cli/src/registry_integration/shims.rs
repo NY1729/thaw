@@ -4813,6 +4813,16 @@ fn jit_export(
                         thaw_hir::HirType::F64 => Some(JitKind::Number),
                         thaw_hir::HirType::Bool => Some(JitKind::Boolean),
                         thaw_hir::HirType::Str => Some(JitKind::String),
+                        thaw_hir::HirType::Array(ref element)
+                            if matches!(
+                                element.as_ref(),
+                                thaw_hir::HirType::F64
+                                    | thaw_hir::HirType::Bool
+                                    | thaw_hir::HirType::Str
+                            ) =>
+                        {
+                            Some(JitKind::Array)
+                        }
                         _ => None,
                     }
                 })
@@ -5276,9 +5286,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             (1..=8).contains(&arity).then_some((result, arity))
         }) {
             for _ in 0..arity {
-                if stack.pop()? == JitKind::Array {
-                    return None;
-                }
+                stack.pop()?;
             }
             stack.push(result);
         } else if matches!(
