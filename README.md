@@ -2163,6 +2163,9 @@ callbacks without loading QuickJS.
 The same cached callback and native scan serve compound `some`, `every`,
 `find`, `findIndex`, `findLast`, `findLastIndex`, and `filter` predicates,
 including value-and-index expressions.
+Compound numeric `reduce` and `reduceRight` callbacks use it too, with the
+standard accumulator, current value, index, and source-array arguments plus
+initial-value and empty-array behavior.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
 including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array
