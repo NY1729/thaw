@@ -2205,6 +2205,11 @@ back to the native boolean representation. Boolean literals and logical
 negation use the same IR, including ECMAScript's falsey `NaN` behavior.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
+Flat fixed-shape object parameters whose fields are number, boolean, or string
+can now enter extracted JIT exports as well. LLVM expands the native object
+layout directly into typed JIT argument slots, so property reads and composed
+expressions avoid JSON conversion and QuickJS; the total expanded signature is
+currently limited to the same 16-slot callback ABI.
 
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections and the
