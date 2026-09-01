@@ -2813,9 +2813,11 @@ fn jit_export(
             }
             Expr::Cond(conditional) => {
                 encode_condition(conditional.test.as_ref(), parameters, locals, context, output)?;
+                output.push("if".into());
                 encode_expression(conditional.cons.as_ref(), parameters, locals, context, output)?;
+                output.push("else".into());
                 encode_expression(conditional.alt.as_ref(), parameters, locals, context, output)?;
-                output.push("?".into());
+                output.push("end".into());
             }
             _ => return None,
         }
@@ -2945,7 +2947,9 @@ fn jit_export(
             return None;
         };
         encode_condition(branch.test.as_ref(), parameters, locals, context, output)?;
+        output.push("if".into());
         encode_returning_statement(branch.cons.as_ref(), parameters, locals, context, output)?;
+        output.push("else".into());
         if let Some(alternate) = branch.alt.as_deref() {
             if !rest.is_empty() {
                 return None;
@@ -2954,7 +2958,7 @@ fn jit_export(
         } else {
             encode_returning_statements(rest, parameters, locals, context, output)?;
         }
-        output.push("?".into());
+        output.push("end".into());
         (output.len() <= 128).then_some(())
     }
 
@@ -4756,7 +4760,7 @@ fn primitive_comparison_result(token: &str) -> Option<(JitKind, JitKind)> {
 
 fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let mut stack = Vec::new();
-    let mut short_circuits = Vec::new();
+    let mut branches = Vec::new();
     let mut maximum_depth = 0;
     for token in expression {
         if matches!(
@@ -4810,10 +4814,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             let result = stack.pop()?;
-            short_circuits.push((stack.len(), result));
+            branches.push((stack.len(), Some(result), false));
+        } else if token == "if" {
+            if stack.pop()? != JitKind::Boolean {
+                return None;
+            }
+            branches.push((stack.len(), None, true));
+        } else if token == "else" {
+            let (base, expected, awaits_alternate) = branches.last_mut()?;
+            if !*awaits_alternate || stack.len() != *base + 1 {
+                return None;
+            }
+            *expected = stack.pop();
+            *awaits_alternate = false;
         } else if token == "end" {
-            let (base, expected) = short_circuits.pop()?;
-            if stack.len() != base + 1 || stack.pop()? != expected {
+            let (base, expected, awaits_alternate) = branches.pop()?;
+            let expected = expected?;
+            if awaits_alternate || stack.len() != base + 1 || stack.pop()? != expected {
                 return None;
             }
             stack.push(expected);
@@ -5488,7 +5505,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let [kind] = stack.as_slice() else {
         return None;
     };
-    short_circuits
+    branches
         .is_empty()
         .then_some((*kind, maximum_depth))
 }
