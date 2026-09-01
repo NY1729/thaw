@@ -29,6 +29,7 @@ static INVALID_EXPONENTIAL_DIGITS: &[u8] =
     b"toExponential() digits argument must be between 0 and 100\0";
 static INVALID_NORMALIZATION_FORM: &[u8] = b"invalid Unicode normalization form\0";
 static INVALID_ARRAY_WITH_INDEX: &[u8] = b"Invalid index for Array.prototype.with\0";
+static INVALID_CODE_POINT: &[u8] = b"Invalid code point\0";
 
 pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 pub type NumberToString = unsafe extern "C" fn(f64) -> *const c_char;
@@ -69,6 +70,8 @@ thread_local! {
     static STRING_NORMALIZE: Cell<Option<StringNormalize>> = const { Cell::new(None) };
     static STRING_SPLIT: Cell<Option<StringSplit>> = const { Cell::new(None) };
     static STRING_TO_ARRAY: Cell<Option<StringToArray>> = const { Cell::new(None) };
+    static STRING_FROM_CHAR_CODE: Cell<Option<NumberToString>> = const { Cell::new(None) };
+    static STRING_FROM_CODE_POINT: Cell<Option<NumberToString>> = const { Cell::new(None) };
     static ARRAY_SLICE: Cell<Option<ArraySlice>> = const { Cell::new(None) };
     static ARRAY_CONCAT: Cell<Option<ArrayConcat>> = const { Cell::new(None) };
     static ARRAY_APPEND: Cell<Option<ArrayAppend>> = const { Cell::new(None) };
@@ -349,6 +352,36 @@ extern "C" fn string_to_array(value: f64) -> f64 {
         0.0
     } else {
         array_result(result)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_from_char_code(value: f64) -> f64 {
+    let Some(convert) = STRING_FROM_CHAR_CODE.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { convert(value) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        f64::from_bits(result as usize as u64)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_from_code_point(value: f64) -> f64 {
+    let Some(convert) = STRING_FROM_CODE_POINT.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe { convert(value) };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(INVALID_CODE_POINT.as_ptr().cast()));
+        0.0
+    } else {
+        f64::from_bits(result as usize as u64)
     }
 }
 
@@ -2004,6 +2037,8 @@ enum NumericValue {
     StringNormalize,
     StringSplit,
     StringToArray,
+    StringFromCharCode,
+    StringFromCodePoint,
     StringReplace,
     StringReplaceAll,
     StringSlice,
@@ -2215,6 +2250,8 @@ impl NumericProgram {
                     "normalize" => Some(NumericValue::StringNormalize),
                     "split" => Some(NumericValue::StringSplit),
                     "strarray" => Some(NumericValue::StringToArray),
+                    "fromcharcode" => Some(NumericValue::StringFromCharCode),
+                    "fromcodepoint" => Some(NumericValue::StringFromCodePoint),
                     "replace" => Some(NumericValue::StringReplace),
                     "replaceall" => Some(NumericValue::StringReplaceAll),
                     "slice" => Some(NumericValue::StringSlice),
@@ -2605,6 +2642,17 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, string_to_array as *const () as u64, depth - 1);
+                }
+                NumericValue::StringFromCharCode | NumericValue::StringFromCodePoint => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::StringFromCharCode => string_from_char_code,
+                        NumericValue::StringFromCodePoint => string_from_code_point,
+                        _ => unreachable!(),
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::ArraySlice => {
                     if depth < 3 {
@@ -3331,6 +3379,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     process_pid: Option<NumberSource>,
     process_ppid: Option<NumberSource>,
     string_to_array: Option<StringToArray>,
+    string_from_char_code: Option<NumberToString>,
+    string_from_code_point: Option<NumberToString>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -3370,6 +3420,10 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
         STRING_NORMALIZE.with(|normalize| normalize.replace(string_normalize));
     let previous_string_split = STRING_SPLIT.with(|split| split.replace(string_split));
     let previous_string_to_array = STRING_TO_ARRAY.with(|convert| convert.replace(string_to_array));
+    let previous_string_from_char_code =
+        STRING_FROM_CHAR_CODE.with(|convert| convert.replace(string_from_char_code));
+    let previous_string_from_code_point =
+        STRING_FROM_CODE_POINT.with(|convert| convert.replace(string_from_code_point));
     let previous_array_slice = ARRAY_SLICE.with(|slice| slice.replace(array_slice));
     let previous_array_concat = ARRAY_CONCAT.with(|concat| concat.replace(array_concat));
     let previous_array_append = ARRAY_APPEND.with(|append| append.replace(array_append));
@@ -3410,6 +3464,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     STRING_NORMALIZE.with(|normalize| normalize.set(previous_string_normalize));
     STRING_SPLIT.with(|split| split.set(previous_string_split));
     STRING_TO_ARRAY.with(|convert| convert.set(previous_string_to_array));
+    STRING_FROM_CHAR_CODE.with(|convert| convert.set(previous_string_from_char_code));
+    STRING_FROM_CODE_POINT.with(|convert| convert.set(previous_string_from_code_point));
     ARRAY_SLICE.with(|slice| slice.set(previous_array_slice));
     ARRAY_CONCAT.with(|concat| concat.set(previous_array_concat));
     ARRAY_APPEND.with(|append| append.set(previous_array_append));
@@ -3564,6 +3620,20 @@ mod tests {
                 output.add(8).cast::<*const c_char>().write(c"😀".as_ptr());
             }
             output
+        }
+        unsafe extern "C" fn from_char_code(value: f64) -> *const c_char {
+            if value == 65.0 {
+                c"A".as_ptr()
+            } else {
+                ptr::null()
+            }
+        }
+        unsafe extern "C" fn from_code_point(value: f64) -> *const c_char {
+            if value == 0x1f600 as f64 {
+                c"😀".as_ptr()
+            } else {
+                ptr::null()
+            }
         }
         unsafe extern "C" fn slice_array(
             array: *const u8,
@@ -3748,6 +3818,8 @@ mod tests {
                 Some(pid),
                 Some(ppid),
                 Some(convert_string),
+                Some(from_char_code),
+                Some(from_code_point),
             )
         }
     }
@@ -4157,12 +4229,29 @@ mod tests {
             "hi 世界"
         );
         unsafe { libc::free(result.cast()) };
+        let constructors = CString::new(
+            "expr:c4050400000000000,fromcharcode,c40ff600000000000,fromcodepoint,concat:constructors",
+        )
+        .unwrap();
+        let result = call(&constructors, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }
+                .to_str()
+                .unwrap(),
+            "A😀"
+        );
+        let invalid_code_point =
+            CString::new("expr:c4131000000000000,fromcodepoint:invalid_code_point").unwrap();
+        assert!(!call(&invalid_code_point, &[]).error.is_null());
         let argument = [f64::from_bits(name.as_ptr() as usize as u64)];
         let missing_allocator = unsafe {
             thaw_jit_call_f64(
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
+                None,
                 None,
                 None,
                 None,
