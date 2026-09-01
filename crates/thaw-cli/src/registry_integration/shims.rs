@@ -3494,6 +3494,20 @@ fn jit_export(
         helpers: &'a std::collections::HashMap<String, NumericCallable<'a>>,
         module_locals: std::collections::HashMap<String, Vec<String>>,
         active: Vec<String>,
+        recursive_names: Vec<String>,
+        recursive_arity: usize,
+    }
+
+    fn same_callable(left: NumericCallable<'_>, right: NumericCallable<'_>) -> bool {
+        match (left, right) {
+            (NumericCallable::Function(left), NumericCallable::Function(right)) => {
+                std::ptr::eq(left, right)
+            }
+            (NumericCallable::Arrow(left), NumericCallable::Arrow(right)) => {
+                std::ptr::eq(left, right)
+            }
+            _ => false,
+        }
     }
 
     fn callable_parts(callable: NumericCallable<'_>) -> Option<(Vec<&Pat>, Vec<LocalStep<'_>>, NumericBody<'_>)> {
@@ -4443,6 +4457,29 @@ fn jit_export(
             return None;
         };
         let name = identifier.sym.as_ref();
+        if context.recursive_names.iter().any(|recursive| recursive == name) {
+            if call.args.len() != context.recursive_arity
+                || call.args.iter().any(|argument| argument.spread.is_some())
+            {
+                return None;
+            }
+            for argument in &call.args {
+                let mut encoded = Vec::new();
+                encode_expression(
+                    argument.expr.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut encoded,
+                )?;
+                if jit_expression_kind(&encoded)?.0 != JitKind::Number {
+                    return None;
+                }
+                output.extend(encoded);
+            }
+            output.push(format!("recur{}", call.args.len()));
+            return Some(());
+        }
         if parameters.contains_key(name)
             || locals.contains_key(name)
             || context.active.len() >= 16
@@ -4685,6 +4722,8 @@ fn jit_export(
                     helpers: &empty_helpers,
                     module_locals: module_locals.clone(),
                     active: Vec::new(),
+                    recursive_names: Vec::new(),
+                    recursive_arity: 0,
                 };
                 encode_expression(
                     initializer,
@@ -4753,10 +4792,29 @@ fn jit_export(
     for (parameter, _, _, _) in &bindings {
         locals.remove(parameter);
     }
+    let recursive_names = if params.len() <= 8
+        && bindings.iter().all(|(_, ty, default, optional)| {
+            **ty == thaw_hir::HirType::F64 && default.is_none() && !optional
+        })
+        && matches!(
+            &function.ret,
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64)
+        )
+    {
+        module_functions
+            .iter()
+            .filter(|(_, candidate)| same_callable(**candidate, callable))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut context = InlineContext {
         helpers: &module_functions,
         module_locals: helper_module_locals,
         active: Vec::new(),
+        recursive_names,
+        recursive_arity: params.len(),
     };
     let mut parameters = std::collections::HashMap::new();
     let mut slot = 0usize;
@@ -5163,6 +5221,17 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 || !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean)
             {
                 return None;
+            }
+            stack.push(JitKind::Number);
+        } else if let Some(arity) = token
+            .strip_prefix("recur")
+            .and_then(|arity| arity.parse::<usize>().ok())
+            .filter(|arity| (1..=8).contains(arity))
+        {
+            for _ in 0..arity {
+                if stack.pop()? != JitKind::Number {
+                    return None;
+                }
             }
             stack.push(JitKind::Number);
         } else if matches!(
