@@ -22,7 +22,7 @@ fn jit_numeric_export(
 ) -> Option<String> {
     use thaw_parser::ast::{
         ArrowExpr, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr,
-        Function, Ident, Lit, MemberProp, ModuleItem, Pat, Prop, PropName, PropOrSpread,
+        ExprOrSpread, Function, Ident, Lit, MemberProp, ModuleItem, Pat, Prop, PropName, PropOrSpread,
         SimpleAssignTarget, Stmt, UnaryOp, UpdateOp, VarDeclKind,
     };
 
@@ -238,6 +238,33 @@ fn jit_numeric_export(
             return None;
         }
         Some(argument.expr.as_ref())
+    }
+
+    fn array_constructor<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<&'a str> {
+        if parameters.contains_key("Array")
+            || locals.contains_key("Array")
+            || helpers.contains_key("Array")
+        {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Array") {
+            return None;
+        }
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        matches!(property.sym.as_ref(), "of" | "from").then_some(property.sym.as_ref())
     }
 
     fn object_same_value<'a>(
@@ -628,6 +655,54 @@ fn jit_numeric_export(
         Some(())
     }
 
+    fn append_array_element(
+        element: &ExprOrSpread,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        prefix: &mut Option<&'static str>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut encoded = Vec::new();
+        encode_expression(
+            element.expr.as_ref(),
+            parameters,
+            locals,
+            context,
+            &mut encoded,
+        )?;
+        if element.spread.is_none() && matches!(element.expr.as_ref(), Expr::Lit(Lit::Bool(_))) {
+            encoded.push("asbool".into());
+        }
+        let (element_prefix, operation) = if element.spread.is_some() {
+            if jit_expression_kind(&encoded)?.0 != JitKind::Array {
+                return None;
+            }
+            (array_prefix(&encoded)?, "arrayconcat")
+        } else {
+            let element_prefix = match jit_expression_kind(&encoded)?.0 {
+                JitKind::Number => "rn",
+                JitKind::String => "rs",
+                JitKind::Boolean => "rb",
+                JitKind::Array => return None,
+            };
+            let operation = match element_prefix {
+                "rn" => "rnappend",
+                "rs" => "rsappend",
+                "rb" => "rbappend",
+                _ => unreachable!(),
+            };
+            (element_prefix, operation)
+        };
+        if prefix.is_some_and(|prefix| prefix != element_prefix) {
+            return None;
+        }
+        *prefix = Some(element_prefix);
+        output.extend(encoded);
+        output.push(operation.into());
+        Some(())
+    }
+
     fn encode_expression(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -689,44 +764,14 @@ fn jit_numeric_export(
                 let mut prefix = None;
                 for element in &array.elems {
                     let element = element.as_ref()?;
-                    let mut encoded = Vec::new();
-                    encode_expression(
-                        element.expr.as_ref(),
+                    append_array_element(
+                        element,
                         parameters,
                         locals,
                         context,
-                        &mut encoded,
+                        &mut prefix,
+                        output,
                     )?;
-                    if element.spread.is_none()
-                        && matches!(element.expr.as_ref(), Expr::Lit(Lit::Bool(_)))
-                    {
-                        encoded.push("asbool".into());
-                    }
-                    let (element_prefix, operation) = if element.spread.is_some() {
-                        if jit_expression_kind(&encoded)?.0 != JitKind::Array {
-                            return None;
-                        }
-                        (array_prefix(&encoded)?, "arrayconcat")
-                    } else {
-                        let element_prefix = match jit_expression_kind(&encoded)?.0 {
-                            JitKind::Number => "rn",
-                            JitKind::String => "rs",
-                            JitKind::Boolean => "rb",
-                            JitKind::Array => return None,
-                        };
-                        (element_prefix, match element_prefix {
-                            "rn" => "rnappend",
-                            "rs" => "rsappend",
-                            "rb" => "rbappend",
-                            _ => unreachable!(),
-                        })
-                    };
-                    if prefix.is_some_and(|prefix| prefix != element_prefix) {
-                        return None;
-                    }
-                    prefix = Some(element_prefix);
-                    output.extend(encoded);
-                    output.push(operation.into());
                 }
             }
             Expr::Member(member) => {
@@ -1080,6 +1125,50 @@ fn jit_numeric_export(
                     }
                     .into(),
                 );
+            }
+            Expr::Call(call)
+                if array_constructor(call, parameters, locals, context.helpers).is_some() =>
+            {
+                match array_constructor(call, parameters, locals, context.helpers)? {
+                    "of" => {
+                        output.push("arrayempty".into());
+                        let mut prefix = None;
+                        for argument in &call.args {
+                            append_array_element(
+                                argument,
+                                parameters,
+                                locals,
+                                context,
+                                &mut prefix,
+                                output,
+                            )?;
+                        }
+                    }
+                    "from" => {
+                        let [argument] = call.args.as_slice() else {
+                            return None;
+                        };
+                        if argument.spread.is_some() {
+                            return None;
+                        }
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        if jit_expression_kind(&encoded)?.0 != JitKind::Array {
+                            return None;
+                        }
+                        output.extend(encoded);
+                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                        output.push(format!("c{:016x}", f64::INFINITY.to_bits()));
+                        output.push("arrayslice".into());
+                    }
+                    _ => unreachable!(),
+                }
             }
             Expr::Call(call)
                 if array_predicate(call, parameters, locals, context.helpers).is_some() =>
