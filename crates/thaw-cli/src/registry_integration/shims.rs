@@ -621,6 +621,7 @@ fn jit_numeric_export(
                 | "findLast"
                 | "findLastIndex"
                 | "filter"
+                | "map"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -1310,6 +1311,24 @@ fn jit_numeric_export(
                         "rnreduce{}{operation}{}",
                         if method == "reduceRight" { "right" } else { "" },
                         if initial.is_some() { "" } else { "0" }
+                    ));
+                } else if method == "map" {
+                    let [callback] = call.args.as_slice() else {
+                        return None;
+                    };
+                    if prefix != "rn" {
+                        return None;
+                    }
+                    let (operation, reverse) = encode_numeric_map_operand(
+                        callback.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        output,
+                    )?;
+                    output.push(format!(
+                        "rnmap{}{operation}",
+                        if reverse { "r" } else { "" }
                     ));
                 } else if matches!(
                     method,
@@ -2646,6 +2665,71 @@ fn jit_numeric_export(
         Some(operation)
     }
 
+    fn encode_numeric_map_operand(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<(&'static str, bool)> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(value)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        let Expr::Bin(binary) = expression else {
+            return None;
+        };
+        let (operand, reverse) = if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == value.id.sym)
+        {
+            (binary.right.as_ref(), false)
+        } else if matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym) {
+            (binary.left.as_ref(), true)
+        } else {
+            return None;
+        };
+        let operation = match binary.op {
+            BinaryOp::Add => "add",
+            BinaryOp::Sub => "sub",
+            BinaryOp::Mul => "mul",
+            BinaryOp::Div => "div",
+            BinaryOp::Mod => "rem",
+            BinaryOp::Exp => "pow",
+            _ => return None,
+        };
+        let mut encoded = Vec::new();
+        encode_expression(
+            operand,
+            outer_parameters,
+            outer_locals,
+            context,
+            &mut encoded,
+        )?;
+        if jit_expression_kind(&encoded)?.0 != JitKind::Number
+            || encoded
+                .iter()
+                .any(|token| matches!(token.as_str(), "random" | "datenow" | "performancenow"))
+        {
+            return None;
+        }
+        output.extend(encoded);
+        Some((operation, reverse))
+    }
+
     fn encode_helper_call(
         call: &CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -3427,6 +3511,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if token
             .strip_prefix("rnfilter")
             .is_some_and(|operation| matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne"))
+            || token.strip_prefix("rnmap").is_some_and(|operation| {
+                matches!(operation, "add" | "sub" | "mul" | "div" | "rem" | "pow")
+                    || matches!(
+                        operation.strip_prefix('r'),
+                        Some("add" | "sub" | "mul" | "div" | "rem" | "pow")
+                    )
+            })
         {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
                 return None;

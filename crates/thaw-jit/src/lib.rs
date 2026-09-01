@@ -542,6 +542,90 @@ number_array_filters!(number_array_filter_eq, |left, right| left == right);
 number_array_filters!(number_array_filter_ne, |left, right| left != right);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_map(
+    value: f64,
+    operand: f64,
+    reverse: bool,
+    operation: impl Fn(f64, f64) -> f64,
+) -> f64 {
+    let (Some(allocate), Some((array, length))) =
+        (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let Some(size) = length.checked_mul(8).and_then(|size| size.checked_add(8)) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let output = unsafe { allocate(size, 8) };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { output.cast::<u64>().write(length as u64) };
+    for index in 0..length {
+        let element = unsafe { array.add(8 + index * 8).cast::<f64>().read() };
+        let mapped = if reverse {
+            operation(operand, element)
+        } else {
+            operation(element, operand)
+        };
+        unsafe { output.add(8 + index * 8).cast::<f64>().write(mapped) };
+    }
+    array_result(output)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! number_array_maps {
+    ($forward:ident, $reverse:ident, $operation:expr) => {
+        extern "C" fn $forward(value: f64, operand: f64) -> f64 {
+            number_array_map(value, operand, false, $operation)
+        }
+        extern "C" fn $reverse(value: f64, operand: f64) -> f64 {
+            number_array_map(value, operand, true, $operation)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_maps!(
+    number_array_map_add,
+    number_array_map_add_reverse,
+    |left, right| left + right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_maps!(
+    number_array_map_subtract,
+    number_array_map_subtract_reverse,
+    |left, right| left - right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_maps!(
+    number_array_map_multiply,
+    number_array_map_multiply_reverse,
+    |left, right| left * right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_maps!(
+    number_array_map_divide,
+    number_array_map_divide_reverse,
+    |left, right| left / right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_maps!(
+    number_array_map_remainder,
+    number_array_map_remainder_reverse,
+    |left, right| left % right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_maps!(
+    number_array_map_power,
+    number_array_map_power_reverse,
+    |left, right| power(left, right)
+);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
     value.floor()
 }
@@ -2451,6 +2535,7 @@ enum NumericValue {
     NumberArrayQuantifier(CompareOp, bool),
     NumberArrayFind(CompareOp, u8),
     NumberArrayFilter(CompareOp),
+    NumberArrayMap(NumericReduceOp, bool),
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2806,6 +2891,20 @@ impl NumericProgram {
                                 _ => return None,
                             };
                             Some(NumericValue::NumberArrayFilter(operation))
+                        })
+                        .or_else(|| {
+                            let operation = value.strip_prefix("rnmap")?;
+                            let (operation, reverse) = NumericReduceOp::parse(operation)
+                                .map(|operation| (operation, false))
+                                .or_else(|| {
+                                    NumericReduceOp::parse(operation.strip_prefix('r')?)
+                                        .map(|operation| (operation, true))
+                                })?;
+                            (!matches!(
+                                operation,
+                                NumericReduceOp::Minimum | NumericReduceOp::Maximum
+                            ))
+                            .then_some(NumericValue::NumberArrayMap(operation, reverse))
                         })
                         .or_else(|| {
                             value
@@ -3325,6 +3424,39 @@ impl NumericProgram {
                         CompareOp::NotEqual => number_array_filter_ne,
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayMap(operation, reverse) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let functions = match operation {
+                        NumericReduceOp::Add => {
+                            [number_array_map_add, number_array_map_add_reverse]
+                        }
+                        NumericReduceOp::Subtract => {
+                            [number_array_map_subtract, number_array_map_subtract_reverse]
+                        }
+                        NumericReduceOp::Multiply => {
+                            [number_array_map_multiply, number_array_map_multiply_reverse]
+                        }
+                        NumericReduceOp::Divide => {
+                            [number_array_map_divide, number_array_map_divide_reverse]
+                        }
+                        NumericReduceOp::Remainder => [
+                            number_array_map_remainder,
+                            number_array_map_remainder_reverse,
+                        ],
+                        NumericReduceOp::Power => {
+                            [number_array_map_power, number_array_map_power_reverse]
+                        }
+                        NumericReduceOp::Minimum | NumericReduceOp::Maximum => return None,
+                    };
+                    emit_binary_call(
+                        &mut code,
+                        functions[usize::from(*reverse)] as *const () as u64,
+                        depth - 2,
+                    );
                     depth -= 1;
                 }
                 NumericValue::ArraySlice => {
@@ -5143,6 +5275,33 @@ mod tests {
         assert_eq!(unsafe { output.cast::<u64>().read() }, 2);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 30.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let map = CString::new("expr:rn0,c4000000000000000,rnmapmul:array-map").unwrap();
+        let result = call(&map, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 40.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 60.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let remainder =
+            CString::new("expr:rn0,c4018000000000000,rnmaprem:array-map-remainder").unwrap();
+        let result = call(&remainder, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 4.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 2.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 0.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let reverse_map =
+            CString::new("expr:rn0,c4059000000000000,rnmaprsub:array-map-reverse").unwrap();
+        let result = call(&reverse_map, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 90.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 80.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 70.0);
         unsafe { libc::free(output.cast_mut().cast()) };
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();
