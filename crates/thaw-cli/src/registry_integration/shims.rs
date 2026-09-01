@@ -3000,6 +3000,13 @@ fn jit_numeric_export(
         {
             return Some("not");
         }
+        if !boolean
+            && matches!(expression, Expr::Member(member)
+                if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "length")
+                    && matches!(member.obj.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym))
+        {
+            return Some("length");
+        }
         let Expr::Call(call) = expression else {
             return None;
         };
@@ -3836,6 +3843,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "rsmaptrim"
                 | "rsmaptrimstart"
                 | "rsmaptrimend"
+                | "rsmaplength"
                 | "rbmapidentity"
                 | "rbmapnot"
         ) {

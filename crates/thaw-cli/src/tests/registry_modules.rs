@@ -311,18 +311,18 @@ fn primitive_array_comparisons_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function selectStrings(values: string[], minimum: string): string[];\nexport declare function hasFlag(values: boolean[], expected: boolean): boolean;\nexport declare function copyStrings(values: string[]): string[];\nexport declare function trimStrings(values: string[]): string[];\nexport declare function uppercaseStrings(values: string[]): string[];\nexport declare function invertFlags(values: boolean[]): boolean[];\n",
+        "export declare function selectStrings(values: string[], minimum: string): string[];\nexport declare function hasFlag(values: boolean[], expected: boolean): boolean;\nexport declare function copyStrings(values: string[]): string[];\nexport declare function trimStrings(values: string[]): string[];\nexport declare function uppercaseStrings(values: string[]): string[];\nexport declare function stringLengths(values: string[]): number[];\nexport declare function invertFlags(values: boolean[]): boolean[];\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports = { selectStrings: (values, minimum) => values.filter(value => value >= minimum), hasFlag: (values, expected) => values.some(value => value === expected), copyStrings: values => values.map(value => value), trimStrings: values => values.map(value => value.trim()), uppercaseStrings: values => values.map(value => value.toUpperCase()), invertFlags: values => values.map(value => !value) };\n",
+        "module.exports = { selectStrings: (values, minimum) => values.filter(value => value >= minimum), hasFlag: (values, expected) => values.some(value => value === expected), copyStrings: values => values.map(value => value), trimStrings: values => values.map(value => value.trim()), uppercaseStrings: values => values.map(value => value.toUpperCase()), stringLengths: values => values.map(value => value.length), invertFlags: values => values.map(value => !value) };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { selectStrings, hasFlag, copyStrings, trimStrings, uppercaseStrings, invertFlags } from 'jit-primitive-comparisons';\nfunction main(): void { console.log(selectStrings(['a', 'c', 'b'], 'b').join(',')); console.log(hasFlag([false, true], true)); console.log(copyStrings(['x', 'y']).join(',')); console.log(trimStrings([' a ', ' b']).join(',')); console.log(uppercaseStrings(['a', 'Straße']).join(',')); console.log(invertFlags([false, true]).join(',')); }\n",
+        "import { selectStrings, hasFlag, copyStrings, trimStrings, uppercaseStrings, stringLengths, invertFlags } from 'jit-primitive-comparisons';\nfunction main(): void { console.log(selectStrings(['a', 'c', 'b'], 'b').join(',')); console.log(hasFlag([false, true], true)); console.log(copyStrings(['x', 'y']).join(',')); console.log(trimStrings([' a ', ' b']).join(',')); console.log(uppercaseStrings(['a', 'Straße']).join(',')); console.log(stringLengths(['', '😀', 'ab']).join(',')); console.log(invertFlags([false, true]).join(',')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -338,7 +338,7 @@ fn primitive_array_comparisons_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "c,b\ntrue\nx,y\na,b\nA,STRASSE\ntrue,false\n"
+        "c,b\ntrue\nx,y\na,b\nA,STRASSE\n0,2,2\ntrue,false\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
