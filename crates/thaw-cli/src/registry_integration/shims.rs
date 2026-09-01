@@ -1386,23 +1386,23 @@ fn jit_numeric_export(
                     let [callback] = call.args.as_slice() else {
                         return None;
                     };
-                    if prefix != "rn" {
-                        return None;
-                    }
                     let method = match method {
                         "findIndex" => "findindex",
                         "findLast" => "findlast",
                         "findLastIndex" => "findlastindex",
                         method => method,
                     };
-                    if numeric_truthy_callback(
+                    if primitive_truthy_callback(
                         callback.expr.as_ref(),
                         parameters,
                         locals,
                         context,
                     ) {
-                        output.push(format!("rn{method}truthy"));
+                        output.push(format!("{prefix}{method}truthy"));
                     } else {
+                        if prefix != "rn" {
+                            return None;
+                        }
                         let operation = encode_numeric_quantifier_operand(
                             callback.expr.as_ref(),
                             parameters,
@@ -2717,7 +2717,7 @@ fn jit_numeric_export(
         Some(operation)
     }
 
-    fn numeric_truthy_callback(
+    fn primitive_truthy_callback(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
         outer_locals: &std::collections::HashMap<String, Vec<String>>,
@@ -3297,6 +3297,29 @@ enum JitKind {
     Array,
 }
 
+fn primitive_truthy_result(token: &str) -> Option<JitKind> {
+    let (element, operation) = token
+        .strip_prefix("rn")
+        .map(|operation| (JitKind::Number, operation))
+        .or_else(|| {
+            token
+                .strip_prefix("rb")
+                .map(|operation| (JitKind::Boolean, operation))
+        })
+        .or_else(|| {
+            token
+                .strip_prefix("rs")
+                .map(|operation| (JitKind::String, operation))
+        })?;
+    match operation {
+        "sometruthy" | "everytruthy" => Some(JitKind::Boolean),
+        "findtruthy" | "findlasttruthy" => Some(element),
+        "findindextruthy" | "findlastindextruthy" => Some(JitKind::Number),
+        "filtertruthy" => Some(JitKind::Array),
+        _ => None,
+    }
+}
+
 fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let mut stack = Vec::new();
     let mut maximum_depth = 0;
@@ -3645,6 +3668,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if let Some(result) = primitive_truthy_result(token) {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(result);
         } else if token
             .strip_prefix("rnreduce")
             .is_some_and(|operation| {
@@ -3668,11 +3696,6 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
-        } else if matches!(token.as_str(), "rnsometruthy" | "rneverytruthy") {
-            if stack.pop()? != JitKind::Array {
-                return None;
-            }
-            stack.push(JitKind::Boolean);
         } else if token
             .strip_prefix("rnfindlastindex")
             .or_else(|| token.strip_prefix("rnfindlast"))
@@ -3681,17 +3704,6 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             .is_some_and(|operation| matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne"))
         {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
-                return None;
-            }
-            stack.push(JitKind::Number);
-        } else if matches!(
-            token.as_str(),
-            "rnfindtruthy"
-                | "rnfindindextruthy"
-                | "rnfindlasttruthy"
-                | "rnfindlastindextruthy"
-        ) {
-            if stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(JitKind::Number);
@@ -3711,7 +3723,6 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             }
             stack.push(JitKind::Array);
         } else if token == "arrayvalue"
-            || token == "rnfiltertruthy"
             || matches!(token.as_str(), "rnmapneg" | "rnmapabs")
             || token
                 .strip_prefix("rnmap")

@@ -542,42 +542,84 @@ number_array_filters!(number_array_filter_eq, |left, right| left == right);
 number_array_filters!(number_array_filter_ne, |left, right| left != right);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn number_truthy(value: f64, _: f64) -> bool {
-    value != 0.0 && !value.is_nan()
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_some_truthy(value: f64) -> f64 {
-    number_array_quantify(value, 0.0, false, number_truthy)
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_every_truthy(value: f64) -> f64 {
-    number_array_quantify(value, 0.0, true, number_truthy)
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-macro_rules! number_array_truthy_finders {
-    ($(($name:ident, $mode:expr)),* $(,)?) => {
-        $(
-            extern "C" fn $name(value: f64) -> f64 {
-                number_array_find(value, 0.0, $mode, number_truthy)
-            }
-        )*
+fn primitive_array_truthy(value: f64, encoded: f64) -> f64 {
+    let Some((array, length)) = (unsafe { array_data(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
     };
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-number_array_truthy_finders!(
-    (number_array_find_truthy, 0),
-    (number_array_find_index_truthy, 1),
-    (number_array_find_last_truthy, 2),
-    (number_array_find_last_index_truthy, 3),
-);
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_filter_truthy(value: f64) -> f64 {
-    number_array_filter(value, 0.0, number_truthy)
+    let encoded = encoded as u8;
+    let kind = encoded / 8;
+    let mode = encoded % 8;
+    if kind > 2 || mode > 6 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let matches = |index: usize| unsafe {
+        let slot = array.add(8 + index * 8);
+        match kind {
+            0 => {
+                let value = slot.cast::<f64>().read_unaligned();
+                value != 0.0 && !value.is_nan()
+            }
+            1 => slot.read() != 0,
+            2 => {
+                let value = slot.cast::<*const c_char>().read_unaligned();
+                !value.is_null() && !CStr::from_ptr(value).to_bytes().is_empty()
+            }
+            _ => false,
+        }
+    };
+    if mode < 2 {
+        return f64::from(if mode == 1 {
+            (0..length).all(&matches)
+        } else {
+            (0..length).any(&matches)
+        });
+    }
+    if mode < 6 {
+        let index = if mode >= 4 {
+            (0..length).rev().find(|index| matches(*index))
+        } else {
+            (0..length).find(|index| matches(*index))
+        };
+        return match (index, mode % 2) {
+            (Some(index), 0) => unsafe { array_element(array, index, kind) },
+            (Some(index), 1) => index as f64,
+            (None, 0) => {
+                CALL_PRESENT.with(|present| present.set(false));
+                0.0
+            }
+            (None, 1) => -1.0,
+            _ => unreachable!(),
+        };
+    }
+    let Some(allocate) = ARENA_ALLOC.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let Some(size) = length.checked_mul(8).and_then(|size| size.checked_add(8)) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let output = unsafe { allocate(size, 8) };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    let mut selected = 0;
+    for index in 0..length {
+        if matches(index) {
+            unsafe {
+                output
+                    .add(8 + selected * 8)
+                    .cast::<u64>()
+                    .write_unaligned(array.add(8 + index * 8).cast::<u64>().read_unaligned())
+            };
+            selected += 1;
+        }
+    }
+    unsafe { output.cast::<u64>().write(selected as u64) };
+    array_result(output)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -2652,7 +2694,7 @@ enum NumericValue {
     NumberArrayQuantifier(CompareOp, bool),
     NumberArrayFind(CompareOp, u8),
     NumberArrayFilter(CompareOp),
-    NumberArrayTruthy(u8),
+    PrimitiveArrayTruthy(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayUnaryMap(bool),
     NumberArrayMathMap(UnaryMath),
@@ -2992,16 +3034,26 @@ impl NumericProgram {
                             Some(NumericValue::NumberArrayFilter(operation))
                         })
                         .or_else(|| {
-                            Some(NumericValue::NumberArrayTruthy(match value {
-                                "rnsometruthy" => 0,
-                                "rneverytruthy" => 1,
-                                "rnfindtruthy" => 2,
-                                "rnfindindextruthy" => 3,
-                                "rnfindlasttruthy" => 4,
-                                "rnfindlastindextruthy" => 5,
-                                "rnfiltertruthy" => 6,
+                            let (kind, operation) = value
+                                .strip_prefix("rn")
+                                .map(|operation| (0, operation))
+                                .or_else(|| {
+                                    value.strip_prefix("rb").map(|operation| (1, operation))
+                                })
+                                .or_else(|| {
+                                    value.strip_prefix("rs").map(|operation| (2, operation))
+                                })?;
+                            let mode = match operation {
+                                "sometruthy" => 0,
+                                "everytruthy" => 1,
+                                "findtruthy" => 2,
+                                "findindextruthy" => 3,
+                                "findlasttruthy" => 4,
+                                "findlastindextruthy" => 5,
+                                "filtertruthy" => 6,
                                 _ => return None,
-                            }))
+                            };
+                            Some(NumericValue::PrimitiveArrayTruthy(kind, mode))
                         })
                         .or_else(|| {
                             Some(NumericValue::NumberArrayUnaryMap(match value {
@@ -3550,22 +3602,16 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::NumberArrayTruthy(mode) => {
-                    if depth == 0 {
+                NumericValue::PrimitiveArrayTruthy(kind, mode) => {
+                    if depth == 0 || depth == 8 {
                         return None;
                     }
-                    let functions = [
-                        number_array_some_truthy,
-                        number_array_every_truthy,
-                        number_array_find_truthy,
-                        number_array_find_index_truthy,
-                        number_array_find_last_truthy,
-                        number_array_find_last_index_truthy,
-                        number_array_filter_truthy,
-                    ];
-                    emit_unary_call(
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(kind * 8 + mode).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_binary_call(
                         &mut code,
-                        functions[usize::from(*mode)] as *const () as u64,
+                        primitive_array_truthy as *const () as u64,
                         depth - 1,
                     );
                 }
@@ -5479,6 +5525,52 @@ mod tests {
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, -2.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 3.0);
         unsafe { libc::free(output.cast_mut().cast()) };
+        let bool_values = [3_u64, 0, 1, 0];
+        let bool_data = bool_values.as_ptr().cast::<u8>();
+        let bool_handle = &bool_data as *const *const u8;
+        let filter_truthy = CString::new("expr:rb0,rbfiltertruthy:bool-filter-truthy").unwrap();
+        let result = call(
+            &filter_truthy,
+            &[f64::from_bits(bool_handle as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
+        assert_eq!(unsafe { output.add(8).read() }, 1);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let empty_string = CString::new("").unwrap();
+        let nonempty_string = CString::new("x").unwrap();
+        let string_values = [
+            3_u64,
+            empty_string.as_ptr() as usize as u64,
+            nonempty_string.as_ptr() as usize as u64,
+            empty_string.as_ptr() as usize as u64,
+        ];
+        let string_data = string_values.as_ptr().cast::<u8>();
+        let string_handle = &string_data as *const *const u8;
+        let filter_truthy = CString::new("expr:rs0,rsfiltertruthy:string-filter-truthy").unwrap();
+        let result = call(
+            &filter_truthy,
+            &[f64::from_bits(string_handle as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
+        assert_eq!(
+            unsafe { output.add(8).cast::<*const c_char>().read() },
+            nonempty_string.as_ptr()
+        );
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let find_truthy = CString::new("expr:rs0,rsfindtruthy:string-find-truthy").unwrap();
+        assert_eq!(
+            call(
+                &find_truthy,
+                &[f64::from_bits(string_handle as usize as u64)]
+            )
+            .value
+            .to_bits(),
+            nonempty_string.as_ptr() as usize as u64
+        );
         let map = CString::new("expr:rn0,c4000000000000000,rnmapmul:array-map").unwrap();
         let result = call(&map, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
