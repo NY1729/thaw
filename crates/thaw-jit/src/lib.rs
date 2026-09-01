@@ -320,6 +320,9 @@ array_search_fn!(string_array_index_of, 2);
 array_search_fn!(string_array_includes, 3);
 array_search_fn!(bool_array_index_of, 4);
 array_search_fn!(bool_array_includes, 5);
+array_search_fn!(number_array_last_index_of, 6);
+array_search_fn!(string_array_last_index_of, 7);
+array_search_fn!(bool_array_last_index_of, 8);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_truthy(value: f64) -> f64 {
@@ -1223,6 +1226,9 @@ enum NumericValue {
     NumberArrayIndexOf,
     BoolArrayIndexOf,
     StringArrayIndexOf,
+    NumberArrayLastIndexOf,
+    BoolArrayLastIndexOf,
+    StringArrayLastIndexOf,
     StringTruthy,
     StringPadEnd,
     StringPadStart,
@@ -1324,6 +1330,9 @@ impl NumericProgram {
                     "rnindexof" => Some(NumericValue::NumberArrayIndexOf),
                     "rbindexof" => Some(NumericValue::BoolArrayIndexOf),
                     "rsindexof" => Some(NumericValue::StringArrayIndexOf),
+                    "rnlastindexof" => Some(NumericValue::NumberArrayLastIndexOf),
+                    "rblastindexof" => Some(NumericValue::BoolArrayLastIndexOf),
+                    "rslastindexof" => Some(NumericValue::StringArrayLastIndexOf),
                     "strbool" => Some(NumericValue::StringTruthy),
                     "padend" => Some(NumericValue::StringPadEnd),
                     "padstart" => Some(NumericValue::StringPadStart),
@@ -1725,7 +1734,10 @@ impl NumericProgram {
                 | NumericValue::StringArrayIncludes
                 | NumericValue::NumberArrayIndexOf
                 | NumericValue::BoolArrayIndexOf
-                | NumericValue::StringArrayIndexOf => {
+                | NumericValue::StringArrayIndexOf
+                | NumericValue::NumberArrayLastIndexOf
+                | NumericValue::BoolArrayLastIndexOf
+                | NumericValue::StringArrayLastIndexOf => {
                     if depth < 3 {
                         return None;
                     }
@@ -1736,6 +1748,9 @@ impl NumericProgram {
                         NumericValue::NumberArrayIndexOf => number_array_index_of,
                         NumericValue::BoolArrayIndexOf => bool_array_index_of,
                         NumericValue::StringArrayIndexOf => string_array_index_of,
+                        NumericValue::NumberArrayLastIndexOf => number_array_last_index_of,
+                        NumericValue::BoolArrayLastIndexOf => bool_array_last_index_of,
+                        NumericValue::StringArrayLastIndexOf => string_array_last_index_of,
                         _ => unreachable!(),
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
@@ -2165,6 +2180,7 @@ mod tests {
             match (operation, needle, from_index) {
                 (0, 20.0, 0.0) => 1.0,
                 (1, 20.0, 0.0) => 1.0,
+                (6, 20.0, f64::INFINITY) => 1.0,
                 _ => -1.0,
             }
         }
@@ -2726,9 +2742,14 @@ mod tests {
             call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
             3.0
         );
-        for (operation, expected) in [("rnindexof", 1.0), ("rnincludes", 1.0)] {
+        for (operation, from, expected) in [
+            ("rnindexof", 0.0f64, 1.0),
+            ("rnincludes", 0.0, 1.0),
+            ("rnlastindexof", f64::INFINITY, 1.0),
+        ] {
             let symbol = CString::new(format!(
-                "expr:rn0,c4034000000000000,c0000000000000000,{operation}:{operation}"
+                "expr:rn0,c4034000000000000,c{:016x},{operation}:{operation}",
+                from.to_bits()
             ))
             .unwrap();
             assert_eq!(

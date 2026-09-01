@@ -640,6 +640,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,a2,rnindexof".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.find = (values, needle, from) => values.lastIndexOf(needle, from);",
+            "find",
+            false,
+            &array_index,
+        ),
+        Some("expr:rn0,a1,a2,rnlastindexof".into())
+    );
     let array_at = thaw_bridge::DtsFunction {
         params: vec![
             array_length.params[0].clone(),

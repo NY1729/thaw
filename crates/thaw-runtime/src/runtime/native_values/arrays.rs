@@ -1062,6 +1062,17 @@ pub unsafe extern "C" fn thaw_jit_array_search(
         5 => f64::from(unsafe {
             thaw_bool_array_includes(array, (needle != 0.0).into(), from_index)
         }),
+        6 => unsafe { thaw_number_array_last_index_of(array, needle, from_index) },
+        7 => unsafe {
+            thaw_string_array_last_index_of(
+                array,
+                needle.to_bits() as usize as *const c_char,
+                from_index,
+            )
+        },
+        8 => unsafe {
+            thaw_bool_array_last_index_of(array, (needle != 0.0).into(), from_index)
+        },
         _ => -1.0,
     }
 }
