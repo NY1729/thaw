@@ -46,11 +46,12 @@ fn jit_numeric_export(
         let MemberProp::Ident(property) = &member.prop else {
             return None;
         };
-        if call.args.iter().any(|argument| argument.spread.is_some())
-            && !(matches!(property.sym.as_ref(), "min" | "max" | "hypot")
-                && matches!(call.args.as_slice(), [argument] if argument.spread.is_some()))
-        {
-            return None;
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            match property.sym.as_ref() {
+                "min" | "max" => {}
+                "hypot" if matches!(call.args.as_slice(), [argument] if argument.spread.is_some()) => {}
+                _ => return None,
+            }
         }
         match property.sym.as_ref() {
             "acos" => Some("acos"),
@@ -2036,27 +2037,6 @@ fn jit_numeric_export(
                             output.push("hypot".into());
                         }
                     }
-                } else if matches!(method, "min" | "max")
-                    && matches!(call.args.as_slice(), [argument] if argument.spread.is_some())
-                {
-                    let [argument] = call.args.as_slice() else {
-                        unreachable!();
-                    };
-                    let mut encoded = Vec::new();
-                    encode_expression(
-                        argument.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        &mut encoded,
-                    )?;
-                    if jit_expression_kind(&encoded)?.0 != JitKind::Array
-                        || array_prefix(&encoded)? != "rn"
-                    {
-                        return None;
-                    }
-                    output.extend(encoded);
-                    output.push(format!("rn{method}"));
                 } else if call.args.is_empty() {
                     let value = if method == "min" {
                         f64::INFINITY
@@ -2065,16 +2045,35 @@ fn jit_numeric_export(
                     };
                     output.push(format!("c{:016x}", value.to_bits()));
                 } else {
-                    encode_number(
-                        call.args[0].expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        output,
-                    )?;
-                    for argument in &call.args[1..] {
-                        encode_number(argument.expr.as_ref(), parameters, locals, context, output)?;
-                        output.push(method.into());
+                    for (index, argument) in call.args.iter().enumerate() {
+                        if argument.spread.is_some() {
+                            let mut encoded = Vec::new();
+                            encode_expression(
+                                argument.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut encoded,
+                            )?;
+                            if jit_expression_kind(&encoded)?.0 != JitKind::Array
+                                || array_prefix(&encoded)? != "rn"
+                            {
+                                return None;
+                            }
+                            output.extend(encoded);
+                            output.push(format!("rn{method}"));
+                        } else {
+                            encode_number(
+                                argument.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                output,
+                            )?;
+                        }
+                        if index != 0 {
+                            output.push(method.into());
+                        }
                     }
                 }
             }
