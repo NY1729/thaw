@@ -666,6 +666,49 @@ fn numeric_comparator_sorts_use_jit_without_quickjs() {
 }
 
 #[test]
+fn string_comparator_sorts_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-string-sort-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-string-sort");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function ascending(values: string[]): string[];\nexport declare function descending(values: string[]): string[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function descending(left, right) { return right.localeCompare(left); } module.exports.ascending = values => values.toSorted((left, right) => left.localeCompare(right)); module.exports.descending = values => values.sort(descending);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { ascending, descending } from 'jit-string-sort';\nfunction main(): void { const source = ['b', 'aa', 'a']; console.log(ascending(source).join(',')); console.log(source.join(',')); console.log(descending(source).join(',')); console.log(source.join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "a,aa,b\nb,aa,a\nb,aa,a\nb,aa,a\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_array_constructors_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-constructors-{}",

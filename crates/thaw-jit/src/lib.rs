@@ -1505,6 +1505,11 @@ extern "C" fn number_array_to_sorted_descending(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_array_to_sorted_descending(value: f64) -> f64 {
+    array_to_sorted(5, value)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_sort(operation: u8, value: f64) -> f64 {
     let (Some(sort), Some((data, _))) = (ARRAY_SORT.with(Cell::get), unsafe { array_data(value) })
     else {
@@ -1534,6 +1539,7 @@ array_sort_fn!(string_array_sort, 1);
 array_sort_fn!(bool_array_sort, 2);
 array_sort_fn!(number_array_sort_ascending, 3);
 array_sort_fn!(number_array_sort_descending, 4);
+array_sort_fn!(string_array_sort_descending, 5);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_fill(operation: u8, array: f64, value: f64, start: f64, end: f64) -> f64 {
@@ -2950,6 +2956,8 @@ enum NumericValue {
     NumberArraySort,
     NumberArrayToSortedBy(bool),
     NumberArraySortBy(bool),
+    StringArrayToSortedDescending,
+    StringArraySortDescending,
     StringArraySort,
     BoolArraySort,
     NumberArrayFill,
@@ -3057,6 +3065,8 @@ impl NumericProgram {
                     | NumericValue::NumberArraySort
                     | NumericValue::StringArraySort
                     | NumericValue::BoolArraySort
+                    | NumericValue::StringArrayToSortedDescending
+                    | NumericValue::StringArraySortDescending
                     | NumericValue::NumberArrayFill
                     | NumericValue::StringArrayFill
                     | NumericValue::BoolArrayFill
@@ -3176,6 +3186,8 @@ impl NumericProgram {
                     "rnsorteddesc" => Some(NumericValue::NumberArrayToSortedBy(true)),
                     "rnsortasc" => Some(NumericValue::NumberArraySortBy(false)),
                     "rnsortdesc" => Some(NumericValue::NumberArraySortBy(true)),
+                    "rssorteddesc" => Some(NumericValue::StringArrayToSortedDescending),
+                    "rssortdesc" => Some(NumericValue::StringArraySortDescending),
                     "rssort" => Some(NumericValue::StringArraySort),
                     "rbsort" => Some(NumericValue::BoolArraySort),
                     "rnfill" => Some(NumericValue::NumberArrayFill),
@@ -4261,6 +4273,20 @@ impl NumericProgram {
                         }
                         (NumericValue::NumberArraySortBy(_), false) => number_array_sort_ascending,
                         (NumericValue::NumberArraySortBy(_), true) => number_array_sort_descending,
+                        _ => unreachable!(),
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::StringArrayToSortedDescending
+                | NumericValue::StringArraySortDescending => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::StringArrayToSortedDescending => {
+                            string_array_to_sorted_descending
+                        }
+                        NumericValue::StringArraySortDescending => string_array_sort_descending,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);

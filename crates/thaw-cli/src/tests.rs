@@ -2248,6 +2248,36 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,rnsortdesc,arrayvalue".into())
     );
+    let string_array_sorted = thaw_bridge::DtsFunction {
+        params: vec![(
+            "values".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+                thaw_hir::HirType::Str,
+            ))),
+        )],
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+            thaw_hir::HirType::Str,
+        ))),
+        ..array_sorted.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.sorted = values => values.toSorted((left, right) => left.localeCompare(right));",
+            "sorted",
+            false,
+            &string_array_sorted,
+        ),
+        Some("expr:rs0,rssorted,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "function descending(left, right) { return right.localeCompare(left); } module.exports.sorted = values => values.sort(descending);",
+            "sorted",
+            false,
+            &string_array_sorted,
+        ),
+        Some("expr:rs0,rssortdesc,arrayvalue".into())
+    );
     let array_fill = thaw_bridge::DtsFunction {
         name: "fill".into(),
         params: vec![
