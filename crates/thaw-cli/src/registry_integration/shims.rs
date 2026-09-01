@@ -932,11 +932,7 @@ fn jit_export(
         locals: &std::collections::HashMap<String, Vec<String>>,
         helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
     ) -> Option<(&'static str, &'a Expr, Option<&'a Expr>)> {
-        if parameters.contains_key("Object")
-            || locals.contains_key("Object")
-            || helpers.contains_key("Object")
-            || call.args.iter().any(|argument| argument.spread.is_some())
-        {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
             return None;
         }
         let Callee::Expr(callee) = &call.callee else {
@@ -945,17 +941,27 @@ fn jit_export(
         let Expr::Member(member) = callee.as_ref() else {
             return None;
         };
-        if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Object") {
+        let Expr::Ident(namespace) = member.obj.as_ref() else {
+            return None;
+        };
+        let namespace = namespace.sym.as_ref();
+        if parameters.contains_key(namespace)
+            || locals.contains_key(namespace)
+            || helpers.contains_key(namespace)
+        {
             return None;
         }
         let MemberProp::Ident(property) = &member.prop else {
             return None;
         };
-        match (property.sym.as_ref(), call.args.as_slice()) {
-            ("keys", [object]) => Some(("dkeys", object.expr.as_ref(), None)),
-            ("values", [object]) => Some(("dvalues", object.expr.as_ref(), None)),
-            ("entries", [object]) => Some(("dentries", object.expr.as_ref(), None)),
-            ("hasOwn", [object, key]) => Some((
+        match (namespace, property.sym.as_ref(), call.args.as_slice()) {
+            ("Object", "keys" | "getOwnPropertyNames", [object])
+            | ("Reflect", "ownKeys", [object]) => {
+                Some(("dkeys", object.expr.as_ref(), None))
+            }
+            ("Object", "values", [object]) => Some(("dvalues", object.expr.as_ref(), None)),
+            ("Object", "entries", [object]) => Some(("dentries", object.expr.as_ref(), None)),
+            ("Object", "hasOwn", [object, key]) => Some((
                 "dhasown",
                 object.expr.as_ref(),
                 Some(key.expr.as_ref()),
@@ -2306,6 +2312,30 @@ fn jit_export(
                     .into(),
                 );
                 output.push("end".into());
+            }
+            Expr::Bin(binary) if binary.op == BinaryOp::In => {
+                let mut key = Vec::new();
+                encode_expression(
+                    binary.left.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut key,
+                )?;
+                append_string(key, output)?;
+                let mut object = Vec::new();
+                encode_expression(
+                    binary.right.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut object,
+                )?;
+                if jit_expression_kind(&object)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                output.extend(object);
+                output.push("din".into());
             }
             Expr::Bin(binary)
                 if matches!(
@@ -6539,8 +6569,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(token.as_str(), "ddelete" | "dhasown") {
-            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Dictionary {
+        } else if matches!(token.as_str(), "ddelete" | "dhasown" | "din") {
+            let expected = if token == "din" {
+                (JitKind::Dictionary, JitKind::String)
+            } else {
+                (JitKind::String, JitKind::Dictionary)
+            };
+            if stack.pop()? != expected.0 || stack.pop()? != expected.1 {
                 return None;
             }
             stack.push(JitKind::Boolean);
