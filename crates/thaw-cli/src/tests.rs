@@ -719,6 +719,20 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         &spread_strings,
     )
     .is_some());
+    let string_spread = thaw_bridge::DtsFunction {
+        params: vec![spread_strings.params[0].clone()],
+        required_params: 1,
+        ..spread_strings.clone()
+    };
+    for source in [
+        "module.exports.values = value => [...value];",
+        "module.exports.values = value => Array.of(...value);",
+    ] {
+        assert_eq!(
+            jit_numeric_export(source, "values", false, &string_spread),
+            Some("expr:arrayempty,s0,strarray,arrayconcat,arrayvalue".into())
+        );
+    }
     let spread_flags = thaw_bridge::DtsFunction {
         params: vec![
             (
