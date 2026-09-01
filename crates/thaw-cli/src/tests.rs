@@ -513,6 +513,69 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             Some(expected.into())
         );
     }
+    let boolean_to_string = thaw_bridge::DtsFunction {
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        )],
+        ..number_to_string.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.format = value => value.toString();",
+            "format",
+            false,
+            &boolean_to_string,
+        ),
+        Some("expr:b0,boolstr".into())
+    );
+    let string_value = thaw_bridge::DtsFunction {
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        )],
+        ..number_to_string.clone()
+    };
+    for (source, expected) in [
+        ("value.toString()", "expr:s0"),
+        ("value.valueOf()", "expr:s0"),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.format = value => {source};"),
+                "format",
+                false,
+                &string_value,
+            ),
+            Some(expected.into())
+        );
+    }
+    let boolean_value = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ..boolean_to_string.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.format = value => value.valueOf();",
+            "format",
+            false,
+            &boolean_value,
+        ),
+        Some("expr:b0".into())
+    );
+    let number_value = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..number_to_string.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.format = value => value.valueOf();",
+            "format",
+            false,
+            &number_value,
+        ),
+        Some("expr:a0".into())
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",

@@ -354,6 +354,20 @@ fn jit_numeric_export(
         Some((operation, member.obj.as_ref()))
     }
 
+    fn primitive_value_of(call: &CallExpr) -> Option<&Expr> {
+        if !call.args.is_empty() {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        matches!(&member.prop, MemberProp::Ident(property) if property.sym == "valueOf")
+            .then_some(member.obj.as_ref())
+    }
+
     fn append_add(
         mut left: Vec<String>,
         mut right: Vec<String>,
@@ -613,7 +627,19 @@ fn jit_numeric_export(
                 let (operation, receiver) = number_format_method(call)?;
                 let mut encoded = Vec::new();
                 encode_expression(receiver, parameters, locals, context, &mut encoded)?;
-                if jit_expression_kind(&encoded)?.0 != JitKind::Number {
+                let receiver_kind = jit_expression_kind(&encoded)?.0;
+                if operation == "toradix" && call.args.is_empty() {
+                    match receiver_kind {
+                        JitKind::Boolean => {
+                            output.extend(encoded);
+                            output.push("boolstr".into());
+                        }
+                        JitKind::String => output.extend(encoded),
+                        JitKind::Number => append_string(encoded, output)?,
+                    }
+                    return Some(());
+                }
+                if receiver_kind != JitKind::Number {
                     return None;
                 }
                 match call.args.as_slice() {
@@ -640,6 +666,15 @@ fn jit_numeric_export(
                     }
                     _ => return None,
                 }
+            }
+            Expr::Call(call) if primitive_value_of(call).is_some() => {
+                encode_expression(
+                    primitive_value_of(call)?,
+                    parameters,
+                    locals,
+                    context,
+                    output,
+                )?;
             }
             Expr::Call(call) if string_method(call, parameters, locals).is_some() => {
                 let (operation, receiver) = string_method(call, parameters, locals)?;
