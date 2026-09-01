@@ -2120,7 +2120,10 @@ supported property reads and methods through `?.`. Fixed aggregates expand one
 presence slot followed by their recursively flattened leaves; LLVM only reads
 those leaves on the present path. Missing receivers return the existing
 optional ABI absence tag, while `?.` combined with `??` stays inside one JIT
-branch and skips both the method and its argument expressions.
+branch and skips both the method and its argument expressions. Subsequent
+fixed fields, tuple indexes, primitive-array properties, and primitive methods
+remain in that branch, so chains such as `value?.meta.count` and
+`value?.label.toUpperCase()` do not re-enter QuickJS.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
