@@ -443,6 +443,41 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,c0000000000000000,rnfiltergt,arrayvalue".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, factor) => values.map(value => value * factor);",
+            "add",
+            false,
+            &filter,
+        ),
+        Some("expr:rn0,a1,rnmapmul,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const subtract = value => 100 - value; module.exports.add = values => values.map(subtract);",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![spread_extreme.params[0].clone()],
+                required_params: 1,
+                ..filter.clone()
+            },
+        ),
+        Some("expr:rn0,c4059000000000000,rnmaprsub,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.map(value => value + Math.random());",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![spread_extreme.params[0].clone()],
+                required_params: 1,
+                ..filter.clone()
+            },
+        ),
+        None
+    );
     for (method, operation) in [("min", "rnmin"), ("max", "rnmax")] {
         assert_eq!(
             jit_numeric_export(
