@@ -316,12 +316,12 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function readNumber(values: Record<string, number>, key: string): number;\nexport declare function readBool(values: Record<string, boolean>, key: string): boolean;\nexport declare function readString(values: Record<string, string>, key: string): string;\nexport declare function updateNumber(values: Record<string, number>, key: string, value: number): number;\nexport declare function updateBool(values: Record<string, boolean>, key: string, value: boolean): boolean;\nexport declare function updateString(values: Record<string, string>, key: string, value: string): string;\nexport declare function removeBool(values: Record<string, boolean>, key: string): boolean;\n",
+        "export declare function readNumber(values: Record<string, number>, key: string): number;\nexport declare function readBool(values: Record<string, boolean>, key: string): boolean;\nexport declare function readString(values: Record<string, string>, key: string): string;\nexport declare function updateNumber(values: Record<string, number>, key: string, value: number): number;\nexport declare function updateBool(values: Record<string, boolean>, key: string, value: boolean): boolean;\nexport declare function updateString(values: Record<string, string>, key: string, value: string): string;\nexport declare function removeBool(values: Record<string, boolean>, key: string): boolean;\nexport declare function updateAndReturn(values: Record<string, number>, key: string, value: number): Record<string, number>;\nexport declare function makeNumbers(value: number): Record<string, number>;\nexport declare function makeBools(value: boolean): Record<string, boolean>;\nexport declare function makeStrings(value: string): Record<string, string>;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function readNumber(values, key) { return values[key] + values.fixed; } function readBool(values, key) { return values[key] && values.enabled; } function readString(values, key) { return values.prefix + values[key]; } function updateNumber(values, key, value) { values[key] = value; values.fixed++; return values[key] + values.fixed; } function updateBool(values, key, value) { values[key] = value; return values[key]; } function updateString(values, key, value) { values[key] += value; return values[key]; } function removeBool(values, key) { delete values[key]; return !values[key]; } module.exports = { readNumber, readBool, readString, updateNumber, updateBool, updateString, removeBool };\n",
+        "function readNumber(values, key) { return values[key] + values.fixed; } function readBool(values, key) { return values[key] && values.enabled; } function readString(values, key) { return values.prefix + values[key]; } function updateNumber(values, key, value) { values[key] = value; values.fixed++; return values[key] + values.fixed; } function updateBool(values, key, value) { values[key] = value; return values[key]; } function updateString(values, key, value) { values[key] += value; return values[key]; } function removeBool(values, key) { delete values[key]; return !values[key]; } function updateAndReturn(values, key, value) { values[key] = value; return values; } function makeNumbers(value) { return { answer: value, doubled: value * 2 }; } function makeBools(value) { return { chosen: value, inverse: !value }; } function makeStrings(value) { return { prefix: 'th', suffix: value }; } module.exports = { readNumber, readBool, readString, updateNumber, updateBool, updateString, removeBool, updateAndReturn, makeNumbers, makeBools, makeStrings };\n",
     )
     .unwrap();
     let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
@@ -343,10 +343,17 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
         &functions[0]
     )
     .is_some());
+    for function in &functions {
+        assert!(
+            jit_numeric_export(&bundle, &function.name, false, function).is_some(),
+            "{} did not specialize",
+            function.name
+        );
+    }
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { readNumber, readBool, readString, updateNumber, updateBool, updateString, removeBool } from 'jit-dictionary';\nfunction main(): void { console.log(readNumber({ chosen: 40, fixed: 2 }, 'chosen')); console.log(readBool({ chosen: true, enabled: true }, 'chosen')); console.log(readBool({ chosen: false, enabled: true }, 'chosen')); console.log(readString({ prefix: 'th', suffix: 'aw' }, 'suffix')); console.log(updateNumber({ chosen: 1, fixed: 2 }, 'chosen', 40)); console.log(updateBool({ chosen: false }, 'chosen', true)); console.log(updateString({ chosen: 'th' }, 'chosen', 'aw')); console.log(removeBool({ chosen: true }, 'chosen')); }\n",
+        "import { readNumber, readBool, readString, updateNumber, updateBool, updateString, removeBool, updateAndReturn, makeNumbers, makeBools, makeStrings } from 'jit-dictionary';\nfunction main(): void { console.log(readNumber({ chosen: 40, fixed: 2 }, 'chosen')); console.log(readBool({ chosen: true, enabled: true }, 'chosen')); console.log(readBool({ chosen: false, enabled: true }, 'chosen')); console.log(readString({ prefix: 'th', suffix: 'aw' }, 'suffix')); console.log(updateNumber({ chosen: 1, fixed: 2 }, 'chosen', 40)); console.log(updateBool({ chosen: false }, 'chosen', true)); console.log(updateString({ chosen: 'th' }, 'chosen', 'aw')); console.log(removeBool({ chosen: true }, 'chosen')); console.log(updateAndReturn({ chosen: 1 }, 'chosen', 42).chosen); console.log(makeNumbers(21).doubled); console.log(makeBools(false).inverse); console.log(makeStrings('aw').prefix + makeStrings('aw').suffix); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -362,7 +369,7 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\ntrue\nfalse\nthaw\n43\ntrue\nthaw\ntrue\n"
+        "42\ntrue\nfalse\nthaw\n43\ntrue\nthaw\ntrue\n42\n42\ntrue\nthaw\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
