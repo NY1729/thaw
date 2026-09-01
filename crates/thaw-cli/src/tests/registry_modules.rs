@@ -187,18 +187,18 @@ fn logical_expressions_short_circuit_in_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Result { value: number; remaining: number; }\nexport declare function orPop(values: number[]): number;\nexport declare function andPop(values: number[]): number;\nexport declare function nested(values: number[]): number;\nexport declare function object(values: number[]): Result;\n",
+        "export interface Result { value: number; remaining: number; }\nexport declare function orPop(values: number[]): number;\nexport declare function andPop(values: number[]): number;\nexport declare function nested(values: number[]): number;\nexport declare function embedded(values: number[]): number;\nexport declare function object(values: number[]): Result;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.orPop = values => values.pop() || values.pop(); module.exports.andPop = values => values.pop() && values.pop(); module.exports.nested = values => values.pop() || values.pop() || values.pop(); module.exports.object = values => ({ value: values.pop() || values.pop(), remaining: values.length });\n",
+        "module.exports.orPop = values => values.pop() || values.pop(); module.exports.andPop = values => values.pop() && values.pop(); module.exports.nested = values => values.pop() || values.pop() || values.pop(); module.exports.embedded = values => (values.pop() || values.pop()) + values.length; module.exports.object = values => ({ value: values.pop() || values.pop(), remaining: values.length });\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { orPop, andPop, nested, object } from 'jit-logical';\nfunction main(): void { const orHit = [1, 2, 3]; console.log(orPop(orHit) + ':' + orHit.length); const orMiss = [1, 2, 0]; console.log(orPop(orMiss) + ':' + orMiss.length); const andMiss = [1, 2, 0]; console.log(andPop(andMiss) + ':' + andMiss.length); const andHit = [1, 2, 3]; console.log(andPop(andHit) + ':' + andHit.length); const nestedValues = [1, 4, 0, 0]; console.log(nested(nestedValues) + ':' + nestedValues.length); const nestedHit = [1, 2, 3]; console.log(nested(nestedHit) + ':' + nestedHit.length); const objectValues = [1, 5, 0]; const result = object(objectValues); console.log(result.value + ':' + result.remaining + ':' + objectValues.length); }\n",
+        "import { orPop, andPop, nested, embedded, object } from 'jit-logical';\nfunction main(): void { const orHit = [1, 2, 3]; console.log(orPop(orHit) + ':' + orHit.length); const orMiss = [1, 2, 0]; console.log(orPop(orMiss) + ':' + orMiss.length); const andMiss = [1, 2, 0]; console.log(andPop(andMiss) + ':' + andMiss.length); const andHit = [1, 2, 3]; console.log(andPop(andHit) + ':' + andHit.length); const nestedValues = [1, 4, 0, 0]; console.log(nested(nestedValues) + ':' + nestedValues.length); const nestedHit = [1, 2, 3]; console.log(nested(nestedHit) + ':' + nestedHit.length); const embeddedValues = [1, 2, 3]; console.log(embedded(embeddedValues) + ':' + embeddedValues.length); const objectValues = [1, 5, 0]; const result = object(objectValues); console.log(result.value + ':' + result.remaining + ':' + objectValues.length); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -214,7 +214,7 @@ fn logical_expressions_short_circuit_in_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "3:2\n2:1\n0:2\n2:1\n4:1\n3:2\n5:1:1\n"
+        "3:2\n2:1\n0:2\n2:1\n4:1\n3:2\n5:2\n5:1:1\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -19,7 +19,6 @@ enum JitExport {
     Object(Vec<(String, JitExport)>),
     Tuple(Vec<JitExport>),
     Conditional(String, Box<JitExport>, Box<JitExport>),
-    Logical(Box<JitExport>, Box<JitExport>, bool),
     WithLocals(Vec<JitLocal>, Box<JitExport>),
 }
 
@@ -393,36 +392,6 @@ fn jit_export(
                 locals,
                 context,
             );
-        }
-        if let Expr::Bin(binary) = expression {
-            if !matches!(binary.op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
-                return encode_nonconditional_return_expression(
-                    expression,
-                    ty,
-                    parameters,
-                    locals,
-                    context,
-                );
-            }
-            let left = encode_return_expression(
-                binary.left.as_ref(),
-                ty,
-                parameters,
-                locals,
-                context,
-            )?;
-            let right = encode_return_expression(
-                binary.right.as_ref(),
-                ty,
-                parameters,
-                locals,
-                context,
-            )?;
-            return Some(JitExport::Logical(
-                Box::new(left),
-                Box::new(right),
-                binary.op == BinaryOp::LogicalAnd,
-            ));
         }
         if matches!(ty, thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)) {
             let Expr::Cond(conditional) = expression else {
@@ -1606,15 +1575,26 @@ fn jit_export(
                 let mut right = Vec::new();
                 encode_expression(binary.left.as_ref(), parameters, locals, context, &mut left)?;
                 encode_expression(binary.right.as_ref(), parameters, locals, context, &mut right)?;
-                append_boolean(left.clone(), output)?;
-                if binary.op == BinaryOp::LogicalAnd {
-                    output.extend(right);
-                    output.extend(left);
-                } else {
-                    output.extend(left);
-                    output.extend(right);
+                let kind = jit_expression_kind(&left)?.0;
+                if jit_expression_kind(&right)?.0 != kind || kind == JitKind::Array {
+                    return None;
                 }
-                output.push("?".into());
+                output.extend(left);
+                output.push("dup".into());
+                match kind {
+                    JitKind::Number => output.push("asbool".into()),
+                    JitKind::String => output.push("strbool".into()),
+                    JitKind::Boolean => {}
+                    JitKind::Array => unreachable!(),
+                }
+                output.push(if binary.op == BinaryOp::LogicalAnd {
+                    "&&"
+                } else {
+                    "||"
+                }
+                .into());
+                output.extend(right);
+                output.push("end".into());
             }
             Expr::Bin(binary)
                 if matches!(
@@ -4711,25 +4691,6 @@ fn jit_numeric_export(
                 result.push("?".into());
                 Some(result)
             }
-            JitExport::Logical(left, right, and) => {
-                let left = tokens(*left)?;
-                let mut result = left.clone();
-                match jit_expression_kind(&left)?.0 {
-                    JitKind::Number => result.push("asbool".into()),
-                    JitKind::String => result.push("strbool".into()),
-                    JitKind::Boolean => {}
-                    JitKind::Array => return None,
-                }
-                if and {
-                    result.extend(tokens(*right)?);
-                    result.extend(left);
-                } else {
-                    result.extend(left);
-                    result.extend(tokens(*right)?);
-                }
-                result.push("?".into());
-                Some(result)
-            }
             JitExport::Object(_) | JitExport::Tuple(_) | JitExport::WithLocals(_, _) => None,
         }
     }
@@ -4795,6 +4756,7 @@ fn primitive_comparison_result(token: &str) -> Option<(JitKind, JitKind)> {
 
 fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let mut stack = Vec::new();
+    let mut short_circuits = Vec::new();
     let mut maximum_depth = 0;
     for token in expression {
         if matches!(
@@ -4843,6 +4805,18 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
+        } else if matches!(token.as_str(), "&&" | "||") {
+            if stack.pop()? != JitKind::Boolean {
+                return None;
+            }
+            let result = stack.pop()?;
+            short_circuits.push((stack.len(), result));
+        } else if token == "end" {
+            let (base, expected) = short_circuits.pop()?;
+            if stack.len() != base + 1 || stack.pop()? != expected {
+                return None;
+            }
+            stack.push(expected);
         } else if token == "?" {
             let alternative = stack.pop()?;
             let consequent = stack.pop()?;
@@ -5514,7 +5488,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let [kind] = stack.as_slice() else {
         return None;
     };
-    Some((*kind, maximum_depth))
+    short_circuits
+        .is_empty()
+        .then_some((*kind, maximum_depth))
 }
 
 fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> Option<String> {
@@ -5666,48 +5642,6 @@ fn jit_numeric_declaration(
                 );
                 format!("{symbol}({arguments}) ? {consequent} : {alternate}")
             }
-            JitExport::Logical(left, right, and) => {
-                let key = path.join(".");
-                path.push("logical.left".into());
-                let left = emit_aggregate_call(
-                    runtime_name,
-                    left,
-                    ty,
-                    path,
-                    direct_params,
-                    arguments,
-                    declaration,
-                );
-                path.pop();
-                path.push("logical.right".into());
-                let right = emit_aggregate_call(
-                    runtime_name,
-                    right,
-                    ty,
-                    path,
-                    direct_params,
-                    arguments,
-                    declaration,
-                );
-                path.pop();
-                let helper = encoded_symbol(&format!(
-                    "{runtime_name}:{key}.logical.wrapper"
-                ));
-                let result_type = render_dynamic_type(ty).unwrap();
-                let condition = match ty {
-                    thaw_hir::HirType::Bool => "left",
-                    thaw_hir::HirType::F64 => "left !== 0",
-                    thaw_hir::HirType::Str => "left.length !== 0",
-                    thaw_hir::HirType::Array(_) => "true",
-                    _ => unreachable!(),
-                };
-                declaration.push_str(&format!(
-                    "function {helper}({direct_params}): {result_type} {{ const left: {result_type} = {left}; return {condition} ? {} : {}; }}\n",
-                    if *and { right.as_str() } else { "left" },
-                    if *and { "left" } else { right.as_str() },
-                ));
-                format!("{helper}({arguments})")
-            }
             JitExport::WithLocals(_, _) => unreachable!(),
         }
     }
@@ -5726,8 +5660,7 @@ fn jit_numeric_declaration(
     let (jit_locals, aggregate) = match operation {
         JitExport::Object(_)
         | JitExport::Tuple(_)
-        | JitExport::Conditional(_, _, _)
-        | JitExport::Logical(_, _, _) => {
+        | JitExport::Conditional(_, _, _) => {
             (&[][..], operation)
         }
         JitExport::WithLocals(locals, aggregate) => (locals.as_slice(), aggregate.as_ref()),
@@ -5738,7 +5671,6 @@ fn jit_numeric_declaration(
         JitExport::Object(_)
             | JitExport::Tuple(_)
             | JitExport::Conditional(_, _, _)
-            | JitExport::Logical(_, _, _)
     ) {
         let thaw_bridge::DtsType::Native(return_type) = &function.ret else {
             unreachable!()

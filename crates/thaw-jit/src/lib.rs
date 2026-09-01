@@ -3320,6 +3320,8 @@ enum NumericValue {
     UnaryMath(UnaryMath),
     Remainder,
     Select,
+    ShortCircuit(bool),
+    ShortCircuitEnd,
     AsBoolean,
     StrictMismatch(bool),
     Drop,
@@ -3562,6 +3564,9 @@ impl NumericProgram {
                     "pow" => Some(NumericValue::Power),
                     "%" => Some(NumericValue::Remainder),
                     "?" => Some(NumericValue::Select),
+                    "&&" => Some(NumericValue::ShortCircuit(true)),
+                    "||" => Some(NumericValue::ShortCircuit(false)),
+                    "end" => Some(NumericValue::ShortCircuitEnd),
                     "asbool" => Some(NumericValue::AsBoolean),
                     "strictfalse" => Some(NumericValue::StrictMismatch(false)),
                     "stricttrue" => Some(NumericValue::StrictMismatch(true)),
@@ -3902,6 +3907,7 @@ impl NumericProgram {
     fn machine_code(&self) -> Option<Vec<u8>> {
         let mut code = Vec::with_capacity(self.0.len() * 12 + 8);
         let mut depth = 0u8;
+        let mut short_circuits = Vec::new();
         for value in &self.0 {
             match value {
                 NumericValue::Argument(index) => {
@@ -5123,6 +5129,50 @@ impl NumericProgram {
                     emit_move(&mut code, condition, alternate);
                     depth -= 2;
                 }
+                NumericValue::ShortCircuit(and) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let condition = depth - 1;
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x0f,
+                        0x2e,
+                        0xc0 | (condition << 3) | condition,
+                    ]);
+                    let parity = emit_near_jump(&mut code, 0x8a);
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x7e,
+                        0xc0 | (condition << 3),
+                        0x48,
+                        0xd1,
+                        0xe0,
+                        0x48,
+                        0x85,
+                        0xc0,
+                    ]);
+                    let truth = emit_near_jump(&mut code, if *and { 0x84 } else { 0x85 });
+                    let mut exits = vec![truth];
+                    if *and {
+                        exits.push(parity);
+                    } else {
+                        patch_near_jump(&mut code, parity)?;
+                    }
+                    depth -= 2;
+                    short_circuits.push((depth, exits));
+                }
+                NumericValue::ShortCircuitEnd => {
+                    let (base_depth, exits) = short_circuits.pop()?;
+                    if depth != base_depth + 1 {
+                        return None;
+                    }
+                    for exit in exits {
+                        patch_near_jump(&mut code, exit)?;
+                    }
+                }
                 NumericValue::AsBoolean => {
                     if depth == 0 {
                         return None;
@@ -5140,7 +5190,7 @@ impl NumericProgram {
                 }
             }
         }
-        (depth == 1).then(|| {
+        (depth == 1 && short_circuits.is_empty()).then(|| {
             code.push(0xc3);
             code
         })
@@ -5161,6 +5211,21 @@ impl NumericProgram {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn emit_move(code: &mut Vec<u8>, destination: u8, source: u8) {
     code.extend_from_slice(&[0x66, 0x0f, 0x28, 0xc0 | (destination << 3) | source]);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_near_jump(code: &mut Vec<u8>, condition: u8) -> usize {
+    code.extend_from_slice(&[0x0f, condition]);
+    let displacement = code.len();
+    code.extend_from_slice(&0i32.to_le_bytes());
+    displacement
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn patch_near_jump(code: &mut [u8], displacement: usize) -> Option<()> {
+    let distance = i32::try_from(code.len().checked_sub(displacement + 4)?).ok()?;
+    code[displacement..displacement + 4].copy_from_slice(&distance.to_le_bytes());
+    Some(())
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -5835,6 +5900,26 @@ mod tests {
                 Some(from_code_point),
             )
         }
+    }
+
+    #[test]
+    fn short_circuit_skips_unselected_native_calls() {
+        let one = format!("c{:016x}", 1.0f64.to_bits());
+        let zero = format!("c{:016x}", 0.0f64.to_bits());
+        let invalid_digits = format!("c{:016x}", 101.0f64.to_bits());
+        let selected = CString::new(format!(
+            "expr:{one},dup,asbool,||,{one},{invalid_digits},tofixed,end:short-or"
+        ))
+        .unwrap();
+        let result = call(&selected, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 1.0);
+
+        let rejected = CString::new(format!(
+            "expr:{zero},dup,asbool,||,{one},{invalid_digits},tofixed,end:run-or"
+        ))
+        .unwrap();
+        assert!(!call(&rejected, &[]).error.is_null());
     }
 
     #[test]
