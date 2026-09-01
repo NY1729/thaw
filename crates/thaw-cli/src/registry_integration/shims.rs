@@ -368,6 +368,43 @@ fn jit_numeric_export(
             .then_some(member.obj.as_ref())
     }
 
+    fn array_method<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+    ) -> Option<(&'a str, &'a Expr)> {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        let MemberProp::Ident(property) = &member.prop else {
+            return None;
+        };
+        let Expr::Ident(receiver) = member.obj.as_ref() else {
+            return None;
+        };
+        if !parameters
+            .get(receiver.sym.as_ref())
+            .is_some_and(|token| token.starts_with('r'))
+        {
+            return None;
+        }
+        matches!(property.sym.as_ref(), "at" | "includes" | "indexOf")
+            .then_some((property.sym.as_ref(), member.obj.as_ref()))
+    }
+
+    fn array_prefix(expression: &[String]) -> Option<&'static str> {
+        expression.iter().find_map(|token| {
+            ["rn", "rb", "rs"]
+                .into_iter()
+                .find(|prefix| token.starts_with(prefix))
+        })
+    }
+
     fn append_add(
         mut left: Vec<String>,
         mut right: Vec<String>,
@@ -686,6 +723,72 @@ fn jit_numeric_export(
                         output.push(operation.into());
                     }
                     _ => return None,
+                }
+            }
+            Expr::Call(call) if array_method(call, parameters).is_some() => {
+                let (method, receiver) = array_method(call, parameters)?;
+                let mut encoded = Vec::new();
+                encode_expression(receiver, parameters, locals, context, &mut encoded)?;
+                if jit_expression_kind(&encoded)?.0 != JitKind::Array {
+                    return None;
+                }
+                let prefix = array_prefix(&encoded)?;
+                output.extend(encoded);
+                if method == "at" {
+                    match call.args.as_slice() {
+                        [] => output.push(format!("c{:016x}", 0.0f64.to_bits())),
+                        [index] => encode_number(
+                            index.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?,
+                        _ => return None,
+                    }
+                    output.push(format!("{prefix}at"));
+                } else {
+                    let ([needle] | [needle, ..]) = call.args.as_slice() else {
+                        return None;
+                    };
+                    let mut needle = {
+                        let mut value = Vec::new();
+                        encode_expression(
+                            needle.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut value,
+                        )?;
+                        value
+                    };
+                    let expected = match prefix {
+                        "rn" => JitKind::Number,
+                        "rb" => JitKind::Boolean,
+                        "rs" => JitKind::String,
+                        _ => return None,
+                    };
+                    if jit_expression_kind(&needle)?.0 != expected {
+                        return None;
+                    }
+                    output.append(&mut needle);
+                    match call.args.get(1) {
+                        Some(from) => encode_number(
+                            from.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?,
+                        None => output.push(format!("c{:016x}", 0.0f64.to_bits())),
+                    }
+                    if call.args.len() > 2 {
+                        return None;
+                    }
+                    output.push(format!(
+                        "{prefix}{}",
+                        if method == "includes" { "includes" } else { "indexof" }
+                    ));
                 }
             }
             Expr::Call(call) if primitive_value_of(call).is_some() => {
@@ -1571,7 +1674,10 @@ fn jit_numeric_export(
                 thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str,
             ) => true,
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
-                matches!(payload.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Str)
+                matches!(
+                    payload.as_ref(),
+                    thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
+                )
             }
             _ => false,
         }
@@ -1678,18 +1784,15 @@ fn jit_numeric_export(
             return None;
         };
         let prefix = match ty {
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => 's',
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => 'b',
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-                if matches!(
-                    element.as_ref(),
-                    thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
-                ) =>
-            {
-                'r'
-            }
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(_)) => return None,
-            _ => 'a',
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "s",
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "b",
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => match element.as_ref() {
+                thaw_hir::HirType::F64 => "rn",
+                thaw_hir::HirType::Bool => "rb",
+                thaw_hir::HirType::Str => "rs",
+                _ => return None,
+            },
+            _ => "a",
         };
         if parameters
             .insert(parameter.id.sym.to_string(), format!("{prefix}{index}"))
@@ -1932,6 +2035,45 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if matches!(token.as_str(), "rnat" | "rbat" | "rsat") {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(match token.as_str() {
+                "rnat" => JitKind::Number,
+                "rbat" => JitKind::Boolean,
+                "rsat" => JitKind::String,
+                _ => unreachable!(),
+            });
+        } else if matches!(
+            token.as_str(),
+            "rnincludes"
+                | "rbincludes"
+                | "rsincludes"
+                | "rnindexof"
+                | "rbindexof"
+                | "rsindexof"
+        ) {
+            if stack.pop()? != JitKind::Number {
+                return None;
+            }
+            let needle = stack.pop()?;
+            if stack.pop()? != JitKind::Array
+                || needle
+                    != match &token[..2] {
+                        "rn" => JitKind::Number,
+                        "rb" => JitKind::Boolean,
+                        "rs" => JitKind::String,
+                        _ => return None,
+                    }
+            {
+                return None;
+            }
+            stack.push(if token.ends_with("includes") {
+                JitKind::Boolean
+            } else {
+                JitKind::Number
+            });
         } else if matches!(
             token.as_str(),
             "acos"
@@ -1974,7 +2116,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 JitKind::String
             } else if token.starts_with('b') {
                 JitKind::Boolean
-            } else if token.starts_with('r') {
+            } else if token.starts_with("rn")
+                || token.starts_with("rb")
+                || token.starts_with("rs")
+            {
                 JitKind::Array
             } else {
                 JitKind::Number
@@ -2048,6 +2193,11 @@ fn jit_numeric_declaration(
             if **payload == thaw_hir::HirType::F64 =>
         {
             "number | undefined"
+        }
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if **payload == thaw_hir::HirType::Bool =>
+        {
+            "boolean | undefined"
         }
         _ => "number",
     };

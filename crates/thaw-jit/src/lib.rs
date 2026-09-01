@@ -33,6 +33,7 @@ pub type StringToNumber = unsafe extern "C" fn(*const c_char) -> f64;
 pub type ParseFloat = unsafe extern "C" fn(*const c_char) -> f64;
 pub type ParseInt = unsafe extern "C" fn(*const c_char, f64) -> f64;
 pub type NumberFormat = unsafe extern "C" fn(u8, f64, f64) -> *const c_char;
+pub type ArraySearch = unsafe extern "C" fn(u8, *const u8, f64, f64) -> f64;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -41,6 +42,7 @@ thread_local! {
     static PARSE_FLOAT: Cell<Option<ParseFloat>> = const { Cell::new(None) };
     static PARSE_INT: Cell<Option<ParseInt>> = const { Cell::new(None) };
     static NUMBER_FORMAT: Cell<Option<NumberFormat>> = const { Cell::new(None) };
+    static ARRAY_SEARCH: Cell<Option<ArraySearch>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -235,17 +237,89 @@ extern "C" fn string_length(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn array_length(value: f64) -> f64 {
+unsafe fn array_data(value: f64) -> Option<(*const u8, usize)> {
     let handle = value.to_bits() as usize as *const *const u8;
     if handle.is_null() {
-        return 0.0;
+        return None;
     }
     let data = unsafe { handle.read() };
     if data.is_null() {
+        return None;
+    }
+    Some((data, unsafe { data.cast::<i64>().read() }.max(0) as usize))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_length(value: f64) -> f64 {
+    unsafe { array_data(value) }.map_or(0.0, |(_, length)| length as f64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn array_at(value: f64, index: f64, kind: u8) -> f64 {
+    let Some((data, length)) = (unsafe { array_data(value) }) else {
+        CALL_PRESENT.with(|present| present.set(false));
+        return 0.0;
+    };
+    let index = if index.is_nan() { 0.0 } else { index.trunc() };
+    let index = if index < 0.0 {
+        length as f64 + index
+    } else {
+        index
+    };
+    if !index.is_finite() || index < 0.0 || index >= length as f64 {
+        CALL_PRESENT.with(|present| present.set(false));
         return 0.0;
     }
-    unsafe { data.cast::<i64>().read() }.max(0) as f64
+    let slot = unsafe { data.add(8 + index as usize * 8) };
+    match kind {
+        0 => unsafe { slot.cast::<f64>().read_unaligned() },
+        1 => f64::from(unsafe { slot.read() } != 0),
+        2 => f64::from_bits(unsafe { slot.cast::<usize>().read_unaligned() } as u64),
+        _ => 0.0,
+    }
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_at(value: f64, index: f64) -> f64 {
+    unsafe { array_at(value, index, 0) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn bool_array_at(value: f64, index: f64) -> f64 {
+    unsafe { array_at(value, index, 1) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_array_at(value: f64, index: f64) -> f64 {
+    unsafe { array_at(value, index, 2) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_search(operation: u8, value: f64, needle: f64, from_index: f64) -> f64 {
+    let (Some(search), Some((data, _))) =
+        (ARRAY_SEARCH.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    unsafe { search(operation, data, needle, from_index) }
+}
+
+macro_rules! array_search_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(value: f64, needle: f64, from_index: f64) -> f64 {
+            array_search($operation, value, needle, from_index)
+        }
+    };
+}
+
+array_search_fn!(number_array_index_of, 0);
+array_search_fn!(number_array_includes, 1);
+array_search_fn!(string_array_index_of, 2);
+array_search_fn!(string_array_includes, 3);
+array_search_fn!(bool_array_index_of, 4);
+array_search_fn!(bool_array_includes, 5);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_truthy(value: f64) -> f64 {
@@ -1140,6 +1214,15 @@ enum NumericValue {
     StringLastIndexOfAt,
     StringLength,
     ArrayLength,
+    NumberArrayAt,
+    BoolArrayAt,
+    StringArrayAt,
+    NumberArrayIncludes,
+    BoolArrayIncludes,
+    StringArrayIncludes,
+    NumberArrayIndexOf,
+    BoolArrayIndexOf,
+    StringArrayIndexOf,
     StringTruthy,
     StringPadEnd,
     StringPadStart,
@@ -1232,6 +1315,15 @@ impl NumericProgram {
                     "lastindexof2" => Some(NumericValue::StringLastIndexOfAt),
                     "strlen" => Some(NumericValue::StringLength),
                     "arraylen" => Some(NumericValue::ArrayLength),
+                    "rnat" => Some(NumericValue::NumberArrayAt),
+                    "rbat" => Some(NumericValue::BoolArrayAt),
+                    "rsat" => Some(NumericValue::StringArrayAt),
+                    "rnincludes" => Some(NumericValue::NumberArrayIncludes),
+                    "rbincludes" => Some(NumericValue::BoolArrayIncludes),
+                    "rsincludes" => Some(NumericValue::StringArrayIncludes),
+                    "rnindexof" => Some(NumericValue::NumberArrayIndexOf),
+                    "rbindexof" => Some(NumericValue::BoolArrayIndexOf),
+                    "rsindexof" => Some(NumericValue::StringArrayIndexOf),
                     "strbool" => Some(NumericValue::StringTruthy),
                     "padend" => Some(NumericValue::StringPadEnd),
                     "padstart" => Some(NumericValue::StringPadStart),
@@ -1287,7 +1379,9 @@ impl NumericProgram {
                         .strip_prefix('a')
                         .or_else(|| value.strip_prefix('b'))
                         .or_else(|| value.strip_prefix('s'))
-                        .or_else(|| value.strip_prefix('r'))
+                        .or_else(|| value.strip_prefix("rn"))
+                        .or_else(|| value.strip_prefix("rb"))
+                        .or_else(|| value.strip_prefix("rs"))
                         .and_then(|index| index.parse::<u8>().ok())
                         .filter(|index| *index < 16)
                         .map(NumericValue::Argument)
@@ -1611,6 +1705,42 @@ impl NumericProgram {
                     }
                     emit_unary_call(&mut code, array_length as *const () as u64, depth - 1);
                 }
+                NumericValue::NumberArrayAt
+                | NumericValue::BoolArrayAt
+                | NumericValue::StringArrayAt => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArrayAt => number_array_at,
+                        NumericValue::BoolArrayAt => bool_array_at,
+                        NumericValue::StringArrayAt => string_array_at,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayIncludes
+                | NumericValue::BoolArrayIncludes
+                | NumericValue::StringArrayIncludes
+                | NumericValue::NumberArrayIndexOf
+                | NumericValue::BoolArrayIndexOf
+                | NumericValue::StringArrayIndexOf => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArrayIncludes => number_array_includes,
+                        NumericValue::BoolArrayIncludes => bool_array_includes,
+                        NumericValue::StringArrayIncludes => string_array_includes,
+                        NumericValue::NumberArrayIndexOf => number_array_index_of,
+                        NumericValue::BoolArrayIndexOf => bool_array_index_of,
+                        NumericValue::StringArrayIndexOf => string_array_index_of,
+                        _ => unreachable!(),
+                    };
+                    emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                    depth -= 2;
+                }
                 NumericValue::StringTruthy => {
                     if depth == 0 {
                         return None;
@@ -1916,6 +2046,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     parse_float: Option<ParseFloat>,
     parse_int: Option<ParseInt>,
     number_format: Option<NumberFormat>,
+    array_search: Option<ArraySearch>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -1949,6 +2080,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_parse_float = PARSE_FLOAT.with(|parser| parser.replace(parse_float));
     let previous_parse_int = PARSE_INT.with(|parser| parser.replace(parse_int));
     let previous_number_format = NUMBER_FORMAT.with(|format| format.replace(number_format));
+    let previous_array_search = ARRAY_SEARCH.with(|search| search.replace(array_search));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let value = function(args);
@@ -1960,6 +2092,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     PARSE_FLOAT.with(|parser| parser.set(previous_parse_float));
     PARSE_INT.with(|parser| parser.set(previous_parse_int));
     NUMBER_FORMAT.with(|format| format.set(previous_number_format));
+    ARRAY_SEARCH.with(|search| search.set(previous_array_search));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -2022,6 +2155,19 @@ mod tests {
             }
             output.cast()
         }
+        unsafe extern "C" fn search_array(
+            operation: u8,
+            array: *const u8,
+            needle: f64,
+            from_index: f64,
+        ) -> f64 {
+            assert!(!array.is_null());
+            match (operation, needle, from_index) {
+                (0, 20.0, 0.0) => 1.0,
+                (1, 20.0, 0.0) => 1.0,
+                _ => -1.0,
+            }
+        }
         unsafe {
             thaw_jit_call_f64(
                 symbol.as_ptr(),
@@ -2033,6 +2179,7 @@ mod tests {
                 Some(parse_float),
                 Some(parse_int),
                 Some(format_method),
+                Some(search_array),
             )
         }
     }
@@ -2454,6 +2601,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         assert!(!missing_allocator.error.is_null());
@@ -2565,13 +2713,38 @@ mod tests {
         unsafe { libc::free(result.cast()) };
         let invalid = CString::new("expr:a0,a1,tofixed:invalid-fixed").unwrap();
         assert!(!call(&invalid, &[1.0, 101.0]).error.is_null());
-        let array = [3_i64, 10, 20, 30];
+        let array = [
+            3_u64,
+            10.0f64.to_bits(),
+            20.0f64.to_bits(),
+            30.0f64.to_bits(),
+        ];
         let data = array.as_ptr().cast::<u8>();
         let handle = &data as *const *const u8;
-        let symbol = CString::new("expr:r0,arraylen:array-length").unwrap();
+        let symbol = CString::new("expr:rn0,arraylen:array-length").unwrap();
         assert_eq!(
             call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
             3.0
+        );
+        for (operation, expected) in [("rnindexof", 1.0), ("rnincludes", 1.0)] {
+            let symbol = CString::new(format!(
+                "expr:rn0,c4034000000000000,c0000000000000000,{operation}:{operation}"
+            ))
+            .unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+                expected
+            );
+        }
+        let symbol = CString::new("expr:rn0,c4000000000000000,rnat:array-at").unwrap();
+        assert_eq!(
+            call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+            30.0
+        );
+        let symbol = CString::new("expr:rn0,c4010000000000000,rnat:array-at-missing").unwrap();
+        assert_eq!(
+            call(&symbol, &[f64::from_bits(handle as usize as u64)]).error,
+            ABSENT_STATUS
         );
     }
 }
