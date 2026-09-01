@@ -174,12 +174,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
-            "function add(left, right) { return add(left, right); } module.exports.add = add;",
+            "function add(left, right) { return right <= 0 ? left : add(left + 1, right - 1); } module.exports.add = add;",
             "add",
             false,
             &function,
         ),
-        None
+        Some(
+            "expr:a1,c0000000000000000,<=,if,a0,else,a0,c3ff0000000000000,+,a1,c3ff0000000000000,-,recur2,end"
+                .into()
+        )
     );
     assert_eq!(
         jit_numeric_export(

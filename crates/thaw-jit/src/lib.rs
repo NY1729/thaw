@@ -3347,6 +3347,7 @@ enum NumericValue {
     PerformanceNow,
     ProcessPid,
     ProcessPpid,
+    Recur(u8),
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -3883,6 +3884,13 @@ impl NumericProgram {
                                 NumericReduceOp::Minimum | NumericReduceOp::Maximum
                             ))
                             .then_some(NumericValue::NumberArrayMap(operation, reverse))
+                        })
+                        .or_else(|| {
+                            value
+                                .strip_prefix("recur")
+                                .and_then(|arity| arity.parse::<u8>().ok())
+                                .filter(|arity| (1..=8).contains(arity))
+                                .map(NumericValue::Recur)
                         })
                         .or_else(|| {
                             value
@@ -5279,6 +5287,14 @@ impl NumericProgram {
                     code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (destination << 3)]);
                     depth -= 1;
                 }
+                NumericValue::Recur(arity) => {
+                    if depth < *arity {
+                        return None;
+                    }
+                    let base = depth - arity;
+                    emit_recursive_call(&mut code, base, *arity)?;
+                    depth = base + 1;
+                }
             }
         }
         (depth == 1 && branches.is_empty()).then(|| {
@@ -5302,6 +5318,47 @@ impl NumericProgram {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn emit_move(code: &mut Vec<u8>, destination: u8, source: u8) {
     code.extend_from_slice(&[0x66, 0x0f, 0x28, 0xc0 | (destination << 3) | source]);
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_recursive_call(code: &mut Vec<u8>, base: u8, arity: u8) -> Option<()> {
+    const FRAME_SIZE: u32 = 136;
+    code.extend_from_slice(&[0x48, 0x81, 0xec]);
+    code.extend_from_slice(&FRAME_SIZE.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x89, 0xbc, 0x24, 0x80, 0, 0, 0]);
+    for register in 0..base {
+        code.extend_from_slice(&[
+            0xf2,
+            0x0f,
+            0x11,
+            0x44 | (register << 3),
+            0x24,
+            64 + register * 8,
+        ]);
+    }
+    for index in 0..arity {
+        let register = base + index;
+        code.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x44 | (register << 3), 0x24, index * 8]);
+    }
+    code.extend_from_slice(&[0x48, 0x89, 0xe7]);
+    code.push(0xe8);
+    let next = code.len().checked_add(4)?;
+    code.extend_from_slice(&i32::try_from(next).ok()?.wrapping_neg().to_le_bytes());
+    emit_move(code, base, 0);
+    for register in 0..base {
+        code.extend_from_slice(&[
+            0xf2,
+            0x0f,
+            0x10,
+            0x44 | (register << 3),
+            0x24,
+            64 + register * 8,
+        ]);
+    }
+    code.extend_from_slice(&[0x48, 0x8b, 0xbc, 0x24, 0x80, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0x81, 0xc4]);
+    code.extend_from_slice(&FRAME_SIZE.to_le_bytes());
+    Some(())
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -6061,6 +6118,23 @@ mod tests {
         let result = call(&absent_coalesce, &[]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 1.0);
+    }
+
+    #[test]
+    fn recursively_calls_the_compiled_expression() {
+        let factorial = CString::new(
+            "expr:a0,c3ff0000000000000,<=,if,c3ff0000000000000,else,a0,a0,c3ff0000000000000,-,recur1,*,end:factorial",
+        )
+        .unwrap();
+        let result = call(&factorial, &[6.0]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 720.0);
+
+        let gcd = CString::new("expr:a1,c0000000000000000,==,if,a0,else,a1,a0,a1,%,recur2,end:gcd")
+            .unwrap();
+        let result = call(&gcd, &[1071.0, 462.0]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 21.0);
     }
 
     #[test]
