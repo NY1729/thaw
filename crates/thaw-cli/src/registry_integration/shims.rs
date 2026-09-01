@@ -1388,14 +1388,41 @@ fn jit_numeric_export(
                     ) {
                         output.push(format!("{prefix}mapto{target}"));
                     } else if prefix != "rn" {
-                        let operation = primitive_unary_map(
+                        if let Some(operation) = primitive_unary_map(
                             callback.expr.as_ref(),
                             parameters,
                             locals,
                             context,
                             prefix == "rb",
-                        )?;
-                        output.push(format!("{prefix}map{operation}"));
+                        ) {
+                            output.push(format!("{prefix}map{operation}"));
+                        } else {
+                            let element_prefix = if prefix == "rb" { "b" } else { "s" };
+                            let (callback, kind, captures) = encode_numeric_jit_callback(
+                                callback.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                3,
+                                Some(2),
+                                (element_prefix, prefix),
+                            )?;
+                            let target = match kind {
+                                JitKind::Number => "n",
+                                JitKind::Boolean => "b",
+                                JitKind::String => "s",
+                                JitKind::Array => return None,
+                            };
+                            encode_string(&callback.join(","), output)?;
+                            let captured = !captures.is_empty();
+                            if captured {
+                                append_jit_captures(captures, output);
+                            }
+                            output.push(format!(
+                                "{prefix}mapjit{target}{}",
+                                if captured { "c" } else { "" }
+                            ));
+                        }
                     } else if let Some(operation) = encode_numeric_conditional_map(
                         callback.expr.as_ref(),
                         parameters,
@@ -4540,8 +4567,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if matches!(token.as_str(), "rnmapjit" | "rnmapjitc") {
-            if token == "rnmapjitc" && stack.pop()? != JitKind::Array {
+        } else if matches!(token.as_str(), "rnmapjit" | "rnmapjitc")
+            || ["rn", "rb", "rs"].iter().any(|prefix| {
+                token.strip_prefix(prefix).is_some_and(|suffix| {
+                    matches!(suffix, "mapjitn" | "mapjitb" | "mapjits" | "mapjitnc" | "mapjitbc" | "mapjitsc")
+                })
+            })
+        {
+            if token.ends_with('c') && stack.pop()? != JitKind::Array {
                 return None;
             }
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Array {
