@@ -17,6 +17,7 @@ struct ResolvedPackage {
 enum JitExport {
     Value(String),
     Object(Vec<(String, JitExport)>),
+    Dictionary(Vec<(String, JitExport)>),
     Tuple(Vec<JitExport>),
     Conditional(String, Box<JitExport>, Box<JitExport>),
     WithLocals(Vec<JitLocal>, Box<JitExport>),
@@ -113,6 +114,10 @@ fn jit_export(
         match ty {
             thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => true,
             thaw_hir::HirType::Array(element) => matches!(
+                element.as_ref(),
+                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
+            ),
+            thaw_hir::HirType::Dictionary(element) => matches!(
                 element.as_ref(),
                 thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
             ),
@@ -369,6 +374,44 @@ fn jit_export(
             .map(JitExport::Object)
     }
 
+    fn encode_dictionary_return(
+        object: &thaw_parser::ast::ObjectLit,
+        element: &thaw_hir::HirType,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<JitExport> {
+        let mut names = std::collections::HashSet::new();
+        object
+            .props
+            .iter()
+            .map(|property| {
+                let (name, expression) = object_property(property)?;
+                if !names.insert(name.clone()) {
+                    return None;
+                }
+                let value = match expression {
+                    ObjectReturnValue::Expression(expression) => encode_return_expression(
+                        expression, element, parameters, locals, context,
+                    ),
+                    ObjectReturnValue::Shorthand(identifier) => {
+                        let encoded = if let Some(value) = locals.get(identifier.sym.as_ref()) {
+                            value.clone()
+                        } else {
+                            vec![parameters.get(identifier.sym.as_ref())?.clone()]
+                        };
+                        Some(JitExport::Value(validated_jit_expression(
+                            encoded,
+                            jit_return_kind(element)?,
+                        )?))
+                    }
+                }?;
+                Some((name, value))
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(JitExport::Dictionary)
+    }
+
     fn jit_return_kind(ty: &thaw_hir::HirType) -> Option<JitKind> {
         match ty {
             thaw_hir::HirType::F64 => Some(JitKind::Number),
@@ -383,6 +426,16 @@ fn jit_export(
                 ) =>
             {
                 Some(JitKind::Array)
+            }
+            thaw_hir::HirType::Dictionary(element)
+                if matches!(
+                    element.as_ref(),
+                    thaw_hir::HirType::F64
+                        | thaw_hir::HirType::Bool
+                        | thaw_hir::HirType::Str
+                ) =>
+            {
+                Some(JitKind::Dictionary)
             }
             _ => None,
         }
@@ -404,7 +457,12 @@ fn jit_export(
                 context,
             );
         }
-        if matches!(ty, thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)) {
+        if matches!(
+            ty,
+            thaw_hir::HirType::Object(_)
+                | thaw_hir::HirType::Dictionary(_)
+                | thaw_hir::HirType::Tuple(_)
+        ) {
             let Expr::Cond(conditional) = expression else {
                 return encode_nonconditional_return_expression(
                     expression,
@@ -460,6 +518,18 @@ fn jit_export(
                 locals,
                 context,
             ),
+            thaw_hir::HirType::Dictionary(element) => {
+                if let Some(object) = object_literal(expression) {
+                    encode_dictionary_return(object, element, parameters, locals, context)
+                } else {
+                    let mut encoded = Vec::new();
+                    encode_expression(expression, parameters, locals, context, &mut encoded)?;
+                    Some(JitExport::Value(validated_jit_expression(
+                        encoded,
+                        JitKind::Dictionary,
+                    )?))
+                }
+            }
             thaw_hir::HirType::Tuple(types) => {
                 let expression = match expression {
                     Expr::Array(array) => array,
@@ -4922,6 +4992,10 @@ fn jit_export(
                 element.as_ref(),
                 thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
             ),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Dictionary(element)) => matches!(
+                element.as_ref(),
+                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
+            ),
             thaw_bridge::DtsType::Native(
                 ty @ (thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)),
             ) => jit_result_supported(ty),
@@ -5183,7 +5257,9 @@ fn jit_export(
         return None;
     }
     if let thaw_bridge::DtsType::Native(
-        ty @ (thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)),
+        ty @ (thaw_hir::HirType::Object(_)
+        | thaw_hir::HirType::Dictionary(_)
+        | thaw_hir::HirType::Tuple(_)),
     ) = &function.ret
     {
         let mut jit_locals = Vec::new();
@@ -5359,6 +5435,8 @@ fn jit_export(
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => JitKind::Boolean,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
             if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str) => JitKind::Array,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Dictionary(element))
+            if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str) => JitKind::Dictionary,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
             if **payload == thaw_hir::HirType::Str => JitKind::String,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
@@ -5390,13 +5468,23 @@ fn jit_numeric_export(
                 result.push("?".into());
                 Some(result)
             }
-            JitExport::Object(_) | JitExport::Tuple(_) | JitExport::WithLocals(_, _) => None,
+            JitExport::Object(_)
+            | JitExport::Dictionary(_)
+            | JitExport::Tuple(_)
+            | JitExport::WithLocals(_, _) => None,
         }
     }
-    Some(format!(
-        "expr:{}",
-        tokens(jit_export(source, export_name, allow_default, function)?)?.join(",")
-    ))
+    let export = jit_export(source, export_name, allow_default, function)?;
+    if matches!(
+        export,
+        JitExport::Object(_)
+            | JitExport::Dictionary(_)
+            | JitExport::Tuple(_)
+            | JitExport::WithLocals(_, _)
+    ) {
+        return Some("aggregate".into());
+    }
+    Some(format!("expr:{}", tokens(export)?.join(",")))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -6411,6 +6499,29 @@ fn jit_numeric_declaration(
                     .collect::<Vec<_>>();
                 format!("{{ {} }}", values.join(", "))
             }
+            JitExport::Dictionary(fields) => {
+                let thaw_hir::HirType::Dictionary(element) = ty else {
+                    unreachable!()
+                };
+                let values = fields
+                    .iter()
+                    .map(|(name, value)| {
+                        path.push(name.clone());
+                        let expression = emit_aggregate_call(
+                            runtime_name,
+                            value,
+                            element,
+                            path,
+                            direct_params,
+                            arguments,
+                            declaration,
+                        );
+                        path.pop();
+                        format!("{}: {expression}", serde_json::to_string(name).unwrap())
+                    })
+                    .collect::<Vec<_>>();
+                format!("{{ {} }}", values.join(", "))
+            }
             JitExport::Tuple(values) => {
                 let thaw_hir::HirType::Tuple(types) = ty else {
                     unreachable!()
@@ -6482,6 +6593,7 @@ fn jit_numeric_declaration(
         .join(", ");
     let (jit_locals, aggregate) = match operation {
         JitExport::Object(_)
+        | JitExport::Dictionary(_)
         | JitExport::Tuple(_)
         | JitExport::Conditional(_, _, _) => {
             (&[][..], operation)
@@ -6489,12 +6601,15 @@ fn jit_numeric_declaration(
         JitExport::WithLocals(locals, aggregate) => (locals.as_slice(), aggregate.as_ref()),
         JitExport::Value(_) => (&[][..], operation),
     };
-    if matches!(
-        aggregate,
-        JitExport::Object(_)
+    if !jit_locals.is_empty()
+        || matches!(
+            aggregate,
+            JitExport::Object(_)
+            | JitExport::Dictionary(_)
             | JitExport::Tuple(_)
             | JitExport::Conditional(_, _, _)
-    ) {
+        )
+    {
         let thaw_bridge::DtsType::Native(return_type) = &function.ret else {
             unreachable!()
         };
