@@ -614,6 +614,8 @@ fn jit_numeric_export(
                 | "with"
                 | "reduce"
                 | "reduceRight"
+                | "some"
+                | "every"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -1304,6 +1306,21 @@ fn jit_numeric_export(
                         if method == "reduceRight" { "right" } else { "" },
                         if initial.is_some() { "" } else { "0" }
                     ));
+                } else if matches!(method, "some" | "every") {
+                    let [callback] = call.args.as_slice() else {
+                        return None;
+                    };
+                    if prefix != "rn" {
+                        return None;
+                    }
+                    let operation = encode_numeric_quantifier_operand(
+                        callback.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        output,
+                    )?;
+                    output.push(format!("rn{method}{operation}"));
                 } else if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
                         [] => encode_string(",", output)?,
@@ -2540,6 +2557,75 @@ fn jit_numeric_export(
         }
     }
 
+    fn encode_numeric_quantifier_operand(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<&'static str> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(value)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        let Expr::Bin(binary) = expression else {
+            return None;
+        };
+        let (operand, reverse) = if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == value.id.sym)
+        {
+            (binary.right.as_ref(), false)
+        } else if matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym) {
+            (binary.left.as_ref(), true)
+        } else {
+            return None;
+        };
+        let operation = match (binary.op, reverse) {
+            (BinaryOp::Lt, false) | (BinaryOp::Gt, true) => "lt",
+            (BinaryOp::LtEq, false) | (BinaryOp::GtEq, true) => "lte",
+            (BinaryOp::Gt, false) | (BinaryOp::Lt, true) => "gt",
+            (BinaryOp::GtEq, false) | (BinaryOp::LtEq, true) => "gte",
+            (BinaryOp::EqEq | BinaryOp::EqEqEq, _) => "eq",
+            (BinaryOp::NotEq | BinaryOp::NotEqEq, _) => "ne",
+            _ => return None,
+        };
+        let mut encoded = Vec::new();
+        encode_expression(
+            operand,
+            outer_parameters,
+            outer_locals,
+            context,
+            &mut encoded,
+        )?;
+        if encoded
+            .iter()
+            .any(|token| matches!(token.as_str(), "random" | "datenow" | "performancenow"))
+        {
+            return None;
+        }
+        if matches!(binary.op, BinaryOp::EqEqEq | BinaryOp::NotEqEq)
+            && jit_expression_kind(&encoded)?.0 != JitKind::Number
+        {
+            return None;
+        }
+        append_number(encoded, output)?;
+        Some(operation)
+    }
+
     fn encode_helper_call(
         call: &CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -3298,6 +3384,15 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token
+            .strip_prefix("rnsome")
+            .or_else(|| token.strip_prefix("rnevery"))
+            .is_some_and(|operation| matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne"))
+        {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if token == "arrayvalue" {
             if stack.pop()? != JitKind::Array {
                 return None;
