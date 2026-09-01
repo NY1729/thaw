@@ -35,7 +35,12 @@ fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
         HirType::Object(fields) => fields.iter().try_fold(0usize, |slots, (_, ty)| {
             jit_parameter_slots(ty).map(|count| slots + count)
         }),
-        HirType::Optional(payload) if !matches!(payload.as_ref(), HirType::Object(_)) => {
+        HirType::Tuple(elements) => elements.iter().try_fold(0usize, |slots, ty| {
+            jit_parameter_slots(ty).map(|count| slots + count)
+        }),
+        HirType::Optional(payload)
+            if !matches!(payload.as_ref(), HirType::Object(_) | HirType::Tuple(_)) =>
+        {
             jit_parameter_slots(payload).map(|_| 2)
         }
         _ => None,
@@ -75,6 +80,45 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 self.compile_jit_argument_slots(field_value, field_type, &field_path, output)?;
                 offset += object_field_storage_bytes(field_type);
+            }
+            return Ok(());
+        }
+        if let HirType::Tuple(elements) = ty {
+            let tuple = self.compile_array_data(value.into_pointer_value())?;
+            let stride = elements
+                .iter()
+                .map(array_element_storage_bytes)
+                .max()
+                .unwrap_or(ARRAY_ELEM_BYTES);
+            for (index, element_type) in elements.iter().enumerate() {
+                let element_path = format!("{path}_{index}");
+                let pointer = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            tuple,
+                            &[self.context.i64_type().const_int(
+                                ARRAY_HEADER_BYTES + stride * index as u64,
+                                false,
+                            )],
+                            &element_path,
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                let element = self
+                    .builder
+                    .build_load(
+                        self.basic_type(element_type)?,
+                        pointer,
+                        &format!("{element_path}_value"),
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.compile_jit_argument_slots(
+                    element,
+                    element_type,
+                    &element_path,
+                    output,
+                )?;
             }
             return Ok(());
         }
@@ -1062,7 +1106,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .iter()
                 .map(jit_parameter_slots)
                 .collect::<Option<Vec<_>>>()
-                .ok_or("JIT calls require primitive, primitive-array, or flat primitive-object arguments")?
+                .ok_or("JIT calls require primitive, primitive-array, object, or tuple arguments")?
                 .into_iter()
                 .sum::<usize>();
             if argument_slots > 16
