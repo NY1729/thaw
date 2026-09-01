@@ -48,6 +48,15 @@ fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     }
 }
 
+fn jit_array_result_element_supported(ty: &HirType) -> bool {
+    matches!(ty, HirType::F64 | HirType::Bool | HirType::Str)
+        || matches!(
+            ty,
+            HirType::Tuple(elements)
+                if matches!(elements.as_slice(), [HirType::Str, HirType::F64 | HirType::Bool | HirType::Str])
+        )
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_jit_argument_slots(
         &mut self,
@@ -1095,12 +1104,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 ty @ (HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 ty @ HirType::Array(element)
-                    if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
+                    if jit_array_result_element_supported(element) => ty,
                 ty @ HirType::Dictionary(element)
                     if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 _ => {
                     return Err(
-                        "JIT calls currently return number, boolean, string, string array, or optional primitive"
+                        "JIT calls currently return primitives, supported arrays, dictionaries, or optional primitives"
                             .into(),
                     )
                 }
