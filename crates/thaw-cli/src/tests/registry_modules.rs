@@ -218,6 +218,49 @@ fn typed_typeof_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn default_parameters_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-defaults-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-defaults");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function scale(value?: number, factor?: number): number;\nexport declare function defaultText(value?: string): string;\nexport declare function defaultFlag(value?: boolean): boolean;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.scale = (value = 2, factor = value + 1) => value * factor;\nmodule.exports.defaultText = (value = 'x') => value;\nmodule.exports.defaultFlag = (value = true) => value;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { scale, defaultText, defaultFlag } from 'jit-defaults';\nfunction main(): void { console.log(scale()); console.log(scale(4)); console.log(scale(4, 5)); console.log(scale(undefined, 5)); console.log(defaultText()); console.log(defaultText('y')); console.log(defaultText(undefined)); console.log(defaultFlag()); console.log(defaultFlag(false)); console.log(defaultFlag(undefined)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "6\n20\n20\n10\nx\ny\nx\ntrue\nfalse\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_string_coercion_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-coercion-{}",
