@@ -995,6 +995,34 @@ fn jit_export(
         }
     }
 
+    fn object_assign_call<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<&'a [ExprOrSpread]> {
+        if parameters.contains_key("Object")
+            || locals.contains_key("Object")
+            || helpers.contains_key("Object")
+            || call.args.is_empty()
+            || call.args.iter().any(|argument| argument.spread.is_some())
+        {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return None;
+        };
+        matches!(
+            (member.obj.as_ref(), &member.prop),
+            (Expr::Ident(object), MemberProp::Ident(property))
+                if object.sym == "Object" && property.sym == "assign"
+        )
+        .then_some(call.args.as_slice())
+    }
+
     fn numeric_constant(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -2337,6 +2365,41 @@ fn jit_export(
                         output.push(operation.into());
                     }
                     _ => return None,
+                }
+            }
+            Expr::Call(call)
+                if object_assign_call(call, parameters, locals, context.helpers).is_some() =>
+            {
+                let arguments = object_assign_call(call, parameters, locals, context.helpers)?;
+                let mut target = Vec::new();
+                encode_expression(
+                    arguments.first()?.expr.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut target,
+                )?;
+                if jit_expression_kind(&target)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                let prefix = dictionary_prefix(&target)?;
+                output.extend(target);
+                for source in &arguments[1..] {
+                    let mut encoded = Vec::new();
+                    encode_expression(
+                        source.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut encoded,
+                    )?;
+                    if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary
+                        || dictionary_prefix(&encoded)? != prefix
+                    {
+                        return None;
+                    }
+                    output.extend(encoded);
+                    output.push("dassign".into());
                 }
             }
             Expr::Call(call)
@@ -6481,6 +6544,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
+        } else if token == "dassign" {
+            if stack.pop()? != JitKind::Dictionary || stack.pop()? != JitKind::Dictionary {
+                return None;
+            }
+            stack.push(JitKind::Dictionary);
         } else if matches!(
             token.as_str(),
             "dkeys"
