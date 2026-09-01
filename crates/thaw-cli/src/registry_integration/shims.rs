@@ -393,7 +393,10 @@ fn jit_numeric_export(
         {
             return None;
         }
-        matches!(property.sym.as_ref(), "at" | "includes" | "indexOf")
+        matches!(
+            property.sym.as_ref(),
+            "at" | "includes" | "indexOf" | "lastIndexOf"
+        )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
 
@@ -780,14 +783,27 @@ fn jit_numeric_export(
                             context,
                             output,
                         )?,
-                        None => output.push(format!("c{:016x}", 0.0f64.to_bits())),
+                        None => output.push(format!(
+                            "c{:016x}",
+                            if method == "lastIndexOf" {
+                                f64::INFINITY
+                            } else {
+                                0.0
+                            }
+                            .to_bits()
+                        )),
                     }
                     if call.args.len() > 2 {
                         return None;
                     }
                     output.push(format!(
                         "{prefix}{}",
-                        if method == "includes" { "includes" } else { "indexof" }
+                        match method {
+                            "includes" => "includes",
+                            "indexOf" => "indexof",
+                            "lastIndexOf" => "lastindexof",
+                            _ => return None,
+                        }
                     ));
                 }
             }
@@ -2053,6 +2069,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "rnindexof"
                 | "rbindexof"
                 | "rsindexof"
+                | "rnlastindexof"
+                | "rblastindexof"
+                | "rslastindexof"
         ) {
             if stack.pop()? != JitKind::Number {
                 return None;
