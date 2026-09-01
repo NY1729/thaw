@@ -2124,6 +2124,11 @@ branch and skips both the method and its argument expressions. Subsequent
 fixed fields, tuple indexes, primitive-array properties, and primitive methods
 remain in that branch, so chains such as `value?.meta.count` and
 `value?.label.toUpperCase()` do not re-enter QuickJS.
+Optional-producing operations propagate their result presence inside the JIT
+as well. `pop`, `shift`, string/array `at`, computed array reads, code-point
+reads, and value-returning `find` variants can feed lazy `??` chains; present
+falsey values are retained, while empty or out-of-range results evaluate only
+the selected fallback.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
