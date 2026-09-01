@@ -34,6 +34,7 @@ pub type ParseFloat = unsafe extern "C" fn(*const c_char) -> f64;
 pub type ParseInt = unsafe extern "C" fn(*const c_char, f64) -> f64;
 pub type NumberFormat = unsafe extern "C" fn(u8, f64, f64) -> *const c_char;
 pub type ArraySearch = unsafe extern "C" fn(u8, *const u8, f64, f64) -> f64;
+pub type ArrayFormat = unsafe extern "C" fn(u8, *const u8, *const c_char) -> *const c_char;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -43,6 +44,7 @@ thread_local! {
     static PARSE_INT: Cell<Option<ParseInt>> = const { Cell::new(None) };
     static NUMBER_FORMAT: Cell<Option<NumberFormat>> = const { Cell::new(None) };
     static ARRAY_SEARCH: Cell<Option<ArraySearch>> = const { Cell::new(None) };
+    static ARRAY_FORMAT: Cell<Option<ArrayFormat>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -304,6 +306,42 @@ fn array_search(operation: u8, value: f64, needle: f64, from_index: f64) -> f64 
     };
     unsafe { search(operation, data, needle, from_index) }
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_format(operation: u8, value: f64, separator: f64) -> f64 {
+    let (Some(format), Some((data, _))) =
+        (ARRAY_FORMAT.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let result = unsafe {
+        format(
+            operation,
+            data,
+            separator.to_bits() as usize as *const c_char,
+        )
+    };
+    if result.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        f64::from_bits(result as usize as u64)
+    }
+}
+
+macro_rules! array_format_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(value: f64, separator: f64) -> f64 {
+            array_format($operation, value, separator)
+        }
+    };
+}
+
+array_format_fn!(number_array_join, 0);
+array_format_fn!(string_array_join, 1);
+array_format_fn!(bool_array_join, 2);
 
 macro_rules! array_search_fn {
     ($name:ident, $operation:expr) => {
@@ -1229,6 +1267,9 @@ enum NumericValue {
     NumberArrayLastIndexOf,
     BoolArrayLastIndexOf,
     StringArrayLastIndexOf,
+    NumberArrayJoin,
+    BoolArrayJoin,
+    StringArrayJoin,
     StringTruthy,
     StringPadEnd,
     StringPadStart,
@@ -1333,6 +1374,9 @@ impl NumericProgram {
                     "rnlastindexof" => Some(NumericValue::NumberArrayLastIndexOf),
                     "rblastindexof" => Some(NumericValue::BoolArrayLastIndexOf),
                     "rslastindexof" => Some(NumericValue::StringArrayLastIndexOf),
+                    "rnjoin" => Some(NumericValue::NumberArrayJoin),
+                    "rbjoin" => Some(NumericValue::BoolArrayJoin),
+                    "rsjoin" => Some(NumericValue::StringArrayJoin),
                     "strbool" => Some(NumericValue::StringTruthy),
                     "padend" => Some(NumericValue::StringPadEnd),
                     "padstart" => Some(NumericValue::StringPadStart),
@@ -1729,6 +1773,21 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
+                NumericValue::NumberArrayJoin
+                | NumericValue::BoolArrayJoin
+                | NumericValue::StringArrayJoin => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArrayJoin => number_array_join,
+                        NumericValue::BoolArrayJoin => bool_array_join,
+                        NumericValue::StringArrayJoin => string_array_join,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
                 NumericValue::NumberArrayIncludes
                 | NumericValue::BoolArrayIncludes
                 | NumericValue::StringArrayIncludes
@@ -2062,6 +2121,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     parse_int: Option<ParseInt>,
     number_format: Option<NumberFormat>,
     array_search: Option<ArraySearch>,
+    array_format: Option<ArrayFormat>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -2096,6 +2156,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_parse_int = PARSE_INT.with(|parser| parser.replace(parse_int));
     let previous_number_format = NUMBER_FORMAT.with(|format| format.replace(number_format));
     let previous_array_search = ARRAY_SEARCH.with(|search| search.replace(array_search));
+    let previous_array_format = ARRAY_FORMAT.with(|format| format.replace(array_format));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let value = function(args);
@@ -2108,6 +2169,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     PARSE_INT.with(|parser| parser.set(previous_parse_int));
     NUMBER_FORMAT.with(|format| format.set(previous_number_format));
     ARRAY_SEARCH.with(|search| search.set(previous_array_search));
+    ARRAY_FORMAT.with(|format| format.set(previous_array_format));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -2184,6 +2246,16 @@ mod tests {
                 _ => -1.0,
             }
         }
+        unsafe extern "C" fn format_array(
+            operation: u8,
+            array: *const u8,
+            separator: *const c_char,
+        ) -> *const c_char {
+            assert_eq!(operation, 0);
+            assert!(!array.is_null());
+            assert_eq!(unsafe { CStr::from_ptr(separator) }.to_bytes(), b"|");
+            c"10|20|30".as_ptr()
+        }
         unsafe {
             thaw_jit_call_f64(
                 symbol.as_ptr(),
@@ -2196,6 +2268,7 @@ mod tests {
                 Some(parse_int),
                 Some(format_method),
                 Some(search_array),
+                Some(format_array),
             )
         }
     }
@@ -2618,6 +2691,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         assert!(!missing_allocator.error.is_null());
@@ -2766,6 +2840,14 @@ mod tests {
         assert_eq!(
             call(&symbol, &[f64::from_bits(handle as usize as u64)]).error,
             ABSENT_STATUS
+        );
+        let symbol = CString::new("expr:rn0,t7c,rnjoin:array-join").unwrap();
+        let result = call(&symbol, &[f64::from_bits(handle as usize as u64)]);
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }
+                .to_str()
+                .unwrap(),
+            "10|20|30"
         );
     }
 }

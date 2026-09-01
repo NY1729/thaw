@@ -2041,6 +2041,8 @@ Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
 reuse the native runtime's `fromIndex` and strict/SameValueZero comparison rules.
+Their `join` and zero-argument `toString` calls reuse the native array
+formatters through one arena-backed JIT callback as well.
 Relational and equality comparisons inspect those IR types as well:
 string/string stays on UTF-16 ordering, mixed loose/relational comparisons use
 numeric coercion, and strict mismatched primitives evaluate both operands

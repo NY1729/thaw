@@ -1095,6 +1095,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             .as_global_value()
                             .as_pointer_value()
                             .into(),
+                        self.module
+                            .get_function("thaw_jit_array_format")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
                     ],
                     "jit_numeric_result",
                 )

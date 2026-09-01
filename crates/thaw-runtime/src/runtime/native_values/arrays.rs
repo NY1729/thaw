@@ -778,6 +778,25 @@ pub unsafe extern "C" fn thaw_bool_array_join(
 }
 
 #[no_mangle]
+/// Shared primitive-array string formatter for the residual JIT.
+///
+/// # Safety
+/// `array` and `separator` must satisfy the selected typed `join` function's
+/// pointer requirements.
+pub unsafe extern "C" fn thaw_jit_array_format(
+    operation: u8,
+    array: *const u8,
+    separator: *const c_char,
+) -> *const c_char {
+    match operation {
+        0 => unsafe { thaw_number_array_join(array, separator) },
+        1 => unsafe { thaw_string_array_join(array, separator) },
+        2 => unsafe { thaw_bool_array_join(array, separator) },
+        _ => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `array` must point to any valid Thaw array. Elements are fixed objects.
