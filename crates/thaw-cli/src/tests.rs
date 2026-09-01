@@ -340,6 +340,33 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = values => values.reduce(function(accumulator, value) { return accumulator + value; }, 5);",
+            "add",
+            false,
+            &spread_extreme,
+        ),
+        Some("expr:rn0,c4014000000000000,rnreduceadd".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.reduce((accumulator, value) => accumulator + value, 0);",
+            "add",
+            false,
+            &spread_extreme,
+        ),
+        Some("expr:rn0,c0000000000000000,rnreduceadd".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.reduce((accumulator, value) => value + accumulator, 0);",
+            "add",
+            false,
+            &spread_extreme,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.add = (left, right) => Math.hypot(left);",
             "add",
             false,
