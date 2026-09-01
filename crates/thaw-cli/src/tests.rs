@@ -640,7 +640,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             ("tail".into(), array_length.params[0].1.clone()),
         ],
         required_params: 2,
-        ..array_return
+        ..array_return.clone()
     };
     assert_eq!(
         jit_numeric_export(
@@ -695,7 +695,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
             thaw_hir::HirType::Bool,
         ))),
-        ..spread_array
+        ..spread_array.clone()
     };
     assert!(jit_numeric_export(
         "module.exports.values = (value, tail) => [true, value, ...tail];",
@@ -704,6 +704,45 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         &spread_flags,
     )
     .is_some());
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.values = (value, tail) => Array.of(1, value, ...tail);",
+            "values",
+            false,
+            &spread_array,
+        ),
+        Some(
+            "expr:arrayempty,c3ff0000000000000,rnappend,a0,rnappend,rn1,arrayconcat,arrayvalue"
+                .into()
+        )
+    );
+    let copy_array = thaw_bridge::DtsFunction {
+        params: vec![("values".into(), array_length.params[0].1.clone())],
+        required_params: 1,
+        ..array_return.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.values = values => Array.from(values);",
+            "values",
+            false,
+            &copy_array,
+        ),
+        Some("expr:rn0,c0000000000000000,c7ff0000000000000,arrayslice,arrayvalue".into())
+    );
+    let shadowed_array_constructor = thaw_bridge::DtsFunction {
+        params: vec![("Array".into(), array_length.params[0].1.clone())],
+        ..array_return
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.values = Array => Array.from(Array);",
+            "values",
+            false,
+            &shadowed_array_constructor,
+        ),
+        None
+    );
     let array_predicate = thaw_bridge::DtsFunction {
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
         ..array_length.clone()
