@@ -460,18 +460,18 @@ fn primitive_array_element_assignment_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function setNumber(values: number[], index: number, value: number): number;\nexport declare function setNumbers(values: number[], index: number, value: number): number[];\nexport declare function setString(values: string[], index: number, value: string): string[];\nexport declare function setFlag(values: boolean[], index: number, value: boolean): boolean[];\nexport declare function addNumber(values: number[], index: number, value: number): number;\nexport declare function multiplyNumbers(values: number[], index: number, value: number): number[];\nexport declare function appendString(values: string[], index: number, value: string): string;\n",
+        "export declare function setNumber(values: number[], index: number, value: number): number;\nexport declare function setNumbers(values: number[], index: number, value: number): number[];\nexport declare function setString(values: string[], index: number, value: string): string[];\nexport declare function setFlag(values: boolean[], index: number, value: boolean): boolean[];\nexport declare function addNumber(values: number[], index: number, value: number): number;\nexport declare function multiplyNumbers(values: number[], index: number, value: number): number[];\nexport declare function appendString(values: string[], index: number, value: string): string;\nexport declare function incrementNumber(values: number[], index: number): number;\nexport declare function decrementNumber(values: number[], index: number): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.setNumber = (values, index, value) => values[index] = value; module.exports.setNumbers = (values, index, value) => { values[index] = value; return values; }; module.exports.setString = (values, index, value) => { values[index] = value; return values; }; module.exports.setFlag = (values, index, value) => { values[index] = value; return values; }; module.exports.addNumber = (values, index, value) => values[index] += value; module.exports.multiplyNumbers = (values, index, value) => { values[index] *= value; return values; }; module.exports.appendString = (values, index, value) => values[index] += value;\n",
+        "module.exports.setNumber = (values, index, value) => values[index] = value; module.exports.setNumbers = (values, index, value) => { values[index] = value; return values; }; module.exports.setString = (values, index, value) => { values[index] = value; return values; }; module.exports.setFlag = (values, index, value) => { values[index] = value; return values; }; module.exports.addNumber = (values, index, value) => values[index] += value; module.exports.multiplyNumbers = (values, index, value) => { values[index] *= value; return values; }; module.exports.appendString = (values, index, value) => values[index] += value; module.exports.incrementNumber = (values, index) => ++values[index]; module.exports.decrementNumber = (values, index) => values[index]--;\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { setNumber, setNumbers, setString, setFlag, addNumber, multiplyNumbers, appendString } from 'jit-array-set';\nfunction main(): void { const numbers = [1]; const alias = numbers; console.log(setNumber(numbers, 3, 9)); console.log(alias.join('|')); console.log(setNumbers(numbers, 1, 2).join('|')); console.log(numbers.join('|')); console.log(addNumber(numbers, 1, 3)); console.log(numbers.join('|')); console.log(multiplyNumbers(numbers, 3, 2).join('|')); const strings = ['a']; console.log(setString(strings, 2, 'c').join('|')); console.log(strings.join('|')); console.log(appendString(strings, 0, 'b')); console.log(strings.join('|')); const flags = [true]; console.log(setFlag(flags, 2, true).join('|')); console.log(flags.join('|')); }\n",
+        "import { setNumber, setNumbers, setString, setFlag, addNumber, multiplyNumbers, appendString, incrementNumber, decrementNumber } from 'jit-array-set';\nfunction main(): void { const numbers = [1]; const alias = numbers; console.log(setNumber(numbers, 3, 9)); console.log(alias.join('|')); console.log(setNumbers(numbers, 1, 2).join('|')); console.log(numbers.join('|')); console.log(addNumber(numbers, 1, 3)); console.log(numbers.join('|')); console.log(multiplyNumbers(numbers, 3, 2).join('|')); console.log(incrementNumber(numbers, 1)); console.log(numbers.join('|')); console.log(decrementNumber(numbers, 3)); console.log(numbers.join('|')); const strings = ['a']; console.log(setString(strings, 2, 'c').join('|')); console.log(strings.join('|')); console.log(appendString(strings, 0, 'b')); console.log(strings.join('|')); const flags = [true]; console.log(setFlag(flags, 2, true).join('|')); console.log(flags.join('|')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -487,7 +487,7 @@ fn primitive_array_element_assignment_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "9\n1|0|0|9\n1|2|0|9\n1|2|0|9\n5\n1|5|0|9\n1|5|0|18\na||c\na||c\nab\nab||c\ntrue|false|true\ntrue|false|true\n"
+        "9\n1|0|0|9\n1|2|0|9\n1|2|0|9\n5\n1|5|0|9\n1|5|0|18\n6\n1|6|0|18\n18\n1|6|0|17\na||c\na||c\nab\nab||c\ntrue|false|true\ntrue|false|true\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
