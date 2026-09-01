@@ -1057,6 +1057,19 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,rnpush,drop,rn0,a2,rnpush".into())
     );
+    let array_unshift = thaw_bridge::DtsFunction {
+        name: "unshift".into(),
+        ..array_push.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.unshift = (values, first, second) => values.unshift(first, second);",
+            "unshift",
+            false,
+            &array_unshift,
+        ),
+        Some("expr:rn0,a2,rnunshift,drop,rn0,a1,rnunshift".into())
+    );
     let array_with = thaw_bridge::DtsFunction {
         name: "replace".into(),
         params: vec![

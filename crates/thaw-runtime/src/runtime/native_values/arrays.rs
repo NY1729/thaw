@@ -520,6 +520,36 @@ pub unsafe extern "C" fn thaw_array_unshift_values(
 }
 
 #[no_mangle]
+/// Prepends one primitive value and updates the caller's native array handle.
+/// Returns the new length, or `-1` on allocation or input failure.
+///
+/// # Safety
+/// `array` must point to a writable primitive Thaw array handle matching
+/// `operation`.
+pub unsafe extern "C" fn thaw_jit_array_unshift(
+    operation: u8,
+    array: *mut *mut u8,
+    value: f64,
+) -> f64 {
+    let Some(current) = array.as_ref().copied() else {
+        return -1.0;
+    };
+    let slot = match operation {
+        0 | 1 => value.to_bits(),
+        2 => u64::from(value != 0.0),
+        _ => return -1.0,
+    };
+    let output = unsafe {
+        thaw_array_unshift_values(current, 8, (&slot as *const u64).cast(), 1)
+    };
+    if output.is_null() {
+        return -1.0;
+    }
+    unsafe { array.write(output) };
+    unsafe { native_array_length(output) }.map_or(-1.0, |length| length as f64)
+}
+
+#[no_mangle]
 /// `Array.prototype.pop`. Removes the last element of `array`, writing its
 /// `element_width` bytes into `out_value` and returning a fresh buffer with
 /// the remaining elements. If `array` is null or already empty, `out_value`

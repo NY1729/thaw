@@ -488,6 +488,7 @@ fn jit_numeric_export(
                 | "fill"
                 | "copyWithin"
                 | "push"
+                | "unshift"
                 | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
@@ -924,7 +925,7 @@ fn jit_numeric_export(
                         _ => return None,
                     }
                     output.push(format!("{prefix}join"));
-                } else if method == "push" {
+                } else if matches!(method, "push" | "unshift") {
                     if call.args.is_empty() {
                         output.push("arraylen".into());
                     }
@@ -934,7 +935,12 @@ fn jit_numeric_export(
                         "rb" => JitKind::Boolean,
                         _ => return None,
                     };
-                    for (index, argument) in call.args.iter().enumerate() {
+                    let arguments: Vec<_> = if method == "unshift" {
+                        call.args.iter().rev().collect()
+                    } else {
+                        call.args.iter().collect()
+                    };
+                    for (index, argument) in arguments.iter().enumerate() {
                         if index != 0 {
                             output.extend(encoded_receiver.iter().cloned());
                         }
@@ -950,8 +956,8 @@ fn jit_numeric_export(
                             return None;
                         }
                         output.extend(encoded_value);
-                        output.push(format!("{prefix}push"));
-                        if index + 1 != call.args.len() {
+                        output.push(format!("{prefix}{method}"));
+                        if index + 1 != arguments.len() {
                             output.push("drop".into());
                         }
                     }
@@ -2513,7 +2519,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if matches!(token.as_str(), "rnpush" | "rspush" | "rbpush") {
+        } else if matches!(
+            token.as_str(),
+            "rnpush" | "rspush" | "rbpush" | "rnunshift" | "rsunshift" | "rbunshift"
+        ) {
             let value = stack.pop()?;
             if stack.pop()? != JitKind::Array
                 || value
