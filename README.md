@@ -2220,6 +2220,9 @@ Primitive and primitive-array local `const` bindings that feed aggregate
 results are emitted as ordered intermediate JIT calls. Stateful array
 operations and dynamic sources such as `Math.random()` therefore execute once,
 and later fields reuse the exact native result instead of duplicating work.
+Conditional aggregate expressions are kept as AOT control flow around their
+specialized JIT condition and branch leaves. The condition runs once and only
+the selected object or tuple branch executes, including stateful array leaves.
 
 - Contextual TypeScript inference, overload resolution, decorators,
   non-top-level class expressions, incompatible/non-object intersections and the
