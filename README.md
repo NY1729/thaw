@@ -2024,6 +2024,8 @@ reuse the native shallow-copy runtime through that same JIT array return ABI;
 their non-mutating `toReversed()` copies and default `toSorted()` ordering use
 it as well. Their destructive `reverse()` and default `sort()` counterparts
 mutate the caller's native storage and return it through the same JIT path.
+Numeric `(left, right) => left - right` and reversed subtraction comparators
+also select stable numeric ascending or descending sorts without QuickJS.
 Typed `fill(value, start?, end?)` performs the same in-place update with native
 relative-index clamping. `copyWithin(target, start, end?)` also stays on that
 path and uses the native overlap-safe slot copy.
