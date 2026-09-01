@@ -1927,9 +1927,37 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &defaulted_numbers,
         ),
         Some(
-            "expr:a0,a1,c4000000000000000,?,a2,a3,a0,a1,c4000000000000000,?,c3ff0000000000000,+,?,*"
+            "expr:a0,asbool,if,a1,else,c4000000000000000,end,a2,asbool,if,a3,else,a0,asbool,if,a1,else,c4000000000000000,end,c3ff0000000000000,+,end,*"
                 .into()
         )
+    );
+    let optional_number = thaw_bridge::DtsFunction {
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                thaw_hir::HirType::F64,
+            ))),
+        )],
+        required_params: 0,
+        ..defaulted_numbers.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.value = value => value ?? 42;",
+            "value",
+            false,
+            &optional_number,
+        ),
+        Some("expr:a0,asbool,if,a1,else,c4045000000000000,end".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.value = value => value + 1;",
+            "value",
+            false,
+            &optional_number,
+        ),
+        None
     );
     let string_characters = thaw_bridge::DtsFunction {
         params: vec![(
