@@ -1286,7 +1286,7 @@ fn jit_numeric_export(
                         callback.expr.as_ref(),
                         parameters,
                         locals,
-                        context.helpers,
+                        context,
                     )?;
                     if let Some(initial) = initial {
                         encode_number(
@@ -2466,7 +2466,7 @@ fn jit_numeric_export(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
         outer_locals: &std::collections::HashMap<String, Vec<String>>,
-        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+        context: &mut InlineContext<'_>,
     ) -> Option<&'static str> {
         if matches!(expression, Expr::Ident(identifier)
             if outer_parameters.contains_key(identifier.sym.as_ref())
@@ -2474,67 +2474,66 @@ fn jit_numeric_export(
         {
             return None;
         }
-        let callable = resolve_callable(expression, helpers)?;
+        let callable = resolve_callable(expression, context.helpers)?;
         let (parameters, steps, body) = callable_parts(callable)?;
         let [Pat::Ident(accumulator), Pat::Ident(value)] = parameters.as_slice() else {
             return None;
         };
-        if !steps.is_empty() || accumulator.id.sym == value.id.sym {
+        if accumulator.id.sym == value.id.sym {
             return None;
         }
-        let expression = match body {
-            NumericBody::Expression(expression) => expression,
-            NumericBody::Statements([Stmt::Return(statement)]) => {
-                statement.arg.as_deref()?
-            }
-            _ => return None,
-        };
-        match expression {
-            Expr::Bin(binary)
-                if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == accumulator.id.sym)
-                    && matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym) =>
+        if !steps.is_empty() {
+            let [LocalStep::Declare {
+                name,
+                mutable: false,
+                ..
+            }] = steps.as_slice()
+            else {
+                return None;
+            };
+            let NumericBody::Statements([Stmt::Return(statement)]) = &body else {
+                return None;
+            };
+            if !matches!(statement.arg.as_deref(), Some(Expr::Ident(result)) if result.sym == name.sym)
             {
-                match binary.op {
-                    BinaryOp::Add => Some("add"),
-                    BinaryOp::Sub => Some("sub"),
-                    BinaryOp::Mul => Some("mul"),
-                    BinaryOp::Div => Some("div"),
-                    BinaryOp::Mod => Some("rem"),
-                    BinaryOp::Exp => Some("pow"),
-                    _ => None,
-                }
+                return None;
             }
-            Expr::Call(call)
+        }
+        let callback_parameters = std::collections::HashMap::from([
+            (accumulator.id.sym.to_string(), "a0".into()),
+            (value.id.sym.to_string(), "a1".into()),
+        ]);
+        let mut encoded = Vec::new();
+        encode_steps_and_body(
+            steps,
+            body,
+            &callback_parameters,
+            context.module_locals.clone(),
+            context,
+            &mut encoded,
+        )?;
+        let [left, right, operation] = encoded.as_slice() else {
+            return None;
+        };
+        if left != "a0" || right != "a1" {
+            return None;
+        }
+        match operation.as_str() {
+            "+" => Some("add"),
+            "-" => Some("sub"),
+            "*" => Some("mul"),
+            "/" => Some("div"),
+            "%" => Some("rem"),
+            "pow" => Some("pow"),
+            "min" | "max"
                 if !outer_parameters.contains_key("Math")
                     && !outer_locals.contains_key("Math")
-                    && !helpers.contains_key("Math") =>
+                    && !context.helpers.contains_key("Math") =>
             {
-                let [left, right] = call.args.as_slice() else {
-                    return None;
-                };
-                if left.spread.is_some()
-                    || right.spread.is_some()
-                    || !matches!(left.expr.as_ref(), Expr::Ident(left) if left.sym == accumulator.id.sym)
-                    || !matches!(right.expr.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
-                {
-                    return None;
-                }
-                let Callee::Expr(callee) = &call.callee else {
-                    return None;
-                };
-                let Expr::Member(member) = callee.as_ref() else {
-                    return None;
-                };
-                if !matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Math") {
-                    return None;
-                }
-                let MemberProp::Ident(property) = &member.prop else {
-                    return None;
-                };
-                match property.sym.as_ref() {
+                match operation.as_str() {
                     "min" => Some("min"),
                     "max" => Some("max"),
-                    _ => None,
+                    _ => unreachable!(),
                 }
             }
             _ => None,
