@@ -2035,6 +2035,8 @@ range-error propagation without loading QuickJS.
 Primitive `valueOf()` calls are identities in the typed IR; zero-argument
 boolean and string `toString()` calls likewise use the existing boolean formatter
 or string value without loading QuickJS.
+Primitive arrays can enter the same word-sized JIT argument ABI; their native
+handle is read directly for `.length`, without JSON marshalling or QuickJS.
 Relational and equality comparisons inspect those IR types as well:
 string/string stays on UTF-16 ordering, mixed loose/relational comparisons use
 numeric coercion, and strict mismatched primitives evaluate both operands

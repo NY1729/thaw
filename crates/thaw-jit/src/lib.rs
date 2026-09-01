@@ -235,6 +235,19 @@ extern "C" fn string_length(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn array_length(value: f64) -> f64 {
+    let handle = value.to_bits() as usize as *const *const u8;
+    if handle.is_null() {
+        return 0.0;
+    }
+    let data = unsafe { handle.read() };
+    if data.is_null() {
+        return 0.0;
+    }
+    unsafe { data.cast::<i64>().read() }.max(0) as f64
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_truthy(value: f64) -> f64 {
     let value = value.to_bits() as usize as *const c_char;
     unsafe { (!value.is_null() && !CStr::from_ptr(value).to_bytes().is_empty()) as u8 as f64 }
@@ -1126,6 +1139,7 @@ enum NumericValue {
     StringLastIndexOf,
     StringLastIndexOfAt,
     StringLength,
+    ArrayLength,
     StringTruthy,
     StringPadEnd,
     StringPadStart,
@@ -1217,6 +1231,7 @@ impl NumericProgram {
                     "lastindexof" => Some(NumericValue::StringLastIndexOf),
                     "lastindexof2" => Some(NumericValue::StringLastIndexOfAt),
                     "strlen" => Some(NumericValue::StringLength),
+                    "arraylen" => Some(NumericValue::ArrayLength),
                     "strbool" => Some(NumericValue::StringTruthy),
                     "padend" => Some(NumericValue::StringPadEnd),
                     "padstart" => Some(NumericValue::StringPadStart),
@@ -1272,6 +1287,7 @@ impl NumericProgram {
                         .strip_prefix('a')
                         .or_else(|| value.strip_prefix('b'))
                         .or_else(|| value.strip_prefix('s'))
+                        .or_else(|| value.strip_prefix('r'))
                         .and_then(|index| index.parse::<u8>().ok())
                         .filter(|index| *index < 16)
                         .map(NumericValue::Argument)
@@ -1588,6 +1604,12 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, string_length as *const () as u64, depth - 1);
+                }
+                NumericValue::ArrayLength => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, array_length as *const () as u64, depth - 1);
                 }
                 NumericValue::StringTruthy => {
                     if depth == 0 {
@@ -2543,5 +2565,13 @@ mod tests {
         unsafe { libc::free(result.cast()) };
         let invalid = CString::new("expr:a0,a1,tofixed:invalid-fixed").unwrap();
         assert!(!call(&invalid, &[1.0, 101.0]).error.is_null());
+        let array = [3_i64, 10, 20, 30];
+        let data = array.as_ptr().cast::<u8>();
+        let handle = &data as *const *const u8;
+        let symbol = CString::new("expr:r0,arraylen:array-length").unwrap();
+        assert_eq!(
+            call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+            3.0
+        );
     }
 }
