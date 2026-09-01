@@ -185,18 +185,18 @@ fn typed_typeof_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function numberKind(value: number): string;\nexport declare function booleanKind(value: boolean): string;\nexport declare function stringKind(value: string): string;\nexport declare function arrayKind(value: number[]): string;\n",
+        "export declare function numberKind(value: number): string;\nexport declare function booleanKind(value: boolean): string;\nexport declare function stringKind(value: string): string;\nexport declare function arrayKind(value: number[]): string;\nexport declare function emptyNumber(): number;\nexport declare function emptyString(): string;\nexport declare function emptyBoolean(): boolean;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports = { numberKind: value => typeof value, booleanKind: value => typeof value, stringKind: value => typeof value, arrayKind: value => typeof value };\n",
+        "module.exports = { numberKind: value => typeof value, booleanKind: value => typeof value, stringKind: value => typeof value, arrayKind: value => typeof value, emptyNumber: () => Number(), emptyString: () => String(), emptyBoolean: () => Boolean() };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { numberKind, booleanKind, stringKind, arrayKind } from 'jit-typeof';\nfunction main(): void { console.log(numberKind(1)); console.log(booleanKind(true)); console.log(stringKind('x')); console.log(arrayKind([1])); }\n",
+        "import { numberKind, booleanKind, stringKind, arrayKind, emptyNumber, emptyString, emptyBoolean } from 'jit-typeof';\nfunction main(): void { console.log(numberKind(1)); console.log(booleanKind(true)); console.log(stringKind('x')); console.log(arrayKind([1])); console.log(emptyNumber()); console.log('[' + emptyString() + ']'); console.log(emptyBoolean()); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -212,7 +212,7 @@ fn typed_typeof_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "number\nboolean\nstring\nobject\n"
+        "number\nboolean\nstring\nobject\n0\n[]\nfalse\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
