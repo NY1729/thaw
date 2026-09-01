@@ -48,8 +48,7 @@ fn jit_numeric_export(
         };
         if call.args.iter().any(|argument| argument.spread.is_some()) {
             match property.sym.as_ref() {
-                "min" | "max" => {}
-                "hypot" if matches!(call.args.as_slice(), [argument] if argument.spread.is_some()) => {}
+                "min" | "max" | "hypot" => {}
                 _ => return None,
             }
         }
@@ -2002,46 +2001,12 @@ fn jit_numeric_export(
                     encode_number(y.expr.as_ref(), parameters, locals, context, output)?;
                     encode_number(x.expr.as_ref(), parameters, locals, context, output)?;
                     output.push(method.into());
-                } else if method == "hypot" {
-                    if matches!(call.args.as_slice(), [argument] if argument.spread.is_some()) {
-                        let [argument] = call.args.as_slice() else {
-                            unreachable!();
-                        };
-                        let mut encoded = Vec::new();
-                        encode_expression(
-                            argument.expr.as_ref(),
-                            parameters,
-                            locals,
-                            context,
-                            &mut encoded,
-                        )?;
-                        if jit_expression_kind(&encoded)?.0 != JitKind::Array
-                            || array_prefix(&encoded)? != "rn"
-                        {
-                            return None;
-                        }
-                        output.extend(encoded);
-                        output.push("rnhypot".into());
-                    } else if call.args.is_empty() {
-                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
-                    } else {
-                        encode_number(
-                            call.args[0].expr.as_ref(),
-                            parameters,
-                            locals,
-                            context,
-                            output,
-                        )?;
-                        for argument in &call.args[1..] {
-                            encode_number(argument.expr.as_ref(), parameters, locals, context, output)?;
-                            output.push("hypot".into());
-                        }
-                    }
                 } else if call.args.is_empty() {
-                    let value = if method == "min" {
-                        f64::INFINITY
-                    } else {
-                        f64::NEG_INFINITY
+                    let value = match method {
+                        "min" => f64::INFINITY,
+                        "max" => f64::NEG_INFINITY,
+                        "hypot" => 0.0,
+                        _ => return None,
                     };
                     output.push(format!("c{:016x}", value.to_bits()));
                 } else {
@@ -2074,6 +2039,12 @@ fn jit_numeric_export(
                         if index != 0 {
                             output.push(method.into());
                         }
+                    }
+                    if method == "hypot"
+                        && call.args.len() == 1
+                        && call.args[0].spread.is_none()
+                    {
+                        output.push("abs".into());
                     }
                 }
             }
