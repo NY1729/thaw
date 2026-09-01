@@ -220,6 +220,49 @@ fn logical_expressions_short_circuit_in_jit_without_quickjs() {
 }
 
 #[test]
+fn optional_operation_receivers_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-optional-result-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-optional-result");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function formatPop(values: number[]): string;\nexport declare function formatPopWithDigits(values: number[], digits: number[]): string;\nexport declare function upperAt(values: string[]): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.formatPop = values => values.pop()?.toFixed(1) ?? 'missing'; module.exports.formatPopWithDigits = (values, digits) => values.pop()?.toFixed(digits.pop() ?? 0) ?? 'missing'; module.exports.upperAt = values => values.at(0)?.toUpperCase() ?? 'missing';\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { formatPop, formatPopWithDigits, upperAt } from 'jit-optional-result';\nfunction main(): void { console.log(formatPop([2])); console.log(formatPop([])); const skipped = [1]; console.log(formatPopWithDigits([], skipped) + ':' + skipped.length); const used = [1]; console.log(formatPopWithDigits([2], used) + ':' + used.length); console.log(upperAt(['thaw'])); console.log(upperAt([])); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2.0\nmissing\nmissing:1\n2.0:0\nTHAW\nmissing\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_aggregates_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-aggregate-{}",

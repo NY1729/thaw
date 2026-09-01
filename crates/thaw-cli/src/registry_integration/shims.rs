@@ -1247,6 +1247,12 @@ fn jit_export(
         context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
+        struct OptionalChainOperation {
+            receiver_presence: Option<String>,
+            receiver: Vec<String>,
+            continuation: Vec<String>,
+        }
+
         fn optional_tokens<'a>(
             expression: &Expr,
             parameters: &'a std::collections::HashMap<String, String>,
@@ -1280,7 +1286,9 @@ fn jit_export(
             parameters: &std::collections::HashMap<String, String>,
             locals: &std::collections::HashMap<String, Vec<String>>,
             context: &mut InlineContext<'_>,
-        ) -> Option<(String, Vec<String>)> {
+        ) -> Option<OptionalChainOperation> {
+            const RECEIVER: &str = "__thaw_optional_receiver";
+
             fn ordinary_expression(expression: &Expr) -> Option<Expr> {
                 match expression {
                     Expr::OptChain(chain) => ordinary_chain(chain),
@@ -1303,6 +1311,62 @@ fn jit_export(
                         Some(Expr::Paren(parenthesized))
                     }
                     expression => Some(expression.clone()),
+                }
+            }
+
+            fn split_expression(
+                expression: &Expr,
+                receiver: &mut Option<Expr>,
+            ) -> Option<Expr> {
+                match expression {
+                    Expr::OptChain(chain) => split_chain(chain, receiver),
+                    Expr::Member(member) => {
+                        let mut member = member.clone();
+                        member.obj = Box::new(split_expression(member.obj.as_ref(), receiver)?);
+                        Some(Expr::Member(member))
+                    }
+                    Expr::Call(call) => {
+                        let mut call = call.clone();
+                        if let Callee::Expr(callee) = &mut call.callee {
+                            **callee = split_expression(callee.as_ref(), receiver)?;
+                        }
+                        Some(Expr::Call(call))
+                    }
+                    Expr::Paren(parenthesized) => {
+                        let mut parenthesized = parenthesized.clone();
+                        parenthesized.expr =
+                            Box::new(split_expression(parenthesized.expr.as_ref(), receiver)?);
+                        Some(Expr::Paren(parenthesized))
+                    }
+                    expression => Some(expression.clone()),
+                }
+            }
+
+            fn split_chain(
+                chain: &thaw_parser::ast::OptChainExpr,
+                receiver: &mut Option<Expr>,
+            ) -> Option<Expr> {
+                match chain.base.as_ref() {
+                    OptChainBase::Member(member) => {
+                        let mut member = member.clone();
+                        if chain.optional && receiver.is_none() {
+                            *receiver = Some(ordinary_expression(member.obj.as_ref())?);
+                            member.obj = Box::new(Expr::Ident(RECEIVER.into()));
+                        } else {
+                            member.obj = Box::new(split_expression(member.obj.as_ref(), receiver)?);
+                        }
+                        Some(Expr::Member(member))
+                    }
+                    OptChainBase::Call(call) => {
+                        if chain.optional {
+                            return None;
+                        }
+                        let mut call = CallExpr::from(call.clone());
+                        if let Callee::Expr(callee) = &mut call.callee {
+                            **callee = split_expression(callee.as_ref(), receiver)?;
+                        }
+                        Some(Expr::Call(call))
+                    }
                 }
             }
 
@@ -1348,18 +1412,62 @@ fn jit_export(
             }
 
             let ordinary = ordinary_chain(chain)?;
-            let (presence, value, receiver) = optional_root(&ordinary, parameters)?;
-            let mut unwrapped = parameters.clone();
-            unwrapped.insert(receiver, value.into());
-            let mut operation = Vec::new();
+            if let Some((presence, value, receiver)) = optional_root(&ordinary, parameters) {
+                let mut unwrapped = parameters.clone();
+                unwrapped.insert(receiver, value.into());
+                let mut operation = Vec::new();
+                encode_expression(
+                    &ordinary,
+                    &unwrapped,
+                    locals,
+                    context,
+                    &mut operation,
+                )?;
+                return Some(OptionalChainOperation {
+                    receiver_presence: Some(presence.into()),
+                    receiver: operation,
+                    continuation: Vec::new(),
+                });
+            }
+
+            let mut source = None;
+            let ordinary = split_chain(chain, &mut source)?;
+            let mut receiver = Vec::new();
             encode_expression(
-                &ordinary,
-                &unwrapped,
+                &source?,
+                parameters,
                 locals,
                 context,
-                &mut operation,
+                &mut receiver,
             )?;
-            Some((presence.into(), operation))
+            if !jit_operation_may_be_absent(&receiver) {
+                return None;
+            }
+            let receiver_token = match jit_expression_kind(&receiver)?.0 {
+                JitKind::Number => format!("a{RECEIVER}"),
+                JitKind::Boolean => format!("b{RECEIVER}"),
+                JitKind::String => format!("s{RECEIVER}"),
+                JitKind::Array => format!("{}{}", array_prefix(&receiver)?, RECEIVER),
+            };
+            let mut continuation_parameters = parameters.clone();
+            continuation_parameters.insert(RECEIVER.into(), receiver_token.clone());
+            let mut continuation = Vec::new();
+            encode_expression(
+                &ordinary,
+                &continuation_parameters,
+                locals,
+                context,
+                &mut continuation,
+            )?;
+            if continuation.first()? != &receiver_token {
+                return None;
+            }
+            continuation.remove(0);
+            Some(OptionalChainOperation {
+                receiver_presence: None,
+                receiver,
+                continuation,
+            })
         }
 
         match expression {
@@ -1737,19 +1845,35 @@ fn jit_export(
                         selected.extend(fallback);
                         selected.push("end".into());
                     } else if let Expr::OptChain(chain) = operand {
-                        let (presence, operation) =
+                        let optional =
                             optional_chain_operation(chain, parameters, locals, context)?;
-                        selected = vec![presence, "asbool".into(), "if".into()];
-                        selected.extend(operation.clone());
-                        if jit_operation_may_be_absent(&operation) {
-                            selected.push("ifpresent".into());
+                        if let Some(presence) = optional.receiver_presence {
+                            selected = vec![presence, "asbool".into(), "if".into()];
+                            selected.extend(optional.receiver.clone());
+                            selected.extend(optional.continuation);
+                            if jit_operation_may_be_absent(&optional.receiver) {
+                                selected.push("ifpresent".into());
+                                selected.push("else".into());
+                                selected.extend(fallback.clone());
+                                selected.push("end".into());
+                            }
                             selected.push("else".into());
-                            selected.extend(fallback.clone());
+                            selected.extend(fallback);
+                            selected.push("end".into());
+                        } else {
+                            selected = optional.receiver;
+                            selected.push("ifpresent".into());
+                            selected.extend(optional.continuation.clone());
+                            if jit_operation_may_be_absent(&optional.continuation) {
+                                selected.push("ifpresent".into());
+                                selected.push("else".into());
+                                selected.extend(fallback.clone());
+                                selected.push("end".into());
+                            }
+                            selected.push("else".into());
+                            selected.extend(fallback);
                             selected.push("end".into());
                         }
-                        selected.push("else".into());
-                        selected.extend(fallback);
-                        selected.push("end".into());
                     } else {
                         let mut operation = Vec::new();
                         encode_expression(
@@ -1773,13 +1897,20 @@ fn jit_export(
                 output.extend(selected);
             }
             Expr::OptChain(chain) => {
-                let (presence, operation) =
-                    optional_chain_operation(chain, parameters, locals, context)?;
+                let optional = optional_chain_operation(chain, parameters, locals, context)?;
+                let mut operation = optional.receiver.clone();
+                operation.extend(optional.continuation.clone());
                 let kind = jit_expression_kind(&operation)?.0;
-                output.push(presence);
-                output.push("asbool".into());
-                output.push("if".into());
-                output.extend(operation);
+                if let Some(presence) = optional.receiver_presence {
+                    output.push(presence);
+                    output.push("asbool".into());
+                    output.push("if".into());
+                    output.extend(operation);
+                } else {
+                    output.extend(optional.receiver);
+                    output.push("ifpresent".into());
+                    output.extend(optional.continuation);
+                }
                 output.push("else".into());
                 output.push(
                     match kind {
