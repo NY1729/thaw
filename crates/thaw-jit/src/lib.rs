@@ -542,6 +542,45 @@ number_array_filters!(number_array_filter_eq, |left, right| left == right);
 number_array_filters!(number_array_filter_ne, |left, right| left != right);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_truthy(value: f64, _: f64) -> bool {
+    value != 0.0 && !value.is_nan()
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_some_truthy(value: f64) -> f64 {
+    number_array_quantify(value, 0.0, false, number_truthy)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_every_truthy(value: f64) -> f64 {
+    number_array_quantify(value, 0.0, true, number_truthy)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! number_array_truthy_finders {
+    ($(($name:ident, $mode:expr)),* $(,)?) => {
+        $(
+            extern "C" fn $name(value: f64) -> f64 {
+                number_array_find(value, 0.0, $mode, number_truthy)
+            }
+        )*
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_truthy_finders!(
+    (number_array_find_truthy, 0),
+    (number_array_find_index_truthy, 1),
+    (number_array_find_last_truthy, 2),
+    (number_array_find_last_index_truthy, 3),
+);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_filter_truthy(value: f64) -> f64 {
+    number_array_filter(value, 0.0, number_truthy)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_map(value: f64, operation: impl Fn(f64) -> f64) -> f64 {
     let (Some(allocate), Some((array, length))) =
         (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
@@ -2613,6 +2652,7 @@ enum NumericValue {
     NumberArrayQuantifier(CompareOp, bool),
     NumberArrayFind(CompareOp, u8),
     NumberArrayFilter(CompareOp),
+    NumberArrayTruthy(u8),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayUnaryMap(bool),
     NumberArrayMathMap(UnaryMath),
@@ -2950,6 +2990,18 @@ impl NumericProgram {
                                 _ => return None,
                             };
                             Some(NumericValue::NumberArrayFilter(operation))
+                        })
+                        .or_else(|| {
+                            Some(NumericValue::NumberArrayTruthy(match value {
+                                "rnsometruthy" => 0,
+                                "rneverytruthy" => 1,
+                                "rnfindtruthy" => 2,
+                                "rnfindindextruthy" => 3,
+                                "rnfindlasttruthy" => 4,
+                                "rnfindlastindextruthy" => 5,
+                                "rnfiltertruthy" => 6,
+                                _ => return None,
+                            }))
                         })
                         .or_else(|| {
                             Some(NumericValue::NumberArrayUnaryMap(match value {
@@ -3497,6 +3549,25 @@ impl NumericProgram {
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
+                }
+                NumericValue::NumberArrayTruthy(mode) => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let functions = [
+                        number_array_some_truthy,
+                        number_array_every_truthy,
+                        number_array_find_truthy,
+                        number_array_find_index_truthy,
+                        number_array_find_last_truthy,
+                        number_array_find_last_index_truthy,
+                        number_array_filter_truthy,
+                    ];
+                    emit_unary_call(
+                        &mut code,
+                        functions[usize::from(*mode)] as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::NumberArrayMap(operation, reverse) => {
                     if depth < 2 {
@@ -5371,6 +5442,42 @@ mod tests {
         assert_eq!(unsafe { output.cast::<u64>().read() }, 2);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 30.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let truthy_values = [
+            4_u64,
+            0.0f64.to_bits(),
+            f64::NAN.to_bits(),
+            (-2.0f64).to_bits(),
+            3.0f64.to_bits(),
+        ];
+        let truthy_data = truthy_values.as_ptr().cast::<u8>();
+        let truthy_handle = &truthy_data as *const *const u8;
+        for (method, expected) in [
+            ("some", 1.0),
+            ("every", 0.0),
+            ("find", -2.0),
+            ("findindex", 2.0),
+            ("findlast", 3.0),
+            ("findlastindex", 3.0),
+        ] {
+            let symbol =
+                CString::new(format!("expr:rn0,rn{method}truthy:array-{method}-truthy")).unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(truthy_handle as usize as u64)]).value,
+                expected,
+                "{method}"
+            );
+        }
+        let filter_truthy = CString::new("expr:rn0,rnfiltertruthy:array-filter-truthy").unwrap();
+        let result = call(
+            &filter_truthy,
+            &[f64::from_bits(truthy_handle as usize as u64)],
+        );
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.cast::<u64>().read() }, 2);
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, -2.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 3.0);
         unsafe { libc::free(output.cast_mut().cast()) };
         let map = CString::new("expr:rn0,c4000000000000000,rnmapmul:array-map").unwrap();
         let result = call(&map, &[f64::from_bits(handle as usize as u64)]);
