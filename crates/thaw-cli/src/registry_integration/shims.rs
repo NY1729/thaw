@@ -18,6 +18,7 @@ enum JitExport {
     Value(String),
     Object(Vec<(String, JitExport)>),
     Tuple(Vec<JitExport>),
+    Conditional(String, Box<JitExport>, Box<JitExport>),
     WithLocals(Vec<JitLocal>, Box<JitExport>),
 }
 
@@ -299,6 +300,63 @@ fn jit_export(
         locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
     ) -> Option<JitExport> {
+        if let Expr::Paren(parenthesized) = expression {
+            return encode_return_expression(
+                parenthesized.expr.as_ref(),
+                ty,
+                parameters,
+                locals,
+                context,
+            );
+        }
+        if matches!(ty, thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)) {
+            let Expr::Cond(conditional) = expression else {
+                return encode_nonconditional_return_expression(
+                    expression,
+                    ty,
+                    parameters,
+                    locals,
+                    context,
+                );
+            };
+            let mut condition = Vec::new();
+            encode_condition(
+                conditional.test.as_ref(),
+                parameters,
+                locals,
+                context,
+                &mut condition,
+            )?;
+            let consequent = encode_return_expression(
+                conditional.cons.as_ref(),
+                ty,
+                parameters,
+                locals,
+                context,
+            )?;
+            let alternate = encode_return_expression(
+                conditional.alt.as_ref(),
+                ty,
+                parameters,
+                locals,
+                context,
+            )?;
+            return Some(JitExport::Conditional(
+                validated_jit_expression(condition, JitKind::Boolean)?,
+                Box::new(consequent),
+                Box::new(alternate),
+            ));
+        }
+        encode_nonconditional_return_expression(expression, ty, parameters, locals, context)
+    }
+
+    fn encode_nonconditional_return_expression(
+        expression: &Expr,
+        ty: &thaw_hir::HirType,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<JitExport> {
         match ty {
             thaw_hir::HirType::Object(fields) => encode_object_return(
                 object_literal(expression)?,
@@ -310,15 +368,6 @@ fn jit_export(
             thaw_hir::HirType::Tuple(types) => {
                 let expression = match expression {
                     Expr::Array(array) => array,
-                    Expr::Paren(parenthesized) => {
-                        return encode_return_expression(
-                            parenthesized.expr.as_ref(),
-                            ty,
-                            parameters,
-                            locals,
-                            context,
-                        )
-                    }
                     _ => return None,
                 };
                 if expression.elems.len() != types.len() {
@@ -354,6 +403,7 @@ fn jit_export(
             }
         }
     }
+
 
     fn math_method(
         call: &CallExpr,
@@ -4437,7 +4487,10 @@ fn jit_numeric_export(
 ) -> Option<String> {
     match jit_export(source, export_name, allow_default, function)? {
         JitExport::Value(operation) => Some(operation),
-        JitExport::Object(_) | JitExport::Tuple(_) | JitExport::WithLocals(_, _) => None,
+        JitExport::Object(_)
+        | JitExport::Tuple(_)
+        | JitExport::Conditional(_, _, _)
+        | JitExport::WithLocals(_, _) => None,
     }
 }
 
@@ -5339,6 +5392,35 @@ fn jit_numeric_declaration(
                     .collect::<Vec<_>>();
                 format!("[{}]", values.join(", "))
             }
+            JitExport::Conditional(condition, consequent, alternate) => {
+                let runtime_key = format!(
+                    "{condition}:{runtime_name}:{}.condition",
+                    path.join(".")
+                );
+                let symbol = encoded_symbol(&runtime_key);
+                declaration.push_str(&format!(
+                    "declare function {symbol}({direct_params}): boolean;\n"
+                ));
+                let consequent = emit_aggregate_call(
+                    runtime_name,
+                    consequent,
+                    ty,
+                    path,
+                    direct_params,
+                    arguments,
+                    declaration,
+                );
+                let alternate = emit_aggregate_call(
+                    runtime_name,
+                    alternate,
+                    ty,
+                    path,
+                    direct_params,
+                    arguments,
+                    declaration,
+                );
+                format!("{symbol}({arguments}) ? {consequent} : {alternate}")
+            }
             JitExport::WithLocals(_, _) => unreachable!(),
         }
     }
@@ -5355,11 +5437,16 @@ fn jit_numeric_declaration(
         .collect::<Vec<_>>()
         .join(", ");
     let (jit_locals, aggregate) = match operation {
-        JitExport::Object(_) | JitExport::Tuple(_) => (&[][..], operation),
+        JitExport::Object(_) | JitExport::Tuple(_) | JitExport::Conditional(_, _, _) => {
+            (&[][..], operation)
+        }
         JitExport::WithLocals(locals, aggregate) => (locals.as_slice(), aggregate.as_ref()),
         JitExport::Value(_) => (&[][..], operation),
     };
-    if matches!(aggregate, JitExport::Object(_) | JitExport::Tuple(_)) {
+    if matches!(
+        aggregate,
+        JitExport::Object(_) | JitExport::Tuple(_) | JitExport::Conditional(_, _, _)
+    ) {
         let thaw_bridge::DtsType::Native(return_type) = &function.ret else {
             unreachable!()
         };
