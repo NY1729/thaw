@@ -384,6 +384,49 @@ fn composed_numeric_maps_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
+fn composed_numeric_predicates_use_jit_callbacks_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-composed-predicate-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-composed-predicate");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function some(values: number[]): boolean;\nexport declare function every(values: number[]): boolean;\nexport declare function find(values: number[]): number | undefined;\nexport declare function findIndex(values: number[]): number;\nexport declare function findLast(values: number[]): number | undefined;\nexport declare function findLastIndex(values: number[]): number;\nexport declare function filter(values: number[]): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "const predicate = (value, index) => value * value > index + 3; module.exports.some = values => values.some(predicate); module.exports.every = values => values.every(predicate); module.exports.find = values => values.find(predicate); module.exports.findIndex = values => values.findIndex(predicate); module.exports.findLast = values => values.findLast(predicate); module.exports.findLastIndex = values => values.findLastIndex(predicate); module.exports.filter = values => values.filter(predicate);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { some, every, find, findIndex, findLast, findLastIndex, filter } from 'jit-composed-predicate';\nfunction main(): void { const values = [1, 2, 3, 4]; console.log(some(values)); console.log(every(values)); console.log(find(values) ?? -1); console.log(findIndex(values)); console.log(findLast(values) ?? -1); console.log(findLastIndex(values)); console.log(filter(values).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nfalse\n3\n2\n4\n3\n3,4\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_array_comparisons_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-primitive-comparisons-{}",

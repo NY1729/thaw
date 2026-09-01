@@ -582,7 +582,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
                 ..filter.clone()
             },
         ),
-        None
+        Some("expr:rn0,t6330303030303030303030303030303030,rnfilterjit,arrayvalue".into())
     );
     let string_array =
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str)));
