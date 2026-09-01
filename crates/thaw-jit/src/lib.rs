@@ -1548,6 +1548,11 @@ extern "C" fn absent_value() -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn take_present() -> f64 {
+    f64::from(CALL_PRESENT.with(|present| present.replace(true)))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn array_at(value: f64, index: f64, kind: u8) -> f64 {
     let Some((data, length)) = (unsafe { array_data(value) }) else {
         CALL_PRESENT.with(|present| present.set(false));
@@ -3328,6 +3333,7 @@ enum NumericValue {
     Select,
     ShortCircuit(bool),
     ConditionalStart,
+    PresentConditionalStart,
     ConditionalAlternate,
     ShortCircuitEnd,
     Absent,
@@ -3576,6 +3582,7 @@ impl NumericProgram {
                     "&&" => Some(NumericValue::ShortCircuit(true)),
                     "||" => Some(NumericValue::ShortCircuit(false)),
                     "if" => Some(NumericValue::ConditionalStart),
+                    "ifpresent" => Some(NumericValue::PresentConditionalStart),
                     "else" => Some(NumericValue::ConditionalAlternate),
                     "end" => Some(NumericValue::ShortCircuitEnd),
                     "absentn" | "absentb" | "absents" => Some(NumericValue::Absent),
@@ -5207,6 +5214,34 @@ impl NumericProgram {
                     depth -= 1;
                     branches.push((depth, vec![parity, zero], true));
                 }
+                NumericValue::PresentConditionalStart => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    emit_spill(&mut code, depth);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(take_present as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_move(&mut code, depth, 0);
+                    emit_restore(&mut code, depth);
+                    code.extend_from_slice(&[0x66, 0x0f, 0x2e, 0xc0 | (depth << 3) | depth]);
+                    let parity = emit_near_jump(&mut code, 0x8a);
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x7e,
+                        0xc0 | (depth << 3),
+                        0x48,
+                        0xd1,
+                        0xe0,
+                        0x48,
+                        0x85,
+                        0xc0,
+                    ]);
+                    let absent = emit_near_jump(&mut code, 0x84);
+                    branches.push((depth - 1, vec![parity, absent], true));
+                }
                 NumericValue::ConditionalAlternate => {
                     let (base_depth, exits, awaits_alternate) = branches.last_mut()?;
                     if !*awaits_alternate || depth != *base_depth + 1 {
@@ -6011,6 +6046,21 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(call(&optional_absent, &[]).error, ABSENT_STATUS);
+
+        let present_coalesce = CString::new(format!(
+            "expr:{one},ifpresent,else,{one},{invalid_digits},tofixed,end:present-coalesce"
+        ))
+        .unwrap();
+        let result = call(&present_coalesce, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 1.0);
+        let absent_coalesce = CString::new(format!(
+            "expr:absentn,ifpresent,else,{one},end:absent-coalesce"
+        ))
+        .unwrap();
+        let result = call(&absent_coalesce, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 1.0);
     }
 
     #[test]
