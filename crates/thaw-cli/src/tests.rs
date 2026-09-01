@@ -576,6 +576,34 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0".into())
     );
+    let array_length = thaw_bridge::DtsFunction {
+        params: vec![(
+            "values".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+                thaw_hir::HirType::F64,
+            ))),
+        )],
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..number_to_string.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.length = values => values.length;",
+            "length",
+            false,
+            &array_length,
+        ),
+        Some("expr:r0,arraylen".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.length = values => values + 1;",
+            "length",
+            false,
+            &array_length,
+        ),
+        None
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",

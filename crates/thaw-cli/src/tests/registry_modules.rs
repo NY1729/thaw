@@ -142,18 +142,18 @@ fn numeric_predicates_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function safe(value: number): boolean;\nexport declare function stringNan(value: string): boolean;\nexport declare function float(value: string): number;\nexport declare function integer(value: string, radix: number): number;\nexport declare function fixed(value: number, digits: number): string;\nexport declare function precision(value: number, digits: number): string;\nexport declare function radix(value: number, base: number): string;\nexport declare function exponential(value: number, digits: number): string;\nexport declare function exponentialShortest(value: number): string;\n",
+        "export declare function safe(value: number): boolean;\nexport declare function stringNan(value: string): boolean;\nexport declare function float(value: string): number;\nexport declare function integer(value: string, radix: number): number;\nexport declare function fixed(value: number, digits: number): string;\nexport declare function precision(value: number, digits: number): string;\nexport declare function radix(value: number, base: number): string;\nexport declare function exponential(value: number, digits: number): string;\nexport declare function exponentialShortest(value: number): string;\nexport declare function count(values: number[]): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports = { safe: value => Number.isSafeInteger(value), stringNan: value => Number.isNaN(value) || isNaN(value), float: value => Number.parseFloat(value), integer: (value, radix) => parseInt(value, radix), fixed: (value, digits) => value.toFixed(digits), precision: (value, digits) => value.toPrecision(digits), radix: (value, base) => value.toString(base), exponential: (value, digits) => value.toExponential(digits), exponentialShortest: value => value.toExponential() };\n",
+        "module.exports = { safe: value => Number.isSafeInteger(value), stringNan: value => Number.isNaN(value) || isNaN(value), float: value => Number.parseFloat(value), integer: (value, radix) => parseInt(value, radix), fixed: (value, digits) => value.toFixed(digits), precision: (value, digits) => value.toPrecision(digits), radix: (value, base) => value.toString(base), exponential: (value, digits) => value.toExponential(digits), exponentialShortest: value => value.toExponential(), count: values => values.length };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { safe, stringNan, float, integer, fixed, precision, radix, exponential, exponentialShortest } from 'jit-predicates';\nfunction main(): void { console.log(safe(42)); console.log(stringNan('x')); console.log(float('  -12.5px')); console.log(integer('11', 2)); console.log(fixed(12.5, 2)); console.log(precision(12.5, 3)); console.log(radix(255, 16)); console.log(exponential(12.6, 1)); console.log(exponentialShortest(12.5)); try { fixed(1, 101); } catch { console.log('range'); } try { exponential(1, 101); } catch { console.log('exp-range'); } }\n",
+        "import { safe, stringNan, float, integer, fixed, precision, radix, exponential, exponentialShortest, count } from 'jit-predicates';\nfunction main(): void { console.log(safe(42)); console.log(stringNan('x')); console.log(float('  -12.5px')); console.log(integer('11', 2)); console.log(fixed(12.5, 2)); console.log(precision(12.5, 3)); console.log(radix(255, 16)); console.log(exponential(12.6, 1)); console.log(exponentialShortest(12.5)); console.log(count([1, 2, 3])); try { fixed(1, 101); } catch { console.log('range'); } try { exponential(1, 101); } catch { console.log('exp-range'); } }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -169,7 +169,7 @@ fn numeric_predicates_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\ntrue\n-12.5\n3\n12.50\n12.5\nff\n1.3e+1\n1.25e+1\nrange\nexp-range\n"
+        "true\ntrue\n-12.5\n3\n12.50\n12.5\nff\n1.3e+1\n1.25e+1\n3\nrange\nexp-range\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

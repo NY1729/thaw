@@ -375,6 +375,9 @@ fn jit_numeric_export(
     ) -> Option<()> {
         let left_kind = jit_expression_kind(&left)?.0;
         let right_kind = jit_expression_kind(&right)?.0;
+        if left_kind == JitKind::Array || right_kind == JitKind::Array {
+            return None;
+        }
         output.append(&mut left);
         if left_kind != JitKind::String && right_kind == JitKind::String {
             output.push(
@@ -415,6 +418,7 @@ fn jit_numeric_export(
             JitKind::Number => output.push("numstr".into()),
             JitKind::Boolean => output.push("boolstr".into()),
             JitKind::String => {}
+            JitKind::Array => return None,
         }
         Some(())
     }
@@ -422,8 +426,10 @@ fn jit_numeric_export(
     fn append_number(mut expression: Vec<String>, output: &mut Vec<String>) -> Option<()> {
         let kind = jit_expression_kind(&expression)?.0;
         output.append(&mut expression);
-        if kind == JitKind::String {
-            output.push("strnum".into());
+        match kind {
+            JitKind::String => output.push("strnum".into()),
+            JitKind::Array => return None,
+            JitKind::Number | JitKind::Boolean => {}
         }
         Some(())
     }
@@ -447,6 +453,7 @@ fn jit_numeric_export(
             JitKind::Number => output.push("asbool".into()),
             JitKind::String => output.push("strbool".into()),
             JitKind::Boolean => {}
+            JitKind::Array => return None,
         }
         Some(())
     }
@@ -510,8 +517,21 @@ fn jit_numeric_export(
             Expr::Member(member) => {
                 if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "length")
                 {
-                    output.push(string_parameter(member.obj.as_ref(), parameters)?.into());
-                    output.push("strlen".into());
+                    let mut receiver = Vec::new();
+                    encode_expression(
+                        member.obj.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut receiver,
+                    )?;
+                    let operation = match jit_expression_kind(&receiver)?.0 {
+                        JitKind::String => "strlen",
+                        JitKind::Array => "arraylen",
+                        _ => return None,
+                    };
+                    output.extend(receiver);
+                    output.push(operation.into());
                 } else {
                     output.push(format!(
                         "c{:016x}",
@@ -636,6 +656,7 @@ fn jit_numeric_export(
                         }
                         JitKind::String => output.extend(encoded),
                         JitKind::Number => append_string(encoded, output)?,
+                        JitKind::Array => return None,
                     }
                     return Some(());
                 }
@@ -1539,6 +1560,10 @@ fn jit_numeric_export(
                     thaw_bridge::DtsType::Native(
                         thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
                     )
+                ) || matches!(
+                    ty,
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
+                        if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str)
                 )
             })
         || !match &function.ret {
@@ -1655,6 +1680,15 @@ fn jit_numeric_export(
         let prefix = match ty {
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => 's',
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => 'b',
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
+                if matches!(
+                    element.as_ref(),
+                    thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
+                ) =>
+            {
+                'r'
+            }
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(_)) => return None,
             _ => 'a',
         };
         if parameters
@@ -1700,6 +1734,7 @@ enum JitKind {
     Number,
     Boolean,
     String,
+    Array,
 }
 
 fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
@@ -1726,19 +1761,25 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "shr"
                 | "ushr"
         ) {
-            if stack.pop()? == JitKind::String || stack.pop()? == JitKind::String {
+            if !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean)
+                || !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean)
+            {
                 return None;
             }
             stack.push(JitKind::Number);
         } else if matches!(token.as_str(), "<" | "<=" | ">" | ">=" | "==" | "!=") {
-            if stack.pop()? == JitKind::String || stack.pop()? == JitKind::String {
+            if !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean)
+                || !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean)
+            {
                 return None;
             }
             stack.push(JitKind::Boolean);
         } else if token == "?" {
             let alternative = stack.pop()?;
             let consequent = stack.pop()?;
-            if stack.pop()? == JitKind::String || consequent != alternative {
+            if !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean | JitKind::String)
+                || consequent != alternative
+            {
                 return None;
             }
             stack.push(consequent);
@@ -1803,7 +1844,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             }
             stack.push(JitKind::Boolean);
         } else if token == "asbool" {
-            if *stack.last()? == JitKind::String {
+            if !matches!(*stack.last()?, JitKind::Number | JitKind::Boolean) {
                 return None;
             }
             *stack.last_mut()? = JitKind::Boolean;
@@ -1886,6 +1927,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token == "arraylen" {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Number);
         } else if matches!(
             token.as_str(),
             "acos"
@@ -1919,7 +1965,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "abs"
                 | "sqrt"
         ) {
-            if *stack.last()? == JitKind::String {
+            if !matches!(*stack.last()?, JitKind::Number | JitKind::Boolean) {
                 return None;
             }
             *stack.last_mut()? = JitKind::Number;
@@ -1928,6 +1974,8 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 JitKind::String
             } else if token.starts_with('b') {
                 JitKind::Boolean
+            } else if token.starts_with('r') {
+                JitKind::Array
             } else {
                 JitKind::Number
             });
@@ -1974,6 +2022,13 @@ fn jit_numeric_declaration(
                 thaw_bridge::DtsType::Native(thaw_hir::HirType::Str)
             ) {
                 "string"
+            } else if let thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) = ty {
+                match element.as_ref() {
+                    thaw_hir::HirType::F64 => "number[]",
+                    thaw_hir::HirType::Bool => "boolean[]",
+                    thaw_hir::HirType::Str => "string[]",
+                    _ => "never[]",
+                }
             } else {
                 "number"
             };

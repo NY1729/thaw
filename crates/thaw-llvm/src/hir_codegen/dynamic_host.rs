@@ -991,11 +991,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 || !signature
                     .params
                     .iter()
-                    .all(|ty| matches!(ty, HirType::F64 | HirType::Bool | HirType::Str))
+                    .all(|ty| {
+                        matches!(
+                            ty,
+                            HirType::F64 | HirType::Bool | HirType::Str | HirType::Array(_)
+                        )
+                    })
                 || args.len() != signature.params.len()
             {
                 return Err(
-                    "JIT calls currently require 0-16 number, boolean, or string arguments".into(),
+                    "JIT calls currently require 0-16 primitive or array arguments".into(),
                 );
             }
             let name = self
