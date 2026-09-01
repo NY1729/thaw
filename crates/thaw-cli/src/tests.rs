@@ -1088,7 +1088,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &spread_extreme,
         ),
-        None
+        Some("expr:rn0,c0000000000000000,t61312c61302c2b,rnreducejit".into())
     );
     assert_eq!(
         jit_numeric_export(

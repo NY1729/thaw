@@ -427,6 +427,49 @@ fn composed_numeric_predicates_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
+fn composed_numeric_reducers_use_jit_callbacks_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-composed-reducer-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-composed-reducer");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function left(values: number[], initial: number): number;\nexport declare function leftFirst(values: number[]): number;\nexport declare function right(values: number[], initial: number): number;\nexport declare function rightLast(values: number[]): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function combine(accumulator, value, index, values) { return accumulator * 2 + value + index + values.length; } module.exports.left = (values, initial) => values.reduce(combine, initial); module.exports.leftFirst = values => values.reduce(combine); module.exports.right = (values, initial) => values.reduceRight(combine, initial); module.exports.rightLast = values => values.reduceRight(combine);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { left, leftFirst, right, rightLast } from 'jit-composed-reducer';\nfunction main(): void { const values = [1, 2, 3]; console.log(left(values, 1)); console.log(leftFirst(values)); console.log(right(values, 1)); console.log(rightLast(values)); try { leftFirst([]); } catch { console.log('left-empty'); } try { rightLast([]); } catch { console.log('right-empty'); } }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "44\n24\n56\n28\nleft-empty\nright-empty\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_array_comparisons_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-primitive-comparisons-{}",
