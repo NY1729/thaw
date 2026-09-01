@@ -59,6 +59,7 @@ pub type ArraySet = unsafe extern "C" fn(u8, *mut *mut u8, f64, f64) -> i8;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 pub type NumberSource = unsafe extern "C" fn() -> f64;
 pub type DictionaryGet = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char) -> f64;
+pub type DictionaryMutate = unsafe extern "C" fn(u8, *mut libc::c_void, *const c_char, f64) -> f64;
 
 thread_local! {
     static ARENA_ALLOC: Cell<Option<ArenaAlloc>> = const { Cell::new(None) };
@@ -95,6 +96,7 @@ thread_local! {
     static PROCESS_PID: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static PROCESS_PPID: Cell<Option<NumberSource>> = const { Cell::new(None) };
     static DICTIONARY_GET: Cell<Option<DictionaryGet>> = const { Cell::new(None) };
+    static DICTIONARY_MUTATE: Cell<Option<DictionaryMutate>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
 }
@@ -122,6 +124,36 @@ extern "C" fn bool_dictionary_get(value: f64, key: f64) -> f64 {
 
 extern "C" fn string_dictionary_get(value: f64, key: f64) -> f64 {
     dictionary_get(value, key, 2)
+}
+
+extern "C" fn dictionary_mutate(object: f64, key: f64, value: f64, kind: u8) -> f64 {
+    let Some(mutate) = DICTIONARY_MUTATE.with(Cell::get) else {
+        return 0.0;
+    };
+    unsafe {
+        mutate(
+            kind,
+            object.to_bits() as usize as *mut libc::c_void,
+            key.to_bits() as usize as *const c_char,
+            value,
+        )
+    }
+}
+
+extern "C" fn number_dictionary_set(object: f64, key: f64, value: f64) -> f64 {
+    dictionary_mutate(object, key, value, 0)
+}
+
+extern "C" fn bool_dictionary_set(object: f64, key: f64, value: f64) -> f64 {
+    dictionary_mutate(object, key, value, 1)
+}
+
+extern "C" fn string_dictionary_set(object: f64, key: f64, value: f64) -> f64 {
+    dictionary_mutate(object, key, value, 2)
+}
+
+extern "C" fn dictionary_delete(object: f64, key: f64) -> f64 {
+    dictionary_mutate(object, key, 0.0, 3)
 }
 
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
@@ -3258,6 +3290,11 @@ enum NumericValue {
     NumberDictionaryGet,
     BoolDictionaryGet,
     StringDictionaryGet,
+    NumberDictionarySet,
+    NumberDictionaryPostSet,
+    StringDictionarySet,
+    BoolDictionarySet,
+    DictionaryDelete,
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
@@ -3501,6 +3538,11 @@ impl NumericProgram {
                     "dnget" => Some(NumericValue::NumberDictionaryGet),
                     "dbget" => Some(NumericValue::BoolDictionaryGet),
                     "dsget" => Some(NumericValue::StringDictionaryGet),
+                    "dnset" => Some(NumericValue::NumberDictionarySet),
+                    "dnpostset" => Some(NumericValue::NumberDictionaryPostSet),
+                    "dsset" => Some(NumericValue::StringDictionarySet),
+                    "dbset" => Some(NumericValue::BoolDictionarySet),
+                    "ddelete" => Some(NumericValue::DictionaryDelete),
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
@@ -5079,7 +5121,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberDictionaryGet
                 | NumericValue::BoolDictionaryGet
-                | NumericValue::StringDictionaryGet => {
+                | NumericValue::StringDictionaryGet
+                | NumericValue::DictionaryDelete => {
                     if depth < 2 {
                         return None;
                     }
@@ -5087,10 +5130,44 @@ impl NumericProgram {
                         NumericValue::NumberDictionaryGet => number_dictionary_get,
                         NumericValue::BoolDictionaryGet => bool_dictionary_get,
                         NumericValue::StringDictionaryGet => string_dictionary_get,
+                        NumericValue::DictionaryDelete => dictionary_delete,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
+                }
+                NumericValue::NumberDictionarySet
+                | NumericValue::StringDictionarySet
+                | NumericValue::BoolDictionarySet => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberDictionarySet => number_dictionary_set,
+                        NumericValue::StringDictionarySet => string_dictionary_set,
+                        NumericValue::BoolDictionarySet => bool_dictionary_set,
+                        _ => unreachable!(),
+                    };
+                    emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
+                    depth -= 2;
+                }
+                NumericValue::NumberDictionaryPostSet => {
+                    if depth < 4 {
+                        return None;
+                    }
+                    let left = depth - 4;
+                    emit_spill(&mut code, depth);
+                    emit_move(&mut code, 0, left);
+                    emit_move(&mut code, 1, left + 1);
+                    emit_move(&mut code, 2, left + 3);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(
+                        &(number_dictionary_set as *const () as u64).to_le_bytes(),
+                    );
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_restore(&mut code, depth);
+                    emit_move(&mut code, left, left + 2);
+                    depth -= 3;
                 }
                 NumericValue::NumberArrayJoin
                 | NumericValue::BoolArrayJoin
@@ -5669,6 +5746,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     string_from_char_code: Option<NumberToString>,
     string_from_code_point: Option<NumberToString>,
     dictionary_get: Option<DictionaryGet>,
+    dictionary_mutate: Option<DictionaryMutate>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
         .then(|| CStr::from_ptr(symbol).to_str().ok())
@@ -5734,6 +5812,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_process_pid = PROCESS_PID.with(|pid| pid.replace(process_pid));
     let previous_process_ppid = PROCESS_PPID.with(|ppid| ppid.replace(process_ppid));
     let previous_dictionary_get = DICTIONARY_GET.with(|get| get.replace(dictionary_get));
+    let previous_dictionary_mutate =
+        DICTIONARY_MUTATE.with(|mutate| mutate.replace(dictionary_mutate));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let mut value = function(args);
@@ -5776,6 +5856,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     PROCESS_PID.with(|pid| pid.set(previous_process_pid));
     PROCESS_PPID.with(|ppid| ppid.set(previous_process_ppid));
     DICTIONARY_GET.with(|get| get.set(previous_dictionary_get));
+    DICTIONARY_MUTATE.with(|mutate| mutate.set(previous_dictionary_mutate));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
     }
@@ -6110,6 +6191,7 @@ mod tests {
                 Some(convert_string),
                 Some(from_char_code),
                 Some(from_code_point),
+                None,
                 None,
             )
         }
@@ -6621,6 +6703,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,
