@@ -1959,6 +1959,82 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+    let optional_string_length = thaw_bridge::DtsFunction {
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                thaw_hir::HirType::Str,
+            ))),
+        )],
+        required_params: 0,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::F64,
+        ))),
+        ..optional_number.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.length = value => value?.length;",
+            "length",
+            false,
+            &optional_string_length,
+        ),
+        Some("expr:a0,asbool,if,s1,strlen,else,absentn,end".into())
+    );
+    let coalesced_string_length = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..optional_string_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.length = value => value?.length ?? 42;",
+            "length",
+            false,
+            &coalesced_string_length,
+        ),
+        Some("expr:a0,asbool,if,s1,strlen,else,c4045000000000000,end".into())
+    );
+    let optional_upper = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        ..optional_string_length.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.upper = value => value?.toUpperCase() ?? 'missing';",
+            "upper",
+            false,
+            &optional_upper,
+        ),
+        Some("expr:a0,asbool,if,s1,touppercase,else,t6d697373696e67,end".into())
+    );
+    let optional_push = thaw_bridge::DtsFunction {
+        params: vec![
+            (
+                "source".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+                    thaw_hir::HirType::F64,
+                ))),
+            ),
+            (
+                "values".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+                    thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)),
+                ))),
+            ),
+        ],
+        required_params: 1,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..optional_upper
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.push = (source, values) => values?.push(source.pop()) ?? 0;",
+            "push",
+            false,
+            &optional_push,
+        ),
+        Some("expr:a1,asbool,if,rn2,rn0,rnpop,rnpush,else,c0000000000000000,end".into())
+    );
     let string_characters = thaw_bridge::DtsFunction {
         params: vec![(
             "value".into(),

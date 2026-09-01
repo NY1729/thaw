@@ -2115,6 +2115,10 @@ defaults are selected lazily in typed IR in declaration order, including
 explicit `undefined` and defaults that reference earlier parameters. The same
 presence tag drives `??` chains, so falsey present values are retained and only
 the first required fallback expression can execute.
+Optional primitive and primitive-array receivers can use supported property
+reads and methods through `?.`. Missing receivers return the existing optional
+ABI absence tag, while `?.` combined with `??` stays inside one JIT branch and
+skips both the method and its argument expressions.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches

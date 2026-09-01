@@ -69,8 +69,8 @@ fn jit_export(
 ) -> Option<JitExport> {
     use thaw_parser::ast::{
         ArrowExpr, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr,
-        ExprOrSpread, Function, Ident, Lit, MemberProp, ModuleItem, Pat, Prop, PropName, PropOrSpread,
-        SimpleAssignTarget, Stmt, UnaryOp, UpdateOp, VarDeclKind,
+        ExprOrSpread, Function, Ident, Lit, MemberProp, ModuleItem, OptChainBase, Pat, Prop,
+        PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp, UpdateOp, VarDeclKind,
     };
 
     fn jit_parameter_slots(ty: &thaw_hir::HirType) -> Option<usize> {
@@ -1277,6 +1277,61 @@ fn jit_export(
             output.push(expression);
         }
 
+        fn optional_chain_operation(
+            chain: &thaw_parser::ast::OptChainExpr,
+            parameters: &std::collections::HashMap<String, String>,
+            locals: &std::collections::HashMap<String, Vec<String>>,
+            context: &mut InlineContext<'_>,
+        ) -> Option<(String, Vec<String>)> {
+            let (receiver, ordinary) = match chain.base.as_ref() {
+                OptChainBase::Member(member) => {
+                    (member.obj.as_ref(), Expr::Member(member.clone()))
+                }
+                OptChainBase::Call(call) => {
+                    let callee = call.callee.as_ref();
+                    let member = match callee {
+                        Expr::Member(member) => Some(member),
+                        Expr::OptChain(chain) => match chain.base.as_ref() {
+                            OptChainBase::Member(member) => Some(member),
+                            OptChainBase::Call(_) => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(member) = member {
+                        let mut ordinary = CallExpr::from(call.clone());
+                        ordinary.callee = Callee::Expr(Box::new(Expr::Member(member.clone())));
+                        (member.obj.as_ref(), Expr::Call(ordinary))
+                    } else if matches!(callee, Expr::Ident(_)) {
+                        (callee, Expr::Call(CallExpr::from(call.clone())))
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            let receiver = match receiver {
+                Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
+                receiver => receiver,
+            };
+            let Expr::Ident(identifier) = receiver else {
+                return None;
+            };
+            let (presence, value) = parameters
+                .get(identifier.sym.as_ref())?
+                .strip_prefix("optional:")?
+                .split_once(':')?;
+            let mut unwrapped = parameters.clone();
+            unwrapped.insert(identifier.sym.to_string(), value.into());
+            let mut operation = Vec::new();
+            encode_expression(
+                &ordinary,
+                &unwrapped,
+                locals,
+                context,
+                &mut operation,
+            )?;
+            Some((presence.into(), operation))
+        }
+
         match expression {
             Expr::Ident(identifier) if locals.contains_key(identifier.sym.as_ref()) => {
                 output.extend(locals.get(identifier.sym.as_ref())?.iter().cloned());
@@ -1633,14 +1688,22 @@ fn jit_export(
                 flatten_nullish(expression, &mut operands);
                 let mut opened = 0;
                 for (index, operand) in operands.iter().enumerate() {
-                    if let Some((presence, value)) = optional_tokens(operand, parameters) {
+                    let optional = optional_tokens(operand, parameters)
+                        .map(|(presence, value)| (presence.into(), vec![value.into()]))
+                        .or_else(|| {
+                            let Expr::OptChain(chain) = operand else {
+                                return None;
+                            };
+                            optional_chain_operation(chain, parameters, locals, context)
+                        });
+                    if let Some((presence, value)) = optional {
                         if index + 1 == operands.len() {
                             return None;
                         }
-                        output.push(presence.into());
+                        output.push(presence);
                         output.push("asbool".into());
                         output.push("if".into());
-                        output.push(value.into());
+                        output.extend(value);
                         output.push("else".into());
                         opened += 1;
                     } else {
@@ -1651,6 +1714,26 @@ fn jit_export(
                 for _ in 0..opened {
                     output.push("end".into());
                 }
+            }
+            Expr::OptChain(chain) => {
+                let (presence, operation) =
+                    optional_chain_operation(chain, parameters, locals, context)?;
+                let kind = jit_expression_kind(&operation)?.0;
+                output.push(presence);
+                output.push("asbool".into());
+                output.push("if".into());
+                output.extend(operation);
+                output.push("else".into());
+                output.push(
+                    match kind {
+                        JitKind::Number => "absentn",
+                        JitKind::Boolean => "absentb",
+                        JitKind::String => "absents",
+                        JitKind::Array => return None,
+                    }
+                    .into(),
+                );
+                output.push("end".into());
             }
             Expr::Bin(binary)
                 if matches!(
@@ -5552,6 +5635,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             *stack.last_mut()? = JitKind::Number;
+        } else if matches!(token.as_str(), "absentn" | "absentb" | "absents") {
+            stack.push(match token.as_str() {
+                "absentn" => JitKind::Number,
+                "absentb" => JitKind::Boolean,
+                "absents" => JitKind::String,
+                _ => unreachable!(),
+            });
+            maximum_depth = maximum_depth.max(stack.len());
         } else {
             stack.push(if token.starts_with('s') || token.starts_with('t') {
                 JitKind::String
