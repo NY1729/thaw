@@ -49,6 +49,7 @@ pub type ArrayReverse = unsafe extern "C" fn(*mut u8, usize) -> *mut u8;
 pub type ArraySort = unsafe extern "C" fn(u8, *mut u8) -> *mut u8;
 pub type ArrayFill = unsafe extern "C" fn(u8, *mut u8, f64, f64, f64) -> *mut u8;
 pub type ArrayCopyWithin = unsafe extern "C" fn(*mut u8, usize, f64, f64, f64) -> *mut u8;
+pub type ArrayPush = unsafe extern "C" fn(u8, *mut *mut u8, f64) -> f64;
 pub type ArrayWith = unsafe extern "C" fn(u8, *const u8, f64, f64) -> *mut u8;
 
 thread_local! {
@@ -71,6 +72,7 @@ thread_local! {
     static ARRAY_SORT: Cell<Option<ArraySort>> = const { Cell::new(None) };
     static ARRAY_FILL: Cell<Option<ArrayFill>> = const { Cell::new(None) };
     static ARRAY_COPY_WITHIN: Cell<Option<ArrayCopyWithin>> = const { Cell::new(None) };
+    static ARRAY_PUSH: Cell<Option<ArrayPush>> = const { Cell::new(None) };
     static ARRAY_WITH: Cell<Option<ArrayWith>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
@@ -617,6 +619,39 @@ extern "C" fn array_copy_within(array: f64, target: f64, start: f64, end: f64) -
         array_result(result)
     }
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn array_push(operation: u8, array: f64, value: f64) -> f64 {
+    let Some(push) = ARRAY_PUSH.with(Cell::get) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let bits = array.to_bits();
+    if bits & ARRAY_RESULT_TAG != 0 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let result = unsafe { push(operation, bits as usize as *mut *mut u8, value) };
+    if result < 0.0 {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        0.0
+    } else {
+        result
+    }
+}
+
+macro_rules! array_push_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(array: f64, value: f64) -> f64 {
+            array_push($operation, array, value)
+        }
+    };
+}
+
+array_push_fn!(number_array_push, 0);
+array_push_fn!(string_array_push, 1);
+array_push_fn!(bool_array_push, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_with(operation: u8, array: f64, index: f64, value: f64) -> f64 {
@@ -1697,6 +1732,9 @@ enum NumericValue {
     StringArrayFill,
     BoolArrayFill,
     ArrayCopyWithin,
+    NumberArrayPush,
+    StringArrayPush,
+    BoolArrayPush,
     NumberArrayWith,
     StringArrayWith,
     BoolArrayWith,
@@ -1726,6 +1764,7 @@ enum NumericValue {
     Select,
     AsBoolean,
     StrictMismatch(bool),
+    Drop,
 }
 
 struct NumericProgram(Vec<NumericValue>);
@@ -1867,6 +1906,10 @@ impl NumericProgram {
                     "rsfill" => Some(NumericValue::StringArrayFill),
                     "rbfill" => Some(NumericValue::BoolArrayFill),
                     "arraycopywithin" => Some(NumericValue::ArrayCopyWithin),
+                    "rnpush" => Some(NumericValue::NumberArrayPush),
+                    "rspush" => Some(NumericValue::StringArrayPush),
+                    "rbpush" => Some(NumericValue::BoolArrayPush),
+                    "drop" => Some(NumericValue::Drop),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -2358,6 +2401,27 @@ impl NumericProgram {
                     );
                     depth -= 3;
                 }
+                NumericValue::NumberArrayPush
+                | NumericValue::StringArrayPush
+                | NumericValue::BoolArrayPush => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::NumberArrayPush => number_array_push,
+                        NumericValue::StringArrayPush => string_array_push,
+                        NumericValue::BoolArrayPush => bool_array_push,
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::Drop => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    depth -= 1;
+                }
                 NumericValue::NumberArrayWith
                 | NumericValue::StringArrayWith
                 | NumericValue::BoolArrayWith => {
@@ -2812,6 +2876,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     array_sort: Option<ArraySort>,
     array_fill: Option<ArrayFill>,
     array_copy_within: Option<ArrayCopyWithin>,
+    array_push: Option<ArrayPush>,
     array_with: Option<ArrayWith>,
 ) -> ThawJitResult {
     let Some(symbol) = (!symbol.is_null())
@@ -2861,6 +2926,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_array_sort = ARRAY_SORT.with(|sort| sort.replace(array_sort));
     let previous_array_fill = ARRAY_FILL.with(|fill| fill.replace(array_fill));
     let previous_array_copy_within = ARRAY_COPY_WITHIN.with(|copy| copy.replace(array_copy_within));
+    let previous_array_push = ARRAY_PUSH.with(|push| push.replace(array_push));
     let previous_array_with = ARRAY_WITH.with(|replace| replace.replace(array_with));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
@@ -2889,6 +2955,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     ARRAY_SORT.with(|sort| sort.set(previous_array_sort));
     ARRAY_FILL.with(|fill| fill.set(previous_array_fill));
     ARRAY_COPY_WITHIN.with(|copy| copy.set(previous_array_copy_within));
+    ARRAY_PUSH.with(|push| push.set(previous_array_push));
     ARRAY_WITH.with(|replace| replace.set(previous_array_with));
     if !error.is_null() {
         return ThawJitResult { value: 0.0, error };
@@ -3112,6 +3179,15 @@ mod tests {
             assert!(!array.is_null());
             array
         }
+        unsafe extern "C" fn push_array_value(
+            operation: u8,
+            array: *mut *mut u8,
+            value: f64,
+        ) -> f64 {
+            assert_eq!((operation, value), (0, 20.0));
+            assert!(!array.is_null());
+            4.0
+        }
         unsafe extern "C" fn replace_array(
             operation: u8,
             array: *const u8,
@@ -3153,6 +3229,7 @@ mod tests {
                 Some(sort_array_in_place),
                 Some(fill_array_in_place),
                 Some(copy_array_within),
+                Some(push_array_value),
                 Some(replace_array),
             )
         }
@@ -3569,6 +3646,7 @@ mod tests {
                 concatenate.as_ptr(),
                 argument.as_ptr(),
                 1,
+                None,
                 None,
                 None,
                 None,

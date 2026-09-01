@@ -457,6 +457,29 @@ pub unsafe extern "C" fn thaw_jit_array_append(
 }
 
 #[no_mangle]
+/// Appends one primitive value and updates the caller's native array handle.
+/// Returns the new length, or `-1` on allocation or input failure.
+///
+/// # Safety
+/// `array` must point to a writable primitive Thaw array handle matching
+/// `operation`.
+pub unsafe extern "C" fn thaw_jit_array_push(
+    operation: u8,
+    array: *mut *mut u8,
+    value: f64,
+) -> f64 {
+    let Some(current) = array.as_ref().copied() else {
+        return -1.0;
+    };
+    let output = unsafe { thaw_jit_array_append(operation, current, value) };
+    if output.is_null() {
+        return -1.0;
+    }
+    unsafe { array.write(output) };
+    unsafe { native_array_length(output) }.map_or(-1.0, |length| length as f64)
+}
+
+#[no_mangle]
 /// `Array.prototype.unshift`. Prepends `count` elements (each
 /// `element_width` bytes, read consecutively from `values`) to `array` and
 /// returns a fresh buffer with the combined contents. See
