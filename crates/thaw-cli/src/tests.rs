@@ -706,6 +706,47 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:a0,typeofnumber".into())
     );
+    let zero_arg_number = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        required_params: 0,
+        params: Vec::new(),
+        ..array_predicate.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.empty = () => Number();",
+            "empty",
+            false,
+            &zero_arg_number,
+        ),
+        Some("expr:c0000000000000000".into())
+    );
+    let zero_arg_string = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        ..zero_arg_number.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.empty = () => String();",
+            "empty",
+            false,
+            &zero_arg_string,
+        ),
+        Some("expr:t".into())
+    );
+    let zero_arg_boolean = thaw_bridge::DtsFunction {
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ..zero_arg_number
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.empty = () => Boolean();",
+            "empty",
+            false,
+            &zero_arg_boolean,
+        ),
+        Some("expr:c0000000000000000".into())
+    );
     let array_search = thaw_bridge::DtsFunction {
         params: vec![
             array_length.params[0].clone(),

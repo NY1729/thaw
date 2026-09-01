@@ -2045,6 +2045,8 @@ expression is still evaluated before the typed result is returned.
 identity.
 Unary `typeof` on supported typed values returns `number`, `boolean`, `string`,
 or `object` from the same JIT while preserving operand evaluation.
+Zero-argument `Number()`, `String()`, and `Boolean()` calls fold to their
+ECMAScript primitive defaults in that IR.
 Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
