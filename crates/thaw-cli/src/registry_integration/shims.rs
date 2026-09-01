@@ -565,7 +565,29 @@ fn jit_numeric_export(
                 }
             }
             Expr::Member(member) => {
-                if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "length")
+                if let MemberProp::Computed(computed) = &member.prop {
+                    let mut receiver = Vec::new();
+                    encode_expression(
+                        member.obj.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut receiver,
+                    )?;
+                    if jit_expression_kind(&receiver)?.0 != JitKind::Array {
+                        return None;
+                    }
+                    let prefix = array_prefix(&receiver)?;
+                    output.extend(receiver);
+                    encode_number(
+                        computed.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        output,
+                    )?;
+                    output.push(format!("{prefix}get"));
+                } else if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "length")
                 {
                     let mut receiver = Vec::new();
                     encode_expression(
@@ -2078,14 +2100,17 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(token.as_str(), "rnat" | "rbat" | "rsat") {
+        } else if matches!(
+            token.as_str(),
+            "rnat" | "rbat" | "rsat" | "rnget" | "rbget" | "rsget"
+        ) {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(match token.as_str() {
-                "rnat" => JitKind::Number,
-                "rbat" => JitKind::Boolean,
-                "rsat" => JitKind::String,
+                "rnat" | "rnget" => JitKind::Number,
+                "rbat" | "rbget" => JitKind::Boolean,
+                "rsat" | "rsget" => JitKind::String,
                 _ => unreachable!(),
             });
         } else if matches!(token.as_str(), "rnjoin" | "rbjoin" | "rsjoin") {

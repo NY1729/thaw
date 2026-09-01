@@ -2043,6 +2043,8 @@ on that path. `at` preserves an explicit absent-result tag, while searches
 reuse the native runtime's `fromIndex` and strict/SameValueZero comparison rules.
 Their `join` and zero-argument `toString` calls reuse the native array
 formatters through one arena-backed JIT callback as well.
+Computed numeric element reads (`values[index]`) use a distinct bounds-checked
+JIT instruction, preserving bracket access's non-relative negative-index behavior.
 Relational and equality comparisons inspect those IR types as well:
 string/string stays on UTF-16 ordering, mixed loose/relational comparisons use
 numeric coercion, and strict mismatched primitives evaluate both operands
