@@ -310,6 +310,23 @@ pub extern "C" fn thaw_jit_dictionary_get(kind: u8, object: *mut Value, key: *co
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_jit_dictionary_mutate(
+    kind: u8,
+    object: *mut Value,
+    key: *const c_char,
+    value: f64,
+) -> f64 {
+    match kind {
+        0 => thaw_json_object_set_number(object, key, value),
+        1 => thaw_json_object_set_bool(object, key, (value != 0.0).into()),
+        2 => thaw_json_object_set_string(object, key, value.to_bits() as usize as *const c_char),
+        3 => return f64::from(thaw_json_object_delete(object, key)),
+        _ => return 0.0,
+    }
+    value
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_array_new() -> *mut Value {
     leak(Value::Array(Vec::new()))
 }

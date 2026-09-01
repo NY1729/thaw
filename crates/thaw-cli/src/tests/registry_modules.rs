@@ -316,12 +316,12 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function readNumber(values: Record<string, number>, key: string): number;\nexport declare function readBool(values: Record<string, boolean>, key: string): boolean;\nexport declare function readString(values: Record<string, string>, key: string): string;\n",
+        "export declare function readNumber(values: Record<string, number>, key: string): number;\nexport declare function readBool(values: Record<string, boolean>, key: string): boolean;\nexport declare function readString(values: Record<string, string>, key: string): string;\nexport declare function updateNumber(values: Record<string, number>, key: string, value: number): number;\nexport declare function updateBool(values: Record<string, boolean>, key: string, value: boolean): boolean;\nexport declare function updateString(values: Record<string, string>, key: string, value: string): string;\nexport declare function removeBool(values: Record<string, boolean>, key: string): boolean;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function readNumber(values, key) { return values[key] + values.fixed; } function readBool(values, key) { return values[key] && values.enabled; } function readString(values, key) { return values.prefix + values[key]; } module.exports = { readNumber, readBool, readString };\n",
+        "function readNumber(values, key) { return values[key] + values.fixed; } function readBool(values, key) { return values[key] && values.enabled; } function readString(values, key) { return values.prefix + values[key]; } function updateNumber(values, key, value) { values[key] = value; values.fixed++; return values[key] + values.fixed; } function updateBool(values, key, value) { values[key] = value; return values[key]; } function updateString(values, key, value) { values[key] += value; return values[key]; } function removeBool(values, key) { delete values[key]; return !values[key]; } module.exports = { readNumber, readBool, readString, updateNumber, updateBool, updateString, removeBool };\n",
     )
     .unwrap();
     let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
@@ -346,7 +346,7 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { readNumber, readBool, readString } from 'jit-dictionary';\nfunction main(): void { console.log(readNumber({ chosen: 40, fixed: 2 }, 'chosen')); console.log(readBool({ chosen: true, enabled: true }, 'chosen')); console.log(readBool({ chosen: false, enabled: true }, 'chosen')); console.log(readString({ prefix: 'th', suffix: 'aw' }, 'suffix')); }\n",
+        "import { readNumber, readBool, readString, updateNumber, updateBool, updateString, removeBool } from 'jit-dictionary';\nfunction main(): void { console.log(readNumber({ chosen: 40, fixed: 2 }, 'chosen')); console.log(readBool({ chosen: true, enabled: true }, 'chosen')); console.log(readBool({ chosen: false, enabled: true }, 'chosen')); console.log(readString({ prefix: 'th', suffix: 'aw' }, 'suffix')); console.log(updateNumber({ chosen: 1, fixed: 2 }, 'chosen', 40)); console.log(updateBool({ chosen: false }, 'chosen', true)); console.log(updateString({ chosen: 'th' }, 'chosen', 'aw')); console.log(removeBool({ chosen: true }, 'chosen')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -362,7 +362,7 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\ntrue\nfalse\nthaw\n"
+        "42\ntrue\nfalse\nthaw\n43\ntrue\nthaw\ntrue\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
