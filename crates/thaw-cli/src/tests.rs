@@ -883,6 +883,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,a1,dup2,rnget,a2,+,rnset".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.set = (values, index) => ++values[index];",
+            "set",
+            false,
+            &array_at,
+        ),
+        Some("expr:rn0,a1,dup2,rnget,c3ff0000000000000,+,rnset".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.set = (values, index) => values[index]--;",
+            "set",
+            false,
+            &array_at,
+        ),
+        Some("expr:rn0,a1,dup2,rnget,dup,c3ff0000000000000,-,rnpostset".into())
+    );
     let array_set_and_return = thaw_bridge::DtsFunction {
         ret: array_length.params[0].1.clone(),
         ..array_set.clone()
@@ -904,6 +922,20 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &array_set_and_return,
         ),
         Some("expr:rn0,a1,dup2,rnget,a2,*,rnset,drop,rn0,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.set = (values, index) => { values[index]++; return values; };",
+            "set",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: array_at.params.clone(),
+                required_params: 2,
+                ret: array_length.params[0].1.clone(),
+                ..array_at.clone()
+            },
+        ),
+        Some("expr:rn0,a1,dup2,rnget,dup,c3ff0000000000000,+,rnpostset,drop,rn0,arrayvalue".into())
     );
     let string_array_set = thaw_bridge::DtsFunction {
         params: vec![
