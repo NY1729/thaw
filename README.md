@@ -2247,7 +2247,8 @@ existing native dictionary pointer as one JIT slot. Static property names and
 runtime string keys call the dictionary host directly for reads, assignments,
 compound assignments, numeric updates and deletion while preserving expression
 results, so packages limited to typed dictionary operations can omit QuickJS as
-well.
+well. Primitive dictionaries can also be returned directly after mutation or
+rebuilt from static-key object literals by the generated native wrapper.
 Fixed-shape object and tuple results with the same recursively representable
 leaves are also assembled by an AOT wrapper from specialized JIT leaf
 expressions. Object literal source order, shorthand fields, nested objects and

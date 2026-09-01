@@ -518,6 +518,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json => Ok(json),
+            HirType::Dictionary(_) => Ok(json),
             HirType::Optional(payload) => {
                 let (object, key) = self.compile_napi_optional_result_container(json)?;
                 self.compile_json_to_optional_field(object, key, json, payload, false)
@@ -1095,6 +1096,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 ty @ (HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 ty @ HirType::Array(element)
                     if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
+                ty @ HirType::Dictionary(element)
+                    if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 _ => {
                     return Err(
                         "JIT calls currently return number, boolean, string, string array, or optional primitive"
@@ -1528,7 +1531,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map(BasicValueEnum::from)
                     .map_err(|error| error.to_string())?
-            } else if matches!(return_type, HirType::Str | HirType::Array(_)) {
+            } else if matches!(
+                return_type,
+                HirType::Str | HirType::Array(_) | HirType::Dictionary(_)
+            ) {
                 let bits = self
                     .builder
                     .build_bit_cast(
