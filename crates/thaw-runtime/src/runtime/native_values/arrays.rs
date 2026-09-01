@@ -912,6 +912,27 @@ pub unsafe extern "C" fn thaw_string_array_sort(array: *mut u8) -> *mut u8 {
     array
 }
 
+unsafe fn thaw_string_array_sort_descending(array: *mut u8) -> *mut u8 {
+    let Some(slots) = (unsafe { native_array_slots(array) }) else {
+        return std::ptr::null_mut();
+    };
+    slots.sort_by(|left, right| {
+        let string = |value: u64| {
+            let pointer = value as usize as *const c_char;
+            if pointer.is_null() {
+                Vec::new()
+            } else {
+                unsafe { CStr::from_ptr(pointer) }
+                    .to_string_lossy()
+                    .encode_utf16()
+                    .collect::<Vec<_>>()
+            }
+        };
+        string(*right).cmp(&string(*left))
+    });
+    array
+}
+
 #[no_mangle]
 /// # Safety
 /// `array` must point to a writable Thaw boolean array.
@@ -966,10 +987,12 @@ pub unsafe extern "C" fn thaw_jit_array_to_sorted(operation: u8, array: *const u
         0 => unsafe { thaw_number_array_to_sorted(array) },
         1 => unsafe { thaw_string_array_to_sorted(array) },
         2 => unsafe { thaw_bool_array_to_sorted(array) },
-        3 | 4 => {
+        3..=5 => {
             let output = unsafe { thaw_array_slice(array, 8, 0.0, f64::INFINITY) };
             if output.is_null() {
                 output
+            } else if operation == 5 {
+                unsafe { thaw_string_array_sort_descending(output) }
             } else {
                 unsafe { thaw_number_array_numeric_sort(output, operation == 4) }
             }
@@ -989,6 +1012,7 @@ pub unsafe extern "C" fn thaw_jit_array_sort(operation: u8, array: *mut u8) -> *
         1 => unsafe { thaw_string_array_sort(array) },
         2 => unsafe { thaw_bool_array_sort(array) },
         3 | 4 => unsafe { thaw_number_array_numeric_sort(array, operation == 4) },
+        5 => unsafe { thaw_string_array_sort_descending(array) },
         _ => std::ptr::null_mut(),
     }
 }

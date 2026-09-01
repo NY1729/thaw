@@ -2026,6 +2026,8 @@ it as well. Their destructive `reverse()` and default `sort()` counterparts
 mutate the caller's native storage and return it through the same JIT path.
 Numeric `(left, right) => left - right` and reversed subtraction comparators
 also select stable numeric ascending or descending sorts without QuickJS.
+String `(left, right) => left.localeCompare(right)` comparators and their
+reversed form likewise select stable UTF-16 ascending or descending sorts.
 Typed `fill(value, start?, end?)` performs the same in-place update with native
 relative-index clamping. `copyWithin(target, start, end?)` also stays on that
 path and uses the native overlap-safe slot copy.
