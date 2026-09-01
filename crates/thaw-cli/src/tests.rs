@@ -759,6 +759,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.ppid = () => process.ppid;",
+            "ppid",
+            false,
+            &zero_arg_number,
+        ),
+        Some("expr:processppid".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "module.exports.pid = process => process.pid;",
             "pid",
             false,
