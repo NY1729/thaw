@@ -454,6 +454,45 @@ fn primitive_array_copies_use_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_array_constructors_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-constructors-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-constructors");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numbers(value: number, tail: number[]): number[];\nexport declare function strings(value: string, tail: string[]): string[];\nexport declare function flags(value: boolean, tail: boolean[]): boolean[];\nexport declare function copyNumbers(values: number[]): number[];\nexport declare function copyStrings(values: string[]): string[];\nexport declare function copyFlags(values: boolean[]): boolean[];\nexport declare function empty(): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.numbers = (value, tail) => Array.of(1, value, ...tail); module.exports.strings = (value, tail) => Array.of('a', value, ...tail); module.exports.flags = (value, tail) => Array.of(true, value, ...tail); module.exports.copyNumbers = values => Array.from(values); module.exports.copyStrings = values => Array.from(values); module.exports.copyFlags = values => Array.from(values); module.exports.empty = () => Array.of();\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numbers, strings, flags, copyNumbers, copyStrings, copyFlags, empty } from 'jit-array-constructors';\nfunction main(): void { console.log(numbers(2, [3, 4]).join('|')); console.log(strings('b', ['c']).join('|')); console.log(flags(false, [true]).join('|')); console.log(copyNumbers([1, 2]).join('|')); console.log(copyStrings(['a', 'b']).join('|')); console.log(copyFlags([true, false]).join('|')); console.log(empty().length); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1|2|3|4\na|b|c\ntrue|false|true\n1|2\na|b\ntrue|false\n0\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn primitive_array_mutation_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-mutation-{}",
