@@ -180,7 +180,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &function,
         ),
         Some(
-            "expr:a1,c0000000000000000,<=,if,a0,else,a0,c3ff0000000000000,+,a1,c3ff0000000000000,-,recur2,end"
+            "expr:a1,c0000000000000000,<=,if,a0,else,a0,c3ff0000000000000,+,a1,c3ff0000000000000,-,recurn2,end"
                 .into()
         )
     );
@@ -3599,6 +3599,62 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         None
     );
+}
+
+#[test]
+fn recognizes_primitive_and_mutual_recursion_for_jit() {
+    let source = "function isEven(value) { return value === 0 ? true : !isEven(value - 1); } function punctuate(count, value) { return count <= 0 ? value : punctuate(count - 1, value + '!'); } function ping(value) { return value <= 0 ? 0 : pong(value - 1) + 1; } function pong(value) { return value <= 0 ? 0 : ping(value - 1) + 1; } module.exports = { isEven, punctuate, ping };";
+    let function = |name: &str, params, ret| thaw_bridge::DtsFunction {
+        name: name.into(),
+        generic: None,
+        params,
+        required_params: if name == "punctuate" { 2 } else { 1 },
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(ret),
+    };
+    let boolean_function = function(
+        "isEven",
+        vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        )],
+        thaw_hir::HirType::Bool,
+    );
+    assert!(jit_numeric_export(source, "isEven", false, &boolean_function,).is_some());
+    assert!(jit_numeric_export(
+        source,
+        "punctuate",
+        false,
+        &function(
+            "punctuate",
+            vec![
+                (
+                    "count".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+                ),
+                (
+                    "value".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+                ),
+            ],
+            thaw_hir::HirType::Str,
+        ),
+    )
+    .is_some());
+    assert!(jit_numeric_export(
+        source,
+        "ping",
+        false,
+        &function(
+            "ping",
+            vec![(
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            )],
+            thaw_hir::HirType::F64,
+        ),
+    )
+    .is_some());
 }
 
 #[test]
