@@ -318,6 +318,78 @@ number_array_reducers!(
 );
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_quantify(
+    value: f64,
+    operand: f64,
+    every: bool,
+    predicate: impl Fn(f64, f64) -> bool,
+) -> f64 {
+    let Some((array, length)) = (unsafe { array_data(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    for index in 0..length {
+        let matches = predicate(
+            unsafe { array.add(8 + index * 8).cast::<f64>().read() },
+            operand,
+        );
+        if matches != every {
+            return f64::from(!every);
+        }
+    }
+    f64::from(every)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! number_array_quantifiers {
+    ($some:ident, $every:ident, $predicate:expr) => {
+        extern "C" fn $some(value: f64, operand: f64) -> f64 {
+            number_array_quantify(value, operand, false, $predicate)
+        }
+        extern "C" fn $every(value: f64, operand: f64) -> f64 {
+            number_array_quantify(value, operand, true, $predicate)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_quantifiers!(
+    number_array_some_lt,
+    number_array_every_lt,
+    |left, right| left < right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_quantifiers!(
+    number_array_some_lte,
+    number_array_every_lte,
+    |left, right| left <= right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_quantifiers!(
+    number_array_some_gt,
+    number_array_every_gt,
+    |left, right| left > right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_quantifiers!(
+    number_array_some_gte,
+    number_array_every_gte,
+    |left, right| left >= right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_quantifiers!(
+    number_array_some_eq,
+    number_array_every_eq,
+    |left, right| left == right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_quantifiers!(
+    number_array_some_ne,
+    number_array_every_ne,
+    |left, right| left != right
+);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
     value.floor()
 }
@@ -2224,6 +2296,7 @@ enum NumericValue {
     NumberArrayMax,
     NumberArrayHypot,
     NumberArrayReduce(NumericReduceOp, bool, bool),
+    NumberArrayQuantifier(CompareOp, bool),
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2519,6 +2592,26 @@ impl NumericProgram {
                             NumericReduceOp::parse(operation).map(|operation| {
                                 NumericValue::NumberArrayReduce(operation, has_initial, from_right)
                             })
+                        })
+                        .or_else(|| {
+                            let (operation, every) = value
+                                .strip_prefix("rnsome")
+                                .map(|operation| (operation, false))
+                                .or_else(|| {
+                                    value
+                                        .strip_prefix("rnevery")
+                                        .map(|operation| (operation, true))
+                                })?;
+                            let operation = match operation {
+                                "lt" => CompareOp::Less,
+                                "lte" => CompareOp::LessEqual,
+                                "gt" => CompareOp::Greater,
+                                "gte" => CompareOp::GreaterEqual,
+                                "eq" => CompareOp::Equal,
+                                "ne" => CompareOp::NotEqual,
+                                _ => return None,
+                            };
+                            Some(NumericValue::NumberArrayQuantifier(operation, every))
                         })
                         .or_else(|| {
                             value
@@ -2953,6 +3046,26 @@ impl NumericProgram {
                     };
                     let function = functions[*from_right as usize * 2 + usize::from(!*has_initial)];
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayQuantifier(operation, every) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    type QuantifierFn = extern "C" fn(f64, f64) -> f64;
+                    let functions: [QuantifierFn; 2] = match operation {
+                        CompareOp::Less => [number_array_some_lt, number_array_every_lt],
+                        CompareOp::LessEqual => [number_array_some_lte, number_array_every_lte],
+                        CompareOp::Greater => [number_array_some_gt, number_array_every_gt],
+                        CompareOp::GreaterEqual => [number_array_some_gte, number_array_every_gte],
+                        CompareOp::Equal => [number_array_some_eq, number_array_every_eq],
+                        CompareOp::NotEqual => [number_array_some_ne, number_array_every_ne],
+                    };
+                    emit_binary_call(
+                        &mut code,
+                        functions[usize::from(*every)] as *const () as u64,
+                        depth - 2,
+                    );
                     depth -= 1;
                 }
                 NumericValue::ArraySlice => {
@@ -4707,6 +4820,28 @@ mod tests {
                 );
             }
         }
+        for (operation, operand, some, every) in [
+            ("lt", 25.0, true, false),
+            ("lte", 30.0, true, true),
+            ("gt", 25.0, true, false),
+            ("gte", 10.0, true, true),
+            ("eq", 20.0, true, false),
+            ("ne", 20.0, true, false),
+            ("eq", f64::NAN, false, false),
+            ("ne", f64::NAN, true, true),
+        ] {
+            for (quantifier, expected) in [("some", some), ("every", every)] {
+                let symbol = CString::new(format!(
+                    "expr:rn0,c{:016x},rn{quantifier}{operation}:array-{quantifier}",
+                    operand.to_bits()
+                ))
+                .unwrap();
+                assert_eq!(
+                    call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+                    f64::from(expected)
+                );
+            }
+        }
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();
         let empty_handle = &empty_data as *const *const u8;
@@ -4721,6 +4856,16 @@ mod tests {
             )
             .error
             .is_null());
+        }
+        for (operation, expected) in [("rnsomelt", 0.0), ("rneverylt", 1.0)] {
+            let symbol = CString::new(format!(
+                "expr:rn0,c0000000000000000,{operation}:empty-array-quantifier"
+            ))
+            .unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(empty_handle as usize as u64)]).value,
+                expected
+            );
         }
         for (operation, expected) in [("rnmin", f64::INFINITY), ("rnmax", f64::NEG_INFINITY)] {
             let symbol = CString::new(format!("expr:rn0,{operation}:empty-extreme")).unwrap();

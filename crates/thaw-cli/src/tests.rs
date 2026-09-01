@@ -287,6 +287,90 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         required_params: 1,
         ..function.clone()
     };
+    let quantifier = thaw_bridge::DtsFunction {
+        params: vec![
+            spread_extreme.params[0].clone(),
+            (
+                "threshold".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ..spread_extreme.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, threshold) => values.some(value => value > threshold);",
+            "add",
+            false,
+            &quantifier,
+        ),
+        Some("expr:rn0,a1,rnsomegt".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, threshold) => values.every(value => threshold <= value);",
+            "add",
+            false,
+            &quantifier,
+        ),
+        Some("expr:rn0,a1,rneverygte".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "const positive = value => value > 0; module.exports.add = values => values.some(positive);",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![spread_extreme.params[0].clone()],
+                required_params: 1,
+                ..quantifier.clone()
+            },
+        ),
+        Some("expr:rn0,c0000000000000000,rnsomegt".into())
+    );
+    let string_quantifier = thaw_bridge::DtsFunction {
+        params: vec![
+            spread_extreme.params[0].clone(),
+            (
+                "expected".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+        ],
+        ..quantifier.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, expected) => values.some(value => value == expected);",
+            "add",
+            false,
+            &string_quantifier,
+        ),
+        Some("expr:rn0,s1,strnum,rnsomeeq".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, expected) => values.some(value => value === expected);",
+            "add",
+            false,
+            &string_quantifier,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.some(value => value > Math.random());",
+            "add",
+            false,
+            &thaw_bridge::DtsFunction {
+                params: vec![spread_extreme.params[0].clone()],
+                required_params: 1,
+                ..quantifier.clone()
+            },
+        ),
+        None
+    );
     for (method, operation) in [("min", "rnmin"), ("max", "rnmax")] {
         assert_eq!(
             jit_numeric_export(
