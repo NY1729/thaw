@@ -2012,9 +2012,9 @@ loading QuickJS. String-separator `split(separator, limit?)` reuses the native
 Primitive `number[]`, `string[]`, and `boolean[]` `slice(start?, end?)` calls
 reuse the native shallow-copy runtime through that same JIT array return ABI;
 their non-mutating `toReversed()` copies and default `toSorted()` ordering use
-it as well. A one-argument `concat(other)` between arrays of the same primitive
-element type performs one native shallow allocation on that path. Primitive-array
-`with(index, value)` performs the same native
+it as well. `concat(...)` accepts zero or more arrays and scalar values of the
+same primitive element type, chaining native shallow allocations while keeping
+intermediate arrays inside the JIT. Primitive-array `with(index, value)` performs the same native
 shallow copy, replaces one typed slot, and reports out-of-range indices through
 the JIT exception path.
 `charAt(index?)` and `charCodeAt(index?)` also use that

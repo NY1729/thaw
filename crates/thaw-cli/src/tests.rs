@@ -998,6 +998,40 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,rn1,arrayconcat".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.concat = values => values.concat();",
+            "concat",
+            false,
+            &array_slice_all,
+        ),
+        Some("expr:rn0,c0000000000000000,c7ff0000000000000,arrayslice".into())
+    );
+    let array_concat_mixed = thaw_bridge::DtsFunction {
+        params: vec![
+            array_length.params[0].clone(),
+            (
+                "first".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            ("middle".into(), array_length.params[0].1.clone()),
+            (
+                "last".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 4,
+        ..array_concat.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.concat = (values, first, middle, last) => values.concat(first, middle, last);",
+            "concat",
+            false,
+            &array_concat_mixed,
+        ),
+        Some("expr:rn0,a1,rnappend,rn2,arrayconcat,a3,rnappend".into())
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",
