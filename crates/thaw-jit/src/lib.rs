@@ -793,31 +793,75 @@ fn number_array_map(value: f64, operation: impl Fn(f64, f64) -> f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_jit_map(value: f64, callback: f64) -> f64 {
+fn compile_jit_callback(callback: f64) -> Option<extern "C" fn(*const f64) -> f64> {
     let Some(callback) = (unsafe { string_argument(callback) }) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
-        return 0.0;
+        return None;
     };
-    let symbol = format!("expr:{callback}:array-map-callback");
+    let symbol = format!("expr:{callback}:array-callback");
     let Some(program) = NumericProgram::parse(&symbol) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
-        return 0.0;
+        return None;
     };
     if program.required_args() > 2 {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
-        return 0.0;
+        return None;
     }
     let code = match compile(&symbol, &program) {
         Ok(code) => code,
         Err(error) => {
             CALL_ERROR.with(|slot| slot.set(error));
-            return 0.0;
+            return None;
         }
     };
-    let callback =
-        unsafe { std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code) };
+    Some(unsafe {
+        std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code)
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_jit_map(value: f64, callback: f64) -> f64 {
+    let Some(callback) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
     number_array_map(value, |element, index| callback([element, index].as_ptr()))
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_jit_scan(value: f64, callback: f64, mode: u8) -> f64 {
+    let Some(callback) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
+    primitive_array_scan(value, 0, mode, |array, index| {
+        let element = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+        let result = callback([element, index as f64].as_ptr());
+        result != 0.0 && !result.is_nan()
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! jit_scan_fn {
+    ($name:ident, $mode:expr) => {
+        extern "C" fn $name(value: f64, callback: f64) -> f64 {
+            number_array_jit_scan(value, callback, $mode)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_fn!(number_array_jit_some, 0);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_fn!(number_array_jit_every, 1);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_fn!(number_array_jit_find, 2);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_fn!(number_array_jit_find_index, 3);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_fn!(number_array_jit_find_last, 4);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_fn!(number_array_jit_find_last_index, 5);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+jit_scan_fn!(number_array_jit_filter, 6);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_index_map(value: f64, encoded: f64) -> f64 {
@@ -3016,6 +3060,7 @@ enum NumericValue {
     PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayJitMap,
+    NumberArrayJitScan(u8),
     NumberArrayIndexMap(NumericReduceOp, bool),
     NumberArraySelectMap(CompareOp, u8),
     NumberArrayBranchMap(u16),
@@ -3094,6 +3139,7 @@ impl NumericProgram {
                     | NumericValue::StringArraySort
                     | NumericValue::BoolArraySort
                     | NumericValue::NumberArrayJitMap
+                    | NumericValue::NumberArrayJitScan(6)
                     | NumericValue::StringArrayToSortedDescending
                     | NumericValue::StringArraySortDescending
                     | NumericValue::NumberArrayFill
@@ -3511,6 +3557,18 @@ impl NumericProgram {
                         })
                         .or_else(|| {
                             (value == "rnmapjit").then_some(NumericValue::NumberArrayJitMap)
+                        })
+                        .or_else(|| {
+                            Some(NumericValue::NumberArrayJitScan(match value {
+                                "rnsomejit" => 0,
+                                "rneveryjit" => 1,
+                                "rnfindjit" => 2,
+                                "rnfindindexjit" => 3,
+                                "rnfindlastjit" => 4,
+                                "rnfindlastindexjit" => 5,
+                                "rnfilterjit" => 6,
+                                _ => return None,
+                            }))
                         })
                         .or_else(|| {
                             value
@@ -4153,6 +4211,23 @@ impl NumericProgram {
                         number_array_jit_map as *const () as u64,
                         depth - 2,
                     );
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayJitScan(mode) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match mode {
+                        0 => number_array_jit_some,
+                        1 => number_array_jit_every,
+                        2 => number_array_jit_find,
+                        3 => number_array_jit_find_index,
+                        4 => number_array_jit_find_last,
+                        5 => number_array_jit_find_last_index,
+                        6 => number_array_jit_filter,
+                        _ => return None,
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
                 NumericValue::NumberArrayIndexMap(operation, reverse) => {
