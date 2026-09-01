@@ -273,18 +273,18 @@ fn primitive_recursion_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function factorial(value: number): number;\nexport declare function gcd(left: number, right: number): number;\nexport declare function isEven(value: number): boolean;\nexport declare function punctuate(count: number, value: string): string;\nexport declare function ping(value: number): number;\nexport declare function sum(values: number[], index: number): number;\nexport declare function drain(values: number[]): number;\nexport declare function joinDown(values: string[], index: number): string;\n",
+        "export interface Counter { value: number; total: number; }\nexport interface Collection { values: number[]; bonus: number; }\nexport declare function factorial(value: number): number;\nexport declare function gcd(left: number, right: number): number;\nexport declare function isEven(value: number): boolean;\nexport declare function punctuate(count: number, value: string): string;\nexport declare function ping(value: number): number;\nexport declare function sum(values: number[], index: number): number;\nexport declare function drain(values: number[]): number;\nexport declare function joinDown(values: string[], index: number): string;\nexport declare function objectSum(state: Counter): number;\nexport declare function tupleSum(state: [number, number]): number;\nexport declare function collectionSum(state: Collection, index: number): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function factorial(value) { return value <= 1 ? 1 : value * factorial(value - 1); } function gcd(left, right) { return right === 0 ? left : gcd(right, left % right); } function isEven(value) { return value === 0 ? true : !isEven(value - 1); } function punctuate(count, value) { return count <= 0 ? value : punctuate(count - 1, value + '!'); } function ping(value) { return value <= 0 ? 0 : pong(value - 1) + 1; } function pong(value) { return value <= 0 ? 0 : ping(value - 1) + 1; } function sum(values, index) { return index >= values.length ? 0 : values[index] + sum(values, index + 1); } function drain(values) { return values.length === 0 ? 0 : values.pop() + drain(values); } function joinDown(values, index) { return index >= values.length ? '' : values[index] + joinDown(values, index + 1); } module.exports = { factorial, gcd, isEven, punctuate, ping, sum, drain, joinDown };\n",
+        "function factorial(value) { return value <= 1 ? 1 : value * factorial(value - 1); } function gcd(left, right) { return right === 0 ? left : gcd(right, left % right); } function isEven(value) { return value === 0 ? true : !isEven(value - 1); } function punctuate(count, value) { return count <= 0 ? value : punctuate(count - 1, value + '!'); } function ping(value) { return value <= 0 ? 0 : pong(value - 1) + 1; } function pong(value) { return value <= 0 ? 0 : ping(value - 1) + 1; } function sum(values, index) { return index >= values.length ? 0 : values[index] + sum(values, index + 1); } function drain(values) { return values.length === 0 ? 0 : values.pop() + drain(values); } function joinDown(values, index) { return index >= values.length ? '' : values[index] + joinDown(values, index + 1); } function objectSum(state) { return state.value <= 0 ? state.total : objectSum({ value: state.value - 1, total: state.total + state.value }); } function tupleSum(state) { return state[0] <= 0 ? state[1] : tupleSum([state[0] - 1, state[1] + state[0]]); } function collectionSum(state, index) { return index >= state.values.length ? state.bonus : state.values[index] + collectionSum(state, index + 1); } module.exports = { factorial, gcd, isEven, punctuate, ping, sum, drain, joinDown, objectSum, tupleSum, collectionSum };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { factorial, gcd, isEven, punctuate, ping, sum, drain, joinDown } from 'jit-recursion';\nfunction main(): void { console.log(factorial(6)); console.log(gcd(1071, 462)); console.log(isEven(6)); console.log(isEven(5)); console.log(punctuate(3, 'thaw')); console.log(ping(5)); console.log(sum([1, 2, 3, 4], 0)); const values = [1, 2, 3]; console.log(drain(values) + ':' + values.length); console.log(joinDown(['a', 'b', 'c'], 0)); }\n",
+        "import { factorial, gcd, isEven, punctuate, ping, sum, drain, joinDown, objectSum, tupleSum, collectionSum } from 'jit-recursion';\nfunction main(): void { console.log(factorial(6)); console.log(gcd(1071, 462)); console.log(isEven(6)); console.log(isEven(5)); console.log(punctuate(3, 'thaw')); console.log(ping(5)); console.log(sum([1, 2, 3, 4], 0)); const values = [1, 2, 3]; console.log(drain(values) + ':' + values.length); console.log(joinDown(['a', 'b', 'c'], 0)); console.log(objectSum({ value: 4, total: 0 })); console.log(tupleSum([4, 0])); console.log(collectionSum({ values: [2, 3, 4], bonus: 1 }, 0)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -300,7 +300,7 @@ fn primitive_recursion_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "720\n21\ntrue\nfalse\nthaw!!!\n5\n10\n6:0\nabc\n"
+        "720\n21\ntrue\nfalse\nthaw!!!\n5\n10\n6:0\nabc\n10\n10\n10\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
