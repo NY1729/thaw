@@ -203,6 +203,18 @@ extern "C" fn string_dictionary_entries(object: f64) -> f64 {
     dictionary_query(object, 0.0, 7)
 }
 
+extern "C" fn dictionary_from_number_entries(entries: f64) -> f64 {
+    dictionary_query(entries, 0.0, 8)
+}
+
+extern "C" fn dictionary_from_bool_entries(entries: f64) -> f64 {
+    dictionary_query(entries, 0.0, 9)
+}
+
+extern "C" fn dictionary_from_string_entries(entries: f64) -> f64 {
+    dictionary_query(entries, 0.0, 10)
+}
+
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -3350,6 +3362,9 @@ enum NumericValue {
     NumberDictionaryEntries,
     BoolDictionaryEntries,
     StringDictionaryEntries,
+    DictionaryFromNumberEntries,
+    DictionaryFromBoolEntries,
+    DictionaryFromStringEntries,
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
@@ -3606,6 +3621,9 @@ impl NumericProgram {
                     "dnentries" => Some(NumericValue::NumberDictionaryEntries),
                     "dbentries" => Some(NumericValue::BoolDictionaryEntries),
                     "dsentries" => Some(NumericValue::StringDictionaryEntries),
+                    "dnfromentries" => Some(NumericValue::DictionaryFromNumberEntries),
+                    "dbfromentries" => Some(NumericValue::DictionaryFromBoolEntries),
+                    "dsfromentries" => Some(NumericValue::DictionaryFromStringEntries),
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
@@ -4043,6 +4061,9 @@ impl NumericProgram {
                                 .or_else(|| value.strip_prefix("dn"))
                                 .or_else(|| value.strip_prefix("db"))
                                 .or_else(|| value.strip_prefix("ds"))
+                                .or_else(|| value.strip_prefix("en"))
+                                .or_else(|| value.strip_prefix("eb"))
+                                .or_else(|| value.strip_prefix("es"))
                                 .and_then(|index| index.parse::<u8>().ok())
                                 .filter(|index| *index < 16)
                                 .map(NumericValue::Argument)
@@ -5207,7 +5228,10 @@ impl NumericProgram {
                 | NumericValue::StringDictionaryValues
                 | NumericValue::NumberDictionaryEntries
                 | NumericValue::BoolDictionaryEntries
-                | NumericValue::StringDictionaryEntries => {
+                | NumericValue::StringDictionaryEntries
+                | NumericValue::DictionaryFromNumberEntries
+                | NumericValue::DictionaryFromBoolEntries
+                | NumericValue::DictionaryFromStringEntries => {
                     if depth == 0 {
                         return None;
                     }
@@ -5219,6 +5243,9 @@ impl NumericProgram {
                         NumericValue::NumberDictionaryEntries => number_dictionary_entries,
                         NumericValue::BoolDictionaryEntries => bool_dictionary_entries,
                         NumericValue::StringDictionaryEntries => string_dictionary_entries,
+                        NumericValue::DictionaryFromNumberEntries => dictionary_from_number_entries,
+                        NumericValue::DictionaryFromBoolEntries => dictionary_from_bool_entries,
+                        NumericValue::DictionaryFromStringEntries => dictionary_from_string_entries,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
