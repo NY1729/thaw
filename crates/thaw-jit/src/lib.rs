@@ -272,13 +272,31 @@ unsafe fn array_at(value: f64, index: f64, kind: u8) -> f64 {
         CALL_PRESENT.with(|present| present.set(false));
         return 0.0;
     }
-    let slot = unsafe { data.add(8 + index as usize * 8) };
+    unsafe { array_element(data, index as usize, kind) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn array_element(data: *const u8, index: usize, kind: u8) -> f64 {
+    let slot = unsafe { data.add(8 + index * 8) };
     match kind {
         0 => unsafe { slot.cast::<f64>().read_unaligned() },
         1 => f64::from(unsafe { slot.read() } != 0),
         2 => f64::from_bits(unsafe { slot.cast::<usize>().read_unaligned() } as u64),
         _ => 0.0,
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+unsafe fn array_get(value: f64, index: f64, kind: u8) -> f64 {
+    let Some((data, length)) = (unsafe { array_data(value) }) else {
+        CALL_PRESENT.with(|present| present.set(false));
+        return 0.0;
+    };
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index >= length as f64 {
+        CALL_PRESENT.with(|present| present.set(false));
+        return 0.0;
+    }
+    unsafe { array_element(data, index as usize, kind) }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -294,6 +312,21 @@ extern "C" fn bool_array_at(value: f64, index: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_array_at(value: f64, index: f64) -> f64 {
     unsafe { array_at(value, index, 2) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_get(value: f64, index: f64) -> f64 {
+    unsafe { array_get(value, index, 0) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn bool_array_get(value: f64, index: f64) -> f64 {
+    unsafe { array_get(value, index, 1) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_array_get(value: f64, index: f64) -> f64 {
+    unsafe { array_get(value, index, 2) }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1258,6 +1291,9 @@ enum NumericValue {
     NumberArrayAt,
     BoolArrayAt,
     StringArrayAt,
+    NumberArrayGet,
+    BoolArrayGet,
+    StringArrayGet,
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
@@ -1365,6 +1401,9 @@ impl NumericProgram {
                     "rnat" => Some(NumericValue::NumberArrayAt),
                     "rbat" => Some(NumericValue::BoolArrayAt),
                     "rsat" => Some(NumericValue::StringArrayAt),
+                    "rnget" => Some(NumericValue::NumberArrayGet),
+                    "rbget" => Some(NumericValue::BoolArrayGet),
+                    "rsget" => Some(NumericValue::StringArrayGet),
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
@@ -1760,7 +1799,10 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArrayAt
                 | NumericValue::BoolArrayAt
-                | NumericValue::StringArrayAt => {
+                | NumericValue::StringArrayAt
+                | NumericValue::NumberArrayGet
+                | NumericValue::BoolArrayGet
+                | NumericValue::StringArrayGet => {
                     if depth < 2 {
                         return None;
                     }
@@ -1768,6 +1810,9 @@ impl NumericProgram {
                         NumericValue::NumberArrayAt => number_array_at,
                         NumericValue::BoolArrayAt => bool_array_at,
                         NumericValue::StringArrayAt => string_array_at,
+                        NumericValue::NumberArrayGet => number_array_get,
+                        NumericValue::BoolArrayGet => bool_array_get,
+                        NumericValue::StringArrayGet => string_array_get,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
@@ -2837,6 +2882,16 @@ mod tests {
             30.0
         );
         let symbol = CString::new("expr:rn0,c4010000000000000,rnat:array-at-missing").unwrap();
+        assert_eq!(
+            call(&symbol, &[f64::from_bits(handle as usize as u64)]).error,
+            ABSENT_STATUS
+        );
+        let symbol = CString::new("expr:rn0,c3ff0000000000000,rnget:array-get").unwrap();
+        assert_eq!(
+            call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+            20.0
+        );
+        let symbol = CString::new("expr:rn0,cbff0000000000000,rnget:array-get-negative").unwrap();
         assert_eq!(
             call(&symbol, &[f64::from_bits(handle as usize as u64)]).error,
             ABSENT_STATUS
