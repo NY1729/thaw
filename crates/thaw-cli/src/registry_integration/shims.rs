@@ -60,6 +60,37 @@ fn jit_numeric_export(
         SimpleAssignTarget, Stmt, UnaryOp, UpdateOp, VarDeclKind,
     };
 
+    fn jit_parameter_slots(ty: &thaw_hir::HirType) -> Option<usize> {
+        match ty {
+            thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => Some(1),
+            thaw_hir::HirType::Array(element)
+                if matches!(
+                    element.as_ref(),
+                    thaw_hir::HirType::F64
+                        | thaw_hir::HirType::Bool
+                        | thaw_hir::HirType::Str
+                ) =>
+            {
+                Some(1)
+            }
+            thaw_hir::HirType::Object(fields) => fields.iter().try_fold(0usize, |slots, (_, ty)| {
+                matches!(
+                    ty,
+                    thaw_hir::HirType::F64
+                        | thaw_hir::HirType::Bool
+                        | thaw_hir::HirType::Str
+                )
+                .then_some(slots + 1)
+            }),
+            thaw_hir::HirType::Optional(payload)
+                if !matches!(payload.as_ref(), thaw_hir::HirType::Object(_)) =>
+            {
+                jit_parameter_slots(payload).map(|_| 2)
+            }
+            _ => None,
+        }
+    }
+
     fn math_method(
         call: &CallExpr,
         parameters: &std::collections::HashMap<String, String>,
@@ -889,6 +920,12 @@ fn jit_numeric_export(
                 }
             }
             Expr::Member(member) => {
+                let object_field = match (member.obj.as_ref(), &member.prop) {
+                    (Expr::Ident(object), MemberProp::Ident(property)) => {
+                        parameters.get(&format!("{}.{}", object.sym, property.sym))
+                    }
+                    _ => None,
+                };
                 if matches!(
                     (member.obj.as_ref(), &member.prop),
                     (Expr::Ident(object), MemberProp::Ident(property))
@@ -901,6 +938,8 @@ fn jit_numeric_export(
                         unreachable!();
                     };
                     output.push(format!("process{}", property.sym));
+                } else if let Some(field) = object_field {
+                    output.push(field.clone());
                 } else if let MemberProp::Computed(computed) = &member.prop {
                     let mut receiver = Vec::new();
                     encode_expression(
@@ -3808,7 +3847,6 @@ fn jit_numeric_export(
     }
 
     if function.generic.is_some()
-        || function.params.len() > 16
         || function.rest_param.is_some()
         || !function
             .params
@@ -3821,10 +3859,18 @@ fn jit_numeric_export(
                     thaw_hir::HirType::Optional(payload) => payload.as_ref(),
                     ty => ty,
                 };
-                matches!(ty, thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str)
-                    || matches!(ty, thaw_hir::HirType::Array(element)
-                        if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str))
+                jit_parameter_slots(ty).is_some()
             })
+        || function
+            .params
+            .iter()
+            .try_fold(0usize, |slots, (_, ty)| match ty {
+                thaw_bridge::DtsType::Native(ty) => {
+                    jit_parameter_slots(ty).map(|count| slots + count)
+                }
+                thaw_bridge::DtsType::Unsupported(_) => None,
+            })
+            .is_none_or(|slots| slots > 16)
         || !match &function.ret {
             thaw_bridge::DtsType::Native(
                 thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str,
@@ -3982,6 +4028,22 @@ fn jit_numeric_export(
             ty => (*ty, false),
         };
         let optional = *optional_parameter || optional_type;
+        if let thaw_hir::HirType::Object(fields) = ty {
+            if optional || default.is_some() {
+                return None;
+            }
+            for (field, field_type) in fields {
+                let prefix = match field_type {
+                    thaw_hir::HirType::Str => "s",
+                    thaw_hir::HirType::Bool => "b",
+                    thaw_hir::HirType::F64 => "a",
+                    _ => return None,
+                };
+                parameters.insert(format!("{parameter}.{field}"), format!("{prefix}{slot}"));
+                slot += 1;
+            }
+            continue;
+        }
         let prefix = match ty {
             thaw_hir::HirType::Str => "s",
             thaw_hir::HirType::Bool => "b",
@@ -4861,18 +4923,20 @@ fn jit_numeric_declaration(
             };
             let optional = index >= function.required_params || optional_type;
             let ty = if *ty == thaw_hir::HirType::Bool {
-                "boolean"
+                "boolean".into()
             } else if *ty == thaw_hir::HirType::Str {
-                "string"
+                "string".into()
             } else if let thaw_hir::HirType::Array(element) = ty {
                 match element.as_ref() {
-                    thaw_hir::HirType::F64 => "number[]",
-                    thaw_hir::HirType::Bool => "boolean[]",
-                    thaw_hir::HirType::Str => "string[]",
-                    _ => "never[]",
+                    thaw_hir::HirType::F64 => "number[]".into(),
+                    thaw_hir::HirType::Bool => "boolean[]".into(),
+                    thaw_hir::HirType::Str => "string[]".into(),
+                    _ => "never[]".into(),
                 }
+            } else if matches!(ty, thaw_hir::HirType::Object(_)) {
+                render_dynamic_type(ty).unwrap()
             } else {
-                "number"
+                "number".into()
             };
             (name, ty, optional)
         })
