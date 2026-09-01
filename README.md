@@ -2007,7 +2007,9 @@ JavaScript's left-to-right coercion order on that path. One-argument `startsWith
 `repeat(count)`, `slice(start?, end?)`, and `substring(start?, end?)` use the
 same typed string IR. Unicode `normalize(form?)` calls the native ICU-backed
 runtime directly through the JIT callback ABI and defaults to NFC without
-loading QuickJS. `charAt(index?)` and `charCodeAt(index?)` also use that
+loading QuickJS. String-separator `split(separator, limit?)` reuses the native
+`string[]` builder and returns its result through the typed JIT array ABI.
+`charAt(index?)` and `charCodeAt(index?)` also use that
 JIT path with UTF-16 code-unit indexing. `padStart(target, pad?)` and
 `padEnd(target, pad?)` use the same arena-backed JIT string return path.
 `at(index?)` and `codePointAt(index?)` use an explicit JIT presence tag so

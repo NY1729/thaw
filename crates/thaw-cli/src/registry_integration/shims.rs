@@ -330,6 +330,7 @@ fn jit_numeric_export(
                     "replace" | "replaceAll" => call.args.len() == 2,
                     "padStart" | "padEnd" => (1..=2).contains(&call.args.len()),
                     "slice" | "substring" => call.args.len() <= 2,
+                    "split" => (1..=2).contains(&call.args.len()),
                     _ => false,
                 };
                 arity_matches && is_string_expression(member.obj.as_ref(), parameters)
@@ -392,6 +393,7 @@ fn jit_numeric_export(
             "padEnd" => "padend",
             "slice" => "slice",
             "substring" => "substring",
+            "split" => "split",
             _ => return None,
         };
         Some((operation, member.obj.as_ref()))
@@ -1091,6 +1093,30 @@ fn jit_numeric_export(
                             output.push(format!("{operation}2"));
                             return Some(());
                         }
+                        _ => return None,
+                    }
+                } else if operation == "split" {
+                    let [separator, limit @ ..] = call.args.as_slice() else {
+                        return None;
+                    };
+                    let mut encoded = Vec::new();
+                    encode_expression(
+                        separator.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut encoded,
+                    )?;
+                    append_string(encoded, output)?;
+                    match limit {
+                        [] => output.push("c7ff0000000000000".into()),
+                        [limit] => encode_number(
+                            limit.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?,
                         _ => return None,
                     }
                 } else {
@@ -1897,6 +1923,9 @@ fn jit_numeric_export(
                     thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
                 )
             }
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => {
+                **element == thaw_hir::HirType::Str
+            }
             _ => false,
         }
     {
@@ -2087,16 +2116,18 @@ fn jit_numeric_export(
         &mut context,
         &mut expression,
     )?;
-    validated_jit_expression(
-        expression,
-        match &function.ret {
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => true,
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
-                **payload == thaw_hir::HirType::Str
-            }
-            _ => false,
-        },
-    )
+    let expected = match &function.ret {
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => JitKind::String,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => JitKind::Boolean,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
+            if **element == thaw_hir::HirType::Str => JitKind::Array,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if **payload == thaw_hir::HirType::Str => JitKind::String,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if **payload == thaw_hir::HirType::Bool => JitKind::Boolean,
+        _ => JitKind::Number,
+    };
+    validated_jit_expression(expression, expected)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2265,6 +2296,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::String);
+        } else if token == "split" {
+            if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::String
+            {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if matches!(
             token.as_str(),
             "charat" | "charcodeat" | "at" | "codepointat"
@@ -2438,9 +2477,12 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     Some((*kind, maximum_depth))
 }
 
-fn validated_jit_expression(expression: Vec<String>, returns_string: bool) -> Option<String> {
+fn validated_jit_expression(expression: Vec<String>, expected: JitKind) -> Option<String> {
     let (kind, maximum_depth) = jit_expression_kind(&expression)?;
-    if (kind == JitKind::String) != returns_string || maximum_depth > 8 {
+    let compatible = kind == expected
+        || (matches!(kind, JitKind::Number | JitKind::Boolean)
+            && matches!(expected, JitKind::Number | JitKind::Boolean));
+    if !compatible || maximum_depth > 8 {
         return None;
     }
     Some(format!("expr:{}", expression.join(",")))
@@ -2491,6 +2533,11 @@ fn jit_numeric_declaration(
     let ret = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "string",
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
+            if **element == thaw_hir::HirType::Str =>
+        {
+            "string[]"
+        }
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
             if **payload == thaw_hir::HirType::Str =>
         {

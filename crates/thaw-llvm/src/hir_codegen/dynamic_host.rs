@@ -980,9 +980,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     payload.as_ref()
                 }
                 ty @ (HirType::F64 | HirType::Bool | HirType::Str) => ty,
+                ty @ HirType::Array(element) if **element == HirType::Str => ty,
                 _ => {
                     return Err(
-                        "JIT calls currently return number, boolean, string, or optional number/string"
+                        "JIT calls currently return number, boolean, string, string array, or optional primitive"
                             .into(),
                     )
                 }
@@ -1151,6 +1152,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             .as_global_value()
                             .as_pointer_value()
                             .into(),
+                        self.module
+                            .get_function("thaw_string_split")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
                     ],
                     "jit_numeric_result",
                 )
@@ -1208,7 +1215,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map(BasicValueEnum::from)
                     .map_err(|error| error.to_string())?
-            } else if *return_type == HirType::Str {
+            } else if matches!(return_type, HirType::Str | HirType::Array(_)) {
                 let bits = self
                     .builder
                     .build_bit_cast(
@@ -1218,14 +1225,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?
                     .into_int_value();
-                self.builder
+                let pointer = self.builder
                     .build_int_to_ptr(
                         bits,
                         self.context.ptr_type(inkwell::AddressSpace::default()),
                         "jit_string_value",
                     )
-                    .map(BasicValueEnum::from)
-                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+                if matches!(return_type, HirType::Array(_)) {
+                    self.compile_array_wrap(pointer)?.into()
+                } else {
+                    pointer.into()
+                }
             } else {
                 value
             };

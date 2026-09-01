@@ -336,6 +336,42 @@ fn unicode_normalization_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn string_split_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-split-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-split");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function split(value: string, separator: string): string[];\nexport declare function limited(value: string, separator: string, limit: number): string[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.split = (value, separator) => value.split(separator); module.exports.limited = (value, separator, limit) => value.split(separator, limit);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { split, limited } from 'jit-split';\nfunction main(): void { console.log(split('a::b::c', '::').join('|')); console.log(limited('a,b,c', ',', 2).join('|')); console.log(limited('abc', '', 2).join('|')); console.log(limited('a,b', ',', 0).length); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "a|b|c\na|b\na|b\n0\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn string_truthiness_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-truthiness-{}",

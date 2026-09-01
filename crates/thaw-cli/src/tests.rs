@@ -1365,6 +1365,43 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:s0,s1,normalize".into())
     );
+    let split = thaw_bridge::DtsFunction {
+        name: "split".into(),
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+            thaw_hir::HirType::Str,
+        ))),
+        ..normalize_form.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.split = (value, separator) => value.split(separator);",
+            "split",
+            false,
+            &split,
+        ),
+        Some("expr:s0,s1,c7ff0000000000000,split".into())
+    );
+    let split_limit = thaw_bridge::DtsFunction {
+        params: vec![
+            split.params[0].clone(),
+            split.params[1].clone(),
+            (
+                "limit".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 3,
+        ..split.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.split = (value, separator, limit) => value.split(separator, limit);",
+            "split",
+            false,
+            &split_limit,
+        ),
+        Some("expr:s0,s1,a2,split".into())
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.matches = value => value.isWellFormed();",
