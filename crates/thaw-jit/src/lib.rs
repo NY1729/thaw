@@ -191,6 +191,18 @@ extern "C" fn string_dictionary_values(object: f64) -> f64 {
     dictionary_query(object, 0.0, 4)
 }
 
+extern "C" fn number_dictionary_entries(object: f64) -> f64 {
+    dictionary_query(object, 0.0, 5)
+}
+
+extern "C" fn bool_dictionary_entries(object: f64) -> f64 {
+    dictionary_query(object, 0.0, 6)
+}
+
+extern "C" fn string_dictionary_entries(object: f64) -> f64 {
+    dictionary_query(object, 0.0, 7)
+}
+
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -3335,6 +3347,9 @@ enum NumericValue {
     NumberDictionaryValues,
     BoolDictionaryValues,
     StringDictionaryValues,
+    NumberDictionaryEntries,
+    BoolDictionaryEntries,
+    StringDictionaryEntries,
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
@@ -3588,6 +3603,9 @@ impl NumericProgram {
                     "dnvalues" => Some(NumericValue::NumberDictionaryValues),
                     "dbvalues" => Some(NumericValue::BoolDictionaryValues),
                     "dsvalues" => Some(NumericValue::StringDictionaryValues),
+                    "dnentries" => Some(NumericValue::NumberDictionaryEntries),
+                    "dbentries" => Some(NumericValue::BoolDictionaryEntries),
+                    "dsentries" => Some(NumericValue::StringDictionaryEntries),
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
@@ -5186,7 +5204,10 @@ impl NumericProgram {
                 NumericValue::DictionaryKeys
                 | NumericValue::NumberDictionaryValues
                 | NumericValue::BoolDictionaryValues
-                | NumericValue::StringDictionaryValues => {
+                | NumericValue::StringDictionaryValues
+                | NumericValue::NumberDictionaryEntries
+                | NumericValue::BoolDictionaryEntries
+                | NumericValue::StringDictionaryEntries => {
                     if depth == 0 {
                         return None;
                     }
@@ -5195,6 +5216,9 @@ impl NumericProgram {
                         NumericValue::NumberDictionaryValues => number_dictionary_values,
                         NumericValue::BoolDictionaryValues => bool_dictionary_values,
                         NumericValue::StringDictionaryValues => string_dictionary_values,
+                        NumericValue::NumberDictionaryEntries => number_dictionary_entries,
+                        NumericValue::BoolDictionaryEntries => bool_dictionary_entries,
+                        NumericValue::StringDictionaryEntries => string_dictionary_entries,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
