@@ -19,6 +19,7 @@ enum JitExport {
     Object(Vec<(String, JitExport)>),
     Tuple(Vec<JitExport>),
     Conditional(String, Box<JitExport>, Box<JitExport>),
+    Logical(Box<JitExport>, Box<JitExport>, bool),
     WithLocals(Vec<JitLocal>, Box<JitExport>),
 }
 
@@ -392,6 +393,36 @@ fn jit_export(
                 locals,
                 context,
             );
+        }
+        if let Expr::Bin(binary) = expression {
+            if !matches!(binary.op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+                return encode_nonconditional_return_expression(
+                    expression,
+                    ty,
+                    parameters,
+                    locals,
+                    context,
+                );
+            }
+            let left = encode_return_expression(
+                binary.left.as_ref(),
+                ty,
+                parameters,
+                locals,
+                context,
+            )?;
+            let right = encode_return_expression(
+                binary.right.as_ref(),
+                ty,
+                parameters,
+                locals,
+                context,
+            )?;
+            return Some(JitExport::Logical(
+                Box::new(left),
+                Box::new(right),
+                binary.op == BinaryOp::LogicalAnd,
+            ));
         }
         if matches!(ty, thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)) {
             let Expr::Cond(conditional) = expression else {
@@ -4629,6 +4660,13 @@ fn jit_export(
             JitExport::WithLocals(jit_locals, Box::new(result))
         });
     }
+    if local_steps.is_empty() {
+        if let thaw_bridge::DtsType::Native(ty) = &function.ret {
+            if jit_result_supported(ty) {
+                return encode_aggregate_body(body, ty, &parameters, &locals, &mut context);
+            }
+        }
+    }
     encode_steps_and_body(
         local_steps,
         body,
@@ -4658,13 +4696,47 @@ fn jit_numeric_export(
     allow_default: bool,
     function: &thaw_bridge::DtsFunction,
 ) -> Option<String> {
-    match jit_export(source, export_name, allow_default, function)? {
-        JitExport::Value(operation) => Some(operation),
-        JitExport::Object(_)
-        | JitExport::Tuple(_)
-        | JitExport::Conditional(_, _, _)
-        | JitExport::WithLocals(_, _) => None,
+    fn tokens(value: JitExport) -> Option<Vec<String>> {
+        match value {
+            JitExport::Value(operation) => operation
+                .strip_prefix("expr:")?
+                .split(',')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+                .into(),
+            JitExport::Conditional(condition, consequent, alternate) => {
+                let mut result = tokens(JitExport::Value(condition))?;
+                result.extend(tokens(*consequent)?);
+                result.extend(tokens(*alternate)?);
+                result.push("?".into());
+                Some(result)
+            }
+            JitExport::Logical(left, right, and) => {
+                let left = tokens(*left)?;
+                let mut result = left.clone();
+                match jit_expression_kind(&left)?.0 {
+                    JitKind::Number => result.push("asbool".into()),
+                    JitKind::String => result.push("strbool".into()),
+                    JitKind::Boolean => {}
+                    JitKind::Array => return None,
+                }
+                if and {
+                    result.extend(tokens(*right)?);
+                    result.extend(left);
+                } else {
+                    result.extend(left);
+                    result.extend(tokens(*right)?);
+                }
+                result.push("?".into());
+                Some(result)
+            }
+            JitExport::Object(_) | JitExport::Tuple(_) | JitExport::WithLocals(_, _) => None,
+        }
     }
+    Some(format!(
+        "expr:{}",
+        tokens(jit_export(source, export_name, allow_default, function)?)?.join(",")
+    ))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -5594,6 +5666,48 @@ fn jit_numeric_declaration(
                 );
                 format!("{symbol}({arguments}) ? {consequent} : {alternate}")
             }
+            JitExport::Logical(left, right, and) => {
+                let key = path.join(".");
+                path.push("logical.left".into());
+                let left = emit_aggregate_call(
+                    runtime_name,
+                    left,
+                    ty,
+                    path,
+                    direct_params,
+                    arguments,
+                    declaration,
+                );
+                path.pop();
+                path.push("logical.right".into());
+                let right = emit_aggregate_call(
+                    runtime_name,
+                    right,
+                    ty,
+                    path,
+                    direct_params,
+                    arguments,
+                    declaration,
+                );
+                path.pop();
+                let helper = encoded_symbol(&format!(
+                    "{runtime_name}:{key}.logical.wrapper"
+                ));
+                let result_type = render_dynamic_type(ty).unwrap();
+                let condition = match ty {
+                    thaw_hir::HirType::Bool => "left",
+                    thaw_hir::HirType::F64 => "left !== 0",
+                    thaw_hir::HirType::Str => "left.length !== 0",
+                    thaw_hir::HirType::Array(_) => "true",
+                    _ => unreachable!(),
+                };
+                declaration.push_str(&format!(
+                    "function {helper}({direct_params}): {result_type} {{ const left: {result_type} = {left}; return {condition} ? {} : {}; }}\n",
+                    if *and { right.as_str() } else { "left" },
+                    if *and { "left" } else { right.as_str() },
+                ));
+                format!("{helper}({arguments})")
+            }
             JitExport::WithLocals(_, _) => unreachable!(),
         }
     }
@@ -5610,7 +5724,10 @@ fn jit_numeric_declaration(
         .collect::<Vec<_>>()
         .join(", ");
     let (jit_locals, aggregate) = match operation {
-        JitExport::Object(_) | JitExport::Tuple(_) | JitExport::Conditional(_, _, _) => {
+        JitExport::Object(_)
+        | JitExport::Tuple(_)
+        | JitExport::Conditional(_, _, _)
+        | JitExport::Logical(_, _, _) => {
             (&[][..], operation)
         }
         JitExport::WithLocals(locals, aggregate) => (locals.as_slice(), aggregate.as_ref()),
@@ -5618,7 +5735,10 @@ fn jit_numeric_declaration(
     };
     if matches!(
         aggregate,
-        JitExport::Object(_) | JitExport::Tuple(_) | JitExport::Conditional(_, _, _)
+        JitExport::Object(_)
+            | JitExport::Tuple(_)
+            | JitExport::Conditional(_, _, _)
+            | JitExport::Logical(_, _, _)
     ) {
         let thaw_bridge::DtsType::Native(return_type) = &function.ret else {
             unreachable!()
