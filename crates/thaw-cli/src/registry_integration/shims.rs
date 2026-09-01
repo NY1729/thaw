@@ -1370,6 +1370,16 @@ fn jit_numeric_export(
                         callback.expr.as_ref(), parameters, locals, context,
                     ) {
                         output.push(format!("rnmap{operation}"));
+                    } else if let Some((operation, reverse)) = numeric_index_map(
+                        callback.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                    ) {
+                        output.push(format!(
+                            "rnmapindex{}{operation}",
+                            if reverse { "r" } else { "" }
+                        ));
                     } else {
                         let (operation, reverse) = encode_numeric_map_operand(
                             callback.expr.as_ref(),
@@ -2921,6 +2931,59 @@ fn jit_numeric_export(
         Some((operation, reverse))
     }
 
+    fn numeric_index_map(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &InlineContext<'_>,
+    ) -> Option<(&'static str, bool)> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(value), Pat::Ident(index)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        let Expr::Bin(binary) = expression else {
+            return None;
+        };
+        let reverse = if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == value.id.sym)
+            && matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == index.id.sym)
+        {
+            false
+        } else if matches!(binary.left.as_ref(), Expr::Ident(left) if left.sym == index.id.sym)
+            && matches!(binary.right.as_ref(), Expr::Ident(right) if right.sym == value.id.sym)
+        {
+            true
+        } else {
+            return None;
+        };
+        Some((
+            match binary.op {
+                BinaryOp::Add => "add",
+                BinaryOp::Sub => "sub",
+                BinaryOp::Mul => "mul",
+                BinaryOp::Div => "div",
+                BinaryOp::Mod => "rem",
+                BinaryOp::Exp => "pow",
+                _ => return None,
+            },
+            reverse,
+        ))
+    }
+
     fn numeric_unary_map(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
@@ -3922,6 +3985,20 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token
+            .strip_prefix("rnmapindex")
+            .is_some_and(|operation| {
+                matches!(operation, "add" | "sub" | "mul" | "div" | "rem" | "pow")
+                    || matches!(
+                        operation.strip_prefix('r'),
+                        Some("add" | "sub" | "mul" | "div" | "rem" | "pow")
+                    )
+            })
+        {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if token
             .strip_prefix("rnfilter")
             .is_some_and(|operation| matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne"))
