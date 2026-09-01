@@ -390,6 +390,107 @@ number_array_quantifiers!(
 );
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_find(
+    value: f64,
+    operand: f64,
+    mode: u8,
+    predicate: impl Fn(f64, f64) -> bool,
+) -> f64 {
+    let Some((array, length)) = (unsafe { array_data(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let matches = |index: usize| {
+        predicate(
+            unsafe { array.add(8 + index * 8).cast::<f64>().read() },
+            operand,
+        )
+    };
+    let index = if mode >= 2 {
+        (0..length).rev().find(|index| matches(*index))
+    } else {
+        (0..length).find(|index| matches(*index))
+    };
+    match (index, mode % 2) {
+        (Some(index), 0) => unsafe { array.add(8 + index * 8).cast::<f64>().read() },
+        (Some(index), 1) => index as f64,
+        (None, 0) => {
+            CALL_PRESENT.with(|present| present.set(false));
+            0.0
+        }
+        (None, 1) => -1.0,
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! number_array_finders {
+    ($find:ident, $find_index:ident, $find_last:ident, $find_last_index:ident, $predicate:expr) => {
+        extern "C" fn $find(value: f64, operand: f64) -> f64 {
+            number_array_find(value, operand, 0, $predicate)
+        }
+        extern "C" fn $find_index(value: f64, operand: f64) -> f64 {
+            number_array_find(value, operand, 1, $predicate)
+        }
+        extern "C" fn $find_last(value: f64, operand: f64) -> f64 {
+            number_array_find(value, operand, 2, $predicate)
+        }
+        extern "C" fn $find_last_index(value: f64, operand: f64) -> f64 {
+            number_array_find(value, operand, 3, $predicate)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_finders!(
+    number_array_find_lt,
+    number_array_find_index_lt,
+    number_array_find_last_lt,
+    number_array_find_last_index_lt,
+    |left, right| left < right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_finders!(
+    number_array_find_lte,
+    number_array_find_index_lte,
+    number_array_find_last_lte,
+    number_array_find_last_index_lte,
+    |left, right| left <= right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_finders!(
+    number_array_find_gt,
+    number_array_find_index_gt,
+    number_array_find_last_gt,
+    number_array_find_last_index_gt,
+    |left, right| left > right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_finders!(
+    number_array_find_gte,
+    number_array_find_index_gte,
+    number_array_find_last_gte,
+    number_array_find_last_index_gte,
+    |left, right| left >= right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_finders!(
+    number_array_find_eq,
+    number_array_find_index_eq,
+    number_array_find_last_eq,
+    number_array_find_last_index_eq,
+    |left, right| left == right
+);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+number_array_finders!(
+    number_array_find_ne,
+    number_array_find_index_ne,
+    number_array_find_last_ne,
+    number_array_find_last_index_ne,
+    |left, right| left != right
+);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
     value.floor()
 }
@@ -2297,6 +2398,7 @@ enum NumericValue {
     NumberArrayHypot,
     NumberArrayReduce(NumericReduceOp, bool, bool),
     NumberArrayQuantifier(CompareOp, bool),
+    NumberArrayFind(CompareOp, u8),
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2612,6 +2714,34 @@ impl NumericProgram {
                                 _ => return None,
                             };
                             Some(NumericValue::NumberArrayQuantifier(operation, every))
+                        })
+                        .or_else(|| {
+                            let (operation, mode) = value
+                                .strip_prefix("rnfindlastindex")
+                                .map(|operation| (operation, 3))
+                                .or_else(|| {
+                                    value
+                                        .strip_prefix("rnfindlast")
+                                        .map(|operation| (operation, 2))
+                                })
+                                .or_else(|| {
+                                    value
+                                        .strip_prefix("rnfindindex")
+                                        .map(|operation| (operation, 1))
+                                })
+                                .or_else(|| {
+                                    value.strip_prefix("rnfind").map(|operation| (operation, 0))
+                                })?;
+                            let operation = match operation {
+                                "lt" => CompareOp::Less,
+                                "lte" => CompareOp::LessEqual,
+                                "gt" => CompareOp::Greater,
+                                "gte" => CompareOp::GreaterEqual,
+                                "eq" => CompareOp::Equal,
+                                "ne" => CompareOp::NotEqual,
+                                _ => return None,
+                            };
+                            Some(NumericValue::NumberArrayFind(operation, mode))
                         })
                         .or_else(|| {
                             value
@@ -3064,6 +3194,56 @@ impl NumericProgram {
                     emit_binary_call(
                         &mut code,
                         functions[usize::from(*every)] as *const () as u64,
+                        depth - 2,
+                    );
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayFind(operation, mode) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    type FindFn = extern "C" fn(f64, f64) -> f64;
+                    let functions: [FindFn; 4] = match operation {
+                        CompareOp::Less => [
+                            number_array_find_lt,
+                            number_array_find_index_lt,
+                            number_array_find_last_lt,
+                            number_array_find_last_index_lt,
+                        ],
+                        CompareOp::LessEqual => [
+                            number_array_find_lte,
+                            number_array_find_index_lte,
+                            number_array_find_last_lte,
+                            number_array_find_last_index_lte,
+                        ],
+                        CompareOp::Greater => [
+                            number_array_find_gt,
+                            number_array_find_index_gt,
+                            number_array_find_last_gt,
+                            number_array_find_last_index_gt,
+                        ],
+                        CompareOp::GreaterEqual => [
+                            number_array_find_gte,
+                            number_array_find_index_gte,
+                            number_array_find_last_gte,
+                            number_array_find_last_index_gte,
+                        ],
+                        CompareOp::Equal => [
+                            number_array_find_eq,
+                            number_array_find_index_eq,
+                            number_array_find_last_eq,
+                            number_array_find_last_index_eq,
+                        ],
+                        CompareOp::NotEqual => [
+                            number_array_find_ne,
+                            number_array_find_index_ne,
+                            number_array_find_last_ne,
+                            number_array_find_last_index_ne,
+                        ],
+                    };
+                    emit_binary_call(
+                        &mut code,
+                        functions[*mode as usize] as *const () as u64,
                         depth - 2,
                     );
                     depth -= 1;
@@ -4841,6 +5021,41 @@ mod tests {
                     f64::from(expected)
                 );
             }
+        }
+        for (method, expected) in [
+            ("find", 20.0),
+            ("findindex", 1.0),
+            ("findlast", 30.0),
+            ("findlastindex", 2.0),
+        ] {
+            let symbol = CString::new(format!(
+                "expr:rn0,c402e000000000000,rn{method}gt:array-{method}"
+            ))
+            .unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+                expected
+            );
+        }
+        for method in ["find", "findlast"] {
+            let symbol = CString::new(format!(
+                "expr:rn0,c4058c00000000000,rn{method}eq:array-{method}-missing"
+            ))
+            .unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(handle as usize as u64)]).error,
+                ABSENT_STATUS
+            );
+        }
+        for method in ["findindex", "findlastindex"] {
+            let symbol = CString::new(format!(
+                "expr:rn0,c4058c00000000000,rn{method}eq:array-{method}-missing"
+            ))
+            .unwrap();
+            assert_eq!(
+                call(&symbol, &[f64::from_bits(handle as usize as u64)]).value,
+                -1.0
+            );
         }
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();

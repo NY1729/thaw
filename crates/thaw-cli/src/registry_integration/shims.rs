@@ -616,6 +616,10 @@ fn jit_numeric_export(
                 | "reduceRight"
                 | "some"
                 | "every"
+                | "find"
+                | "findIndex"
+                | "findLast"
+                | "findLastIndex"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -1306,7 +1310,10 @@ fn jit_numeric_export(
                         if method == "reduceRight" { "right" } else { "" },
                         if initial.is_some() { "" } else { "0" }
                     ));
-                } else if matches!(method, "some" | "every") {
+                } else if matches!(
+                    method,
+                    "some" | "every" | "find" | "findIndex" | "findLast" | "findLastIndex"
+                ) {
                     let [callback] = call.args.as_slice() else {
                         return None;
                     };
@@ -1320,6 +1327,12 @@ fn jit_numeric_export(
                         context,
                         output,
                     )?;
+                    let method = match method {
+                        "findIndex" => "findindex",
+                        "findLast" => "findlast",
+                        "findLastIndex" => "findlastindex",
+                        method => method,
+                    };
                     output.push(format!("rn{method}{operation}"));
                 } else if matches!(method, "join" | "toString") {
                     match call.args.as_slice() {
@@ -3393,6 +3406,17 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
+        } else if token
+            .strip_prefix("rnfindlastindex")
+            .or_else(|| token.strip_prefix("rnfindlast"))
+            .or_else(|| token.strip_prefix("rnfindindex"))
+            .or_else(|| token.strip_prefix("rnfind"))
+            .is_some_and(|operation| matches!(operation, "lt" | "lte" | "gt" | "gte" | "eq" | "ne"))
+        {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Number);
         } else if token == "arrayvalue" {
             if stack.pop()? != JitKind::Array {
                 return None;
