@@ -219,6 +219,40 @@ pub extern "C" fn thaw_number_to_precision(value: f64, digits: f64) -> *const c_
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
+fn normalize_exponential(mut text: String) -> String {
+    let exponent = text.find('e').expect("exponential format");
+    let value: i32 = text[exponent + 1..].parse().expect("integer exponent");
+    text.truncate(exponent + 1);
+    if value >= 0 {
+        text.push('+');
+    }
+    text.push_str(&value.to_string());
+    text
+}
+
+#[no_mangle]
+/// Formats `value` in exponential notation. A non-negative `digits` value
+/// selects that many fractional digits; a negative value represents an
+/// omitted argument and uses the shortest round-trippable representation.
+pub extern "C" fn thaw_number_to_exponential(value: f64, digits: f64) -> *const c_char {
+    if !value.is_finite() {
+        return thaw_number_to_string(value);
+    }
+    let negative = value < 0.0;
+    let magnitude = value.abs();
+    let body = if digits < 0.0 {
+        let mut buffer = ryu::Buffer::new();
+        let shortest = buffer.format_finite(magnitude);
+        let parsed: f64 = shortest.parse().expect("ryu output is a number");
+        let rendered = format!("{parsed:e}");
+        normalize_exponential(rendered)
+    } else {
+        normalize_exponential(format!("{magnitude:.digits$e}", digits = digits as usize))
+    };
+    let text = if negative { format!("-{body}") } else { body };
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_jit_format_number(
     operation: u8,
@@ -229,6 +263,7 @@ pub extern "C" fn thaw_jit_format_number(
         0 => thaw_number_to_fixed(value, argument),
         1 => thaw_number_to_precision(value, argument),
         2 => thaw_number_to_radix_string(value, argument),
+        3 => thaw_number_to_exponential(value, argument),
         _ => std::ptr::null(),
     }
 }
@@ -554,12 +589,25 @@ mod radix_string_tests {
                 thaw_number_to_precision(f64::NEG_INFINITY, 3.0),
                 "-Infinity",
             ),
+            (thaw_number_to_exponential(f64::INFINITY, 2.0), "Infinity"),
         ] {
             assert!(!value.is_null());
             assert_eq!(
                 unsafe { std::ffi::CStr::from_ptr(value) }.to_str().unwrap(),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn formats_exponential_values() {
+        for (value, digits, expected) in [
+            (12.6, 1.0, "1.3e+1"),
+            (12.5, -1.0, "1.25e+1"),
+            (0.0, 2.0, "0.00e+0"),
+        ] {
+            let text = thaw_number_to_exponential(value, digits);
+            assert_eq!(unsafe { std::ffi::CStr::from_ptr(text) }.to_str().unwrap(), expected);
         }
     }
 }
