@@ -1611,13 +1611,26 @@ fn jit_numeric_export(
                         "arrayreversed".into()
                     });
                 } else if matches!(method, "toSorted" | "sort") {
-                    if !call.args.is_empty() {
-                        return None;
+                    let suffix = if method == "sort" { "sort" } else { "sorted" };
+                    match call.args.as_slice() {
+                        [] => output.push(format!("{prefix}{suffix}")),
+                        [callback] if callback.spread.is_none() && prefix == "rn" => {
+                            output.push(format!(
+                                "rn{suffix}{}",
+                                if numeric_sort_callback(
+                                    callback.expr.as_ref(),
+                                    parameters,
+                                    locals,
+                                    context,
+                                )? {
+                                    "desc"
+                                } else {
+                                    "asc"
+                                }
+                            ));
+                        }
+                        _ => return None,
                     }
-                    output.push(format!(
-                        "{prefix}{}",
-                        if method == "sort" { "sort" } else { "sorted" }
-                    ));
                 } else if method == "fill" {
                     let [value, range @ ..] = call.args.as_slice() else {
                         return None;
@@ -2677,6 +2690,50 @@ fn jit_numeric_export(
                 }
             }
             _ => None,
+        }
+    }
+
+    fn numeric_sort_callback(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &InlineContext<'_>,
+    ) -> Option<bool> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let [Pat::Ident(left), Pat::Ident(right)] = parameters.as_slice() else {
+            return None;
+        };
+        if !steps.is_empty() || left.id.sym == right.id.sym {
+            return None;
+        }
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(statement)]) => statement.arg.as_deref()?,
+            _ => return None,
+        };
+        let Expr::Bin(binary) = expression else {
+            return None;
+        };
+        if binary.op != BinaryOp::Sub {
+            return None;
+        }
+        if matches!(binary.left.as_ref(), Expr::Ident(identifier) if identifier.sym == left.id.sym)
+            && matches!(binary.right.as_ref(), Expr::Ident(identifier) if identifier.sym == right.id.sym)
+        {
+            Some(false)
+        } else if matches!(binary.left.as_ref(), Expr::Ident(identifier) if identifier.sym == right.id.sym)
+            && matches!(binary.right.as_ref(), Expr::Ident(identifier) if identifier.sym == left.id.sym)
+        {
+            Some(true)
+        } else {
+            None
         }
     }
 
@@ -4248,6 +4305,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "rnsort"
                 | "rssort"
                 | "rbsort"
+                | "rnsortedasc"
+                | "rnsorteddesc"
+                | "rnsortasc"
+                | "rnsortdesc"
         ) {
             if stack.pop()? != JitKind::Array {
                 return None;
