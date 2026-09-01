@@ -742,6 +742,20 @@ pub unsafe extern "C" fn thaw_jit_array_to_sorted(operation: u8, array: *const u
 }
 
 #[no_mangle]
+/// Shared primitive-array in-place sorter for the residual JIT.
+///
+/// # Safety
+/// `array` must point to a writable primitive Thaw array matching `operation`.
+pub unsafe extern "C" fn thaw_jit_array_sort(operation: u8, array: *mut u8) -> *mut u8 {
+    match operation {
+        0 => unsafe { thaw_number_array_sort(array) },
+        1 => unsafe { thaw_string_array_sort(array) },
+        2 => unsafe { thaw_bool_array_sort(array) },
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
 /// Returns a primitive-array shallow copy with one element replaced.
 /// `operation` selects number, string, or boolean element storage.
 ///

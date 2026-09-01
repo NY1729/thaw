@@ -940,6 +940,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,arrayreversed".into())
     );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.reversed = values => values.reverse();",
+            "reversed",
+            false,
+            &array_reversed,
+        ),
+        Some("expr:rn0,arrayreverse".into())
+    );
     let array_sorted = thaw_bridge::DtsFunction {
         name: "sorted".into(),
         ..array_slice_all.clone()
@@ -952,6 +961,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             &array_sorted,
         ),
         Some("expr:rn0,rnsorted".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.sorted = values => values.sort();",
+            "sorted",
+            false,
+            &array_sorted,
+        ),
+        Some("expr:rn0,rnsort".into())
     );
     let array_with = thaw_bridge::DtsFunction {
         name: "replace".into(),
