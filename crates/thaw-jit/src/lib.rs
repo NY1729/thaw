@@ -851,6 +851,56 @@ fn number_array_select_map(value: f64, operand: f64, encoded: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_branch_map(value: f64, operand: f64, encoded: f64) -> f64 {
+    let encoded = encoded as u16;
+    let operation = (encoded & 7) as u8;
+    let reverse = encoded & 8 != 0;
+    let true_branch = ((encoded >> 4) & 15) as u8;
+    let false_branch = ((encoded >> 8) & 15) as u8;
+    if operation > 5 || true_branch > 13 || false_branch > 13 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let branch = |element: f64, mode: u8| {
+        let (operation, left, right) = if mode < 8 {
+            (mode.saturating_sub(2), element, operand)
+        } else {
+            (mode - 8, operand, element)
+        };
+        match mode {
+            0 => element,
+            1 => operand,
+            _ => match operation {
+                0 => left + right,
+                1 => left - right,
+                2 => left * right,
+                3 => left / right,
+                4 => left % right,
+                5 => power(left, right),
+                _ => unreachable!(),
+            },
+        }
+    };
+    number_array_map(value, |element, _| {
+        let (left, right) = if reverse {
+            (operand, element)
+        } else {
+            (element, operand)
+        };
+        let condition = match operation {
+            0 => left < right,
+            1 => left <= right,
+            2 => left > right,
+            3 => left >= right,
+            4 => left == right,
+            5 => left != right,
+            _ => unreachable!(),
+        };
+        branch(element, if condition { true_branch } else { false_branch })
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 macro_rules! number_array_maps {
     ($forward:ident, $reverse:ident, $operation:expr) => {
         extern "C" fn $forward(value: f64, operand: f64) -> f64 {
@@ -2918,6 +2968,7 @@ enum NumericValue {
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayIndexMap(NumericReduceOp, bool),
     NumberArraySelectMap(CompareOp, u8),
+    NumberArrayBranchMap(u16),
     NumberArrayUnaryMap(bool),
     NumberArrayMathMap(UnaryMath),
     NumberArrayPop,
@@ -3360,6 +3411,15 @@ impl NumericProgram {
                                     _ => return None,
                                 },
                             ))
+                        })
+                        .or_else(|| {
+                            let encoded =
+                                u16::from_str_radix(value.strip_prefix("rnmapbranch")?, 16).ok()?;
+                            let operation = encoded & 7;
+                            let true_branch = (encoded >> 4) & 15;
+                            let false_branch = (encoded >> 8) & 15;
+                            (operation <= 5 && true_branch <= 13 && false_branch <= 13)
+                                .then_some(NumericValue::NumberArrayBranchMap(encoded))
                         })
                         .or_else(|| {
                             let encoded = value.strip_prefix("rnmapselect")?;
@@ -4058,6 +4118,20 @@ impl NumericProgram {
                     emit_ternary_call(
                         &mut code,
                         number_array_select_map as *const () as u64,
+                        depth - 2,
+                    );
+                    depth -= 1;
+                }
+                NumericValue::NumberArrayBranchMap(encoded) => {
+                    if depth < 2 || depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(*encoded).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_ternary_call(
+                        &mut code,
+                        number_array_branch_map as *const () as u64,
                         depth - 2,
                     );
                     depth -= 1;
@@ -6113,6 +6187,15 @@ mod tests {
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 15.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 20.0);
         assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 30.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let branch_map =
+            CString::new("expr:rn0,c4034000000000000,rnmapbranch933:array-branch-map").unwrap();
+        let result = call(&branch_map, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 10.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 0.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 10.0);
         unsafe { libc::free(output.cast_mut().cast()) };
         let remainder =
             CString::new("expr:rn0,c4018000000000000,rnmaprem:array-map-remainder").unwrap();
