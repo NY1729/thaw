@@ -2131,8 +2131,9 @@ The same comparison callbacks work with `find`, `findIndex`, `findLast`, and
 index searches return `-1`.
 Comparison-based `number[]` `filter` calls use the same native scan and return
 a freshly allocated native array in one pass.
-Numeric truthiness callbacks, including `filter(Boolean)`, identity arrows, and
-double negation, use those native `some`/`every`/finder/filter scans as well.
+Primitive-array truthiness callbacks, including `filter(Boolean)`, identity
+arrows, and double negation, use shared native `some`/`every`/finder/filter
+scans for number, string, and boolean elements.
 Binary arithmetic `number[]` `map` callbacks likewise allocate once and support
 `+`, `-`, `*`, `/`, `%`, and `**` with the element on either side.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
