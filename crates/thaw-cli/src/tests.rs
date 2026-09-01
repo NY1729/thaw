@@ -940,6 +940,19 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,arrayreversed".into())
     );
+    let array_sorted = thaw_bridge::DtsFunction {
+        name: "sorted".into(),
+        ..array_slice_all.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.sorted = values => values.toSorted();",
+            "sorted",
+            false,
+            &array_sorted,
+        ),
+        Some("expr:rn0,rnsorted".into())
+    );
     for source in [
         "module.exports.length = value => parseFloat(value);",
         "module.exports.length = value => Number.parseFloat(value);",
