@@ -492,6 +492,7 @@ fn jit_numeric_export(
                 | "pop"
                 | "shift"
                 | "splice"
+                | "toSpliced"
                 | "with"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
@@ -969,7 +970,7 @@ fn jit_numeric_export(
                         return None;
                     }
                     output.push(format!("{prefix}{method}"));
-                } else if method == "splice" {
+                } else if matches!(method, "splice" | "toSpliced") {
                     let scalar_kind = match prefix {
                         "rn" => JitKind::Number,
                         "rs" => JitKind::String,
@@ -1027,7 +1028,14 @@ fn jit_numeric_export(
                         output.extend(encoded_value);
                         output.push(format!("{prefix}append"));
                     }
-                    output.push("arraysplice".into());
+                    output.push(
+                        if method == "splice" {
+                            "arraysplice"
+                        } else {
+                            "arraytospliced"
+                        }
+                        .into(),
+                    );
                 } else if method == "concat" {
                     if call.args.is_empty() {
                         output.push("c0000000000000000".into());
@@ -2599,7 +2607,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if token == "arraysplice" {
+        } else if matches!(token.as_str(), "arraysplice" | "arraytospliced") {
             if stack.pop()? != JitKind::Array
                 || stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Number
