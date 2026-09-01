@@ -218,6 +218,46 @@ fn numeric_predicates_use_jit_without_quickjs() {
 }
 
 #[test]
+fn mixed_hypot_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-mixed-hypot-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-mixed-hypot");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function distance(left: number, values: number[], tail: number[], right: number): number;\nexport declare function magnitude(value: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { distance: (left, values, tail, right) => Math.hypot(left, ...values, ...tail, right), magnitude: value => Math.hypot(value) };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { distance, magnitude } from 'jit-mixed-hypot';\nfunction main(): void { console.log(distance(2, [3], [6], 0)); console.log(distance(0, [], [], 0)); console.log(distance(NaN, [], [Infinity], 0)); console.log(magnitude(-3)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "7\n0\nInfinity\n3\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn typed_typeof_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-typeof-{}",

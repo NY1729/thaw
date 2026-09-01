@@ -1983,9 +1983,9 @@ IR during CommonJS extraction. `Number.EPSILON`, `MAX_VALUE`, `MIN_VALUE`,
 safe-integer bounds, `NaN`, signed infinities, and the unshadowed global
 `NaN`/`Infinity` names likewise become exact JIT constants. Native helper calls
 spill live numeric values, so Math calls can appear at any supported expression
-depth. `Math.min`/`Math.max` can interleave fixed numeric arguments and multiple
-`...number[]` spreads, while `Math.hypot(...number[])` accepts one spread; all
-three fold native array storage directly in the JIT,
+depth. `Math.min`/`Math.max`/`Math.hypot` can interleave fixed numeric arguments
+and multiple `...number[]` spreads. All three fold native array storage directly
+in the JIT,
 preserving empty-array identities, large finite magnitudes, infinities, `NaN`,
 and signed zero. Its end-to-end test produces
 `42` with the artifact's `quickjs` flag still false. Registry integration also
