@@ -865,6 +865,29 @@ pub unsafe extern "C" fn thaw_number_array_sort(array: *mut u8) -> *mut u8 {
     array
 }
 
+unsafe fn thaw_number_array_numeric_sort(array: *mut u8, descending: bool) -> *mut u8 {
+    let Some(slots) = (unsafe { native_array_slots(array) }) else {
+        return std::ptr::null_mut();
+    };
+    slots.sort_by(|left, right| {
+        let left = f64::from_bits(*left);
+        let right = f64::from_bits(*right);
+        let difference = if descending {
+            right - left
+        } else {
+            left - right
+        };
+        if difference.is_nan() || difference == 0.0 {
+            std::cmp::Ordering::Equal
+        } else if difference < 0.0 {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    });
+    array
+}
+
 #[no_mangle]
 /// # Safety
 /// `array` must point to a writable Thaw C-string pointer array.
@@ -943,6 +966,14 @@ pub unsafe extern "C" fn thaw_jit_array_to_sorted(operation: u8, array: *const u
         0 => unsafe { thaw_number_array_to_sorted(array) },
         1 => unsafe { thaw_string_array_to_sorted(array) },
         2 => unsafe { thaw_bool_array_to_sorted(array) },
+        3 | 4 => {
+            let output = unsafe { thaw_array_slice(array, 8, 0.0, f64::INFINITY) };
+            if output.is_null() {
+                output
+            } else {
+                unsafe { thaw_number_array_numeric_sort(output, operation == 4) }
+            }
+        }
         _ => std::ptr::null_mut(),
     }
 }
@@ -957,6 +988,7 @@ pub unsafe extern "C" fn thaw_jit_array_sort(operation: u8, array: *mut u8) -> *
         0 => unsafe { thaw_number_array_sort(array) },
         1 => unsafe { thaw_string_array_sort(array) },
         2 => unsafe { thaw_bool_array_sort(array) },
+        3 | 4 => unsafe { thaw_number_array_numeric_sort(array, operation == 4) },
         _ => std::ptr::null_mut(),
     }
 }
