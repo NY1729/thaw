@@ -2138,6 +2138,8 @@ String and boolean comparison callbacks use those scans too, preserving UTF-16
 string ordering and boolean ordering without loading QuickJS.
 Identity maps for string and boolean arrays, plus boolean negation maps, copy
 native storage directly without loading QuickJS.
+String-array maps also reuse the native Unicode case conversion and JavaScript
+whitespace trimming operations.
 Binary arithmetic `number[]` `map` callbacks likewise allocate once and support
 `+`, `-`, `*`, `/`, `%`, and `**` with the element on either side.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
