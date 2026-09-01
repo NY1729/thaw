@@ -522,6 +522,26 @@ extern "C" fn reference_same_value(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn type_of_number(_: f64) -> f64 {
+    f64::from_bits(c"number".as_ptr() as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn type_of_boolean(_: f64) -> f64 {
+    f64::from_bits(c"boolean".as_ptr() as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn type_of_string(_: f64) -> f64 {
+    f64::from_bits(c"string".as_ptr() as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn type_of_object(_: f64) -> f64 {
+    f64::from_bits(c"object".as_ptr() as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_is_well_formed(_: f64) -> f64 {
     1.0
 }
@@ -1292,6 +1312,10 @@ enum NumericValue {
     NumberSameValue,
     StringSameValue,
     ReferenceSameValue,
+    TypeOfNumber,
+    TypeOfBoolean,
+    TypeOfString,
+    TypeOfObject,
     StringCompare,
     StringCharAt,
     StringCharCodeAt,
@@ -1408,6 +1432,10 @@ impl NumericProgram {
                     "numsame" => Some(NumericValue::NumberSameValue),
                     "strsame" => Some(NumericValue::StringSameValue),
                     "refsame" => Some(NumericValue::ReferenceSameValue),
+                    "typeofnumber" => Some(NumericValue::TypeOfNumber),
+                    "typeofboolean" => Some(NumericValue::TypeOfBoolean),
+                    "typeofstring" => Some(NumericValue::TypeOfString),
+                    "typeofobject" => Some(NumericValue::TypeOfObject),
                     "strcmp" => Some(NumericValue::StringCompare),
                     "charat" => Some(NumericValue::StringCharAt),
                     "charcodeat" => Some(NumericValue::StringCharCodeAt),
@@ -1703,6 +1731,22 @@ impl NumericProgram {
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
+                }
+                NumericValue::TypeOfNumber
+                | NumericValue::TypeOfBoolean
+                | NumericValue::TypeOfString
+                | NumericValue::TypeOfObject => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::TypeOfNumber => type_of_number,
+                        NumericValue::TypeOfBoolean => type_of_boolean,
+                        NumericValue::TypeOfString => type_of_string,
+                        NumericValue::TypeOfObject => type_of_object,
+                        _ => unreachable!(),
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::StringCharAt
                 | NumericValue::StringCharCodeAt
@@ -2956,6 +3000,22 @@ mod tests {
         let symbol = CString::new("expr:rn0,rn1,refsame:reference-same-value").unwrap();
         let array = f64::from_bits(handle as usize as u64);
         assert_eq!(call(&symbol, &[array, array]).value, 1.0);
+        for (symbol, expected) in [
+            ("expr:a0,typeofnumber:type-of-number", "number"),
+            ("expr:b0,typeofboolean:type-of-boolean", "boolean"),
+            ("expr:s0,typeofstring:type-of-string", "string"),
+            ("expr:rn0,typeofobject:type-of-array", "object"),
+        ] {
+            let symbol = CString::new(symbol).unwrap();
+            let result = call(&symbol, &[array]);
+            assert!(result.error.is_null());
+            assert_eq!(
+                unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }
+                    .to_str()
+                    .unwrap(),
+                expected
+            );
+        }
         for (operation, from, expected) in [
             ("rnindexof", 0.0f64, 1.0),
             ("rnincludes", 0.0, 1.0),
