@@ -290,6 +290,46 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             std::f64::consts::E.to_bits()
         ))
     );
+    for (expression, value) in [
+        ("Number.EPSILON", f64::EPSILON),
+        ("Number.MAX_SAFE_INTEGER", 9_007_199_254_740_991.0),
+        ("Number.MIN_SAFE_INTEGER", -9_007_199_254_740_991.0),
+        ("Number.MAX_VALUE", f64::MAX),
+        ("Number.MIN_VALUE", f64::from_bits(1)),
+        ("Number.NaN", f64::NAN),
+        ("Number.POSITIVE_INFINITY", f64::INFINITY),
+        ("Number.NEGATIVE_INFINITY", f64::NEG_INFINITY),
+        ("NaN", f64::NAN),
+        ("Infinity", f64::INFINITY),
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!("module.exports.add = (left, right) => {expression};"),
+                "add",
+                false,
+                &function,
+            ),
+            Some(format!("expr:c{:016x}", value.to_bits()))
+        );
+    }
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (Number, right) => Number.MAX_VALUE;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (Infinity, right) => Infinity;",
+            "add",
+            false,
+            &function,
+        ),
+        Some("expr:a0".into())
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = (left, right) => left + Math.sin(right);",
@@ -986,6 +1026,20 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
         ..zero_arg_number
     };
+    assert!(jit_numeric_export(
+        "module.exports.constants = () => Number.MIN_VALUE > 0;",
+        "constants",
+        false,
+        &zero_arg_boolean,
+    )
+    .is_some());
+    assert!(jit_numeric_export(
+        "module.exports.globals = () => Number.isNaN(NaN) && !isFinite(Infinity);",
+        "globals",
+        false,
+        &zero_arg_boolean,
+    )
+    .is_some());
     assert_eq!(
         jit_numeric_export(
             "module.exports.empty = () => Boolean();",
