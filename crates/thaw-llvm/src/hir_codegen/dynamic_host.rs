@@ -980,7 +980,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     payload.as_ref()
                 }
                 ty @ (HirType::F64 | HirType::Bool | HirType::Str) => ty,
-                ty @ HirType::Array(element) if **element == HirType::Str => ty,
+                ty @ HirType::Array(element)
+                    if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 _ => {
                     return Err(
                         "JIT calls currently return number, boolean, string, string array, or optional primitive"
@@ -1154,6 +1155,12 @@ impl<'ctx> HirCompiler<'ctx> {
                             .into(),
                         self.module
                             .get_function("thaw_string_split")
+                            .unwrap()
+                            .as_global_value()
+                            .as_pointer_value()
+                            .into(),
+                        self.module
+                            .get_function("thaw_array_slice")
                             .unwrap()
                             .as_global_value()
                             .as_pointer_value()
