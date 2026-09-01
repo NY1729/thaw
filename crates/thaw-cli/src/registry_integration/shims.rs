@@ -331,7 +331,10 @@ fn jit_numeric_export(
         Some((operation, member.obj.as_ref()))
     }
 
-    fn number_format_method(call: &CallExpr) -> Option<(&'static str, &Expr)> {
+    fn number_format_method<'a>(
+        call: &'a CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+    ) -> Option<(&'static str, &'a Expr)> {
         if call.args.iter().any(|argument| argument.spread.is_some()) {
             return None;
         }
@@ -344,6 +347,13 @@ fn jit_numeric_export(
         let MemberProp::Ident(property) = &member.prop else {
             return None;
         };
+        if property.sym == "toString"
+            && matches!(member.obj.as_ref(), Expr::Ident(receiver) if parameters
+                .get(receiver.sym.as_ref())
+                .is_some_and(|token| token.starts_with('r')))
+        {
+            return None;
+        }
         let operation = match property.sym.as_ref() {
             "toFixed" => "tofixed",
             "toPrecision" => "toprecision",
@@ -395,7 +405,7 @@ fn jit_numeric_export(
         }
         matches!(
             property.sym.as_ref(),
-            "at" | "includes" | "indexOf" | "lastIndexOf"
+            "at" | "includes" | "indexOf" | "lastIndexOf" | "join" | "toString"
         )
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
@@ -683,8 +693,8 @@ fn jit_numeric_export(
             {
                 encode_condition(expression, parameters, locals, context, output)?;
             }
-            Expr::Call(call) if number_format_method(call).is_some() => {
-                let (operation, receiver) = number_format_method(call)?;
+            Expr::Call(call) if number_format_method(call, parameters).is_some() => {
+                let (operation, receiver) = number_format_method(call, parameters)?;
                 let mut encoded = Vec::new();
                 encode_expression(receiver, parameters, locals, context, &mut encoded)?;
                 let receiver_kind = jit_expression_kind(&encoded)?.0;
@@ -737,7 +747,24 @@ fn jit_numeric_export(
                 }
                 let prefix = array_prefix(&encoded)?;
                 output.extend(encoded);
-                if method == "at" {
+                if matches!(method, "join" | "toString") {
+                    match call.args.as_slice() {
+                        [] => encode_string(",", output)?,
+                        [separator] if method == "join" => {
+                            let mut encoded_separator = Vec::new();
+                            encode_expression(
+                                separator.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut encoded_separator,
+                            )?;
+                            append_string(encoded_separator, output)?;
+                        }
+                        _ => return None,
+                    }
+                    output.push(format!("{prefix}join"));
+                } else if method == "at" {
                     match call.args.as_slice() {
                         [] => output.push(format!("c{:016x}", 0.0f64.to_bits())),
                         [index] => encode_number(
@@ -2061,6 +2088,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "rsat" => JitKind::String,
                 _ => unreachable!(),
             });
+        } else if matches!(token.as_str(), "rnjoin" | "rbjoin" | "rsjoin") {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::String);
         } else if matches!(
             token.as_str(),
             "rnincludes"
