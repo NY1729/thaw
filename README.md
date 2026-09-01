@@ -2217,15 +2217,17 @@ to mutable values remain on the QuickJS path. Calls to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
 including nested calls and forward function declarations; dynamic, shadowed, or
 indirect cycles that do not return to the exported root deliberately fall back
-instead. Named primitive exports can call themselves with one to eight number,
-boolean, string, or primitive-array arguments and return a number, boolean, or
-string through a relative call to the same compiled JIT stub. Array handles keep
-their native identity across recursive frames, including bounds-checked indexed
-reads and in-place mutation. A cycle that returns to that root can inline its
-intervening pure helpers, covering static mutual recursion as well. Recursive
-arguments retain left-to-right expression evaluation, so factorial, Euclidean
-GCD, boolean recursion, string accumulation, recursive array scans/drains, and
-root-involving mutual recursion no longer embed QuickJS. Numeric exports with 0-16
+instead. Named primitive exports can call themselves with up to eight flattened
+JIT argument slots and return a number, boolean, or string through a relative
+call to the same compiled JIT stub. Arguments may be number, boolean, string,
+primitive arrays, or fixed-shape objects and tuples composed from those leaves.
+Array handles keep their native identity across recursive frames, including
+bounds-checked indexed reads and in-place mutation. A cycle that returns to that
+root can inline its intervening pure helpers, covering static mutual recursion
+as well. Recursive arguments retain left-to-right expression evaluation, so
+factorial, Euclidean GCD, boolean recursion, string accumulation, recursive
+array scans/drains, aggregate state updates, and root-involving mutual recursion
+no longer embed QuickJS. Numeric exports with 0-16
 required arguments use a single argument-array runtime ABI; generated code loads
 only the `aN` slots referenced by its IR. Numeric/boolean predicates may accept
 and return `boolean`; LLVM converts boolean arguments to JIT slots and comparison results

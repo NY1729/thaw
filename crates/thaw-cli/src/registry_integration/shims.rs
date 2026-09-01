@@ -3495,7 +3495,7 @@ fn jit_export(
         module_locals: std::collections::HashMap<String, Vec<String>>,
         active: Vec<String>,
         recursive_names: Vec<String>,
-        recursive_parameters: Vec<JitKind>,
+        recursive_parameters: Vec<thaw_hir::HirType>,
         recursive_result: Option<JitKind>,
     }
 
@@ -4465,19 +4465,16 @@ fn jit_export(
                 return None;
             }
             let expected_parameters = context.recursive_parameters.clone();
-            for (argument, expected) in call.args.iter().zip(expected_parameters) {
-                let mut encoded = Vec::new();
-                encode_expression(
+            let mut arity = 0;
+            for (argument, expected) in call.args.iter().zip(&expected_parameters) {
+                arity += encode_recursive_argument(
                     argument.expr.as_ref(),
+                    expected,
                     parameters,
                     locals,
                     context,
-                    &mut encoded,
+                    output,
                 )?;
-                if jit_expression_kind(&encoded)?.0 != expected {
-                    return None;
-                }
-                output.extend(encoded);
             }
             let result = match context.recursive_result? {
                 JitKind::Number => 'n',
@@ -4485,7 +4482,7 @@ fn jit_export(
                 JitKind::String => 's',
                 JitKind::Array => return None,
             };
-            output.push(format!("recur{result}{}", call.args.len()));
+            output.push(format!("recur{result}{arity}"));
             return Some(());
         }
         if parameters.contains_key(name)
@@ -4532,6 +4529,113 @@ fn jit_export(
         );
         context.active.pop();
         result
+    }
+
+    fn encode_recursive_argument(
+        expression: &Expr,
+        ty: &thaw_hir::HirType,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<usize> {
+        match ty {
+            thaw_hir::HirType::Object(fields) => {
+                if let Some(object) = object_literal(expression) {
+                    if object.props.len() != fields.len() {
+                        return None;
+                    }
+                    let mut slots = 0;
+                    for (property, (field, field_type)) in object.props.iter().zip(fields) {
+                        let (name, value) = object_property(property)?;
+                        let ObjectReturnValue::Expression(value) = value else {
+                            return None;
+                        };
+                        if &name != field {
+                            return None;
+                        }
+                        slots += encode_recursive_argument(
+                            value,
+                            field_type,
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?;
+                    }
+                    return Some(slots);
+                }
+                encode_recursive_path(&member_path(expression)?, ty, parameters, output)
+            }
+            thaw_hir::HirType::Tuple(types) => {
+                if let Expr::Array(array) = expression {
+                    if array.elems.len() != types.len() {
+                        return None;
+                    }
+                    let mut slots = 0;
+                    for (element, ty) in array.elems.iter().zip(types) {
+                        let element = element.as_ref()?;
+                        if element.spread.is_some() {
+                            return None;
+                        }
+                        slots += encode_recursive_argument(
+                            element.expr.as_ref(),
+                            ty,
+                            parameters,
+                            locals,
+                            context,
+                            output,
+                        )?;
+                    }
+                    return Some(slots);
+                }
+                encode_recursive_path(&member_path(expression)?, ty, parameters, output)
+            }
+            _ => {
+                let expected = jit_return_kind(ty)?;
+                let mut encoded = Vec::new();
+                encode_expression(
+                    expression,
+                    parameters,
+                    locals,
+                    context,
+                    &mut encoded,
+                )?;
+                if jit_expression_kind(&encoded)?.0 != expected {
+                    return None;
+                }
+                output.extend(encoded);
+                Some(1)
+            }
+        }
+    }
+
+    fn encode_recursive_path(
+        path: &str,
+        ty: &thaw_hir::HirType,
+        parameters: &std::collections::HashMap<String, String>,
+        output: &mut Vec<String>,
+    ) -> Option<usize> {
+        match ty {
+            thaw_hir::HirType::Object(fields) => fields.iter().try_fold(0, |slots, (field, ty)| {
+                encode_recursive_path(&format!("{path}.{field}"), ty, parameters, output)
+                    .map(|count| slots + count)
+            }),
+            thaw_hir::HirType::Tuple(types) => {
+                types.iter().enumerate().try_fold(0, |slots, (index, ty)| {
+                    encode_recursive_path(&format!("{path}.{index}"), ty, parameters, output)
+                        .map(|count| slots + count)
+                })
+            }
+            _ => {
+                let token = parameters.get(path)?.clone();
+                (jit_expression_kind(std::slice::from_ref(&token))?.0 == jit_return_kind(ty)?)
+                    .then(|| {
+                        output.push(token);
+                        1
+                    })
+            }
+        }
     }
 
     fn resolve_callable<'a>(
@@ -4801,34 +4905,20 @@ fn jit_export(
     for (parameter, _, _, _) in &bindings {
         locals.remove(parameter);
     }
-    let recursive_parameters = (params.len() <= 8)
-        .then(|| {
-            bindings
-                .iter()
-                .map(|(_, ty, default, optional)| {
-                    if default.is_some() || *optional {
-                        return None;
-                    }
-                    match **ty {
-                        thaw_hir::HirType::F64 => Some(JitKind::Number),
-                        thaw_hir::HirType::Bool => Some(JitKind::Boolean),
-                        thaw_hir::HirType::Str => Some(JitKind::String),
-                        thaw_hir::HirType::Array(ref element)
-                            if matches!(
-                                element.as_ref(),
-                                thaw_hir::HirType::F64
-                                    | thaw_hir::HirType::Bool
-                                    | thaw_hir::HirType::Str
-                            ) =>
-                        {
-                            Some(JitKind::Array)
-                        }
-                        _ => None,
-                    }
-                })
-                .collect::<Option<Vec<_>>>()
+    let recursive_parameters = bindings
+        .iter()
+        .try_fold((0usize, Vec::new()), |(slots, mut types), (_, ty, default, optional)| {
+            if default.is_some() || *optional {
+                return None;
+            }
+            let count = jit_parameter_slots(ty)?;
+            if slots + count > 8 {
+                return None;
+            }
+            types.push((*ty).clone());
+            Some((slots + count, types))
         })
-        .flatten()
+        .map(|(_, types)| types)
         .unwrap_or_default();
     let recursive_result = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::F64) => Some(JitKind::Number),
