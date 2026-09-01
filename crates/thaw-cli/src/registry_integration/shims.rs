@@ -14,6 +14,40 @@ struct ResolvedPackage {
     bundle_js: Option<String>,
 }
 
+fn is_unary_math_method(operation: &str) -> bool {
+    matches!(
+        operation,
+        "abs"
+            | "acos"
+            | "acosh"
+            | "asin"
+            | "asinh"
+            | "atan"
+            | "atanh"
+            | "cbrt"
+            | "ceil"
+            | "clz32"
+            | "cos"
+            | "cosh"
+            | "exp"
+            | "expm1"
+            | "floor"
+            | "fround"
+            | "log"
+            | "log1p"
+            | "log2"
+            | "log10"
+            | "round"
+            | "sign"
+            | "sin"
+            | "sinh"
+            | "sqrt"
+            | "tan"
+            | "tanh"
+            | "trunc"
+    )
+}
+
 fn jit_numeric_export(
     source: &str,
     export_name: &str,
@@ -2782,10 +2816,11 @@ fn jit_numeric_export(
         let [argument] = call.args.as_slice() else {
             return None;
         };
+        let operation = math_method(call, outer_parameters, outer_locals)?;
         (argument.spread.is_none()
-            && math_method(call, outer_parameters, outer_locals) == Some("abs")
+            && is_unary_math_method(operation)
             && matches!(argument.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym))
-        .then_some("abs")
+        .then_some(operation)
     }
 
     fn encode_helper_call(
@@ -3581,7 +3616,12 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if token == "arrayvalue" || matches!(token.as_str(), "rnmapneg" | "rnmapabs") {
+        } else if token == "arrayvalue"
+            || matches!(token.as_str(), "rnmapneg" | "rnmapabs")
+            || token
+                .strip_prefix("rnmap")
+                .is_some_and(|operation| operation != "abs" && is_unary_math_method(operation))
+        {
             if stack.pop()? != JitKind::Array {
                 return None;
             }

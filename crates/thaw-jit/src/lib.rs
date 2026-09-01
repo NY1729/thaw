@@ -627,6 +627,49 @@ extern "C" fn number_array_map_absolute(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn square_root_number(value: f64) -> f64 {
+    value.sqrt()
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_map_math(value: f64, operation: f64) -> f64 {
+    let function = match operation as u8 {
+        0 => acos_number,
+        1 => acosh_number,
+        2 => asin_number,
+        3 => asinh_number,
+        4 => atan_number,
+        5 => atanh_number,
+        6 => cbrt_number,
+        7 => ceil_number,
+        8 => clz32_number,
+        9 => cos_number,
+        10 => cosh_number,
+        11 => exp_number,
+        12 => expm1_number,
+        13 => floor_number,
+        14 => fround_number,
+        15 => log_number,
+        16 => log1p_number,
+        17 => log2_number,
+        18 => log10_number,
+        19 => round_number,
+        20 => sign_number,
+        21 => sin_number,
+        22 => sinh_number,
+        23 => square_root_number,
+        24 => tan_number,
+        25 => tanh_number,
+        26 => truncate_number,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    number_array_map(value, |element| function(element))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
     value.floor()
 }
@@ -2287,6 +2330,7 @@ enum CompareOp {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 enum UnaryMath {
     Acos,
     Acosh,
@@ -2342,6 +2386,39 @@ impl BitwiseOp {
 }
 
 impl UnaryMath {
+    fn parse(operation: &str) -> Option<Self> {
+        match operation {
+            "acos" => Some(Self::Acos),
+            "acosh" => Some(Self::Acosh),
+            "asin" => Some(Self::Asin),
+            "asinh" => Some(Self::Asinh),
+            "atan" => Some(Self::Atan),
+            "atanh" => Some(Self::Atanh),
+            "cbrt" => Some(Self::Cbrt),
+            "ceil" => Some(Self::Ceil),
+            "clz32" => Some(Self::Clz32),
+            "cos" => Some(Self::Cos),
+            "cosh" => Some(Self::Cosh),
+            "exp" => Some(Self::Exp),
+            "expm1" => Some(Self::Expm1),
+            "floor" => Some(Self::Floor),
+            "fround" => Some(Self::Fround),
+            "log" => Some(Self::Log),
+            "log1p" => Some(Self::Log1p),
+            "log2" => Some(Self::Log2),
+            "log10" => Some(Self::Log10),
+            "round" => Some(Self::Round),
+            "sign" => Some(Self::Sign),
+            "sin" => Some(Self::Sin),
+            "sinh" => Some(Self::Sinh),
+            "sqrt" => Some(Self::SquareRoot),
+            "tan" => Some(Self::Tan),
+            "tanh" => Some(Self::Tanh),
+            "trunc" => Some(Self::Truncate),
+            _ => None,
+        }
+    }
+
     #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
     fn function(self) -> extern "C" fn(f64) -> f64 {
         match self {
@@ -2538,6 +2615,7 @@ enum NumericValue {
     NumberArrayFilter(CompareOp),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayUnaryMap(bool),
+    NumberArrayMathMap(UnaryMath),
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2789,49 +2867,28 @@ impl NumericProgram {
                     "trimend" => Some(NumericValue::StringTrimEnd),
                     "trimstart" => Some(NumericValue::StringTrimStart),
                     "pow" => Some(NumericValue::Power),
-                    "acos" => Some(NumericValue::UnaryMath(UnaryMath::Acos)),
-                    "acosh" => Some(NumericValue::UnaryMath(UnaryMath::Acosh)),
-                    "asin" => Some(NumericValue::UnaryMath(UnaryMath::Asin)),
-                    "asinh" => Some(NumericValue::UnaryMath(UnaryMath::Asinh)),
-                    "atan" => Some(NumericValue::UnaryMath(UnaryMath::Atan)),
-                    "atanh" => Some(NumericValue::UnaryMath(UnaryMath::Atanh)),
-                    "cbrt" => Some(NumericValue::UnaryMath(UnaryMath::Cbrt)),
-                    "ceil" => Some(NumericValue::UnaryMath(UnaryMath::Ceil)),
-                    "clz32" => Some(NumericValue::UnaryMath(UnaryMath::Clz32)),
-                    "cos" => Some(NumericValue::UnaryMath(UnaryMath::Cos)),
-                    "cosh" => Some(NumericValue::UnaryMath(UnaryMath::Cosh)),
-                    "exp" => Some(NumericValue::UnaryMath(UnaryMath::Exp)),
-                    "expm1" => Some(NumericValue::UnaryMath(UnaryMath::Expm1)),
-                    "floor" => Some(NumericValue::UnaryMath(UnaryMath::Floor)),
-                    "fround" => Some(NumericValue::UnaryMath(UnaryMath::Fround)),
-                    "log" => Some(NumericValue::UnaryMath(UnaryMath::Log)),
-                    "log1p" => Some(NumericValue::UnaryMath(UnaryMath::Log1p)),
-                    "log2" => Some(NumericValue::UnaryMath(UnaryMath::Log2)),
-                    "log10" => Some(NumericValue::UnaryMath(UnaryMath::Log10)),
-                    "round" => Some(NumericValue::UnaryMath(UnaryMath::Round)),
-                    "sign" => Some(NumericValue::UnaryMath(UnaryMath::Sign)),
-                    "sin" => Some(NumericValue::UnaryMath(UnaryMath::Sin)),
-                    "sinh" => Some(NumericValue::UnaryMath(UnaryMath::Sinh)),
-                    "sqrt" => Some(NumericValue::UnaryMath(UnaryMath::SquareRoot)),
-                    "tan" => Some(NumericValue::UnaryMath(UnaryMath::Tan)),
-                    "tanh" => Some(NumericValue::UnaryMath(UnaryMath::Tanh)),
-                    "trunc" => Some(NumericValue::UnaryMath(UnaryMath::Truncate)),
                     "%" => Some(NumericValue::Remainder),
                     "?" => Some(NumericValue::Select),
                     "asbool" => Some(NumericValue::AsBoolean),
                     "strictfalse" => Some(NumericValue::StrictMismatch(false)),
                     "stricttrue" => Some(NumericValue::StrictMismatch(true)),
-                    value => value
-                        .strip_prefix("rnreduce")
-                        .and_then(|operation| {
-                            let (operation, from_right) = operation
-                                .strip_prefix("right")
-                                .map_or((operation, false), |operation| (operation, true));
-                            let (operation, has_initial) = operation
-                                .strip_suffix('0')
-                                .map_or((operation, true), |operation| (operation, false));
-                            NumericReduceOp::parse(operation).map(|operation| {
-                                NumericValue::NumberArrayReduce(operation, has_initial, from_right)
+                    value => UnaryMath::parse(value)
+                        .map(NumericValue::UnaryMath)
+                        .or_else(|| {
+                            value.strip_prefix("rnreduce").and_then(|operation| {
+                                let (operation, from_right) = operation
+                                    .strip_prefix("right")
+                                    .map_or((operation, false), |operation| (operation, true));
+                                let (operation, has_initial) = operation
+                                    .strip_suffix('0')
+                                    .map_or((operation, true), |operation| (operation, false));
+                                NumericReduceOp::parse(operation).map(|operation| {
+                                    NumericValue::NumberArrayReduce(
+                                        operation,
+                                        has_initial,
+                                        from_right,
+                                    )
+                                })
                             })
                         })
                         .or_else(|| {
@@ -2900,6 +2957,12 @@ impl NumericProgram {
                                 "rnmapabs" => true,
                                 _ => return None,
                             }))
+                        })
+                        .or_else(|| {
+                            value
+                                .strip_prefix("rnmap")
+                                .and_then(UnaryMath::parse)
+                                .map(NumericValue::NumberArrayMathMap)
                         })
                         .or_else(|| {
                             let operation = value.strip_prefix("rnmap")?;
@@ -3478,6 +3541,19 @@ impl NumericProgram {
                         number_array_map_negate
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::NumberArrayMathMap(operation) => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(*operation as u8).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_binary_call(
+                        &mut code,
+                        number_array_map_math as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::ArraySlice => {
                     if depth < 3 {
@@ -5331,6 +5407,47 @@ mod tests {
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, -20.0);
         assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, -30.0);
         unsafe { libc::free(output.cast_mut().cast()) };
+        let math_maps: [(&str, extern "C" fn(f64) -> f64); 27] = [
+            ("acos", acos_number),
+            ("acosh", acosh_number),
+            ("asin", asin_number),
+            ("asinh", asinh_number),
+            ("atan", atan_number),
+            ("atanh", atanh_number),
+            ("cbrt", cbrt_number),
+            ("ceil", ceil_number),
+            ("clz32", clz32_number),
+            ("cos", cos_number),
+            ("cosh", cosh_number),
+            ("exp", exp_number),
+            ("expm1", expm1_number),
+            ("floor", floor_number),
+            ("fround", fround_number),
+            ("log", log_number),
+            ("log1p", log1p_number),
+            ("log2", log2_number),
+            ("log10", log10_number),
+            ("round", round_number),
+            ("sign", sign_number),
+            ("sin", sin_number),
+            ("sinh", sinh_number),
+            ("sqrt", square_root_number),
+            ("tan", tan_number),
+            ("tanh", tanh_number),
+            ("trunc", truncate_number),
+        ];
+        for (method, expected) in math_maps {
+            let symbol = CString::new(format!("expr:rn0,rnmap{method}:array-map-math")).unwrap();
+            let result = call(&symbol, &[f64::from_bits(handle as usize as u64)]);
+            assert!(result.error.is_null(), "{method}");
+            let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+            assert_eq!(
+                unsafe { output.add(8).cast::<f64>().read() }.to_bits(),
+                expected(10.0).to_bits(),
+                "{method}"
+            );
+            unsafe { libc::free(output.cast_mut().cast()) };
+        }
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();
         let empty_handle = &empty_data as *const *const u8;

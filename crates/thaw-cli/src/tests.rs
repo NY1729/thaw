@@ -501,6 +501,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rn0,rnmapabs,arrayvalue".into())
     );
+    for method in [
+        "acos", "acosh", "asin", "asinh", "atan", "atanh", "cbrt", "ceil", "clz32", "cos", "cosh",
+        "exp", "expm1", "floor", "fround", "log", "log1p", "log2", "log10", "round", "sign", "sin",
+        "sinh", "sqrt", "tan", "tanh", "trunc",
+    ] {
+        assert_eq!(
+            jit_numeric_export(
+                &format!(
+                    "module.exports.add = values => values.map(value => Math.{method}(value));"
+                ),
+                "add",
+                false,
+                &unary_map,
+            ),
+            Some(format!("expr:rn0,rnmap{method},arrayvalue")),
+            "{method}"
+        );
+    }
     assert_eq!(
         jit_numeric_export(
             "const Math = { abs: value => value }; module.exports.add = values => values.map(value => Math.abs(value));",

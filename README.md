@@ -2133,7 +2133,8 @@ Comparison-based `number[]` `filter` calls use the same native scan and return
 a freshly allocated native array in one pass.
 Binary arithmetic `number[]` `map` callbacks likewise allocate once and support
 `+`, `-`, `*`, `/`, `%`, and `**` with the element on either side.
-Unary negation and `Math.abs` callbacks use that same map scan.
+Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
+including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array
 formatters through one arena-backed JIT callback as well.
 Computed numeric element reads (`values[index]`) use a distinct bounds-checked
