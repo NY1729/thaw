@@ -188,15 +188,51 @@ extern "C" fn array_hypot(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn number_array_reduce_add(value: f64, mut accumulator: f64) -> f64 {
+fn number_array_reduce(
+    value: f64,
+    mut accumulator: f64,
+    operation: impl Fn(f64, f64) -> f64,
+) -> f64 {
     let Some((array, length)) = (unsafe { array_data(value) }) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
         return 0.0;
     };
     for index in 0..length {
-        accumulator += unsafe { array.add(8 + index * 8).cast::<f64>().read() };
+        accumulator = operation(accumulator, unsafe {
+            array.add(8 + index * 8).cast::<f64>().read()
+        });
     }
     accumulator
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_reduce_add(value: f64, accumulator: f64) -> f64 {
+    number_array_reduce(value, accumulator, |left, right| left + right)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_reduce_subtract(value: f64, accumulator: f64) -> f64 {
+    number_array_reduce(value, accumulator, |left, right| left - right)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_reduce_multiply(value: f64, accumulator: f64) -> f64 {
+    number_array_reduce(value, accumulator, |left, right| left * right)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_reduce_divide(value: f64, accumulator: f64) -> f64 {
+    number_array_reduce(value, accumulator, |left, right| left / right)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_reduce_remainder(value: f64, accumulator: f64) -> f64 {
+    number_array_reduce(value, accumulator, |left, right| left % right)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_reduce_power(value: f64, accumulator: f64) -> f64 {
+    number_array_reduce(value, accumulator, |left, right| power(left, right))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -1972,6 +2008,30 @@ impl NumericOp {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+enum NumericReduceOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Power,
+}
+
+impl NumericReduceOp {
+    fn parse(operation: &str) -> Option<Self> {
+        match operation {
+            "add" => Some(Self::Add),
+            "sub" => Some(Self::Subtract),
+            "mul" => Some(Self::Multiply),
+            "div" => Some(Self::Divide),
+            "rem" => Some(Self::Remainder),
+            "pow" => Some(Self::Power),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum NumericValue {
     Argument(u8),
     Constant(f64),
@@ -2077,7 +2137,7 @@ enum NumericValue {
     NumberArrayMin,
     NumberArrayMax,
     NumberArrayHypot,
-    NumberArrayReduceAdd,
+    NumberArrayReduce(NumericReduceOp),
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2288,7 +2348,6 @@ impl NumericProgram {
                     "rnmin" => Some(NumericValue::NumberArrayMin),
                     "rnmax" => Some(NumericValue::NumberArrayMax),
                     "rnhypot" => Some(NumericValue::NumberArrayHypot),
-                    "rnreduceadd" => Some(NumericValue::NumberArrayReduceAdd),
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
@@ -2363,15 +2422,21 @@ impl NumericProgram {
                     "strictfalse" => Some(NumericValue::StrictMismatch(false)),
                     "stricttrue" => Some(NumericValue::StrictMismatch(true)),
                     value => value
-                        .strip_prefix('a')
-                        .or_else(|| value.strip_prefix('b'))
-                        .or_else(|| value.strip_prefix('s'))
-                        .or_else(|| value.strip_prefix("rn"))
-                        .or_else(|| value.strip_prefix("rb"))
-                        .or_else(|| value.strip_prefix("rs"))
-                        .and_then(|index| index.parse::<u8>().ok())
-                        .filter(|index| *index < 16)
-                        .map(NumericValue::Argument)
+                        .strip_prefix("rnreduce")
+                        .and_then(NumericReduceOp::parse)
+                        .map(NumericValue::NumberArrayReduce)
+                        .or_else(|| {
+                            value
+                                .strip_prefix('a')
+                                .or_else(|| value.strip_prefix('b'))
+                                .or_else(|| value.strip_prefix('s'))
+                                .or_else(|| value.strip_prefix("rn"))
+                                .or_else(|| value.strip_prefix("rb"))
+                                .or_else(|| value.strip_prefix("rs"))
+                                .and_then(|index| index.parse::<u8>().ok())
+                                .filter(|index| *index < 16)
+                                .map(NumericValue::Argument)
+                        })
                         .or_else(|| {
                             value
                                 .strip_prefix('t')
@@ -2736,15 +2801,19 @@ impl NumericProgram {
                     }
                     emit_unary_call(&mut code, array_hypot as *const () as u64, depth - 1);
                 }
-                NumericValue::NumberArrayReduceAdd => {
+                NumericValue::NumberArrayReduce(operation) => {
                     if depth < 2 {
                         return None;
                     }
-                    emit_binary_call(
-                        &mut code,
-                        number_array_reduce_add as *const () as u64,
-                        depth - 2,
-                    );
+                    let function: extern "C" fn(f64, f64) -> f64 = match operation {
+                        NumericReduceOp::Add => number_array_reduce_add,
+                        NumericReduceOp::Subtract => number_array_reduce_subtract,
+                        NumericReduceOp::Multiply => number_array_reduce_multiply,
+                        NumericReduceOp::Divide => number_array_reduce_divide,
+                        NumericReduceOp::Remainder => number_array_reduce_remainder,
+                        NumericReduceOp::Power => number_array_reduce_power,
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
                 NumericValue::ArraySlice => {
@@ -4446,11 +4515,23 @@ mod tests {
             call(&hypot, &[f64::from_bits(handle as usize as u64)]).value,
             10.0f64.hypot(20.0).hypot(30.0)
         );
-        let sum = CString::new("expr:rn0,c4020000000000000,rnreduceadd:array-sum").unwrap();
-        assert_eq!(
-            call(&sum, &[f64::from_bits(handle as usize as u64)]).value,
-            68.0
-        );
+        for (operation, expected) in [
+            ("add", 68.0),
+            ("sub", -52.0),
+            ("mul", 48_000.0),
+            ("div", 8.0 / 10.0 / 20.0 / 30.0),
+            ("rem", 8.0),
+            ("pow", f64::INFINITY),
+        ] {
+            let reduce = CString::new(format!(
+                "expr:rn0,c4020000000000000,rnreduce{operation}:array-reduce"
+            ))
+            .unwrap();
+            assert_eq!(
+                call(&reduce, &[f64::from_bits(handle as usize as u64)]).value,
+                expected
+            );
+        }
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();
         let empty_handle = &empty_data as *const *const u8;

@@ -2113,9 +2113,9 @@ Number, boolean, and string arrays also keep `at`, `includes`, `indexOf`, and
 `lastIndexOf`
 on that path. `at` preserves an explicit absent-result tag, while searches
 reuse the native runtime's `fromIndex` and strict/SameValueZero comparison rules.
-Initial-value `number[]` reductions with a direct `(accumulator, value) =>
-accumulator + value` callback scan native storage from left to right in the JIT,
-including function-expression callbacks and empty arrays.
+Initial-value `number[]` reductions with a direct arithmetic callback scan
+native storage from left to right in the JIT. `+`, `-`, `*`, `/`, `%`, and `**`
+are supported in arrow or function-expression callbacks, including empty arrays.
 Their `join` and zero-argument `toString` calls reuse the native array
 formatters through one arena-backed JIT callback as well.
 Computed numeric element reads (`values[index]`) use a distinct bounds-checked
