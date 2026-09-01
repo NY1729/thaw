@@ -2062,6 +2062,8 @@ Global `isNaN`/`isFinite` preserve their numeric coercion, while
 `Number.isSafeInteger` use strict typed predicates in the same JIT IR.
 Global and `Number.parseFloat`/`parseInt` calls reuse Thaw runtime's tested
 ECMAScript prefix and radix parsers through the JIT callback ABI.
+`Math.random()` also calls Thaw's stateful native generator directly from the
+JIT, so dynamic random values do not require loading QuickJS.
 Numeric `toFixed`, `toPrecision`, `toExponential`, and radix-aware `toString` likewise reuse
 the native arena-backed formatters, including argument normalization and
 range-error propagation without loading QuickJS.
