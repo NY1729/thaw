@@ -188,6 +188,18 @@ extern "C" fn array_hypot(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn number_array_reduce_add(value: f64, mut accumulator: f64) -> f64 {
+    let Some((array, length)) = (unsafe { array_data(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    for index in 0..length {
+        accumulator += unsafe { array.add(8 + index * 8).cast::<f64>().read() };
+    }
+    accumulator
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn floor_number(value: f64) -> f64 {
     value.floor()
 }
@@ -2065,6 +2077,7 @@ enum NumericValue {
     NumberArrayMin,
     NumberArrayMax,
     NumberArrayHypot,
+    NumberArrayReduceAdd,
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
@@ -2275,6 +2288,7 @@ impl NumericProgram {
                     "rnmin" => Some(NumericValue::NumberArrayMin),
                     "rnmax" => Some(NumericValue::NumberArrayMax),
                     "rnhypot" => Some(NumericValue::NumberArrayHypot),
+                    "rnreduceadd" => Some(NumericValue::NumberArrayReduceAdd),
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
@@ -2721,6 +2735,17 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, array_hypot as *const () as u64, depth - 1);
+                }
+                NumericValue::NumberArrayReduceAdd => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(
+                        &mut code,
+                        number_array_reduce_add as *const () as u64,
+                        depth - 2,
+                    );
+                    depth -= 1;
                 }
                 NumericValue::ArraySlice => {
                     if depth < 3 {
@@ -4420,6 +4445,11 @@ mod tests {
         assert_eq!(
             call(&hypot, &[f64::from_bits(handle as usize as u64)]).value,
             10.0f64.hypot(20.0).hypot(30.0)
+        );
+        let sum = CString::new("expr:rn0,c4020000000000000,rnreduceadd:array-sum").unwrap();
+        assert_eq!(
+            call(&sum, &[f64::from_bits(handle as usize as u64)]).value,
+            68.0
         );
         let empty = [0_u64];
         let empty_data = empty.as_ptr().cast::<u8>();
