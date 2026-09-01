@@ -179,6 +179,18 @@ extern "C" fn dictionary_keys(object: f64) -> f64 {
     dictionary_query(object, 0.0, 1)
 }
 
+extern "C" fn number_dictionary_values(object: f64) -> f64 {
+    dictionary_query(object, 0.0, 2)
+}
+
+extern "C" fn bool_dictionary_values(object: f64) -> f64 {
+    dictionary_query(object, 0.0, 3)
+}
+
+extern "C" fn string_dictionary_values(object: f64) -> f64 {
+    dictionary_query(object, 0.0, 4)
+}
+
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -3320,6 +3332,9 @@ enum NumericValue {
     DictionaryDelete,
     DictionaryHasOwn,
     DictionaryKeys,
+    NumberDictionaryValues,
+    BoolDictionaryValues,
+    StringDictionaryValues,
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
@@ -3570,6 +3585,9 @@ impl NumericProgram {
                     "ddelete" => Some(NumericValue::DictionaryDelete),
                     "dhasown" => Some(NumericValue::DictionaryHasOwn),
                     "dkeys" => Some(NumericValue::DictionaryKeys),
+                    "dnvalues" => Some(NumericValue::NumberDictionaryValues),
+                    "dbvalues" => Some(NumericValue::BoolDictionaryValues),
+                    "dsvalues" => Some(NumericValue::StringDictionaryValues),
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
@@ -5165,11 +5183,21 @@ impl NumericProgram {
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;
                 }
-                NumericValue::DictionaryKeys => {
+                NumericValue::DictionaryKeys
+                | NumericValue::NumberDictionaryValues
+                | NumericValue::BoolDictionaryValues
+                | NumericValue::StringDictionaryValues => {
                     if depth == 0 {
                         return None;
                     }
-                    emit_unary_call(&mut code, dictionary_keys as *const () as u64, depth - 1);
+                    let function = match value {
+                        NumericValue::DictionaryKeys => dictionary_keys,
+                        NumericValue::NumberDictionaryValues => number_dictionary_values,
+                        NumericValue::BoolDictionaryValues => bool_dictionary_values,
+                        NumericValue::StringDictionaryValues => string_dictionary_values,
+                        _ => unreachable!(),
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::NumberDictionarySet
                 | NumericValue::StringDictionarySet

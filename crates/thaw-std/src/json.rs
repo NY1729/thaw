@@ -330,7 +330,8 @@ pub extern "C" fn thaw_jit_dictionary_mutate(
 /// # Safety
 ///
 /// `object` must point to a valid JSON value. For operation `0`, `key` must
-/// point to a valid NUL-terminated string.
+/// point to a valid NUL-terminated string. Operations `1` through `4` return
+/// an arena-backed array handle.
 pub unsafe extern "C" fn thaw_jit_dictionary_query(
     operation: u8,
     object: *mut Value,
@@ -339,6 +340,15 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
     match operation {
         0 => f64::from(unsafe { thaw_json_has_own(object, key) }),
         1 => f64::from_bits(wrap_array_handle(unsafe { thaw_json_keys(object) }) as usize as u64),
+        2 => f64::from_bits(
+            wrap_array_handle(unsafe { thaw_json_number_values(object) }) as usize as u64,
+        ),
+        3 => f64::from_bits(
+            wrap_array_handle(unsafe { thaw_json_bool_values(object) }) as usize as u64,
+        ),
+        4 => f64::from_bits(
+            wrap_array_handle(unsafe { thaw_json_string_values(object) }) as usize as u64,
+        ),
         _ => 0.0,
     }
 }

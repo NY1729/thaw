@@ -955,6 +955,7 @@ fn jit_export(
         };
         match (property.sym.as_ref(), call.args.as_slice()) {
             ("keys", [object]) => Some(("dkeys", object.expr.as_ref(), None)),
+            ("values", [object]) => Some(("dvalues", object.expr.as_ref(), None)),
             ("hasOwn", [object, key]) => Some((
                 "dhasown",
                 object.expr.as_ref(),
@@ -1266,6 +1267,12 @@ fn jit_export(
         expression.iter().find_map(|token| {
             if matches!(token.as_str(), "strarray" | "dkeys") {
                 return Some("rs");
+            }
+            match token.as_str() {
+                "dnvalues" => return Some("rn"),
+                "dbvalues" => return Some("rb"),
+                "dsvalues" => return Some("rs"),
+                _ => {}
             }
             ["rn", "rb", "rs"]
                 .into_iter()
@@ -2303,6 +2310,16 @@ fn jit_export(
                 if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary {
                     return None;
                 }
+                let operation = if operation == "dvalues" {
+                    match dictionary_prefix(&encoded)? {
+                        "dn" => "dnvalues",
+                        "db" => "dbvalues",
+                        "ds" => "dsvalues",
+                        _ => unreachable!(),
+                    }
+                } else {
+                    operation
+                };
                 output.extend(encoded);
                 if let Some(key) = key {
                     let mut encoded = Vec::new();
@@ -6390,7 +6407,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Boolean);
-        } else if token == "dkeys" {
+        } else if matches!(token.as_str(), "dkeys" | "dnvalues" | "dbvalues" | "dsvalues") {
             if stack.pop()? != JitKind::Dictionary {
                 return None;
             }
