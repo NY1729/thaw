@@ -109,12 +109,13 @@ fn jit_numeric_export(
         if parameters.contains_key(object.sym.as_ref()) || locals.contains_key(object.sym.as_ref()) {
             return None;
         }
-        if !matches!(&member.prop, MemberProp::Ident(property) if property.sym == "now") {
+        let MemberProp::Ident(property) = &member.prop else {
             return None;
-        }
-        match object.sym.as_ref() {
-            "Date" => Some("datenow"),
-            "performance" => Some("performancenow"),
+        };
+        match (object.sym.as_ref(), property.sym.as_ref()) {
+            ("Date", "now") => Some("datenow"),
+            ("performance", "now") => Some("performancenow"),
+            ("process", "uptime") => Some("processuptime"),
             _ => None,
         }
     }
@@ -1680,7 +1681,14 @@ fn jit_numeric_export(
                 }
             }
             Expr::Call(call) if time_method(call, parameters, locals).is_some() => {
-                output.push(time_method(call, parameters, locals)?.into());
+                let method = time_method(call, parameters, locals)?;
+                if method == "processuptime" {
+                    output.push("performancenow".into());
+                    output.push(format!("c{:016x}", 1_000.0f64.to_bits()));
+                    output.push("/".into());
+                } else {
+                    output.push(method.into());
+                }
             }
             Expr::Call(call) if math_method(call, parameters, locals).is_some() => {
                 let method = math_method(call, parameters, locals)?;

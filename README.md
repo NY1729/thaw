@@ -2066,6 +2066,8 @@ ECMAScript prefix and radix parsers through the JIT callback ABI.
 JIT, so dynamic random values do not require loading QuickJS.
 `Date.now()` and `performance.now()` use the same zero-argument JIT callback
 ABI for the native wall and monotonic clocks respectively.
+`process.uptime()` reuses that monotonic source and converts milliseconds to
+seconds directly in typed JIT IR.
 Numeric `toFixed`, `toPrecision`, `toExponential`, and radix-aware `toString` likewise reuse
 the native arena-backed formatters, including argument normalization and
 range-error propagation without loading QuickJS.
