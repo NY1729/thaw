@@ -2134,6 +2134,8 @@ a freshly allocated native array in one pass.
 Primitive-array truthiness callbacks, including `filter(Boolean)`, identity
 arrows, and double negation, use shared native `some`/`every`/finder/filter
 scans for number, string, and boolean elements.
+String and boolean comparison callbacks use those scans too, preserving UTF-16
+string ordering and boolean ordering without loading QuickJS.
 Binary arithmetic `number[]` `map` callbacks likewise allocate once and support
 `+`, `-`, `*`, `/`, `%`, and `**` with the element on either side.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,

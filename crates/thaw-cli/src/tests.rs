@@ -561,6 +561,55 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         Some("expr:rb0,rbsometruthy".into())
     );
+    let compared_string_filter = thaw_bridge::DtsFunction {
+        params: vec![
+            string_filter.params[0].clone(),
+            (
+                "minimum".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+            ),
+        ],
+        required_params: 2,
+        ..string_filter.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, minimum) => values.filter(value => value >= minimum);",
+            "add",
+            false,
+            &compared_string_filter,
+        ),
+        Some("expr:rs0,s1,rsfiltergte,arrayvalue".into())
+    );
+    let compared_bool_quantifier = thaw_bridge::DtsFunction {
+        params: vec![
+            bool_quantifier.params[0].clone(),
+            (
+                "expected".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+            ),
+        ],
+        required_params: 2,
+        ..bool_quantifier.clone()
+    };
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = (values, expected) => values.some(value => value === expected);",
+            "add",
+            false,
+            &compared_bool_quantifier,
+        ),
+        Some("expr:rb0,b1,rbsomeeq".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "module.exports.add = values => values.filter(value => value === 1);",
+            "add",
+            false,
+            &string_filter,
+        ),
+        None
+    );
     assert_eq!(
         jit_numeric_export(
             "module.exports.add = values => values.find(Boolean);",
