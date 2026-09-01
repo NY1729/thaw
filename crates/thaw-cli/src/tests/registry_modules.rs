@@ -372,6 +372,42 @@ fn string_split_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_array_slice_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-slice-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-slice");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numbers(values: number[], start: number, end: number): number[];\nexport declare function strings(values: string[], start: number, end: number): string[];\nexport declare function flags(values: boolean[], start: number, end: number): boolean[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.numbers = (values, start, end) => values.slice(start, end); module.exports.strings = (values, start, end) => values.slice(start, end); module.exports.flags = (values, start, end) => values.slice(start, end);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numbers, strings, flags } from 'jit-array-slice';\nfunction main(): void { console.log(numbers([1, 2, 3, 4], 1, -1).join('|')); console.log(strings(['a', 'b', 'c'], 0, 2).join('|')); console.log(flags([true, false, true], 1, 3).join('|')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "2|3\na|b\nfalse|true\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn string_truthiness_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-truthiness-{}",
