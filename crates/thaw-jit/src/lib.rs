@@ -819,6 +819,38 @@ fn number_array_index_map(value: f64, encoded: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn number_array_select_map(value: f64, operand: f64, encoded: f64) -> f64 {
+    let encoded = encoded as u8;
+    let operation = encoded % 8;
+    let mode = encoded / 8;
+    if operation > 5 || mode > 3 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    number_array_map(value, |element, _| {
+        let (left, right) = if mode & 1 == 0 {
+            (element, operand)
+        } else {
+            (operand, element)
+        };
+        let condition = match operation {
+            0 => left < right,
+            1 => left <= right,
+            2 => left > right,
+            3 => left >= right,
+            4 => left == right,
+            5 => left != right,
+            _ => unreachable!(),
+        };
+        if condition == (mode & 2 == 0) {
+            element
+        } else {
+            operand
+        }
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 macro_rules! number_array_maps {
     ($forward:ident, $reverse:ident, $operation:expr) => {
         extern "C" fn $forward(value: f64, operand: f64) -> f64 {
@@ -2885,6 +2917,7 @@ enum NumericValue {
     PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
     NumberArrayIndexMap(NumericReduceOp, bool),
+    NumberArraySelectMap(CompareOp, u8),
     NumberArrayUnaryMap(bool),
     NumberArrayMathMap(UnaryMath),
     NumberArrayPop,
@@ -3326,6 +3359,14 @@ impl NumericProgram {
                                     "string" => 2,
                                     _ => return None,
                                 },
+                            ))
+                        })
+                        .or_else(|| {
+                            let encoded = value.strip_prefix("rnmapselect")?;
+                            let (operation, mode) = encoded.split_at(encoded.len().checked_sub(1)?);
+                            Some(NumericValue::NumberArraySelectMap(
+                                CompareOp::parse(operation)?,
+                                mode.parse::<u8>().ok().filter(|mode| *mode < 4)?,
                             ))
                         })
                         .or_else(|| {
@@ -4002,6 +4043,24 @@ impl NumericProgram {
                         number_array_index_map as *const () as u64,
                         depth - 1,
                     );
+                }
+                NumericValue::NumberArraySelectMap(operation, mode) => {
+                    if depth < 2 || depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(
+                        &f64::from(*operation as u8 + mode * 8)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_ternary_call(
+                        &mut code,
+                        number_array_select_map as *const () as u64,
+                        depth - 2,
+                    );
+                    depth -= 1;
                 }
                 NumericValue::NumberArrayUnaryMap(absolute) => {
                     if depth == 0 {
@@ -6045,6 +6104,15 @@ mod tests {
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 10.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 21.0);
         assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 32.0);
+        unsafe { libc::free(output.cast_mut().cast()) };
+        let select_map =
+            CString::new("expr:rn0,c402e000000000000,rnmapselectgte0:array-select-map").unwrap();
+        let result = call(&select_map, &[f64::from_bits(handle as usize as u64)]);
+        assert!(result.error.is_null());
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *const u8;
+        assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 15.0);
+        assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 20.0);
+        assert_eq!(unsafe { output.add(24).cast::<f64>().read() }, 30.0);
         unsafe { libc::free(output.cast_mut().cast()) };
         let remainder =
             CString::new("expr:rn0,c4018000000000000,rnmaprem:array-map-remainder").unwrap();

@@ -450,6 +450,15 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     );
     assert_eq!(
         jit_numeric_export(
+            "module.exports.add = (values, minimum) => values.map(value => value >= minimum ? value : minimum);",
+            "add",
+            false,
+            &filter,
+        ),
+        Some("expr:rn0,a1,rnmapselectgte0,arrayvalue".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
             "const positive = value => value > 0; module.exports.add = values => values.filter(positive);",
             "add",
             false,

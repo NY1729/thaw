@@ -311,18 +311,18 @@ fn local_map_callbacks_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function scale(values: number[], factor: number): number[];\n",
+        "export declare function scale(values: number[], factor: number): number[];\nexport declare function clamp(values: number[], minimum: number): number[];\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.scale = (values, factor) => values.map(value => { const scaled = value * factor; return scaled; });\n",
+        "module.exports.scale = (values, factor) => values.map(value => { const scaled = value * factor; return scaled; });\nmodule.exports.clamp = (values, minimum) => values.map(value => value >= minimum ? value : minimum);\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { scale } from 'jit-local-map';\nfunction main(): void { console.log(scale([1, 2, 3], 4).join(',')); }\n",
+        "import { scale, clamp } from 'jit-local-map';\nfunction main(): void { console.log(scale([1, 2, 3], 4).join(',')); console.log(clamp([1, 4, 2], 3).join(',')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -336,7 +336,7 @@ fn local_map_callbacks_use_jit_without_quickjs() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "4,8,12\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "4,8,12\n3,4,3\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
