@@ -2210,6 +2210,9 @@ numeric coercion, and strict mismatched primitives evaluate both operands
 before producing their constant boolean result.
 Single-return bodies and nested return-only `if`/`else if`/`else` trees are
 normalized to the same IR, including direct boolean/numeric conditions.
+Return-only `switch` statements over number, boolean, or string values also
+stay in that IR. The discriminant executes once, case expressions remain lazy,
+empty-case fallthrough and a default at any source position are preserved.
 Side-effect-free local declarations, assignments,
 numeric compound assignments, and standalone increments/decrements are
 expanded in statement order. Calls, property mutation, and forward references

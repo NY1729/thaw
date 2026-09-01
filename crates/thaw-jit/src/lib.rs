@@ -3487,6 +3487,7 @@ enum NumericValue {
     AsBoolean,
     StrictMismatch(bool),
     Drop,
+    DropUnder,
     Duplicate,
     DuplicatePair,
     MathRandom,
@@ -3712,6 +3713,7 @@ impl NumericProgram {
                     "rsshift" => Some(NumericValue::StringArrayShift),
                     "rbshift" => Some(NumericValue::BoolArrayShift),
                     "drop" => Some(NumericValue::Drop),
+                    "nip" => Some(NumericValue::DropUnder),
                     "dup" => Some(NumericValue::Duplicate),
                     "dup2" => Some(NumericValue::DuplicatePair),
                     "random" => Some(NumericValue::MathRandom),
@@ -5092,6 +5094,13 @@ impl NumericProgram {
                     if depth == 0 {
                         return None;
                     }
+                    depth -= 1;
+                }
+                NumericValue::DropUnder => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_move(&mut code, depth - 2, depth - 1);
                     depth -= 1;
                 }
                 NumericValue::Duplicate => {
