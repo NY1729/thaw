@@ -175,6 +175,10 @@ extern "C" fn dictionary_has_own(object: f64, key: f64) -> f64 {
     dictionary_query(object, key, 0)
 }
 
+extern "C" fn dictionary_in(key: f64, object: f64) -> f64 {
+    dictionary_query(object, key, 0)
+}
+
 extern "C" fn dictionary_keys(object: f64) -> f64 {
     dictionary_query(object, 0.0, 1)
 }
@@ -3359,6 +3363,7 @@ enum NumericValue {
     BoolDictionarySet,
     DictionaryDelete,
     DictionaryHasOwn,
+    DictionaryIn,
     DictionaryKeys,
     NumberDictionaryValues,
     BoolDictionaryValues,
@@ -3619,6 +3624,7 @@ impl NumericProgram {
                     "dbset" => Some(NumericValue::BoolDictionarySet),
                     "ddelete" => Some(NumericValue::DictionaryDelete),
                     "dhasown" => Some(NumericValue::DictionaryHasOwn),
+                    "din" => Some(NumericValue::DictionaryIn),
                     "dkeys" => Some(NumericValue::DictionaryKeys),
                     "dnvalues" => Some(NumericValue::NumberDictionaryValues),
                     "dbvalues" => Some(NumericValue::BoolDictionaryValues),
@@ -5214,6 +5220,7 @@ impl NumericProgram {
                 | NumericValue::StringDictionaryGet
                 | NumericValue::DictionaryDelete
                 | NumericValue::DictionaryHasOwn
+                | NumericValue::DictionaryIn
                 | NumericValue::DictionaryAssign => {
                     if depth < 2 {
                         return None;
@@ -5224,6 +5231,7 @@ impl NumericProgram {
                         NumericValue::StringDictionaryGet => string_dictionary_get,
                         NumericValue::DictionaryDelete => dictionary_delete,
                         NumericValue::DictionaryHasOwn => dictionary_has_own,
+                        NumericValue::DictionaryIn => dictionary_in,
                         NumericValue::DictionaryAssign => dictionary_assign,
                         _ => unreachable!(),
                     };

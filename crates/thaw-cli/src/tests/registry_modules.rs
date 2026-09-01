@@ -478,6 +478,58 @@ fn object_assign_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn dictionary_key_queries_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-key-queries-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-key-queries");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function ownNames(values: Record<string, number>): string[];\nexport declare function reflectNames(values: Record<string, number>): string[];\nexport declare function contains(values: Record<string, number>, key: string): boolean;\nexport declare function containsNumber(values: Record<string, number>, key: number): boolean;\nexport declare function numericRecord(value: number): Record<string, number>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function ownNames(values) { return Object.getOwnPropertyNames(values); } function reflectNames(values) { return Reflect.ownKeys(values); } function contains(values, key) { return key in values; } function containsNumber(values, key) { return key in values; } function numericRecord(value) { return { ['7']: value }; } module.exports = { ownNames, reflectNames, contains, containsNumber, numericRecord };\n",
+    )
+    .unwrap();
+    let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
+    let functions = thaw_bridge::parse_dts(&declarations).unwrap();
+    let bundle = std::fs::read_to_string(package.join("bundle.js")).unwrap();
+    for function in &functions {
+        assert!(
+            jit_numeric_export(&bundle, &function.name, false, function).is_some(),
+            "{function:?} did not specialize"
+        );
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { ownNames, reflectNames, contains, containsNumber, numericRecord } from 'jit-key-queries';\nfunction main(): void { console.log(ownNames({ zebra: 1, alpha: 2 }).join(',')); console.log(reflectNames({ zebra: 1, alpha: 2 }).join(',')); console.log(contains({ zebra: 1, alpha: 2 }, 'alpha')); console.log(contains({ zebra: 1, alpha: 2 }, 'missing')); console.log(containsNumber(numericRecord(3), 7)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "zebra,alpha\nzebra,alpha\ntrue\nfalse\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_aggregates_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-aggregate-{}",

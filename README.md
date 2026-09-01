@@ -2250,7 +2250,8 @@ results, so packages limited to typed dictionary operations can omit QuickJS as
 well. Primitive dictionaries can also be returned directly after mutation or
 rebuilt from object literals by the generated native wrapper, including
 runtime-computed string keys, spreads, duplicate-key overwrites and their
-left-to-right evaluation order. `Object.keys` returns a native string array,
+left-to-right evaluation order. `Object.keys`, `Object.getOwnPropertyNames`,
+and `Reflect.ownKeys` return a native string array,
 `Object.values` returns the corresponding native primitive array,
 `Object.entries` returns a native `[string, value][]`, and `Object.hasOwn`
 performs a direct host query for these dictionaries. `Object.fromEntries`
@@ -2258,6 +2259,8 @@ converts those typed entry arrays back to native dictionaries, so enumeration,
 round trips, length/array operations and ownership checks remain on the
 QuickJS-free path. `Object.assign` also mutates and returns a same-typed target
 there, applying any number of dictionary sources in left-to-right order.
+The `in` operator coerces its key to a string and uses the same direct
+dictionary ownership query without loading QuickJS.
 Fixed-shape object and tuple results with the same recursively representable
 leaves are also assembled by an AOT wrapper from specialized JIT leaf
 expressions. Object literal source order, shorthand fields, nested objects and
