@@ -14,6 +14,11 @@ struct ResolvedPackage {
     bundle_js: Option<String>,
 }
 
+enum JitExport {
+    Value(String),
+    Object(Vec<(String, JitExport)>),
+}
+
 fn is_unary_math_method(operation: &str) -> bool {
     matches!(
         operation,
@@ -48,12 +53,12 @@ fn is_unary_math_method(operation: &str) -> bool {
     )
 }
 
-fn jit_numeric_export(
+fn jit_export(
     source: &str,
     export_name: &str,
     allow_default: bool,
     function: &thaw_bridge::DtsFunction,
-) -> Option<String> {
+) -> Option<JitExport> {
     use thaw_parser::ast::{
         ArrowExpr, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr,
         ExprOrSpread, Function, Ident, Lit, MemberProp, ModuleItem, Pat, Prop, PropName, PropOrSpread,
@@ -130,6 +135,122 @@ fn jit_numeric_export(
             }
             _ => None,
         }
+    }
+
+    fn object_literal(expression: &Expr) -> Option<&thaw_parser::ast::ObjectLit> {
+        match expression {
+            Expr::Object(object) => Some(object),
+            Expr::Paren(parenthesized) => object_literal(parenthesized.expr.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn object_return<'a>(body: NumericBody<'a>) -> Option<&'a thaw_parser::ast::ObjectLit> {
+        let expression = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(returned)]) => returned.arg.as_deref()?,
+            _ => return None,
+        };
+        object_literal(expression)
+    }
+
+    enum ObjectReturnValue<'a> {
+        Expression(&'a Expr),
+        Shorthand(&'a Ident),
+    }
+
+    fn object_property(property: &PropOrSpread) -> Option<(String, ObjectReturnValue<'_>)> {
+        let PropOrSpread::Prop(property) = property else {
+            return None;
+        };
+        match property.as_ref() {
+            Prop::KeyValue(property) => {
+                let name = match &property.key {
+                    PropName::Ident(identifier) => identifier.sym.to_string(),
+                    PropName::Str(string) => string.value.to_string_lossy().into_owned(),
+                    _ => return None,
+                };
+                Some((name, ObjectReturnValue::Expression(property.value.as_ref())))
+            }
+            Prop::Shorthand(identifier) => Some((
+                identifier.sym.to_string(),
+                ObjectReturnValue::Shorthand(identifier),
+            )),
+            _ => None,
+        }
+    }
+
+    fn encode_object_return(
+        object: &thaw_parser::ast::ObjectLit,
+        fields: &[(String, thaw_hir::HirType)],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<JitExport> {
+        if object.props.len() != fields.len() {
+            return None;
+        }
+        let mut names = std::collections::HashSet::new();
+        object
+            .props
+            .iter()
+            .map(|property| {
+                let (name, expression) = object_property(property)?;
+                if !names.insert(name.clone()) {
+                    return None;
+                }
+                let ty = &fields.iter().find(|(field, _)| field == &name)?.1;
+                let value = if let thaw_hir::HirType::Object(fields) = ty {
+                    let ObjectReturnValue::Expression(expression) = expression else {
+                        return None;
+                    };
+                    encode_object_return(
+                        object_literal(expression)?,
+                        fields,
+                        parameters,
+                        locals,
+                        context,
+                    )?
+                } else {
+                    let expected = match ty {
+                        thaw_hir::HirType::F64 => JitKind::Number,
+                        thaw_hir::HirType::Bool => JitKind::Boolean,
+                        thaw_hir::HirType::Str => JitKind::String,
+                        thaw_hir::HirType::Array(element)
+                            if matches!(
+                                element.as_ref(),
+                                thaw_hir::HirType::F64
+                                    | thaw_hir::HirType::Bool
+                                    | thaw_hir::HirType::Str
+                            ) =>
+                        {
+                            JitKind::Array
+                        }
+                        _ => return None,
+                    };
+                    let mut encoded = Vec::new();
+                    match expression {
+                        ObjectReturnValue::Expression(expression) => encode_expression(
+                            expression,
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?,
+                        ObjectReturnValue::Shorthand(identifier) => {
+                            if let Some(value) = locals.get(identifier.sym.as_ref()) {
+                                encoded.extend(value.iter().cloned());
+                            } else {
+                                encoded.push(parameters.get(identifier.sym.as_ref())?.clone());
+                            }
+                        }
+                    }
+                    JitExport::Value(validated_jit_expression(encoded, expected)?)
+                };
+                Some((name, value))
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(JitExport::Object)
     }
 
     fn math_method(
@@ -3921,6 +4042,9 @@ fn jit_numeric_export(
                 element.as_ref(),
                 thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
             ),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Object(fields)) => fields
+                .iter()
+                .all(|(_, ty)| jit_parameter_slots(ty).is_some()),
             _ => false,
         }
     {
@@ -4110,6 +4234,18 @@ fn jit_numeric_export(
     if slot > 16 {
         return None;
     }
+    if let thaw_bridge::DtsType::Native(thaw_hir::HirType::Object(fields)) = &function.ret {
+        if !local_steps.is_empty() {
+            return None;
+        }
+        return encode_object_return(
+            object_return(body)?,
+            fields,
+            &parameters,
+            &locals,
+            &mut context,
+        );
+    }
     encode_steps_and_body(
         local_steps,
         body,
@@ -4129,7 +4265,20 @@ fn jit_numeric_export(
             if **payload == thaw_hir::HirType::Bool => JitKind::Boolean,
         _ => JitKind::Number,
     };
-    validated_jit_expression(expression, expected)
+    validated_jit_expression(expression, expected).map(JitExport::Value)
+}
+
+#[cfg(test)]
+fn jit_numeric_export(
+    source: &str,
+    export_name: &str,
+    allow_default: bool,
+    function: &thaw_bridge::DtsFunction,
+) -> Option<String> {
+    match jit_export(source, export_name, allow_default, function)? {
+        JitExport::Value(operation) => Some(operation),
+        JitExport::Object(_) => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4927,47 +5076,145 @@ fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> O
 fn jit_numeric_declaration(
     package: &str,
     function: &thaw_bridge::DtsFunction,
-    operation: &str,
+    operation: &JitExport,
 ) -> (String, String) {
-    let runtime_key = format!("{operation}:{package}::{}", function.name);
-    let encoded = runtime_key
-        .as_bytes()
+    fn declaration_params(
+        function: &thaw_bridge::DtsFunction,
+    ) -> Vec<(&str, String, bool)> {
+        function
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, (name, ty))| {
+                let (ty, optional_type) = match ty {
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
+                        (payload.as_ref(), true)
+                    }
+                    thaw_bridge::DtsType::Native(ty) => (ty, false),
+                    thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+                };
+                (
+                    name.as_str(),
+                    render_dynamic_type(ty).unwrap(),
+                    index >= function.required_params || optional_type,
+                )
+            })
+            .collect()
+    }
+
+    fn encoded_symbol(runtime_key: &str) -> String {
+        let encoded = runtime_key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("__thaw_typed_jit_{encoded}")
+    }
+
+    fn emit_object_calls(
+        runtime_name: &str,
+        fields: &[(String, JitExport)],
+        types: &[(String, thaw_hir::HirType)],
+        path: &mut Vec<String>,
+        direct_params: &str,
+        arguments: &str,
+        declaration: &mut String,
+    ) -> String {
+        let values = fields
+            .iter()
+            .map(|(name, value)| {
+                path.push(name.clone());
+                let ty = &types.iter().find(|(field, _)| field == name).unwrap().1;
+                let expression = match value {
+                    JitExport::Value(operation) => {
+                        let runtime_key = format!(
+                            "{operation}:{runtime_name}:{}",
+                            path.join(".")
+                        );
+                        let symbol = encoded_symbol(&runtime_key);
+                        declaration.push_str(&format!(
+                            "declare function {symbol}({direct_params}): {};\n",
+                            render_dynamic_type(ty).unwrap()
+                        ));
+                        format!("{symbol}({arguments})")
+                    }
+                    JitExport::Object(fields) => {
+                        let thaw_hir::HirType::Object(types) = ty else {
+                            unreachable!()
+                        };
+                        emit_object_calls(
+                            runtime_name,
+                            fields,
+                            types,
+                            path,
+                            direct_params,
+                            arguments,
+                            declaration,
+                        )
+                    }
+                };
+                path.pop();
+                format!("{}: {expression}", serde_json::to_string(name).unwrap())
+            })
+            .collect::<Vec<_>>();
+        format!("{{ {} }}", values.join(", "))
+    }
+
+    let params = declaration_params(function);
+    let direct_params = params
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let symbol = format!("__thaw_typed_jit_{encoded}");
-    let params = function
-        .params
-        .iter()
-        .enumerate()
-        .map(|(index, (name, ty))| {
-            let (ty, optional_type) = match ty {
-                thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
-                    (payload.as_ref(), true)
-                }
-                thaw_bridge::DtsType::Native(ty) => (ty, false),
-                thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
-            };
-            let optional = index >= function.required_params || optional_type;
-            let ty = if *ty == thaw_hir::HirType::Bool {
-                "boolean".into()
-            } else if *ty == thaw_hir::HirType::Str {
-                "string".into()
-            } else if let thaw_hir::HirType::Array(element) = ty {
-                match element.as_ref() {
-                    thaw_hir::HirType::F64 => "number[]".into(),
-                    thaw_hir::HirType::Bool => "boolean[]".into(),
-                    thaw_hir::HirType::Str => "string[]".into(),
-                    _ => "never[]".into(),
-                }
-            } else if matches!(ty, thaw_hir::HirType::Object(_)) {
-                render_dynamic_type(ty).unwrap()
-            } else {
-                "number".into()
-            };
-            (name, ty, optional)
+        .map(|(name, ty, optional)| {
+            format!(
+                "{name}: {ty}{}",
+                if *optional { " | undefined" } else { "" }
+            )
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let JitExport::Object(fields) = operation {
+        let thaw_bridge::DtsType::Native(thaw_hir::HirType::Object(types)) = &function.ret else {
+            unreachable!()
+        };
+        let arguments = params
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut declaration = String::new();
+        let runtime_name = format!("{package}::{}", function.name);
+        let result = emit_object_calls(
+            &runtime_name,
+            fields,
+            types,
+            &mut Vec::new(),
+            &direct_params,
+            &arguments,
+            &mut declaration,
+        );
+        let wrapper_key = format!("{package}::{}", function.name)
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let wrapper = format!("__thaw_jit_wrapper_{wrapper_key}");
+        let wrapper_params = params
+            .iter()
+            .map(|(name, ty, optional)| {
+                format!("{name}{}: {ty}", if *optional { "?" } else { "" })
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        declaration.push_str(&format!(
+            "function {wrapper}({wrapper_params}): {} {{ return {result}; }}\n",
+            render_dynamic_type(&thaw_hir::HirType::Object(types.clone())).unwrap()
+        ));
+        return (wrapper, declaration);
+    }
+    let JitExport::Value(operation) = operation else {
+        unreachable!()
+    };
+    let runtime_key = format!("{operation}:{package}::{}", function.name);
+    let symbol = encoded_symbol(&runtime_key);
     let ret = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "string",
@@ -4994,16 +5241,6 @@ fn jit_numeric_declaration(
         }
         _ => "number",
     };
-    let direct_params = params
-        .iter()
-        .map(|(name, ty, optional)| {
-            format!(
-                "{name}: {ty}{}",
-                if *optional { " | undefined" } else { "" }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
     let mut declaration = format!("declare function {symbol}({direct_params}): {ret};\n");
     if function.required_params == params.len() {
         return (symbol, declaration);
@@ -5023,7 +5260,7 @@ fn jit_numeric_declaration(
         .join(", ");
     let arguments = params
         .iter()
-        .map(|(name, _, _)| name.as_str())
+        .map(|(name, _, _)| *name)
         .collect::<Vec<_>>()
         .join(", ");
     declaration.push_str(&format!(
@@ -6274,7 +6511,7 @@ fn generate_registry_shims(
                     .as_deref()
                     .filter(|_| pkg.native_addon.is_none())
                     .and_then(|source| {
-                        jit_numeric_export(
+                        jit_export(
                             source,
                             &function.name,
                             pkg.commonjs_export_name.as_deref() == Some(&function.name)
@@ -6283,7 +6520,7 @@ fn generate_registry_shims(
                         )
                     });
                 let declaration = jit_operation
-                    .as_deref()
+                    .as_ref()
                     .map(|operation| jit_numeric_declaration(&pkg.name, function, operation))
                     .or_else(|| {
                         typed_dynamic_declaration(
