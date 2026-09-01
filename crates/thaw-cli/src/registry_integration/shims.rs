@@ -1389,17 +1389,29 @@ fn jit_numeric_export(
                             if reverse { "r" } else { "" }
                         ));
                     } else {
-                        let (operation, reverse) = encode_numeric_map_operand(
+                        let mut operand = Vec::new();
+                        if let Some((operation, reverse)) = encode_numeric_map_operand(
                             callback.expr.as_ref(),
                             parameters,
                             locals,
                             context,
-                            output,
-                        )?;
-                        output.push(format!(
-                            "rnmap{}{operation}",
-                            if reverse { "r" } else { "" }
-                        ));
+                            &mut operand,
+                        ) {
+                            output.extend(operand);
+                            output.push(format!(
+                                "rnmap{}{operation}",
+                                if reverse { "r" } else { "" }
+                            ));
+                        } else {
+                            let callback = encode_numeric_jit_map(
+                                callback.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                            )?;
+                            encode_string(&callback.join(","), output)?;
+                            output.push("rnmapjit".into());
+                        }
                     }
                 } else if matches!(
                     method,
@@ -3267,6 +3279,48 @@ fn jit_numeric_export(
         ))
     }
 
+    fn encode_numeric_jit_map(
+        expression: &Expr,
+        outer_parameters: &std::collections::HashMap<String, String>,
+        outer_locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<Vec<String>> {
+        if matches!(expression, Expr::Ident(identifier)
+            if outer_parameters.contains_key(identifier.sym.as_ref())
+                || outer_locals.contains_key(identifier.sym.as_ref()))
+        {
+            return None;
+        }
+        let callable = resolve_callable(expression, context.helpers)?;
+        let (parameters, steps, body) = callable_parts(callable)?;
+        let callback_parameters = match parameters.as_slice() {
+            [Pat::Ident(value)] => {
+                std::collections::HashMap::from([(value.id.sym.to_string(), "a0".into())])
+            }
+            [Pat::Ident(value), Pat::Ident(index)] if value.id.sym != index.id.sym => {
+                std::collections::HashMap::from([
+                    (value.id.sym.to_string(), "a0".into()),
+                    (index.id.sym.to_string(), "a1".into()),
+                ])
+            }
+            _ => return None,
+        };
+        let mut encoded = Vec::new();
+        encode_steps_and_body(
+            steps,
+            body,
+            &callback_parameters,
+            context.module_locals.clone(),
+            context,
+            &mut encoded,
+        )?;
+        (jit_expression_kind(&encoded)?.0 == JitKind::Number
+            && !encoded
+                .iter()
+                .any(|token| matches!(token.as_str(), "random" | "datenow" | "performancenow")))
+        .then_some(encoded)
+    }
+
     fn numeric_unary_map(
         expression: &Expr,
         outer_parameters: &std::collections::HashMap<String, String>,
@@ -4301,6 +4355,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             })
         {
             if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Array);
+        } else if token == "rnmapjit" {
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Array {
                 return None;
             }
             stack.push(JitKind::Array);

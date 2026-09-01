@@ -2156,6 +2156,10 @@ Comparison conditionals that select between the numeric element and a typed
 threshold compile to one native selection scan as well.
 Each branch may instead apply its own `+`, `-`, `*`, `/`, `%`, or `**`
 operation between that element and threshold in the same scan.
+More general pure numeric `map` bodies are compiled as cached JIT callbacks
+and invoked by one native array loop. This covers composed expressions such as
+`value * value + 1`, index-dependent expressions, local temporaries, and named
+callbacks without loading QuickJS.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
 including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array
