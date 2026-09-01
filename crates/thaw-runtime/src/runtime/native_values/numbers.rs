@@ -154,8 +154,8 @@ pub extern "C" fn thaw_number_to_radix_string(value: f64, radix: f64) -> *const 
 /// integer in `[0, 100]`; values whose magnitude is at least `1e21` fall
 /// back to the general `ToString` algorithm, as the specification requires.
 pub extern "C" fn thaw_number_to_fixed(value: f64, digits: f64) -> *const c_char {
-    if value.is_nan() {
-        return arena_c_string("NaN").map_or(std::ptr::null(), |value| value.cast());
+    if !value.is_finite() {
+        return thaw_number_to_string(value);
     }
     let negative = value < 0.0;
     let magnitude = if negative { -value } else { value };
@@ -209,14 +209,28 @@ fn format_precision_digits(magnitude: f64, precision: usize) -> String {
 /// `Number.prototype.toPrecision` when its argument is not omitted. `digits`
 /// must already be normalized to an integer in `[1, 100]`.
 pub extern "C" fn thaw_number_to_precision(value: f64, digits: f64) -> *const c_char {
-    if value.is_nan() {
-        return arena_c_string("NaN").map_or(std::ptr::null(), |value| value.cast());
+    if !value.is_finite() {
+        return thaw_number_to_string(value);
     }
     let negative = value < 0.0;
     let magnitude = if negative { -value } else { value };
     let body = format_precision_digits(magnitude, digits as usize);
     let text = if negative { format!("-{body}") } else { body };
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_jit_format_number(
+    operation: u8,
+    value: f64,
+    argument: f64,
+) -> *const c_char {
+    match operation {
+        0 => thaw_number_to_fixed(value, argument),
+        1 => thaw_number_to_precision(value, argument),
+        2 => thaw_number_to_radix_string(value, argument),
+        _ => std::ptr::null(),
+    }
 }
 
 fn javascript_string_number(text: &str) -> f64 {
@@ -534,5 +548,18 @@ mod radix_string_tests {
         assert_eq!(number_to_radix_string(f64::NAN, 16), "NaN");
         assert_eq!(number_to_radix_string(f64::INFINITY, 16), "Infinity");
         assert_eq!(number_to_radix_string(f64::NEG_INFINITY, 16), "-Infinity");
+        for (value, expected) in [
+            (thaw_number_to_fixed(f64::INFINITY, 2.0), "Infinity"),
+            (
+                thaw_number_to_precision(f64::NEG_INFINITY, 3.0),
+                "-Infinity",
+            ),
+        ] {
+            assert!(!value.is_null());
+            assert_eq!(
+                unsafe { std::ffi::CStr::from_ptr(value) }.to_str().unwrap(),
+                expected
+            );
+        }
     }
 }
