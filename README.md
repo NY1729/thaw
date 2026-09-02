@@ -2431,7 +2431,9 @@ array or primitive dictionary members; `??` normalizes its selected fallback to
 the same tagged representation. JavaScript default initializers on those
 parameters use the same selection path when the argument is omitted.
 Fixed-shape object members use an opaque object tag on the argument side, so
-object/string unions can be tested, coerced and forwarded without QuickJS;
+object/string unions can be tested, coerced and forwarded without QuickJS.
+After a `typeof value === "object"` check, primitive fields are loaded directly
+from the native object layout and remain available to ordinary JIT operations;
 tagged fixed-object results remain outside this path until their concrete
 layout can be reconstructed safely.
 Mutable dynamic locals may be reassigned between these representable shapes;
