@@ -2960,7 +2960,14 @@ fn jit_export(
                             context,
                             prefix == "rb",
                         ) {
-                            output.push(format!("{prefix}map{operation}"));
+                            if dynamic_array && operation != "identity" {
+                                return None;
+                            }
+                            output.push(if dynamic_array {
+                                "dynarraymapidentity".into()
+                            } else {
+                                format!("{prefix}map{operation}")
+                            });
                         } else {
                             let element_prefix = if prefix == "rb" { "b" } else { "s" };
                             let (callback, kind, captures) = encode_numeric_jit_callback(
@@ -4863,6 +4870,7 @@ fn jit_export(
                     | "dynarraymaptonumber"
                     | "dynarraymaptoboolean"
                     | "dynarraymaptostring"
+                    | "dynarraymapidentity"
                     | "rnpush"
                     | "rspush"
                     | "rbpush"
@@ -11702,6 +11710,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
+        } else if token == "dynarraymapidentity" {
+            if stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Dynamic);
         } else if matches!(
             token.as_str(),
             "throwoutn"

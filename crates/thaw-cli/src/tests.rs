@@ -4320,6 +4320,18 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         );
         assert!(jit_numeric_export(&source, &map.name, false, &map).is_some());
     }
+    let identity = thaw_bridge::DtsFunction {
+        name: "mapIdentity".into(),
+        ret: function.params[0].1.clone(),
+        ..function.clone()
+    };
+    assert!(jit_numeric_export(
+        "function mapIdentity(value) { if (Array.isArray(value)) return value.map(item => item); return value; } module.exports = { mapIdentity };",
+        "mapIdentity",
+        false,
+        &identity,
+    )
+    .is_some());
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],

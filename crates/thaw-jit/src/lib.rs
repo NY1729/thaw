@@ -1189,6 +1189,28 @@ extern "C" fn dynamic_array_convert(value: f64, target: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_map_identity(value: f64) -> f64 {
+    let Some(array) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let source = match array.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => 0,
+        DYNAMIC_BOOLEAN_ARRAY_TAG => 1,
+        DYNAMIC_STRING_ARRAY_TAG => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    let result = primitive_array_convert(
+        f64::from_bits(array.payload),
+        f64::from(source * 4 + source),
+    );
+    dynamic_array_result(array.tag, result)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_map(value: f64, operation: impl Fn(f64, f64) -> f64) -> f64 {
     let (Some(allocate), Some((array, length))) =
         (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
@@ -4711,6 +4733,7 @@ enum NumericValue {
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
     DynamicArrayConvert(u8),
+    DynamicArrayMapIdentity,
     NumberArrayMap(NumericReduceOp, bool),
     PrimitiveArrayJitMap(u8, u8, bool),
     PrimitiveArrayJitScan(u8, u8, bool),
@@ -5077,6 +5100,7 @@ impl NumericProgram {
                     "dynarraymaptonumber" => Some(NumericValue::DynamicArrayConvert(0)),
                     "dynarraymaptoboolean" => Some(NumericValue::DynamicArrayConvert(1)),
                     "dynarraymaptostring" => Some(NumericValue::DynamicArrayConvert(2)),
+                    "dynarraymapidentity" => Some(NumericValue::DynamicArrayMapIdentity),
                     _ if token.strip_prefix("dynarray").is_some_and(|operation| {
                         [
                             "findlastindex",
@@ -6409,6 +6433,16 @@ impl NumericProgram {
                     emit_binary_call(
                         &mut code,
                         dynamic_array_convert as *const () as u64,
+                        depth - 1,
+                    );
+                }
+                NumericValue::DynamicArrayMapIdentity => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(
+                        &mut code,
+                        dynamic_array_map_identity as *const () as u64,
                         depth - 1,
                     );
                 }
