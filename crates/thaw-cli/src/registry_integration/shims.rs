@@ -6954,7 +6954,13 @@ fn jit_export(
             expression => {
                 let mut encoded = Vec::new();
                 encode_expression(expression, parameters, locals, context, &mut encoded)?;
-                let kind = jit_expression_kind(&encoded)?.0;
+                let (kind, _) = jit_expression_kind(&encoded)
+                    .or_else(|| {
+                        let mut stacked = output.clone();
+                        stacked.extend(encoded.iter().cloned());
+                        stacked.extend(std::iter::repeat_n("nip".into(), kinds.len()));
+                        jit_expression_kind(&stacked)
+                    })?;
                 let prefix = match kind {
                     JitKind::Number => "ln",
                     JitKind::Boolean => "lb",
@@ -6985,6 +6991,84 @@ fn jit_export(
                 Some(())
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_fixed_call(
+        call: &CallExpr,
+        requested: &std::collections::HashSet<String>,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        kinds: &mut std::collections::HashMap<String, JitKind>,
+        materialized: &mut std::collections::HashMap<String, Vec<String>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return None;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let callable = resolve_callable(callee.as_ref(), context.helpers)?;
+        let (helper_parameters, steps, body) = callable_parts(callable)?;
+        if !steps.is_empty() || helper_parameters.len() != call.args.len() {
+            return None;
+        }
+        let mut helper_locals = context.module_locals.clone();
+        for (index, (parameter, argument)) in helper_parameters.iter().zip(&call.args).enumerate() {
+            let Pat::Ident(parameter) = parameter else {
+                return None;
+            };
+            let path = format!(".argument{index}");
+            let argument_paths = std::collections::HashSet::from([path.clone()]);
+            let mut argument_values = std::collections::HashMap::new();
+            materialize_fixed_literal(
+                argument.expr.as_ref(),
+                &path,
+                &argument_paths,
+                parameters,
+                locals,
+                context,
+                kinds,
+                &mut argument_values,
+                output,
+            )?;
+            helper_locals.insert(
+                parameter.id.sym.to_string(),
+                argument_values.remove(&path)?,
+            );
+        }
+        let returned = match body {
+            NumericBody::Expression(expression) => expression,
+            NumericBody::Statements([Stmt::Return(returned)]) => returned.arg.as_deref()?,
+            _ => return None,
+        };
+        let active = match callee.as_ref() {
+            Expr::Ident(name) => Some(name.sym.to_string()),
+            _ => None,
+        };
+        if let Some(name) = &active {
+            if context.active.contains(name) {
+                return None;
+            }
+            context.active.push(name.clone());
+        }
+        let result = materialize_fixed_literal(
+            returned,
+            "",
+            requested,
+            parameters,
+            &helper_locals,
+            context,
+            kinds,
+            materialized,
+            output,
+        );
+        if active.is_some() {
+            context.active.pop();
+        }
+        result
     }
 
     fn collect_fixed_object_pattern<'a>(
@@ -10122,17 +10206,30 @@ fn jit_export(
                             .iter()
                             .map(|(path, _, _)| path.clone())
                             .collect();
-                        materialize_fixed_literal(
-                            initializer,
-                            "",
-                            &requested,
-                            parameters,
-                            &locals,
-                            context,
-                            &mut runtime_kinds,
-                            &mut materialized,
-                            output,
-                        )?;
+                        if let Expr::Call(call) = initializer {
+                            materialize_fixed_call(
+                                call,
+                                &requested,
+                                parameters,
+                                &locals,
+                                context,
+                                &mut runtime_kinds,
+                                &mut materialized,
+                                output,
+                            )?;
+                        } else {
+                            materialize_fixed_literal(
+                                initializer,
+                                "",
+                                &requested,
+                                parameters,
+                                &locals,
+                                context,
+                                &mut runtime_kinds,
+                                &mut materialized,
+                                output,
+                            )?;
+                        }
                         runtime_locals = runtime_kinds.len();
                     }
                     for (path, name, default) in bindings {

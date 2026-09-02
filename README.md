@@ -2582,6 +2582,9 @@ declaration and assignment patterns instead of falling back to QuickJS.
 Object and tuple literal destructuring materializes every leaf once in source
 order, including unused side-effecting leaves, while requested primitive-array
 leaves retain one mutable identity.
+Supported local helpers that return those fixed literals use the same path:
+arguments are materialized left-to-right once, then all returned leaves are
+evaluated once before destructuring without QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
