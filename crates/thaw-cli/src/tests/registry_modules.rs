@@ -1185,7 +1185,7 @@ fn optional_aggregates_use_jit_without_quickjs() {
 #[test]
 fn fixed_object_union_result_builds_native_storage() {
     let functions = thaw_bridge::parse_dts(
-        "export interface Meta { label: string; enabled: boolean; }\nexport interface Item { count: number; meta: Meta; values: number[]; }\nexport declare function make(flag: boolean): Item | string;\n",
+        "export interface Meta { label: string; enabled: boolean; }\nexport interface Item { count: number; meta: Meta; values: number[]; }\nexport declare function make(flag: boolean): Item | string;\nexport declare function describe(value: Item | string): string;\n",
     )
     .unwrap();
     let operation = jit_numeric_export(
@@ -1203,6 +1203,27 @@ fn fixed_object_union_result_builds_native_storage() {
     assert!(operation.contains("objseto8"), "{operation}");
     assert!(operation.contains("objseta16"), "{operation}");
     assert!(operation.contains(",if,"), "{operation}");
+    assert!(jit_numeric_export(
+        "module.exports.describe = value => typeof value === 'object' ? value.meta.label : value.toUpperCase();",
+        "describe",
+        false,
+        &functions[1],
+    )
+    .is_some(), "nested object field");
+    assert!(jit_numeric_export(
+        "module.exports.describe = value => typeof value === 'object' ? String(value.values.length) : value.toUpperCase();",
+        "describe",
+        false,
+        &functions[1],
+    )
+    .is_some(), "array field length");
+    assert!(jit_numeric_export(
+        "module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label + ':' + String(value.meta.enabled) + ':' + String(value.values.length) : value.toUpperCase();",
+        "describe",
+        false,
+        &functions[1],
+    )
+    .is_some());
 }
 
 #[test]
@@ -1221,7 +1242,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) : value.toUpperCase(); module.exports.identity = value => value; module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4] } : 'none'; module.exports.wrap = values => ({ count: values.length, meta: { label: 'wrapped', enabled: true }, values });\n",
+        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label + ':' + String(value.meta.enabled) + ':' + String(value.values.length) : value.toUpperCase(); module.exports.identity = value => value; module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4] } : 'none'; module.exports.wrap = values => ({ count: values.length, meta: { label: 'wrapped', enabled: true }, values });\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -1243,7 +1264,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[object Object]\ntext\nmissing\n1\nTEXT\n1:one:true:1,2\nresult\n2:made:false:3,4\nnone\n1:wrapped:true:5,6\n5,6\n"
+        "[object Object]\ntext\nmissing\n1:one:true:2\nTEXT\n1:one:true:1,2\nresult\n2:made:false:3,4\nnone\n1:wrapped:true:5,6\n5,6\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
