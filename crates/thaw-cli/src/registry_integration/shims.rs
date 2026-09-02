@@ -7055,6 +7055,98 @@ fn jit_export(
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn materialize_helper_switch_cases(
+        cases: &[thaw_parser::ast::SwitchCase],
+        discriminant: &[String],
+        requested: &std::collections::HashSet<String>,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        mutable: &std::collections::HashSet<String>,
+        context: &mut InlineContext<'_>,
+        kinds: &mut std::collections::HashMap<String, JitKind>,
+        materialized: &mut std::collections::HashMap<String, Vec<String>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (case, remaining) = cases.split_first()?;
+        let statements = case.cons.iter().collect::<Vec<_>>();
+        let Some(test) = case.test.as_deref() else {
+            if !remaining.is_empty() {
+                return None;
+            }
+            return materialize_helper_returns(
+                &statements,
+                requested,
+                parameters,
+                locals,
+                mutable,
+                context,
+                kinds,
+                materialized,
+                output,
+            );
+        };
+        let discriminant_kind = jit_expression_kind(discriminant)?.0;
+        let mut condition = discriminant.to_vec();
+        let mut case_value = Vec::new();
+        encode_expression(test, parameters, locals, context, &mut case_value)?;
+        if jit_expression_kind(&case_value)?.0 != discriminant_kind {
+            return None;
+        }
+        condition.extend(case_value);
+        condition.push(
+            match discriminant_kind {
+                JitKind::Number | JitKind::Boolean => "==",
+                JitKind::String => "strsame",
+                JitKind::Dynamic => "dynseq",
+                JitKind::Array => "refsame",
+                JitKind::Dictionary => return None,
+            }
+            .into(),
+        );
+        let mut consequent_kinds = kinds.clone();
+        let mut consequent_values = std::collections::HashMap::new();
+        let mut consequent_output = Vec::new();
+        materialize_helper_returns(
+            &statements,
+            requested,
+            parameters,
+            locals,
+            mutable,
+            context,
+            &mut consequent_kinds,
+            &mut consequent_values,
+            &mut consequent_output,
+        )?;
+        let mut alternate_kinds = kinds.clone();
+        let mut alternate_values = std::collections::HashMap::new();
+        let mut alternate_output = Vec::new();
+        materialize_helper_switch_cases(
+            remaining,
+            discriminant,
+            requested,
+            parameters,
+            locals,
+            mutable,
+            context,
+            &mut alternate_kinds,
+            &mut alternate_values,
+            &mut alternate_output,
+        )?;
+        if consequent_kinds != alternate_kinds || consequent_values != alternate_values {
+            return None;
+        }
+        output.extend(condition);
+        output.push("if".into());
+        output.extend(consequent_output);
+        output.push("else".into());
+        output.extend(alternate_output);
+        output.push("end".into());
+        *kinds = consequent_kinds;
+        *materialized = consequent_values;
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn materialize_helper_returns(
         statements: &[&Stmt],
         requested: &std::collections::HashSet<String>,
@@ -7171,6 +7263,32 @@ fn jit_export(
                 *kinds = consequent_kinds;
                 *materialized = consequent_values;
                 Some(())
+            }
+            Stmt::Switch(switch) if rest.is_empty() => {
+                if !matches!(switch.cases.last(), Some(case) if case.test.is_none()) {
+                    return None;
+                }
+                let mut discriminant = Vec::new();
+                encode_expression(
+                    switch.discriminant.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut discriminant,
+                )?;
+                let discriminant = materialize_helper_value(discriminant, kinds, output)?;
+                materialize_helper_switch_cases(
+                    &switch.cases,
+                    &discriminant,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    kinds,
+                    materialized,
+                    output,
+                )
             }
             _ => {
                 let control_kinds = helper_control_kinds(kinds, locals)?;
