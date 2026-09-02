@@ -4290,7 +4290,7 @@ fn jit_export(
             .filter(|kind| matches!(kind, b'D' | b'E' | b'F'))
             .collect::<Vec<_>>();
         if not_object
-            || aggregates.len() != 1
+            || aggregates.is_empty()
             || (!not_array
                 && kinds
                 .bytes()
@@ -4300,11 +4300,11 @@ fn jit_export(
         }
         let mut object_value = source.clone();
         object_value.push(
-            match aggregates[0] {
-                b'D' => "untagdn",
-                b'E' => "untagdb",
-                b'F' => "untagds",
-                _ => unreachable!(),
+            match aggregates.as_slice() {
+                [b'D'] => "untagdn",
+                [b'E'] => "untagdb",
+                [b'F'] => "untagds",
+                _ => "untagdictionary",
             }
             .into(),
         );
@@ -12442,6 +12442,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "untagdn"
                 | "untagdb"
                 | "untagds"
+                | "untagdictionary"
         ) {
             if stack.pop()? != JitKind::Dynamic {
                 return None;

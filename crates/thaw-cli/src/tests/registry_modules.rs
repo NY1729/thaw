@@ -1638,18 +1638,18 @@ fn typeof_object_narrows_dynamic_dictionary_union_in_jit() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function numberValue(value: Record<string, number> | string): number;\nexport declare function boolValue(value: Record<string, boolean> | string): boolean;\nexport declare function stringValue(value: Record<string, string> | string): string;\nexport declare function inverted(value: Record<string, number> | string): number;\n",
+        "export declare function numberValue(value: Record<string, number> | string): number;\nexport declare function boolValue(value: Record<string, boolean> | string): boolean;\nexport declare function stringValue(value: Record<string, string> | string): string;\nexport declare function inverted(value: Record<string, number> | string): number;\nexport declare function keyCount(value: Record<string, number> | Record<string, boolean> | Record<string, string> | string): number;\nexport declare function hasTarget(value: Record<string, number> | Record<string, boolean> | Record<string, string> | string): boolean;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function numberValue(value) { if (typeof value === 'object') return value.count; return value.length; } function boolValue(value) { if (typeof value === 'object') return value.ready; return value.length > 0; } function stringValue(value) { if (typeof value === 'object') return value.name; return value.toUpperCase(); } function inverted(value) { if (typeof value !== 'object') return value.length; return value.count; } module.exports = { numberValue, boolValue, stringValue, inverted };\n",
+        "function numberValue(value) { if (typeof value === 'object') return value.count; return value.length; } function boolValue(value) { if (typeof value === 'object') return value.ready; return value.length > 0; } function stringValue(value) { if (typeof value === 'object') return value.name; return value.toUpperCase(); } function inverted(value) { if (typeof value !== 'object') return value.length; return value.count; } function keyCount(value) { if (typeof value === 'object') return Object.keys(value).length; return value.length; } function hasTarget(value) { if (typeof value === 'object') return Object.hasOwn(value, 'target'); return false; } module.exports = { numberValue, boolValue, stringValue, inverted, keyCount, hasTarget };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { numberValue, boolValue, stringValue, inverted } from 'jit-dictionary-narrowing'; function main(): void { const numbers: Record<string, number> = { count: 42 }; const booleans: Record<string, boolean> = { ready: true }; const strings: Record<string, string> = { name: 'thaw' }; console.log(numberValue(numbers)); console.log(numberValue('word')); console.log(boolValue(booleans)); console.log(boolValue('')); console.log(stringValue(strings)); console.log(stringValue('word')); console.log(inverted(numbers)); console.log(inverted('word')); }\n",
+        "import { numberValue, boolValue, stringValue, inverted, keyCount, hasTarget } from 'jit-dictionary-narrowing'; function main(): void { const numbers: Record<string, number> = { count: 42, target: 1 }; const booleans: Record<string, boolean> = { ready: true }; const strings: Record<string, string> = { name: 'thaw', target: 'yes' }; console.log(numberValue(numbers)); console.log(numberValue('word')); console.log(boolValue(booleans)); console.log(boolValue('')); console.log(stringValue(strings)); console.log(stringValue('word')); console.log(inverted(numbers)); console.log(inverted('word')); console.log(keyCount(numbers)); console.log(keyCount(booleans)); console.log(keyCount(strings)); console.log(keyCount('word')); console.log(hasTarget(numbers)); console.log(hasTarget(booleans)); console.log(hasTarget(strings)); console.log(hasTarget('word')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1665,7 +1665,7 @@ fn typeof_object_narrows_dynamic_dictionary_union_in_jit() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\n4\ntrue\nfalse\nthaw\nWORD\n42\n4\n"
+        "42\n4\ntrue\nfalse\nthaw\nWORD\n42\n4\n2\n1\n2\n4\ntrue\nfalse\ntrue\nfalse\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
