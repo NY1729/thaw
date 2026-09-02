@@ -1966,6 +1966,28 @@ fn array_format(operation: u8, value: f64, separator: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_join(value: f64, separator: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| {
+            let operation = match dynamic.tag {
+                DYNAMIC_NUMBER_ARRAY_TAG => 0,
+                DYNAMIC_BOOLEAN_ARRAY_TAG => 2,
+                DYNAMIC_STRING_ARRAY_TAG => 1,
+                _ => {
+                    CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+                    return 0.0;
+                }
+            };
+            array_format(operation, f64::from_bits(dynamic.payload), separator)
+        },
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_slice(value: f64, start: f64, end: f64) -> f64 {
     let (Some(slice), Some((data, _))) =
         (ARRAY_SLICE.with(Cell::get), unsafe { array_data(value) })
@@ -4012,6 +4034,7 @@ enum NumericValue {
     NumberArrayJoin,
     BoolArrayJoin,
     StringArrayJoin,
+    DynamicArrayJoin,
     ArraySlice,
     ArrayConcat,
     NumberArrayAppend,
@@ -4356,6 +4379,7 @@ impl NumericProgram {
                     "rnjoin" => Some(NumericValue::NumberArrayJoin),
                     "rbjoin" => Some(NumericValue::BoolArrayJoin),
                     "rsjoin" => Some(NumericValue::StringArrayJoin),
+                    "dynarrayjoin" => Some(NumericValue::DynamicArrayJoin),
                     "arrayslice" => Some(NumericValue::ArraySlice),
                     "arrayconcat" => Some(NumericValue::ArrayConcat),
                     "rnappend" => Some(NumericValue::NumberArrayAppend),
@@ -6770,7 +6794,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArrayJoin
                 | NumericValue::BoolArrayJoin
-                | NumericValue::StringArrayJoin => {
+                | NumericValue::StringArrayJoin
+                | NumericValue::DynamicArrayJoin => {
                     if depth < 2 {
                         return None;
                     }
@@ -6778,6 +6803,7 @@ impl NumericProgram {
                         NumericValue::NumberArrayJoin => number_array_join,
                         NumericValue::BoolArrayJoin => bool_array_join,
                         NumericValue::StringArrayJoin => string_array_join,
+                        NumericValue::DynamicArrayJoin => dynamic_array_join,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
