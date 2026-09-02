@@ -2698,6 +2698,42 @@ array_remove_fn!(string_array_shift, 4);
 array_remove_fn!(bool_array_shift, 5);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_remove(array: f64, shift: bool) -> f64 {
+    let Some(array) = dynamic_primitive(array, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let (operation, tag) = match array.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => (0, DYNAMIC_NUMBER_TAG),
+        DYNAMIC_STRING_ARRAY_TAG => (1, DYNAMIC_STRING_TAG),
+        DYNAMIC_BOOLEAN_ARRAY_TAG => (2, DYNAMIC_BOOLEAN_TAG),
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    let value = array_remove(
+        operation + u8::from(shift) * 3,
+        f64::from_bits(array.payload),
+    );
+    if CALL_PRESENT.with(Cell::get) {
+        dynamic_from_parts(tag as f64, value)
+    } else {
+        0.0
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_pop(array: f64) -> f64 {
+    dynamic_array_remove(array, false)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_shift(array: f64) -> f64 {
+    dynamic_array_remove(array, true)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_with(operation: u8, array: f64, index: f64, value: f64) -> f64 {
     let (Some(replace), Some((data, _))) =
         (ARRAY_WITH.with(Cell::get), unsafe { array_data(array) })
@@ -3116,7 +3152,14 @@ extern "C" fn dynamic_from_parts(tag: f64, payload: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
     }
-    arena_dynamic(tag, payload.to_bits())
+    arena_dynamic(
+        tag,
+        if tag == DYNAMIC_BOOLEAN_TAG {
+            u64::from(payload != 0.0)
+        } else {
+            payload.to_bits()
+        },
+    )
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -4419,9 +4462,11 @@ enum NumericValue {
     NumberArrayPop,
     StringArrayPop,
     BoolArrayPop,
+    DynamicArrayPop,
     NumberArrayShift,
     StringArrayShift,
     BoolArrayShift,
+    DynamicArrayShift,
     ArraySplice,
     ArrayToSpliced,
     NumberArrayWith,
@@ -4781,9 +4826,11 @@ impl NumericProgram {
                     "rnpop" => Some(NumericValue::NumberArrayPop),
                     "rspop" => Some(NumericValue::StringArrayPop),
                     "rbpop" => Some(NumericValue::BoolArrayPop),
+                    "dynarraypop" => Some(NumericValue::DynamicArrayPop),
                     "rnshift" => Some(NumericValue::NumberArrayShift),
                     "rsshift" => Some(NumericValue::StringArrayShift),
                     "rbshift" => Some(NumericValue::BoolArrayShift),
+                    "dynarrayshift" => Some(NumericValue::DynamicArrayShift),
                     "drop" => Some(NumericValue::Drop),
                     "nip" => Some(NumericValue::DropUnder),
                     "dup" => Some(NumericValue::Duplicate),
@@ -6502,9 +6549,11 @@ impl NumericProgram {
                 NumericValue::NumberArrayPop
                 | NumericValue::StringArrayPop
                 | NumericValue::BoolArrayPop
+                | NumericValue::DynamicArrayPop
                 | NumericValue::NumberArrayShift
                 | NumericValue::StringArrayShift
-                | NumericValue::BoolArrayShift => {
+                | NumericValue::BoolArrayShift
+                | NumericValue::DynamicArrayShift => {
                     if depth == 0 {
                         return None;
                     }
@@ -6512,9 +6561,11 @@ impl NumericProgram {
                         NumericValue::NumberArrayPop => number_array_pop,
                         NumericValue::StringArrayPop => string_array_pop,
                         NumericValue::BoolArrayPop => bool_array_pop,
+                        NumericValue::DynamicArrayPop => dynamic_array_pop,
                         NumericValue::NumberArrayShift => number_array_shift,
                         NumericValue::StringArrayShift => string_array_shift,
                         NumericValue::BoolArrayShift => bool_array_shift,
+                        NumericValue::DynamicArrayShift => dynamic_array_shift,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
