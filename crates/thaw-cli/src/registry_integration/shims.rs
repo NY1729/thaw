@@ -2896,9 +2896,6 @@ fn jit_export(
                     if prefix != "rn" && !dynamic_array {
                         return None;
                     }
-                    if dynamic_array && initial.is_none() {
-                        return None;
-                    }
                     if callback.spread.is_some()
                         || initial.is_some_and(|initial| initial.spread.is_some())
                     {
@@ -2925,16 +2922,38 @@ fn jit_export(
                             if initial.is_some() { "" } else { "0" }
                         ));
                     } else {
-                        let (callback, kind, captures) = encode_numeric_jit_callback(
+                        let (mut callback, mut kind, captures) = encode_numeric_jit_callback(
                             callback.expr.as_ref(),
                             parameters,
                             locals,
                             context,
                             4,
-                            Some(3),
+                            if dynamic_array && initial.is_none() {
+                                None
+                            } else {
+                                Some(3)
+                            },
                             ("a", "rn", dynamic_array),
                         )?;
-                        if kind != JitKind::Number {
+                        if dynamic_array && initial.is_none() && kind != JitKind::Dynamic {
+                            callback.push(
+                                match kind {
+                                    JitKind::Number => "tagnum",
+                                    JitKind::Boolean => "tagbool",
+                                    JitKind::String => "tagstr",
+                                    _ => return None,
+                                }
+                                .into(),
+                            );
+                            kind = JitKind::Dynamic;
+                        }
+                        if kind
+                            != if dynamic_array && initial.is_none() {
+                                JitKind::Dynamic
+                            } else {
+                                JitKind::Number
+                            }
+                        {
                             return None;
                         }
                         encode_string(&callback.join(","), output)?;
@@ -8842,14 +8861,18 @@ fn jit_export(
                 .insert(
                     parameter.id.sym.to_string(),
                     if dynamic_array {
-                        match (max_parameters, index) {
-                            (3, 0) => "u0nbs".into(),
-                            (3, 1) => "a2".into(),
-                            (3, 2) => "u3NBS".into(),
-                            (4, 0) => "a0".into(),
-                            (4, 1) => "u1nbs".into(),
-                            (4, 2) => "a3".into(),
-                            (4, 3) => "u4NBS".into(),
+                        match (max_parameters, array_parameter, index) {
+                            (3, _, 0) => "u0nbs".into(),
+                            (3, _, 1) => "a2".into(),
+                            (3, _, 2) => "u3NBS".into(),
+                            (4, Some(3), 0) => "a0".into(),
+                            (4, Some(3), 1) => "u1nbs".into(),
+                            (4, Some(3), 2) => "a3".into(),
+                            (4, Some(3), 3) => "u4NBS".into(),
+                            (4, None, 0) => "u0nbs".into(),
+                            (4, None, 1) => "u2nbs".into(),
+                            (4, None, 2) => "a4".into(),
+                            (4, None, 3) => "u5NBS".into(),
                             _ => return None,
                         }
                     } else {
@@ -8892,7 +8915,7 @@ fn jit_export(
             });
         }
         let capture_offset = if dynamic_array {
-            max_parameters + 2
+            max_parameters + if array_parameter.is_some() { 2 } else { 3 }
         } else {
             max_parameters
         };
@@ -12425,9 +12448,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if matches!(
             token.as_str(),
             "dynarrayreducejit"
+                | "dynarrayreducejit0"
                 | "dynarrayreducerightjit"
+                | "dynarrayreducerightjit0"
                 | "dynarrayreducejitc"
+                | "dynarrayreducejitc0"
                 | "dynarrayreducerightjitc"
+                | "dynarrayreducerightjitc0"
         ) {
             if token.contains("jitc") && stack.pop()? != JitKind::Array {
                 return None;
@@ -12438,7 +12465,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             {
                 return None;
             }
-            stack.push(JitKind::Number);
+            stack.push(if token.ends_with('0') {
+                JitKind::Dynamic
+            } else {
+                JitKind::Number
+            });
         } else if matches!(
             token.as_str(),
             "rnreducejit"
