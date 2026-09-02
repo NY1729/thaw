@@ -2618,6 +2618,9 @@ Primitive-dictionary `for...in` loops can likewise return a fixed aggregate
 early. Their native source handle is reused, while an explicit typed key slot
 supports computed number, boolean, or string dictionary reads in the returned
 leaves before joining the post-loop fallback.
+Nested `while` and `do...while` loops can exit the same aggregate result region.
+The counted return instruction moves only the trailing result leaves across any
+temporary inner-loop slots, then jumps directly to the shared helper result.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same

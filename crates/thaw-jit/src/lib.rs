@@ -5767,7 +5767,7 @@ enum NumericValue {
     CatchStart,
     TryEnd,
     ResultStart,
-    ResultReturn,
+    ResultReturn(u8),
     ResultEnd,
     Throw,
     TaggedThrow(u8),
@@ -6223,7 +6223,13 @@ impl NumericProgram {
                     "catch" => Some(NumericValue::CatchStart),
                     "tryend" => Some(NumericValue::TryEnd),
                     "resultstart" => Some(NumericValue::ResultStart),
-                    "resultreturn" => Some(NumericValue::ResultReturn),
+                    "resultreturn" => Some(NumericValue::ResultReturn(0)),
+                    value if value.starts_with("resultreturn") => value
+                        .strip_prefix("resultreturn")?
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|count| (1..=8).contains(count))
+                        .map(NumericValue::ResultReturn),
                     "resultend" => Some(NumericValue::ResultEnd),
                     "throw" => Some(NumericValue::Throw),
                     value if value.starts_with("throwtag") => value
@@ -9026,18 +9032,29 @@ impl NumericProgram {
                     result_depth: None,
                     exits: Vec::new(),
                 }),
-                NumericValue::ResultReturn => {
+                NumericValue::ResultReturn(count) => {
                     let result = results.last_mut()?;
                     if depth <= result.base_depth {
                         return None;
                     }
-                    let result_depth = depth - result.base_depth;
+                    let result_depth = if *count == 0 {
+                        depth - result.base_depth
+                    } else {
+                        *count
+                    };
+                    if depth < result.base_depth + result_depth {
+                        return None;
+                    }
                     if result
                         .result_depth
                         .replace(result_depth)
                         .is_some_and(|expected| expected != result_depth)
                     {
                         return None;
+                    }
+                    let source = depth - result_depth;
+                    for offset in 0..result_depth {
+                        emit_move(&mut code, result.base_depth + offset, source + offset);
                     }
                     result.exits.push(emit_unconditional_jump(&mut code));
                     depth = result.base_depth;

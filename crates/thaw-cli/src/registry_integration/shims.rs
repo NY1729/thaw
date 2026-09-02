@@ -7157,6 +7157,8 @@ fn jit_export(
                         .as_deref()
                         .is_some_and(contains_aggregate_return)
             }
+            Stmt::While(statement) => contains_aggregate_return(statement.body.as_ref()),
+            Stmt::DoWhile(statement) => contains_aggregate_return(statement.body.as_ref()),
             _ => false,
         }
     }
@@ -7199,9 +7201,10 @@ fn jit_export(
                 {
                     return None;
                 }
+                let result_count = returned_kinds.len().checked_sub(result_base_kinds.len())?;
                 *expected_kinds = Some(returned_kinds);
                 *expected_values = Some(returned_values);
-                output.push("resultreturn".into());
+                output.push(format!("resultreturn{result_count}"));
                 Some(())
             }
             Stmt::Block(block) => {
@@ -7268,9 +7271,63 @@ fn jit_export(
                 output.push("guardend".into());
                 Some(())
             }
-            Stmt::While(_)
-            | Stmt::DoWhile(_)
-            | Stmt::For(_)
+            Stmt::While(loop_statement)
+                if contains_aggregate_return(loop_statement.body.as_ref()) =>
+            {
+                output.extend(["loop".into(), "looptail".into()]);
+                encode_condition(
+                    loop_statement.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    output,
+                )?;
+                output.push("while".into());
+                encode_aggregate_return_effects(
+                    loop_statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    control_kinds,
+                    result_base_kinds,
+                    context,
+                    expected_kinds,
+                    expected_values,
+                    output,
+                )?;
+                output.push("loopend".into());
+                Some(())
+            }
+            Stmt::DoWhile(loop_statement)
+                if contains_aggregate_return(loop_statement.body.as_ref()) =>
+            {
+                output.push("loop".into());
+                encode_aggregate_return_effects(
+                    loop_statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    control_kinds,
+                    result_base_kinds,
+                    context,
+                    expected_kinds,
+                    expected_values,
+                    output,
+                )?;
+                output.push("looptail".into());
+                encode_condition(
+                    loop_statement.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    output,
+                )?;
+                output.extend(["while".into(), "loopend".into()]);
+                Some(())
+            }
+            Stmt::For(_)
             | Stmt::ForIn(_)
             | Stmt::ForOf(_)
             | Stmt::Switch(_)
@@ -16580,12 +16637,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             }
         } else if token == "resultstart" {
             result_regions.push((stack.clone(), None));
-        } else if token == "resultreturn" {
+        } else if token == "resultreturn" || token.starts_with("resultreturn") {
             let (base, expected) = result_regions.last_mut()?;
             if !stack.starts_with(base.as_slice()) || stack.len() == base.len() {
                 return None;
             }
-            let returned = stack.split_off(base.len());
+            let count = token
+                .strip_prefix("resultreturn")
+                .filter(|count| !count.is_empty())
+                .map(str::parse::<usize>)
+                .transpose()
+                .ok()?
+                .unwrap_or_else(|| stack.len() - base.len());
+            if count == 0 || count > 8 || stack.len() < base.len() + count {
+                return None;
+            }
+            let returned = stack.split_off(stack.len() - count);
+            stack.truncate(base.len());
             if let Some(previous) = expected.take() {
                 if previous.len() != returned.len() {
                     return None;
