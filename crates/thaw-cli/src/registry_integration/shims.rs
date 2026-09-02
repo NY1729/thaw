@@ -2919,6 +2919,79 @@ fn jit_export(
             }
         }
 
+        fn encode_runtime_computed_field(
+            path: &str,
+            key: &Expr,
+            parameters: &std::collections::HashMap<String, String>,
+            locals: &std::collections::HashMap<String, Vec<String>>,
+            context: &mut InlineContext<'_>,
+        ) -> Option<Vec<String>> {
+            fn branches(
+                fields: &[(String, Vec<String>)],
+                kind: JitKind,
+                output: &mut Vec<String>,
+            ) -> Option<()> {
+                let Some(((name, value), remaining)) = fields.split_first() else {
+                    output.push(
+                        match kind {
+                            JitKind::Number => "absentn",
+                            JitKind::Boolean => "absentb",
+                            JitKind::String => "absents",
+                            JitKind::Array => "absenta",
+                            JitKind::Dictionary => "absentd",
+                            JitKind::Dynamic => "absentdyn",
+                        }
+                        .into(),
+                    );
+                    return Some(());
+                };
+                output.push("dup".into());
+                encode_string(name, output)?;
+                output.extend([
+                    "strcmp".into(),
+                    "c0000000000000000".into(),
+                    "==".into(),
+                    "if".into(),
+                ]);
+                output.extend(value.iter().cloned());
+                output.push("else".into());
+                branches(remaining, kind, output)?;
+                output.push("end".into());
+                Some(())
+            }
+
+            let prefix = format!("{path}.");
+            let mut fields = locals
+                .iter()
+                .filter_map(|(name, value)| {
+                    let field = name.strip_prefix(&prefix)?;
+                    (!field.contains('.')).then(|| (field.to_owned(), value.clone()))
+                })
+                .chain(parameters.iter().filter_map(|(name, value)| {
+                    let field = name.strip_prefix(&prefix)?;
+                    (!field.contains('.')).then(|| (field.to_owned(), vec![value.clone()]))
+                }))
+                .collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
+            fields.dedup_by(|left, right| left.0 == right.0);
+            let kind = fields
+                .iter()
+                .map(|(_, value)| jit_expression_kind(value).map(|result| result.0))
+                .collect::<Option<Vec<_>>>()?;
+            let expected = *kind.first()?;
+            if kind.iter().any(|kind| *kind != expected) {
+                return None;
+            }
+            let mut output = Vec::new();
+            encode_expression(key, parameters, locals, context, &mut output)?;
+            if jit_expression_kind(&output)?.0 != JitKind::String {
+                return None;
+            }
+            branches(&fields, expected, &mut output)?;
+            output.push("nip".into());
+            Some(output)
+        }
+
         match expression {
             Expr::Ident(identifier) if locals.contains_key(identifier.sym.as_ref()) => {
                 output.extend(locals.get(identifier.sym.as_ref())?.iter().cloned());
@@ -3052,7 +3125,16 @@ fn jit_export(
                                 parameters,
                                 locals,
                                 context,
-                            );
+                            )
+                            .or_else(|| {
+                                encode_runtime_computed_field(
+                                    &path,
+                                    computed.expr.as_ref(),
+                                    parameters,
+                                    locals,
+                                    context,
+                                )
+                            });
                         }
                     }
                 }
@@ -12746,6 +12828,14 @@ fn normalize_callable_branches<'a>(
 }
 
 fn jit_operation_may_be_absent(operation: &[String]) -> bool {
+    if operation.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "absentn" | "absentb" | "absents" | "absentdyn" | "absenta" | "absentd"
+        )
+    }) {
+        return true;
+    }
     let Some(token) = operation.last().map(String::as_str) else {
         return false;
     };

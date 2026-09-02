@@ -2440,7 +2440,9 @@ available to ordinary JIT operations; fixed object fields can use either dot
 syntax or constant string computed-property syntax without changing the native
 access path. A conditional computed key with a finite set of string literals,
 such as `value[flag ? "left" : "right"]`, is evaluated once and lowered to a
-typed JIT branch over those fixed field reads;
+typed JIT branch over those fixed field reads. An arbitrary runtime string key
+can select among a fixed object's same-typed fields through the same one-time
+evaluation path; an unknown key produces the native absent state for `??`;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
