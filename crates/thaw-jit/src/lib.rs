@@ -2829,6 +2829,29 @@ extern "C" fn type_of_dynamic(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_to_boolean(value: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| match dynamic.tag {
+            DYNAMIC_NUMBER_TAG => {
+                let value = f64::from_bits(dynamic.payload);
+                f64::from(value != 0.0 && !value.is_nan())
+            }
+            DYNAMIC_STRING_TAG => f64::from(unsafe {
+                (dynamic.payload as usize as *const c_char)
+                    .as_ref()
+                    .is_some_and(|value| *value != 0)
+            }),
+            DYNAMIC_BOOLEAN_TAG => f64::from(dynamic.payload != 0),
+            _ => unreachable!(),
+        },
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn untag_number(value: f64) -> f64 {
     untag_dynamic(value, DYNAMIC_NUMBER_TAG)
 }
@@ -2881,6 +2904,22 @@ extern "C" fn boolean_to_string(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_to_string(value: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| match dynamic.tag {
+            DYNAMIC_NUMBER_TAG => number_to_string(f64::from_bits(dynamic.payload)),
+            DYNAMIC_STRING_TAG => f64::from_bits(dynamic.payload),
+            DYNAMIC_BOOLEAN_TAG => boolean_to_string(dynamic.payload as f64),
+            _ => unreachable!(),
+        },
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_to_number(value: f64) -> f64 {
     let Some(parse) = STRING_TO_NUMBER.with(Cell::get) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
@@ -2893,6 +2932,22 @@ extern "C" fn string_to_number(value: f64) -> f64 {
     } else {
         unsafe { parse(value) }
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_to_number(value: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| match dynamic.tag {
+            DYNAMIC_NUMBER_TAG => f64::from_bits(dynamic.payload),
+            DYNAMIC_STRING_TAG => string_to_number(f64::from_bits(dynamic.payload)),
+            DYNAMIC_BOOLEAN_TAG => dynamic.payload as f64,
+            _ => unreachable!(),
+        },
+    )
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -3628,6 +3683,7 @@ enum NumericValue {
     TypeOfString,
     TypeOfObject,
     TypeOfDynamic,
+    DynamicToBoolean,
     StringCompare,
     StringCharAt,
     StringCharCodeAt,
@@ -3637,6 +3693,8 @@ enum NumericValue {
     NumberToString,
     BooleanToString,
     StringToNumber,
+    DynamicToString,
+    DynamicToNumber,
     TagNumber,
     TagString,
     TagBoolean,
@@ -3949,6 +4007,7 @@ impl NumericProgram {
                     "typeofstring" => Some(NumericValue::TypeOfString),
                     "typeofobject" => Some(NumericValue::TypeOfObject),
                     "typeofdynamic" => Some(NumericValue::TypeOfDynamic),
+                    "dynbool" => Some(NumericValue::DynamicToBoolean),
                     "strcmp" => Some(NumericValue::StringCompare),
                     "charat" => Some(NumericValue::StringCharAt),
                     "charcodeat" => Some(NumericValue::StringCharCodeAt),
@@ -3958,6 +4017,8 @@ impl NumericProgram {
                     "numstr" => Some(NumericValue::NumberToString),
                     "boolstr" => Some(NumericValue::BooleanToString),
                     "strnum" => Some(NumericValue::StringToNumber),
+                    "dynstr" => Some(NumericValue::DynamicToString),
+                    "dynnum" => Some(NumericValue::DynamicToNumber),
                     "tagnum" => Some(NumericValue::TagNumber),
                     "tagstr" => Some(NumericValue::TagString),
                     "tagbool" => Some(NumericValue::TagBoolean),
@@ -4820,6 +4881,12 @@ impl NumericProgram {
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
+                NumericValue::DynamicToBoolean => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, dynamic_to_boolean as *const () as u64, depth - 1);
+                }
                 NumericValue::StringCharAt
                 | NumericValue::StringCharCodeAt
                 | NumericValue::StringAt
@@ -4847,6 +4914,8 @@ impl NumericProgram {
                 NumericValue::NumberToString
                 | NumericValue::BooleanToString
                 | NumericValue::StringToNumber
+                | NumericValue::DynamicToString
+                | NumericValue::DynamicToNumber
                 | NumericValue::TagNumber
                 | NumericValue::TagString
                 | NumericValue::TagBoolean
@@ -4863,6 +4932,8 @@ impl NumericProgram {
                         NumericValue::NumberToString => number_to_string,
                         NumericValue::BooleanToString => boolean_to_string,
                         NumericValue::StringToNumber => string_to_number,
+                        NumericValue::DynamicToString => dynamic_to_string,
+                        NumericValue::DynamicToNumber => dynamic_to_number,
                         NumericValue::TagNumber => tag_number,
                         NumericValue::TagString => tag_string,
                         NumericValue::TagBoolean => tag_boolean,
@@ -7615,7 +7686,7 @@ mod tests {
             ("expr:b0,tagbool,typeofdynamic:boolean-type", "boolean"),
         ] {
             let result = call(&CString::new(symbol).unwrap(), &[20.0]);
-            assert!(result.error.is_null());
+            assert!(result.error.is_null(), "{symbol}");
             assert_eq!(
                 unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }
                     .to_str()
@@ -7645,6 +7716,38 @@ mod tests {
         let result = call(&dynamic_argument, &[3.0, f64::from_bits(1)]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 1.0);
+
+        for (symbol, expected) in [
+            ("expr:c0000000000000000,tagnum,dynbool:false-number", 0.0),
+            ("expr:c7ff8000000000000,tagnum,dynbool:nan", 0.0),
+            ("expr:c3ff0000000000000,tagnum,dynbool:true-number", 1.0),
+            ("expr:t,tagstr,dynbool:false-string", 0.0),
+            ("expr:t78,tagstr,dynbool:true-string", 1.0),
+            ("expr:c0000000000000000,tagbool,dynbool:false-boolean", 0.0),
+            ("expr:c3ff0000000000000,tagbool,dynbool:true-boolean", 1.0),
+        ] {
+            let result = call(&CString::new(symbol).unwrap(), &[]);
+            assert!(result.error.is_null(), "{symbol}");
+            assert_eq!(result.value, expected, "{symbol}");
+        }
+
+        let result = call(
+            &CString::new("expr:t3432,tagstr,dynnum:dynamic-number").unwrap(),
+            &[],
+        );
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 42.0);
+        let result = call(
+            &CString::new("expr:c4000000000000000,tagnum,dynstr:dynamic-string").unwrap(),
+            &[],
+        );
+        assert!(result.error.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }
+                .to_str()
+                .unwrap(),
+            "42"
+        );
 
         let mismatch = CString::new("expr:t68656c6c6f,tagstr,untagnum:mismatch").unwrap();
         assert!(!call(&mismatch, &[]).error.is_null());
