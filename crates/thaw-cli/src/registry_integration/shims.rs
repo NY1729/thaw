@@ -2813,7 +2813,7 @@ fn jit_export(
                 }
                 let prefix = array_prefix(&encoded)
                     .or_else(|| dynamic_array.then_some("dynamic"))?;
-                if dynamic_array && !matches!(method, "join" | "toString") {
+                if dynamic_array && !matches!(method, "join" | "toString" | "slice") {
                     return None;
                 }
                 let encoded_receiver = encoded.clone();
@@ -3369,7 +3369,14 @@ fn jit_export(
                         }
                         _ => return None,
                     }
-                    output.push("arrayslice".into());
+                    output.push(
+                        if dynamic_array {
+                            "dynarrayslice"
+                        } else {
+                            "arrayslice"
+                        }
+                        .into(),
+                    );
                 } else if method == "at" {
                     match call.args.as_slice() {
                         [] => output.push(format!("c{:016x}", 0.0f64.to_bits())),
@@ -12184,14 +12191,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if token == "arrayslice" {
+        } else if matches!(token.as_str(), "arrayslice" | "dynarrayslice") {
             if stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Number
-                || stack.pop()? != JitKind::Array
+                || stack.pop()?
+                    != if token == "dynarrayslice" {
+                        JitKind::Dynamic
+                    } else {
+                        JitKind::Array
+                    }
             {
                 return None;
             }
-            stack.push(JitKind::Array);
+            stack.push(if token == "dynarrayslice" {
+                JitKind::Dynamic
+            } else {
+                JitKind::Array
+            });
         } else if token == "arrayconcat" {
             if stack.pop()? != JitKind::Array || stack.pop()? != JitKind::Array {
                 return None;
