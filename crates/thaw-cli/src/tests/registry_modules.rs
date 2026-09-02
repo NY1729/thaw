@@ -1606,6 +1606,116 @@ fn tuple_union_array_transforms_use_jit_without_quickjs() {
 }
 
 #[test]
+fn primitive_tuple_union_callbacks_use_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function anyFlag(value: boolean[] | [boolean, boolean]): boolean;\n",
+        "export declare function allFlags(value: boolean[] | [boolean, boolean]): boolean;\n",
+        "export declare function trueFlags(value: boolean[] | [boolean, boolean]): boolean[];\n",
+        "export declare function invertFlags(value: boolean[] | [boolean, boolean]): boolean[];\n",
+        "export declare function hasText(value: string[] | [string, string], needle: string): boolean;\n",
+        "export declare function findText(value: string[] | [string, string], needle: string): string;\n",
+        "export declare function matchingText(value: string[] | [string, string], needle: string): string[];\n",
+        "export declare function upperText(value: string[] | [string, string]): string[];\n",
+        "export declare function textLengths(value: string[] | [string, string]): number[];\n",
+        "export declare function indexedLengths(value: string[] | [string, string], offset: number): number[];\n",
+        "export declare function flagScores(value: boolean[] | [boolean, boolean], offset: number): number[];\n",
+    );
+    let source = concat!(
+        "module.exports.anyFlag = value => Array.isArray(value) ? value.some(item => item) : false; ",
+        "module.exports.allFlags = value => Array.isArray(value) ? value.every(item => item) : false; ",
+        "module.exports.trueFlags = value => Array.isArray(value) ? value.filter(item => item) : [false]; ",
+        "module.exports.invertFlags = value => Array.isArray(value) ? value.map(item => !item) : [false]; ",
+        "module.exports.hasText = (value, needle) => Array.isArray(value) ? value.some(item => item === needle) : false; ",
+        "module.exports.findText = (value, needle) => Array.isArray(value) ? value.find(item => item === needle) ?? 'missing' : 'missing'; ",
+        "module.exports.matchingText = (value, needle) => Array.isArray(value) ? value.filter(item => item === needle) : ['missing']; ",
+        "module.exports.upperText = value => Array.isArray(value) ? value.map(item => item.toUpperCase()) : ['missing']; ",
+        "module.exports.textLengths = value => Array.isArray(value) ? value.map(item => item.length) : [0];",
+        "module.exports.indexedLengths = (value, offset) => Array.isArray(value) ? value.map((item, index) => item.length + index + offset) : [0]; ",
+        "module.exports.flagScores = (value, offset) => Array.isArray(value) ? value.map((item, index) => (item ? 10 : 0) + index + offset) : [0];",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in [
+        "anyFlag",
+        "allFlags",
+        "trueFlags",
+        "invertFlags",
+        "hasText",
+        "findText",
+        "matchingText",
+        "upperText",
+        "textLengths",
+        "indexedLengths",
+        "flagScores",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-primitive-tuple-union-callbacks-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-primitive-tuple-union-callbacks");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { allFlags, anyFlag, findText, flagScores, hasText, indexedLengths, invertFlags, matchingText, textLengths, trueFlags, upperText } from 'jit-primitive-tuple-union-callbacks';\n",
+            "function main(): void {\n",
+            "  console.log(anyFlag([false, true, false]));\n",
+            "  console.log(anyFlag([false, false] as [boolean, boolean]));\n",
+            "  console.log(allFlags([true, true]));\n",
+            "  console.log(allFlags([true, false] as [boolean, boolean]));\n",
+            "  console.log(trueFlags([false, true, true]).join(','));\n",
+            "  console.log(trueFlags([true, false] as [boolean, boolean]).join(','));\n",
+            "  console.log(invertFlags([false, true]).join(','));\n",
+            "  console.log(invertFlags([true, false] as [boolean, boolean]).join(','));\n",
+            "  console.log(hasText(['a', 'b', 'a'], 'b'));\n",
+            "  console.log(hasText(['x', 'y'] as [string, string], 'z'));\n",
+            "  console.log(findText(['a', 'b', 'a'], 'b'));\n",
+            "  console.log(findText(['x', 'y'] as [string, string], 'z'));\n",
+            "  console.log(matchingText(['a', 'b', 'a'], 'a').join(','));\n",
+            "  console.log(matchingText(['x', 'y'] as [string, string], 'y').join(','));\n",
+            "  console.log(upperText(['a', 'bb']).join(','));\n",
+            "  console.log(upperText(['x', 'yy'] as [string, string]).join(','));\n",
+            "  console.log(textLengths(['a', 'bb']).join(','));\n",
+            "  console.log(textLengths(['xxx', 'y'] as [string, string]).join(','));\n",
+            "  console.log(indexedLengths(['a', 'bb'], 2).join(','));\n",
+            "  console.log(indexedLengths(['xxx', 'y'] as [string, string], 1).join(','));\n",
+            "  console.log(flagScores([true, false], 1).join(','));\n",
+            "  console.log(flagScores([false, true] as [boolean, boolean], 2).join(','));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nfalse\ntrue\nfalse\ntrue,true\ntrue\ntrue,false\nfalse,true\ntrue\nfalse\nb\nmissing\na,a\ny\nA,BB\nX,YY\n1,2\n3,1\n3,5\n4,3\n11,2\n2,13\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
