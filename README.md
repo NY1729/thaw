@@ -2410,7 +2410,13 @@ JavaScript truthiness in conditions, unary `!`, and value-preserving `&&`/`||`.
 tag without returning to QuickJS. Binary `+` selects numeric addition or string
 concatenation from the runtime tags, while relational, loose-equality, and
 strict-equality comparisons preserve primitive JavaScript coercion rules in the
-same JIT.
+same JIT. Unary numeric conversion, arithmetic, exponentiation, bitwise
+operations and shifts reuse the tag-aware numeric conversion. Zero-argument
+`valueOf()` preserves the tagged value and `toString()` formats every supported
+primitive without leaving the JIT. String methods on a tagged union validate
+the runtime string tag before reusing the typed string instruction; a
+non-string receiver raises through the native JIT error path rather than
+loading QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,

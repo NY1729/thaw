@@ -1499,6 +1499,49 @@ fn dynamic_primitive_loop_locals_narrow_without_quickjs() {
 }
 
 #[test]
+fn dynamic_primitive_numeric_operators_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-dynamic-operators-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-dynamic-operators");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numericOps(value: number | boolean | string): number;\nexport declare function bitOps(value: number | boolean | string): number;\nexport declare function identity(value: number | boolean | string): number | boolean | string;\nexport declare function text(value: number | boolean | string): string;\nexport declare function upper(value: number | boolean | string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function numericOps(value) { const n = +value; return ((n * 3 - 2) / 2) % 7 + n ** 2; } function bitOps(value) { const n = +value; return ((n << 2) | 1) ^ ((n >> 1) & 3) ^ (n >>> 1) ^ ~n; } function identity(value) { return value.valueOf(); } function text(value) { return value.toString(); } function upper(value) { return value.toUpperCase(); } module.exports = { numericOps, bitOps, identity, text, upper };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numericOps, bitOps, identity, text, upper } from 'jit-dynamic-operators'; function show(value: number | boolean | string): void { if (typeof value === 'number') console.log(value); else if (typeof value === 'boolean') console.log(value); else console.log(value.toUpperCase()); } function main(): void { console.log(numericOps('4')); console.log(numericOps(true)); console.log(bitOps('4')); console.log(bitOps(true)); show(identity(5)); show(identity(false)); show(identity('same')); console.log(text(5)); console.log(text(false)); console.log(text('same')); console.log(upper('mixed')); try { upper(1); } catch { console.log('type-error'); } }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "21\n1.5\n-22\n-5\n5\nfalse\nSAME\n5\nfalse\nsame\nMIXED\ntype-error\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
