@@ -3053,26 +3053,53 @@ fn jit_export(
                         .cloned()
                         .or_else(|| parameters.get(&field).map(|value| vec![value.clone()]))?;
                     let (getter, receiver) = operation.split_last()?;
-                    let (prefix, expected) = if getter
+                    let (prefix, expected, offset, present_tag) = if getter
                         .strip_prefix("objn")
                         .is_some_and(|offset| offset.parse::<u16>().is_ok())
                     {
-                        ("objsetn", JitKind::Number)
+                        (
+                            "objsetn",
+                            JitKind::Number,
+                            getter.strip_prefix("objn")?.parse::<u16>().ok()?,
+                            None,
+                        )
                     } else if getter
                         .strip_prefix("objb")
                         .is_some_and(|offset| offset.parse::<u16>().is_ok())
                     {
-                        ("objsetb", JitKind::Boolean)
+                        (
+                            "objsetb",
+                            JitKind::Boolean,
+                            getter.strip_prefix("objb")?.parse::<u16>().ok()?,
+                            None,
+                        )
                     } else if getter
                         .strip_prefix("objs")
                         .is_some_and(|offset| offset.parse::<u16>().is_ok())
                     {
-                        ("objsets", JitKind::String)
+                        (
+                            "objsets",
+                            JitKind::String,
+                            getter.strip_prefix("objs")?.parse::<u16>().ok()?,
+                            None,
+                        )
+                    } else if assignment == AssignOp::Assign {
+                        let (encoded, present_tag) = getter
+                            .strip_prefix("objopt")
+                            .map(|offset| (offset, 1u8))
+                            .or_else(|| getter.strip_prefix("objnull").map(|offset| (offset, 0u8)))?;
+                        let (kind, offset) = encoded.split_at(1);
+                        let offset = offset.parse::<u16>().ok()?;
+                        let (prefix, expected, payload_offset) = match kind {
+                            "n" => ("objsetn", JitKind::Number, offset.checked_add(8)?),
+                            "b" => ("objsetb", JitKind::Boolean, offset.checked_add(1)?),
+                            "s" => ("objsets", JitKind::String, offset.checked_add(8)?),
+                            _ => return None,
+                        };
+                        (prefix, expected, payload_offset, Some((offset, present_tag)))
                     } else {
                         return None;
                     };
-                    let offset = getter.bytes().skip_while(|byte| !byte.is_ascii_digit()).count();
-                    let offset = &getter[getter.len() - offset..];
                     let mut encoded = Vec::new();
                     encode_expression(value, parameters, locals, context, &mut encoded)?;
                     let mut output = receiver.to_vec();
@@ -3120,9 +3147,12 @@ fn jit_export(
                     output.extend([
                         "dup2".into(),
                         format!("{prefix}{offset}"),
-                        "drop".into(),
-                        "nip".into(),
                     ]);
+                    if let Some((tag_offset, tag)) = present_tag {
+                        output.push(format!("c{:016x}", f64::from(tag).to_bits()));
+                        output.push(format!("objsetb{tag_offset}"));
+                    }
+                    output.extend(["drop".into(), "nip".into()]);
                     Some(output)
                 }
                 _ => None,

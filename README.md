@@ -2446,7 +2446,9 @@ evaluation path; an unknown key produces the native absent state for `??`;
 simple and compound assignments plus prefix/postfix numeric updates through a
 constant or finite conditional key update the selected native fixed-object
 field in place and preserve both expression-result semantics and shared
-identity across later calls;
+identity across later calls; assigning a present number, boolean, or string to
+an optional, nullable, or nullish field updates its native payload and presence
+tag through the same path;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without

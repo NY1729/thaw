@@ -1480,6 +1480,64 @@ fn optional_object_fields_use_jit_without_quickjs() {
 }
 
 #[test]
+fn tagged_object_field_assignments_use_jit_without_quickjs() {
+    let declarations = thaw_bridge::parse_dts(
+        "export interface Item { optional?: number; nullable: number | null; nullish: number | null | undefined; }\nexport declare function setOptional(value: Item | string, next: number): number;\nexport declare function setNullable(value: Item | string, next: number): number;\nexport declare function setNullish(value: Item | string, next: number): number;\n",
+    )
+    .unwrap();
+    let source = "module.exports.setOptional = (value, next) => typeof value === 'object' ? value.optional = next : -1; module.exports.setNullable = (value, next) => typeof value === 'object' ? value.nullable = next : -1; module.exports.setNullish = (value, next) => typeof value === 'object' ? value.nullish = next : -1;";
+    for (index, name) in ["setOptional", "setNullable", "setNullish"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name} did not specialize"
+        );
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tagged-object-field-assignment-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tagged-object-field-assignment");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Item { optional?: number; nullable: number | null; nullish: number | null | undefined; }\nexport declare function setOptional(value: Item | string, next: number): number;\nexport declare function setNullable(value: Item | string, next: number): number;\nexport declare function setNullish(value: Item | string, next: number): number;\nexport declare function optional(value: Item | string): number;\nexport declare function nullable(value: Item | string): number;\nexport declare function nullish(value: Item | string): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.setOptional = (value, next) => typeof value === 'object' ? value.optional = next : -1; module.exports.setNullable = (value, next) => typeof value === 'object' ? value.nullable = next : -1; module.exports.setNullish = (value, next) => typeof value === 'object' ? value.nullish = next : -1; module.exports.optional = value => typeof value === 'object' ? value.optional ?? 0 : -1; module.exports.nullable = value => typeof value === 'object' ? value.nullable ?? 0 : -1; module.exports.nullish = value => typeof value === 'object' ? value.nullish ?? 0 : -1;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { nullable, nullish, optional, setNullable, setNullish, setOptional } from 'jit-tagged-object-field-assignment';\ntype Item = { optional?: number; nullable: number | null; nullish: number | null | undefined };
+function main(): void { const value: Item = { nullable: null, nullish: undefined }; console.log(optional(value)); console.log(nullable(value)); console.log(nullish(value)); console.log(setOptional(value, 3)); console.log(setNullable(value, 5)); console.log(setNullish(value, 7)); console.log(optional(value)); console.log(nullable(value)); console.log(nullish(value)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "0\n0\n0\n3\n5\n7\n3\n5\n7\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_tuple_elements_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-tuple-element-{}",
