@@ -2434,8 +2434,8 @@ Fixed-shape object members use an opaque object tag on the argument side, so
 object/string unions can be tested, coerced and forwarded without QuickJS.
 After a `typeof value === "object"` check, primitive fields, recursively nested
 fixed-object fields, and primitive-array fields are loaded directly from the
-native object layout; nested primitive operations and array length checks remain
-available to ordinary JIT operations;
+native object layout; supported nested string and primitive-array operations
+remain available to ordinary JIT operations;
 the same tagged value can also return through LLVM without changing object
 identity or layout. Object literals with an exact fixed shape and recursively
 nested fixed objects, primitive arrays, or primitive number, boolean, and string

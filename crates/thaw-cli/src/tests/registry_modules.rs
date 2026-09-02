@@ -1218,7 +1218,14 @@ fn fixed_object_union_result_builds_native_storage() {
     )
     .is_some(), "array field length");
     assert!(jit_numeric_export(
-        "module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label + ':' + String(value.meta.enabled) + ':' + String(value.values.length) : value.toUpperCase();",
+        "module.exports.describe = value => typeof value === 'object' ? value.values.join(',') : value.toUpperCase();",
+        "describe",
+        false,
+        &functions[1],
+    )
+    .is_some(), "array field join");
+    assert!(jit_numeric_export(
+        "module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label.toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') : value.toUpperCase();",
         "describe",
         false,
         &functions[1],
@@ -1242,7 +1249,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label + ':' + String(value.meta.enabled) + ':' + String(value.values.length) : value.toUpperCase(); module.exports.identity = value => value; module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4] } : 'none'; module.exports.wrap = values => ({ count: values.length, meta: { label: 'wrapped', enabled: true }, values });\n",
+        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label.toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') : value.toUpperCase(); module.exports.identity = value => value; module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4] } : 'none'; module.exports.wrap = values => ({ count: values.length, meta: { label: 'wrapped', enabled: true }, values });\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -1264,7 +1271,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[object Object]\ntext\nmissing\n1:one:true:2\nTEXT\n1:one:true:1,2\nresult\n2:made:false:3,4\nnone\n1:wrapped:true:5,6\n5,6\n"
+        "[object Object]\ntext\nmissing\n1:ONE:true:1,2\nTEXT\n1:one:true:1,2\nresult\n2:made:false:3,4\nnone\n1:wrapped:true:5,6\n5,6\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
