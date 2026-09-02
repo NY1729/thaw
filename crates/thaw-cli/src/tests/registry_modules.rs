@@ -2077,10 +2077,21 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
 
 #[test]
 fn nested_object_destructuring_uses_jit_without_quickjs() {
-    let dts = "export declare function unpack(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }): string;\n";
-    let source = "module.exports.unpack = value => { const { count: amount, meta: { label, enabled }, pair: [index, text], values } = value; values.push(index); return label + ':' + String(amount) + ':' + String(enabled) + ':' + String(index) + ':' + text + ':' + values.join(','); };";
+    let dts = concat!(
+        "export declare function unpack(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }): string;\n",
+        "export declare function reassign(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }): string;\n",
+    );
+    let source = concat!(
+        "module.exports.unpack = value => { const { count: amount, meta: { label, enabled }, pair: [index, text], values } = value; values.push(index); return label + ':' + String(amount) + ':' + String(enabled) + ':' + String(index) + ':' + text + ':' + values.join(','); }; ",
+        "module.exports.reassign = value => { let count = 0; let label = ''; let index = 0; let text = ''; ({ count, meta: { label }, pair: [index, text] } = value); return String(count) + ':' + label + ':' + String(index) + ':' + text; };",
+    );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
-    assert!(jit_numeric_export(source, "unpack", false, &declarations[0]).is_some());
+    for (index, name) in ["unpack", "reassign"].into_iter().enumerate() {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-nested-object-destructuring-{}",
@@ -2094,7 +2105,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { unpack } from 'jit-nested-object-destructuring';\nfunction main(): void { console.log(unpack({ count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'], values: [1, 2] })); }\n",
+        "import { reassign, unpack } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; console.log(unpack(value)); console.log(reassign(value)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2110,7 +2121,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "box:3:true:7:pair:1,2,7\n"
+        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

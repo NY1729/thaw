@@ -2568,7 +2568,9 @@ existing straight-line mutable locals, including holes, lazy defaults, repeated
 targets, and side-effecting array-returning right-hand sides.
 Fixed object parameters also support nested object and tuple declaration
 patterns, shorthand or renamed leaves, skipped tuple positions, and direct
-aliases to contained primitive arrays on the same JIT path.
+aliases to contained primitive arrays on the same JIT path. Parenthesized object
+assignment patterns can write those same nested leaves back to existing
+straight-line mutable locals without QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
