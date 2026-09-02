@@ -2625,6 +2625,10 @@ every reached outer iteration and discarded on normal exit. Dictionary keys
 remain available to computed reads in returned leaves. The counted return
 instruction moves only those trailing result leaves across any temporary
 inner-loop slots, then jumps directly to the shared helper result.
+Nested `switch` statements share that result region as well. Their discriminant
+is evaluated once, case tests retain source-order fallthrough, and ordinary
+`break` exits only the switch while a matching aggregate `return` bypasses the
+surrounding loop without loading QuickJS.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
