@@ -7186,6 +7186,108 @@ fn jit_export(
                 output,
             ),
             Stmt::If(branch) => {
+                if let Some((name, tag_index, value_index, selected, alternate, probe)) =
+                    dynamic_catch_narrowing(branch.test.as_ref(), locals)
+                {
+                    let consequent = match branch.cons.as_ref() {
+                        Stmt::Block(block) => block.stmts.iter().collect::<Vec<_>>(),
+                        statement => vec![statement],
+                    };
+                    let alternate_statements = if let Some(statement) = branch.alt.as_deref() {
+                        match statement {
+                            Stmt::Block(block) => block.stmts.iter().collect::<Vec<_>>(),
+                            statement => vec![statement],
+                        }
+                    } else {
+                        rest.to_vec()
+                    };
+                    let mut consequent_locals = locals.clone();
+                    consequent_locals.insert(
+                        name.clone(),
+                        vec![format!("{}{value_index}", selected.prefix)],
+                    );
+                    let mut consequent_kinds = kinds.clone();
+                    consequent_kinds.insert(name.clone(), selected.kind);
+                    let mut consequent_values = std::collections::HashMap::new();
+                    let mut consequent_output = Vec::new();
+                    materialize_helper_returns(
+                        &consequent,
+                        requested,
+                        parameters,
+                        &consequent_locals,
+                        mutable,
+                        context,
+                        &mut consequent_kinds,
+                        &mut consequent_values,
+                        &mut consequent_output,
+                    )?;
+                    let alternate = alternate?;
+                    let mut alternate_locals = locals.clone();
+                    alternate_locals.insert(
+                        name.clone(),
+                        vec![format!("{}{value_index}", alternate.prefix)],
+                    );
+                    let mut alternate_kinds = kinds.clone();
+                    alternate_kinds.insert(name, alternate.kind);
+                    let mut alternate_values = std::collections::HashMap::new();
+                    let mut alternate_output = Vec::new();
+                    materialize_helper_returns(
+                        &alternate_statements,
+                        requested,
+                        parameters,
+                        &alternate_locals,
+                        mutable,
+                        context,
+                        &mut alternate_kinds,
+                        &mut alternate_values,
+                        &mut alternate_output,
+                    )?;
+                    if consequent_values != alternate_values
+                        || consequent_kinds.len() != alternate_kinds.len()
+                    {
+                        return None;
+                    }
+                    output.extend([
+                        format!("ln{tag_index}"),
+                        format!(
+                            "c{:016x}",
+                            f64::from(caught_throw_tag(&selected)?).to_bits()
+                        ),
+                        "==".into(),
+                    ]);
+                    match probe {
+                        CatchProbe::Tag => {}
+                        CatchProbe::ArrayIndex(index) => output.extend([
+                            "if".into(),
+                            format!("{}{value_index}", selected.prefix),
+                            "arraylen".into(),
+                            format!("c{:016x}", f64::from(index).to_bits()),
+                            ">".into(),
+                            "else".into(),
+                            "c0000000000000000".into(),
+                            "end".into(),
+                        ]),
+                        CatchProbe::DictionaryKey(key) => {
+                            output.push("if".into());
+                            encode_string(&key, output)?;
+                            output.extend([
+                                format!("{}{value_index}", selected.prefix),
+                                "din".into(),
+                                "else".into(),
+                                "c0000000000000000".into(),
+                                "end".into(),
+                            ]);
+                        }
+                    }
+                    output.push("if".into());
+                    output.extend(consequent_output);
+                    output.push("else".into());
+                    output.extend(alternate_output);
+                    output.push("end".into());
+                    *kinds = consequent_kinds;
+                    *materialized = consequent_values;
+                    return Some(());
+                }
                 if branch.alt.is_some() && !rest.is_empty() {
                     let control_kinds = helper_control_kinds(kinds, locals)?;
                     encode_loop_effects(
@@ -7288,12 +7390,14 @@ fn jit_export(
                         &mut caught,
                     )?;
                 }
-                let [caught] = caught.as_slice() else {
+                if caught.is_empty() {
                     return None;
-                };
-                output.push("trystart".into());
+                }
+                let tagged = caught.len() > 1;
+                output.push(if tagged { "trystarttag" } else { "trystart" }.into());
                 let caught_control = LoopControl {
                     catch_active: true,
+                    catch_tagged: tagged,
                     ..root_loop_control()
                 };
                 let control_kinds = helper_control_kinds(kinds, locals)?;
@@ -7309,26 +7413,48 @@ fn jit_export(
                     )?;
                 }
                 let placeholder = kinds.len();
-                match caught.kind {
-                    JitKind::Number => output.push("c0000000000000000".into()),
-                    JitKind::Boolean => {
-                        output.extend(["c0000000000000000".into(), "asbool".into()]);
-                    }
-                    JitKind::String => output.push("t".into()),
-                    JitKind::Array => output.push("arrayempty".into()),
-                    JitKind::Dictionary => output.push(
-                        match caught.prefix {
-                            "dnl" => "dnempty",
-                            "dbl" => "dbempty",
-                            "dsl" => "dsempty",
-                            _ => return None,
+                if tagged {
+                    output.extend([
+                        "c0000000000000000".into(),
+                        "c0000000000000000".into(),
+                        "tagnum".into(),
+                    ]);
+                } else {
+                    let caught = &caught[0];
+                    match caught.kind {
+                        JitKind::Number => output.push("c0000000000000000".into()),
+                        JitKind::Boolean => {
+                            output.extend(["c0000000000000000".into(), "asbool".into()]);
                         }
-                        .into(),
-                    ),
-                    JitKind::Dynamic => return None,
+                        JitKind::String => output.push("t".into()),
+                        JitKind::Array => output.push("arrayempty".into()),
+                        JitKind::Dictionary => output.push(
+                            match caught.prefix {
+                                "dnl" => "dnempty",
+                                "dbl" => "dbempty",
+                                "dsl" => "dsempty",
+                                _ => return None,
+                            }
+                            .into(),
+                        ),
+                        JitKind::Dynamic => return None,
+                    }
                 }
                 let mut normal_kinds = kinds.clone();
-                normal_kinds.insert(format!("\0catch-placeholder-{placeholder}"), caught.kind);
+                normal_kinds.insert(
+                    format!("\0catch-placeholder-{placeholder}"),
+                    if tagged {
+                        JitKind::Number
+                    } else {
+                        caught[0].kind
+                    },
+                );
+                if tagged {
+                    normal_kinds.insert(
+                        format!("\0catch-placeholder-{}", placeholder + 1),
+                        JitKind::Dynamic,
+                    );
+                }
                 let mut normal_values = std::collections::HashMap::new();
                 materialize_fixed_literal(
                     returned.arg.as_deref()?,
@@ -7348,13 +7474,41 @@ fn jit_export(
                     let Pat::Ident(parameter) = parameter else {
                         return None;
                     };
-                    catch_locals.insert(
-                        parameter.id.sym.to_string(),
-                        vec![format!("{}{placeholder}", caught.prefix)],
-                    );
-                    catch_kinds.insert(parameter.id.sym.to_string(), caught.kind);
+                    if tagged {
+                        let variants = caught
+                            .iter()
+                            .map(|kind| {
+                                Some(format!(
+                                    "{}={}",
+                                    caught_throw_tag(kind)?,
+                                    kind.prefix
+                                ))
+                            })
+                            .collect::<Option<Vec<_>>>()?
+                            .join("|");
+                        catch_locals.insert(
+                            parameter.id.sym.to_string(),
+                            vec![format!("x{placeholder}:{}:{variants}", placeholder + 1)],
+                        );
+                        catch_kinds.insert(
+                            format!("\0catch-tag-{placeholder}"),
+                            JitKind::Number,
+                        );
+                        catch_kinds.insert(parameter.id.sym.to_string(), JitKind::Number);
+                    } else {
+                        catch_locals.insert(
+                            parameter.id.sym.to_string(),
+                            vec![format!("{}{placeholder}", caught[0].prefix)],
+                        );
+                        catch_kinds.insert(parameter.id.sym.to_string(), caught[0].kind);
+                    }
                 } else {
-                    catch_kinds.insert(format!("\0catch-{placeholder}"), caught.kind);
+                    for slot in 0..if tagged { 2 } else { 1 } {
+                        catch_kinds.insert(
+                            format!("\0catch-{}-{slot}", catch_kinds.len()),
+                            JitKind::Number,
+                        );
+                    }
                 }
                 let catch_body = handler.body.stmts.iter().collect::<Vec<_>>();
                 let mut catch_values = std::collections::HashMap::new();
