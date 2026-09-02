@@ -4179,6 +4179,27 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &shift_value,
     )
     .is_some());
+    let set_value = thaw_bridge::DtsFunction {
+        name: "setValue".into(),
+        params: vec![
+            function.params[0].clone(),
+            (
+                "index".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            ("replacement".into(), needle.clone()),
+        ],
+        required_params: 3,
+        ret: needle.clone(),
+        ..function.clone()
+    };
+    assert!(jit_numeric_export(
+        "function setValue(value, index, replacement) { if (Array.isArray(value)) return value[index] = replacement; return replacement; } module.exports = { setValue };",
+        "setValue",
+        false,
+        &set_value,
+    )
+    .is_some());
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],
