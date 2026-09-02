@@ -2443,7 +2443,10 @@ nested fixed objects, primitive arrays, homogeneous primitive dictionaries, or
 fixed primitive tuples and primitive number, boolean, and string fields are
 allocated in the runtime arena using that same native layout, so
 conditional object/string results can be constructed and returned without
-QuickJS. Array fields retain their shared mutable handle, including shorthand
+QuickJS. Fixed tuples may recursively contain other fixed primitive tuples;
+their native handles can be read from LLVM-created values or assembled by the
+JIT and passed directly to another specialized call. Array fields retain their
+shared mutable handle, including shorthand
 fields sourced from JIT parameters.
 Mutable dynamic locals may be reassigned between these representable shapes;
 array results are converted to stable native handles before tagging. Other
