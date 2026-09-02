@@ -2463,6 +2463,9 @@ dictionary parameters use a tag-plus-payload JIT ABI as well, so their present,
 nullable and nullish fixed-shape object and tuple parameters reuse the same tag
 while LLVM flattens their leaves only on the present path, allowing optional
 property and tuple-index chains to stay in the JIT;
+conditional fixed-object and tuple results may likewise return a reconstructed
+present value, `null`, or `undefined`; generated wrappers emit typed return
+branches so the standalone artifact does not need QuickJS for the union;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
