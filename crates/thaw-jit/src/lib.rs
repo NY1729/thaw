@@ -2477,6 +2477,43 @@ array_push_fn!(string_array_push, 1);
 array_push_fn!(bool_array_push, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_insert(array: f64, value: f64, unshift: bool) -> f64 {
+    let (Some(array), Some(value)) = (
+        dynamic_primitive(array, None),
+        dynamic_primitive(value, None),
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let operation = match (array.tag, value.tag) {
+        (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG) => 0,
+        (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG) => 1,
+        (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG) => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    let array = f64::from_bits(array.payload);
+    let value = f64::from_bits(value.payload);
+    if unshift {
+        array_unshift(operation, array, value)
+    } else {
+        array_push(operation, array, value)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_push(array: f64, value: f64) -> f64 {
+    dynamic_array_insert(array, value, false)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_unshift(array: f64, value: f64) -> f64 {
+    dynamic_array_insert(array, value, true)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_unshift(operation: u8, array: f64, value: f64) -> f64 {
     let Some(unshift) = ARRAY_UNSHIFT.with(Cell::get) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
@@ -4345,9 +4382,11 @@ enum NumericValue {
     NumberArrayPush,
     StringArrayPush,
     BoolArrayPush,
+    DynamicArrayPush,
     NumberArrayUnshift,
     StringArrayUnshift,
     BoolArrayUnshift,
+    DynamicArrayUnshift,
     NumberArraySet,
     NumberArrayPostSet,
     StringArraySet,
@@ -4708,9 +4747,11 @@ impl NumericProgram {
                     "rnpush" => Some(NumericValue::NumberArrayPush),
                     "rspush" => Some(NumericValue::StringArrayPush),
                     "rbpush" => Some(NumericValue::BoolArrayPush),
+                    "dynarraypush" => Some(NumericValue::DynamicArrayPush),
                     "rnunshift" => Some(NumericValue::NumberArrayUnshift),
                     "rsunshift" => Some(NumericValue::StringArrayUnshift),
                     "rbunshift" => Some(NumericValue::BoolArrayUnshift),
+                    "dynarrayunshift" => Some(NumericValue::DynamicArrayUnshift),
                     "rnset" => Some(NumericValue::NumberArraySet),
                     "rnpostset" => Some(NumericValue::NumberArrayPostSet),
                     "rsset" => Some(NumericValue::StringArraySet),
@@ -6319,7 +6360,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArrayPush
                 | NumericValue::StringArrayPush
-                | NumericValue::BoolArrayPush => {
+                | NumericValue::BoolArrayPush
+                | NumericValue::DynamicArrayPush => {
                     if depth < 2 {
                         return None;
                     }
@@ -6327,6 +6369,7 @@ impl NumericProgram {
                         NumericValue::NumberArrayPush => number_array_push,
                         NumericValue::StringArrayPush => string_array_push,
                         NumericValue::BoolArrayPush => bool_array_push,
+                        NumericValue::DynamicArrayPush => dynamic_array_push,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
@@ -6334,7 +6377,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArrayUnshift
                 | NumericValue::StringArrayUnshift
-                | NumericValue::BoolArrayUnshift => {
+                | NumericValue::BoolArrayUnshift
+                | NumericValue::DynamicArrayUnshift => {
                     if depth < 2 {
                         return None;
                     }
@@ -6342,6 +6386,7 @@ impl NumericProgram {
                         NumericValue::NumberArrayUnshift => number_array_unshift,
                         NumericValue::StringArrayUnshift => string_array_unshift,
                         NumericValue::BoolArrayUnshift => bool_array_unshift,
+                        NumericValue::DynamicArrayUnshift => dynamic_array_unshift,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);

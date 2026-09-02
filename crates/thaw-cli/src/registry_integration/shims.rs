@@ -2831,6 +2831,8 @@ fn jit_export(
                             | "fill"
                             | "copyWithin"
                             | "with"
+                            | "push"
+                            | "unshift"
                     )
                 {
                     return None;
@@ -3151,10 +3153,14 @@ fn jit_export(
                             return None;
                         }
                         output.extend(encoded_value);
-                        output.push(local_insert.map_or_else(
-                            || format!("{prefix}{method}"),
-                            |local| format!("{prefix}l{method}{local}"),
-                        ));
+                        output.push(if dynamic_array {
+                            format!("dynarray{method}")
+                        } else {
+                            local_insert.map_or_else(
+                                || format!("{prefix}{method}"),
+                                |local| format!("{prefix}l{method}{local}"),
+                            )
+                        });
                         if index + 1 != arguments.len() {
                             output.push("drop".into());
                         }
@@ -4787,9 +4793,11 @@ fn jit_export(
                     | "rnpush"
                     | "rspush"
                     | "rbpush"
+                    | "dynarraypush"
                     | "rnunshift"
                     | "rsunshift"
                     | "rbunshift"
+                    | "dynarrayunshift"
                     | "rnset"
                     | "rnpostset"
                     | "rsset"
@@ -11753,6 +11761,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "rb" => JitKind::Boolean,
                 _ => return None,
             });
+        } else if matches!(token.as_str(), "dynarraypush" | "dynarrayunshift") {
+            if stack.pop()? != JitKind::Dynamic || stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Number);
         } else if matches!(token.as_str(), "startswith" | "endswith" | "includes") {
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::String {
                 return None;

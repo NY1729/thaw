@@ -4127,6 +4127,29 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &with,
     )
     .is_some());
+    let insert = thaw_bridge::DtsFunction {
+        name: "insert".into(),
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ..with.clone()
+    };
+    assert!(jit_numeric_export(
+        "function insert(value, replacement) { if (Array.isArray(value)) return value.push(replacement); return 0; } module.exports = { insert };",
+        "insert",
+        false,
+        &insert,
+    )
+    .is_some());
+    let prepend = thaw_bridge::DtsFunction {
+        name: "prepend".into(),
+        ..insert
+    };
+    assert!(jit_numeric_export(
+        "function prepend(value, replacement) { if (Array.isArray(value)) return value.unshift(replacement); return 0; } module.exports = { prepend };",
+        "prepend",
+        false,
+        &prepend,
+    )
+    .is_some());
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],
