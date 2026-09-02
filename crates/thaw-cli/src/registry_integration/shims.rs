@@ -6868,6 +6868,46 @@ fn jit_export(
         Some(())
     }
 
+    fn materialize_helper_value(
+        mut encoded: Vec<String>,
+        kinds: &mut std::collections::HashMap<String, JitKind>,
+        output: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        let (kind, _) = jit_expression_kind(&encoded).or_else(|| {
+            let mut stacked = output.clone();
+            stacked.extend(encoded.iter().cloned());
+            stacked.extend(std::iter::repeat_n("nip".into(), kinds.len()));
+            jit_expression_kind(&stacked)
+        })?;
+        let prefix = match kind {
+            JitKind::Number => "ln",
+            JitKind::Boolean => "lb",
+            JitKind::String => "ls",
+            JitKind::Dynamic => "ld",
+            JitKind::Array => match array_prefix(&encoded)? {
+                "rn" => "rnl",
+                "rb" => "rbl",
+                "rs" => "rsl",
+                _ => return None,
+            },
+            JitKind::Dictionary => match dictionary_prefix(&encoded)? {
+                "dn" => "dnl",
+                "db" => "dbl",
+                "ds" => "dsl",
+                _ => return None,
+            },
+        };
+        let index = kinds.len();
+        output.append(&mut encoded);
+        if kind == JitKind::Boolean {
+            output.push("asbool".into());
+        } else if kind == JitKind::Array {
+            output.push("arrayhandle".into());
+        }
+        kinds.insert(format!("\0helper-{index}"), kind);
+        Some(vec![format!("{prefix}{index}")])
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn materialize_fixed_literal(
         expression: &Expr,
@@ -7173,8 +7213,181 @@ fn jit_export(
                         )?;
                         output.push("drop".into());
                     }
-                    LocalStep::DestructureArray { .. }
-                    | LocalStep::DestructureObject { .. } => return None,
+                    LocalStep::DestructureArray {
+                        bindings,
+                        rest,
+                        initializer,
+                        mutable,
+                        assign_existing,
+                    } => {
+                        let names = bindings
+                            .iter()
+                            .map(|(_, name, _)| *name)
+                            .chain(rest.iter().map(|(_, name)| *name));
+                        if names.clone().any(|name| {
+                            assign_existing && !helper_mutable.contains(name.sym.as_ref())
+                        }) {
+                            return None;
+                        }
+                        let mut source = Vec::new();
+                        encode_expression(
+                            initializer,
+                            &no_parameters,
+                            &helper_locals,
+                            context,
+                            &mut source,
+                        )?;
+                        if source.len() == 1 {
+                            if let Some(untag) = jit_typed_array_union_untag(&source[0]) {
+                                source.push(untag.into());
+                            }
+                        }
+                        let prefix = array_prefix(&source)?;
+                        let source = materialize_helper_value(source, kinds, output)?;
+                        for (element, name, default) in bindings {
+                            let mut value = source.clone();
+                            value.extend([
+                                format!("c{:016x}", (element as f64).to_bits()),
+                                format!("{prefix}get"),
+                            ]);
+                            if let Some(default) = default {
+                                let expected = jit_expression_kind(&value)?.0;
+                                let mut fallback = Vec::new();
+                                encode_expression(
+                                    default,
+                                    &no_parameters,
+                                    &helper_locals,
+                                    context,
+                                    &mut fallback,
+                                )?;
+                                if expected == JitKind::Boolean {
+                                    let mut boolean = Vec::new();
+                                    append_boolean(fallback, &mut boolean)?;
+                                    fallback = boolean;
+                                }
+                                if jit_expression_kind(&fallback)?.0 != expected {
+                                    return None;
+                                }
+                                value.push("ifpresent".into());
+                                value.push("else".into());
+                                value.extend(fallback);
+                                value.push("end".into());
+                            }
+                            if assign_existing {
+                                let current = helper_locals.get(name.sym.as_ref())?;
+                                if jit_expression_kind(current)?.0
+                                    != jit_expression_kind(&value)?.0
+                                {
+                                    return None;
+                                }
+                                let target = loop_local_index(current.first()?)?;
+                                output.extend(value);
+                                output.push(format!("setl{target}"));
+                            } else {
+                                let value = materialize_helper_value(value, kinds, output)?;
+                                helper_locals.insert(name.sym.to_string(), value);
+                                if mutable {
+                                    helper_mutable.insert(name.sym.to_string());
+                                }
+                            }
+                        }
+                        if let Some((start, name)) = rest {
+                            let mut value = source;
+                            value.extend([
+                                format!("c{:016x}", (start as f64).to_bits()),
+                                format!("c{:016x}", f64::INFINITY.to_bits()),
+                                "arrayslice".into(),
+                            ]);
+                            if assign_existing {
+                                let current = helper_locals.get(name.sym.as_ref())?;
+                                if jit_expression_kind(current)?.0 != JitKind::Array {
+                                    return None;
+                                }
+                                let target = loop_local_index(current.first()?)?;
+                                output.extend(value);
+                                output.extend(["arrayhandle".into(), format!("setl{target}")]);
+                            } else {
+                                let value = materialize_helper_value(value, kinds, output)?;
+                                helper_locals.insert(name.sym.to_string(), value);
+                                if mutable {
+                                    helper_mutable.insert(name.sym.to_string());
+                                }
+                            }
+                        }
+                    }
+                    LocalStep::DestructureObject {
+                        bindings,
+                        initializer,
+                        mutable,
+                        assign_existing,
+                    } => {
+                        if bindings.iter().any(|(_, name, _)| {
+                            assign_existing && !helper_mutable.contains(name.sym.as_ref())
+                        }) {
+                            return None;
+                        }
+                        let requested = bindings
+                            .iter()
+                            .map(|(path, _, _)| path.clone())
+                            .collect();
+                        let mut values = std::collections::HashMap::new();
+                        if let Expr::Call(call) = initializer {
+                            materialize_fixed_call(
+                                call,
+                                &requested,
+                                &no_parameters,
+                                &helper_locals,
+                                context,
+                                kinds,
+                                &mut values,
+                                output,
+                            )?;
+                        } else {
+                            materialize_fixed_literal(
+                                initializer,
+                                "",
+                                &requested,
+                                &no_parameters,
+                                &helper_locals,
+                                context,
+                                kinds,
+                                &mut values,
+                                output,
+                            )?;
+                        }
+                        for (path, name, default) in bindings {
+                            let value = if let Some(value) = values.remove(&path) {
+                                value
+                            } else {
+                                let default = default?;
+                                let mut encoded = Vec::new();
+                                encode_expression(
+                                    default,
+                                    &no_parameters,
+                                    &helper_locals,
+                                    context,
+                                    &mut encoded,
+                                )?;
+                                materialize_helper_value(encoded, kinds, output)?
+                            };
+                            if assign_existing {
+                                let current = helper_locals.get(name.sym.as_ref())?;
+                                if jit_expression_kind(current)?.0
+                                    != jit_expression_kind(&value)?.0
+                                {
+                                    return None;
+                                }
+                                let target = loop_local_index(current.first()?)?;
+                                output.extend(value);
+                                output.push(format!("setl{target}"));
+                            } else {
+                                helper_locals.insert(name.sym.to_string(), value);
+                                if mutable {
+                                    helper_mutable.insert(name.sym.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
             let returned = match body {
