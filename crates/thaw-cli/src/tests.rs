@@ -4012,7 +4012,7 @@ fn recognizes_tagged_statement_returns_for_jit() {
 }
 
 #[test]
-fn jit_slices_a_narrowed_mixed_array_union() {
+fn jit_copies_a_narrowed_mixed_array_union() {
     let union = thaw_hir::HirType::Union(vec![
         thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)),
         thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str)),
@@ -4030,6 +4030,18 @@ fn jit_slices_a_narrowed_mixed_array_union() {
     assert!(jit_numeric_export(
         "function slice(value) { if (Array.isArray(value)) return value.slice(1); return value.slice(1); } module.exports = { slice };",
         "slice",
+        false,
+        &function,
+    )
+    .is_some());
+
+    let function = thaw_bridge::DtsFunction {
+        name: "concat".into(),
+        ..function
+    };
+    assert!(jit_numeric_export(
+        "function concat(value) { if (Array.isArray(value)) return value.concat(value); return value.concat(value); } module.exports = { concat };",
+        "concat",
         false,
         &function,
     )
