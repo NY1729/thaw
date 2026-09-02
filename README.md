@@ -2607,6 +2607,9 @@ native control-flow instructions compose directly with aggregate materialization
 aggregate early. A structured JIT result region carries every leaf out of the
 loop and joins it with the post-loop fallback return without exiting the
 surrounding specialized export or loading QuickJS.
+Classic `for` initializer declarations stay in that result region as hidden
+typed slots, so an early aggregate may include the loop-scoped index while the
+post-loop fallback remains outside its lexical scope.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
