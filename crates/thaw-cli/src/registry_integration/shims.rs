@@ -7160,6 +7160,7 @@ fn jit_export(
             Stmt::While(statement) => contains_aggregate_return(statement.body.as_ref()),
             Stmt::DoWhile(statement) => contains_aggregate_return(statement.body.as_ref()),
             Stmt::For(statement) => contains_aggregate_return(statement.body.as_ref()),
+            Stmt::ForOf(statement) => contains_aggregate_return(statement.body.as_ref()),
             _ => false,
         }
     }
@@ -7404,6 +7405,154 @@ fn jit_export(
                     )?;
                 }
                 output.push("loopend".into());
+                output.extend(std::iter::repeat_n(
+                    "drop".into(),
+                    nested_kinds.len().checked_sub(control_kinds.len())?,
+                ));
+                Some(())
+            }
+            Stmt::ForOf(loop_statement)
+                if !loop_statement.is_await
+                    && contains_aggregate_return(loop_statement.body.as_ref()) =>
+            {
+                let mut nested_locals = locals.clone();
+                let mut nested_mutable = mutable.clone();
+                let mut nested_kinds = control_kinds.clone();
+                let mut source = Vec::new();
+                encode_expression(
+                    loop_statement.right.as_ref(),
+                    parameters,
+                    &nested_locals,
+                    context,
+                    &mut source,
+                )?;
+                if source.len() == 1 {
+                    if let Some(untag) = jit_typed_array_union_untag(&source[0]) {
+                        source.push(untag.into());
+                    }
+                }
+                if jit_expression_kind(&source)?.0 != JitKind::Array {
+                    return None;
+                }
+                let array = array_prefix(&source)?;
+                let element_kind = match array {
+                    "rn" => JitKind::Number,
+                    "rb" => JitKind::Boolean,
+                    "rs" => JitKind::String,
+                    _ => return None,
+                };
+                let local_prefix = format!("{array}l");
+                let source_local = if let [source] = source.as_slice() {
+                    source.starts_with(&local_prefix).then(|| source.clone())
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| {
+                    let source_index = nested_kinds.len();
+                    output.extend(source);
+                    nested_kinds.insert(
+                        format!("\0forof-source-{source_index}"),
+                        JitKind::Array,
+                    );
+                    format!("{array}l{source_index}")
+                });
+                let index = nested_kinds.len();
+                output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                nested_kinds.insert(format!("\0forof-index-{index}"), JitKind::Number);
+                let index_local = format!("ln{index}");
+                let element_index = match &loop_statement.left {
+                    ForHead::VarDecl(declaration) => {
+                        let [declarator] = declaration.decls.as_slice() else {
+                            return None;
+                        };
+                        let Pat::Ident(name) = &declarator.name else {
+                            return None;
+                        };
+                        if declarator.init.is_some()
+                            || parameters.contains_key(name.id.sym.as_ref())
+                            || nested_locals.contains_key(name.id.sym.as_ref())
+                        {
+                            return None;
+                        }
+                        match element_kind {
+                            JitKind::String => encode_string("", output)?,
+                            JitKind::Number | JitKind::Boolean => {
+                                output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                                if element_kind == JitKind::Boolean {
+                                    output.push("asbool".into());
+                                }
+                            }
+                            _ => return None,
+                        }
+                        let element_index = nested_kinds.len();
+                        let prefix = match element_kind {
+                            JitKind::Number => "ln",
+                            JitKind::Boolean => "lb",
+                            JitKind::String => "ls",
+                            _ => return None,
+                        };
+                        nested_locals.insert(
+                            name.id.sym.to_string(),
+                            vec![format!("{prefix}{element_index}")],
+                        );
+                        nested_kinds.insert(name.id.sym.to_string(), element_kind);
+                        if declaration.kind != VarDeclKind::Const {
+                            nested_mutable.insert(name.id.sym.to_string());
+                        }
+                        element_index
+                    }
+                    ForHead::Pat(pattern) => {
+                        let Pat::Ident(name) = pattern.as_ref() else {
+                            return None;
+                        };
+                        if !nested_mutable.contains(name.id.sym.as_ref())
+                            || nested_kinds.get(name.id.sym.as_ref())? != &element_kind
+                        {
+                            return None;
+                        }
+                        nested_locals
+                            .get(name.id.sym.as_ref())?
+                            .first()?
+                            .get(2..)?
+                            .parse::<usize>()
+                            .ok()?
+                    }
+                    ForHead::UsingDecl(_) => return None,
+                };
+                output.push("loop".into());
+                output.extend([
+                    index_local.clone(),
+                    source_local.clone(),
+                    "arraylen".into(),
+                    "<".into(),
+                    "while".into(),
+                    source_local,
+                    index_local.clone(),
+                    format!("{array}get"),
+                    format!("setl{element_index}"),
+                ]);
+                let nested_control_kinds = helper_control_kinds(&nested_kinds, &nested_locals)?;
+                encode_aggregate_return_effects(
+                    loop_statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    &nested_locals,
+                    &nested_mutable,
+                    &nested_control_kinds,
+                    result_base_kinds,
+                    context,
+                    expected_kinds,
+                    expected_values,
+                    output,
+                )?;
+                output.extend([
+                    "looptail".into(),
+                    index_local,
+                    format!("c{:016x}", 1.0f64.to_bits()),
+                    "+".into(),
+                    format!("setl{index}"),
+                    "loopend".into(),
+                ]);
                 output.extend(std::iter::repeat_n(
                     "drop".into(),
                     nested_kinds.len().checked_sub(control_kinds.len())?,
