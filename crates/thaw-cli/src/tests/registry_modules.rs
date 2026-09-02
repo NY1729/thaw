@@ -1375,7 +1375,7 @@ fn optional_object_fields_use_jit_without_quickjs() {
     )
     .unwrap();
     assert!(jit_numeric_export(
-        "module.exports.make = full => full ? { name: 'made', score: 8, enabled: true } : { name: 'empty', score: 0, enabled: false };",
+        "module.exports.make = full => full ? { name: 'made' } : {};",
         "make",
         false,
         &functions[0],
@@ -1395,7 +1395,7 @@ fn optional_object_fields_use_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.name = value => typeof value === 'object' ? value.name ?? 'missing' : value; module.exports.upper = value => typeof value === 'object' ? value.name?.toUpperCase() ?? 'missing' : value; module.exports.score = value => typeof value === 'object' ? value.score ?? 0 : -1; module.exports.enabled = value => typeof value === 'object' ? value.enabled ?? false : true; module.exports.make = full => full ? { name: 'made', score: 8, enabled: true } : { name: 'empty', score: 0, enabled: false };\n",
+        "module.exports.name = value => typeof value === 'object' ? value.name ?? 'missing' : value; module.exports.upper = value => typeof value === 'object' ? value.name?.toUpperCase() ?? 'missing' : value; module.exports.score = value => typeof value === 'object' ? value.score ?? 0 : -1; module.exports.enabled = value => typeof value === 'object' ? value.enabled ?? false : true; module.exports.make = full => full ? { name: 'made' } : {};\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -1417,7 +1417,7 @@ fn optional_object_fields_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "thaw\nTHAW\n7\ntrue\nmissing\nmissing\n0\nfalse\nplain\nmade\n8\ntrue\nempty\n0\nfalse\n"
+        "thaw\nTHAW\n7\ntrue\nmissing\nmissing\n0\nfalse\nplain\nmade\n0\nfalse\nmissing\n0\nfalse\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
