@@ -2198,6 +2198,12 @@ Compound `map` callbacks use the same typed path for `string[]` and `boolean[]`
 sources and may produce `number[]`, `boolean[]`, or `string[]`. The source
 element, callback index and source array keep their native representations, and
 captured primitives or arrays are passed through the same compact capture pack.
+Runtime unions of homogeneous number, boolean, and string arrays use the same
+callback path after passing their element tag alongside the native payload.
+General `map` callbacks and the seven predicate scans above can therefore use
+the element, index, source array, and primitive captures without loading
+QuickJS; mapped results remain statically typed while element-returning scans
+preserve the selected runtime tag.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
 including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array

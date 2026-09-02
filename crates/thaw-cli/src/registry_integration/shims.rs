@@ -3132,6 +3132,7 @@ fn jit_export(
                                 "rn" => "a",
                                 "rb" => "b",
                                 "rs" => "s",
+                                _ if dynamic_array => "u",
                                 _ => return None,
                             };
                             let (callback, kind, captures) = encode_numeric_jit_callback(
@@ -3141,7 +3142,7 @@ fn jit_export(
                                 context,
                                 3,
                                 Some(2),
-                                (element_prefix, prefix, false),
+                                (element_prefix, prefix, dynamic_array),
                             )?;
                             if !matches!(kind, JitKind::Number | JitKind::Boolean) {
                                 return None;
@@ -3152,7 +3153,8 @@ fn jit_export(
                                 append_jit_captures(captures, output);
                             }
                             output.push(format!(
-                                "{prefix}{method}jit{}",
+                                "{}{method}jit{}",
+                                if dynamic_array { "dynarray" } else { prefix },
                                 if captured { "c" } else { "" }
                             ));
                         }
@@ -11761,6 +11763,37 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
+        } else if token.strip_prefix("dynarray").is_some_and(|suffix| {
+            [
+                "somejit",
+                "everyjit",
+                "findjit",
+                "findindexjit",
+                "findlastjit",
+                "findlastindexjit",
+                "filterjit",
+            ]
+            .iter()
+            .any(|operation| suffix == *operation || suffix == format!("{operation}c"))
+        }) {
+            let captured = token.ends_with('c');
+            if captured && stack.pop()? != JitKind::Array {
+                return None;
+            }
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            let method = token
+                .strip_prefix("dynarray")?
+                .trim_end_matches('c')
+                .trim_end_matches("jit");
+            stack.push(if matches!(method, "filter" | "find" | "findlast") {
+                JitKind::Dynamic
+            } else if matches!(method, "some" | "every") {
+                JitKind::Boolean
+            } else {
+                JitKind::Number
+            });
         } else if matches!(
             token.as_str(),
             "throwoutn"

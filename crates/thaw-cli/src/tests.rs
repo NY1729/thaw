@@ -4381,6 +4381,45 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &captured_map,
     )
     .is_some());
+    for (method, ret) in [
+        (
+            "some",
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ),
+        (
+            "every",
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ),
+        ("find", function.ret.clone()),
+        (
+            "findIndex",
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ),
+        ("findLast", function.ret.clone()),
+        (
+            "findLastIndex",
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ),
+        ("filter", function.params[0].1.clone()),
+    ] {
+        let scan = thaw_bridge::DtsFunction {
+            name: method.into(),
+            ret,
+            ..function.clone()
+        };
+        let fallback = match method {
+            "some" | "every" => "false",
+            "findIndex" | "findLastIndex" => "-1",
+            _ => "value",
+        };
+        let source = format!(
+            "function {method}(value) {{ if (Array.isArray(value)) return value.{method}((item, index, values) => Number(item) + index >= values.length); return {fallback}; }} module.exports = {{ {method} }};"
+        );
+        assert!(
+            jit_numeric_export(&source, method, false, &scan).is_some(),
+            "{method}"
+        );
+    }
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],
