@@ -2851,6 +2851,8 @@ fn jit_export(
                             | "shift"
                             | "splice"
                             | "toSpliced"
+                            | "some"
+                            | "every"
                     )
                 {
                     return None;
@@ -3064,7 +3066,11 @@ fn jit_export(
                         locals,
                         context,
                     ) {
-                        output.push(format!("{prefix}{method}truthy"));
+                        output.push(if dynamic_array {
+                            format!("dynarray{method}truthy")
+                        } else {
+                            format!("{prefix}{method}truthy")
+                        });
                     } else {
                         let mut operand = Vec::new();
                         let operation = if prefix == "rn" {
@@ -4830,6 +4836,8 @@ fn jit_export(
                     | "dynarraysplice"
                     | "dynarraytospliced"
                     | "dynarrayappend"
+                    | "dynarraysometruthy"
+                    | "dynarrayeverytruthy"
                     | "rnpush"
                     | "rspush"
                     | "rbpush"
@@ -12178,6 +12186,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if matches!(
+            token.as_str(),
+            "dynarraysometruthy" | "dynarrayeverytruthy"
+        ) {
+            if stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if let Some(result) = primitive_truthy_result(token) {
             if stack.pop()? != JitKind::Array {
                 return None;
