@@ -1716,6 +1716,91 @@ fn primitive_tuple_union_callbacks_use_jit_without_quickjs() {
 }
 
 #[test]
+fn tuple_union_callback_context_uses_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function mapContext(value: number[] | [number, number], factor: number, offset: number): number[];\n",
+        "export declare function filterContext(value: number[] | [number, number], minimum: number, bonus: number): number[];\n",
+        "export declare function someContext(value: number[] | [number, number], minimum: number, bonus: number): boolean;\n",
+        "export declare function reduceContext(value: number[] | [number, number], multiplier: number, offset: number): number;\n",
+        "export declare function stringContext(value: string[] | [string, string], suffix: string, offset: number): string[];\n",
+        "export declare function booleanContext(value: boolean[] | [boolean, boolean], expected: boolean, offset: number): boolean[];\n",
+    );
+    let source = concat!(
+        "module.exports.mapContext = (value, factor, offset) => Array.isArray(value) ? value.map((item, index, source) => item * factor + index + source.length + offset) : [0]; ",
+        "module.exports.filterContext = (value, minimum, bonus) => Array.isArray(value) ? value.filter((item, index, source) => item + index + bonus >= source.length + minimum) : [0]; ",
+        "module.exports.someContext = (value, minimum, bonus) => Array.isArray(value) ? value.some((item, index, source) => item + index + bonus >= source.length + minimum) : false; ",
+        "module.exports.reduceContext = (value, multiplier, offset) => Array.isArray(value) ? value.reduce((total, item, index, source) => total * multiplier + item + index + source.length + offset, 0) : 0;",
+        "module.exports.stringContext = (value, suffix, offset) => Array.isArray(value) ? value.map((item, index, source) => item + suffix + String(index + source.length + offset)) : ['']; ",
+        "module.exports.booleanContext = (value, expected, offset) => Array.isArray(value) ? value.map((item, index, source) => item === (expected && index + offset < source.length)) : [false];",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in [
+        "mapContext",
+        "filterContext",
+        "someContext",
+        "reduceContext",
+        "stringContext",
+        "booleanContext",
+    ]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-callback-context-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union-callback-context");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { booleanContext, filterContext, mapContext, reduceContext, someContext, stringContext } from 'jit-tuple-union-callback-context';\n",
+            "function main(): void {\n",
+            "  console.log(mapContext([1, 2, 3], 2, 1).join(','));\n",
+            "  console.log(mapContext([5, 6] as [number, number], 3, 2).join(','));\n",
+            "  console.log(filterContext([1, 2, 3], 1, 0).join(','));\n",
+            "  console.log(filterContext([5, 6] as [number, number], 5, 0).join(','));\n",
+            "  console.log(someContext([1, 2, 3], 2, 0));\n",
+            "  console.log(someContext([5, 6] as [number, number], 6, 0));\n",
+            "  console.log(reduceContext([1, 2], 2, 1));\n",
+            "  console.log(reduceContext([5, 6] as [number, number], 3, 2));\n",
+            "  console.log(stringContext(['a', 'b'], '!', 1).join(','));\n",
+            "  console.log(stringContext(['x', 'y'] as [string, string], '?', 0).join(','));\n",
+            "  console.log(booleanContext([true, false], true, 0).join(','));\n",
+            "  console.log(booleanContext([false, true] as [boolean, boolean], false, 1).join(','));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "6,9,12\n19,23\n3\n6\ntrue\nfalse\n14\n38\na!3,b!4\nx?2,y?3\ntrue,false\ntrue,false\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
