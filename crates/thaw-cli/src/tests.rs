@@ -4420,6 +4420,32 @@ fn jit_copies_a_narrowed_mixed_array_union() {
             "{method}"
         );
     }
+    for method in ["reduce", "reduceRight"] {
+        let reduce = thaw_bridge::DtsFunction {
+            name: method.into(),
+            params: vec![
+                function.params[0].clone(),
+                (
+                    "initial".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+                ),
+                (
+                    "factor".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+                ),
+            ],
+            required_params: 3,
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ..function.clone()
+        };
+        let source = format!(
+            "function {method}(value, initial, factor) {{ if (Array.isArray(value)) return value.{method}((accumulator, item, index, values) => accumulator * factor + Number(item) + index + values.length, initial); return initial; }} module.exports = {{ {method} }};"
+        );
+        assert!(
+            jit_numeric_export(&source, method, false, &reduce).is_some(),
+            "{method}"
+        );
+    }
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],

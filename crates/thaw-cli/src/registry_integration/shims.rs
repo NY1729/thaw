@@ -2867,6 +2867,8 @@ fn jit_export(
                             | "findLastIndex"
                             | "filter"
                             | "map"
+                            | "reduce"
+                            | "reduceRight"
                     )
                 {
                     return None;
@@ -2891,7 +2893,10 @@ fn jit_export(
                         [callback, initial] => (callback, Some(initial)),
                         _ => return None,
                     };
-                    if prefix != "rn" {
+                    if prefix != "rn" && !dynamic_array {
+                        return None;
+                    }
+                    if dynamic_array && initial.is_none() {
                         return None;
                     }
                     if callback.spread.is_some()
@@ -2910,12 +2915,10 @@ fn jit_export(
                     } else {
                         output.push("c0000000000000000".into());
                     }
-                    if let Some(operation) = numeric_reducer(
-                        callback.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                    ) {
+                    let reducer = (!dynamic_array).then(|| {
+                        numeric_reducer(callback.expr.as_ref(), parameters, locals, context)
+                    });
+                    if let Some(operation) = reducer.flatten() {
                         output.push(format!(
                             "rnreduce{}{operation}{}",
                             if method == "reduceRight" { "right" } else { "" },
@@ -2929,7 +2932,7 @@ fn jit_export(
                             context,
                             4,
                             Some(3),
-                            ("a", "rn", false),
+                            ("a", "rn", dynamic_array),
                         )?;
                         if kind != JitKind::Number {
                             return None;
@@ -2940,7 +2943,8 @@ fn jit_export(
                             append_jit_captures(captures, output);
                         }
                         output.push(format!(
-                            "rnreduce{}jit{}{}",
+                            "{}reduce{}jit{}{}",
+                            if dynamic_array { "dynarray" } else { "rn" },
                             if method == "reduceRight" { "right" } else { "" },
                             if captured { "c" } else { "" },
                             if initial.is_some() { "" } else { "0" }
@@ -8838,10 +8842,14 @@ fn jit_export(
                 .insert(
                     parameter.id.sym.to_string(),
                     if dynamic_array {
-                        match index {
-                            0 => "u0nbs".into(),
-                            1 => "a2".into(),
-                            2 => "u3NBS".into(),
+                        match (max_parameters, index) {
+                            (3, 0) => "u0nbs".into(),
+                            (3, 1) => "a2".into(),
+                            (3, 2) => "u3NBS".into(),
+                            (4, 0) => "a0".into(),
+                            (4, 1) => "u1nbs".into(),
+                            (4, 2) => "a3".into(),
+                            (4, 3) => "u4NBS".into(),
                             _ => return None,
                         }
                     } else {
@@ -8883,7 +8891,11 @@ fn jit_export(
                 })
             });
         }
-        let capture_offset = if dynamic_array { 5 } else { max_parameters };
+        let capture_offset = if dynamic_array {
+            max_parameters + 2
+        } else {
+            max_parameters
+        };
         if capture_offset + captures.len() > 16 {
             return None;
         }
@@ -12407,6 +12419,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             })
         {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if matches!(
+            token.as_str(),
+            "dynarrayreducejit"
+                | "dynarrayreducerightjit"
+                | "dynarrayreducejitc"
+                | "dynarrayreducerightjitc"
+        ) {
+            if token.contains("jitc") && stack.pop()? != JitKind::Array {
+                return None;
+            }
+            if stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Dynamic
+            {
                 return None;
             }
             stack.push(JitKind::Number);
