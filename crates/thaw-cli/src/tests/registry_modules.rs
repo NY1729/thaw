@@ -1628,6 +1628,49 @@ fn array_predicate_narrows_dynamic_union_in_jit() {
 }
 
 #[test]
+fn typeof_object_narrows_dynamic_dictionary_union_in_jit() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-dictionary-narrowing-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-dictionary-narrowing");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function numberValue(value: Record<string, number> | string): number;\nexport declare function boolValue(value: Record<string, boolean> | string): boolean;\nexport declare function stringValue(value: Record<string, string> | string): string;\nexport declare function inverted(value: Record<string, number> | string): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function numberValue(value) { if (typeof value === 'object') return value.count; return value.length; } function boolValue(value) { if (typeof value === 'object') return value.ready; return value.length > 0; } function stringValue(value) { if (typeof value === 'object') return value.name; return value.toUpperCase(); } function inverted(value) { if (typeof value !== 'object') return value.length; return value.count; } module.exports = { numberValue, boolValue, stringValue, inverted };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numberValue, boolValue, stringValue, inverted } from 'jit-dictionary-narrowing'; function main(): void { const numbers: Record<string, number> = { count: 42 }; const booleans: Record<string, boolean> = { ready: true }; const strings: Record<string, string> = { name: 'thaw' }; console.log(numberValue(numbers)); console.log(numberValue('word')); console.log(boolValue(booleans)); console.log(boolValue('')); console.log(stringValue(strings)); console.log(stringValue('word')); console.log(inverted(numbers)); console.log(inverted('word')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "42\n4\ntrue\nfalse\nthaw\nWORD\n42\n4\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
