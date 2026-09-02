@@ -60,9 +60,12 @@ fn jit_array_result_element_supported(ty: &HirType) -> bool {
 
 fn jit_tagged_union(elements: &[HirType]) -> bool {
     jit_argument_tagged_union(elements)
-        && !elements
+        && !(elements
             .iter()
             .any(|element| matches!(element, HirType::Object(_)))
+            && elements
+                .iter()
+                .any(|element| matches!(element, HirType::Dictionary(_))))
 }
 
 fn jit_argument_tagged_union(elements: &[HirType]) -> bool {
