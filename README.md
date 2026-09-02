@@ -2518,6 +2518,9 @@ A fixed primitive tuple has its own native pointer tag, retaining typed index
 reads across JIT arguments, constructed results, and calls between specialized
 exports. It can coexist with a fixed object in the same union; `Array.isArray`
 narrows the tuple and object branches without loading QuickJS.
+When homogeneous primitive arrays and a fixed tuple share that array branch,
+their common native length header allows `.length` to use the same JIT
+operation while the non-array fixed-object branch remains separately narrowed.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
