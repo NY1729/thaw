@@ -2460,6 +2460,9 @@ nullish `&&=` and direct nullable/nullish scalar returns retain their exact tag.
 Nullable and nullish scalar, homogeneous primitive-array, and primitive-
 dictionary parameters use a tag-plus-payload JIT ABI as well, so their present,
 `null`, and `undefined` values and results round-trip without QuickJS;
+nullable and nullish fixed-shape object and tuple parameters reuse the same tag
+while LLVM flattens their leaves only on the present path, allowing optional
+property and tuple-index chains to stay in the JIT;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
