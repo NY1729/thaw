@@ -5613,6 +5613,10 @@ impl NumericProgram {
                     "rbget" => Some(NumericValue::BoolArrayGet),
                     "rsget" => Some(NumericValue::StringArrayGet),
                     "raget" => Some(NumericValue::StringArrayGet),
+                    "roget" => Some(NumericValue::StringArrayGet),
+                    "ragetrn" | "ragetrb" | "ragetrs" | "rogetdn" | "rogetdb" | "rogetds" => {
+                        Some(NumericValue::StringArrayGet)
+                    }
                     "dnget" => Some(NumericValue::NumberDictionaryGet),
                     "dbget" => Some(NumericValue::BoolDictionaryGet),
                     "dsget" => Some(NumericValue::StringDictionaryGet),
@@ -6286,7 +6290,7 @@ impl NumericProgram {
                             let kind = match kind {
                                 "n" => 0,
                                 "b" => 1,
-                                "s" | "p" => 2,
+                                "s" | "p" | "o" => 2,
                                 _ => return None,
                             };
                             index
