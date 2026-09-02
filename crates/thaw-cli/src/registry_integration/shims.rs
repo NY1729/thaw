@@ -9473,19 +9473,33 @@ fn jit_export(
                             source.push(untag.into());
                         }
                     }
-                    if jit_expression_kind(&source)?.0 != JitKind::Array
-                        || !stable_jit_tokens(&source)
-                    {
+                    if jit_expression_kind(&source)?.0 != JitKind::Array {
                         return None;
                     }
                     let prefix = array_prefix(&source)?;
-                    for (index, name) in bindings {
-                        if parameters.contains_key(name.sym.as_ref())
+                    let local_prefix = match prefix {
+                        "rn" => "rnl",
+                        "rb" => "rbl",
+                        "rs" => "rsl",
+                        _ => return None,
+                    };
+                    if bindings.iter().any(|(_, name)| {
+                        parameters.contains_key(name.sym.as_ref())
                             || locals.contains_key(name.sym.as_ref())
-                        {
-                            return None;
-                        }
-                        let mut value = source.clone();
+                    }) {
+                        return None;
+                    }
+                    let source_index = runtime_kinds.len();
+                    output.extend(source);
+                    output.push("arrayhandle".into());
+                    runtime_kinds.insert(
+                        format!("\0destructure-source-{source_index}"),
+                        JitKind::Array,
+                    );
+                    runtime_locals = runtime_kinds.len();
+                    let source_local = format!("{local_prefix}{source_index}");
+                    for (index, name) in bindings {
+                        let mut value = vec![source_local.clone()];
                         value.push(format!("c{:016x}", (index as f64).to_bits()));
                         value.push(format!("{prefix}get"));
                         locals.insert(name.sym.to_string(), value);
