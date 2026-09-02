@@ -309,6 +309,18 @@ fn jit_export(
                         thaw_hir::HirType::Str => "objopts",
                         thaw_hir::HirType::Object(_) => "objopto",
                         thaw_hir::HirType::Tuple(_) => "objoptt",
+                        thaw_hir::HirType::Array(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "objoptrn",
+                            thaw_hir::HirType::Bool => "objoptrb",
+                            thaw_hir::HirType::Str => "objoptrs",
+                            _ => return None,
+                        },
+                        thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "objoptdn",
+                            thaw_hir::HirType::Bool => "objoptdb",
+                            thaw_hir::HirType::Str => "objoptds",
+                            _ => return None,
+                        },
                         _ => return None,
                     }),
                     thaw_hir::HirType::Nullish(payload) => Some(match payload.as_ref() {
@@ -317,6 +329,18 @@ fn jit_export(
                         thaw_hir::HirType::Str => "objnulls",
                         thaw_hir::HirType::Object(_) => "objnullo",
                         thaw_hir::HirType::Tuple(_) => "objnullt",
+                        thaw_hir::HirType::Array(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "objnullrn",
+                            thaw_hir::HirType::Bool => "objnullrb",
+                            thaw_hir::HirType::Str => "objnullrs",
+                            _ => return None,
+                        },
+                        thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "objnulldn",
+                            thaw_hir::HirType::Bool => "objnulldb",
+                            thaw_hir::HirType::Str => "objnullds",
+                            _ => return None,
+                        },
                         _ => return None,
                     }),
                     _ => None,
@@ -391,6 +415,18 @@ fn jit_export(
                         thaw_hir::HirType::Str => "tupopts",
                         thaw_hir::HirType::Object(_) => "tupopto",
                         thaw_hir::HirType::Tuple(_) => "tupoptt",
+                        thaw_hir::HirType::Array(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "tupoptrn",
+                            thaw_hir::HirType::Bool => "tupoptrb",
+                            thaw_hir::HirType::Str => "tupoptrs",
+                            _ => return None,
+                        },
+                        thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "tupoptdn",
+                            thaw_hir::HirType::Bool => "tupoptdb",
+                            thaw_hir::HirType::Str => "tupoptds",
+                            _ => return None,
+                        },
                         _ => return None,
                     },
                     thaw_hir::HirType::Nullish(payload) => match payload.as_ref() {
@@ -399,6 +435,18 @@ fn jit_export(
                         thaw_hir::HirType::Str => "tupnulls",
                         thaw_hir::HirType::Object(_) => "tupnullo",
                         thaw_hir::HirType::Tuple(_) => "tupnullt",
+                        thaw_hir::HirType::Array(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "tupnullrn",
+                            thaw_hir::HirType::Bool => "tupnullrb",
+                            thaw_hir::HirType::Str => "tupnullrs",
+                            _ => return None,
+                        },
+                        thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "tupnulldn",
+                            thaw_hir::HirType::Bool => "tupnulldb",
+                            thaw_hir::HirType::Str => "tupnullds",
+                            _ => return None,
+                        },
                         _ => return None,
                     },
                     _ => return None,
@@ -729,6 +777,44 @@ fn jit_export(
                             )?,
                             'p',
                         ),
+                        thaw_hir::HirType::Array(element_type)
+                            if jit_array_result_element_supported(element_type) =>
+                        {
+                            let mut value = Vec::new();
+                            encode_expression(
+                                element.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut value,
+                            )?;
+                            if jit_expression_kind(&value)?.0 != JitKind::Array {
+                                return None;
+                            }
+                            value.push("arrayhandle".into());
+                            (value, 'p')
+                        }
+                        thaw_hir::HirType::Dictionary(element_type)
+                            if matches!(
+                                element_type.as_ref(),
+                                thaw_hir::HirType::F64
+                                    | thaw_hir::HirType::Bool
+                                    | thaw_hir::HirType::Str
+                            ) =>
+                        {
+                            let mut value = Vec::new();
+                            encode_expression(
+                                element.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut value,
+                            )?;
+                            if jit_expression_kind(&value)?.0 != JitKind::Dictionary {
+                                return None;
+                            }
+                            (value, 'o')
+                        }
                         primitive => {
                             let mut value = Vec::new();
                             encode_expression(
@@ -780,6 +866,44 @@ fn jit_export(
                             )?,
                             'p',
                         ),
+                        thaw_hir::HirType::Array(element_type)
+                            if jit_array_result_element_supported(element_type) =>
+                        {
+                            let mut value = Vec::new();
+                            encode_expression(
+                                element.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut value,
+                            )?;
+                            if jit_expression_kind(&value)?.0 != JitKind::Array {
+                                return None;
+                            }
+                            value.push("arrayhandle".into());
+                            (value, 'p')
+                        }
+                        thaw_hir::HirType::Dictionary(element_type)
+                            if matches!(
+                                element_type.as_ref(),
+                                thaw_hir::HirType::F64
+                                    | thaw_hir::HirType::Bool
+                                    | thaw_hir::HirType::Str
+                            ) =>
+                        {
+                            let mut value = Vec::new();
+                            encode_expression(
+                                element.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut value,
+                            )?;
+                            if jit_expression_kind(&value)?.0 != JitKind::Dictionary {
+                                return None;
+                            }
+                            (value, 'o')
+                        }
                         primitive => {
                             let mut value = Vec::new();
                             encode_expression(
@@ -1026,6 +1150,44 @@ fn jit_export(
                                 )?,
                                 'a',
                             ),
+                            thaw_hir::HirType::Array(element_type)
+                                if jit_array_result_element_supported(element_type) =>
+                            {
+                                let mut value = Vec::new();
+                                encode_expression(
+                                    expression,
+                                    parameters,
+                                    locals,
+                                    context,
+                                    &mut value,
+                                )?;
+                                if jit_expression_kind(&value)?.0 != JitKind::Array {
+                                    return None;
+                                }
+                                value.push("arrayhandle".into());
+                                (value, 'a')
+                            }
+                            thaw_hir::HirType::Dictionary(element_type)
+                                if matches!(
+                                    element_type.as_ref(),
+                                    thaw_hir::HirType::F64
+                                        | thaw_hir::HirType::Bool
+                                        | thaw_hir::HirType::Str
+                                ) =>
+                            {
+                                let mut value = Vec::new();
+                                encode_expression(
+                                    expression,
+                                    parameters,
+                                    locals,
+                                    context,
+                                    &mut value,
+                                )?;
+                                if jit_expression_kind(&value)?.0 != JitKind::Dictionary {
+                                    return None;
+                                }
+                                (value, 'o')
+                            }
                             primitive => {
                                 let mut value = Vec::new();
                                 encode_expression(
@@ -1074,6 +1236,44 @@ fn jit_export(
                                 )?,
                                 'a',
                             ),
+                            thaw_hir::HirType::Array(element_type)
+                                if jit_array_result_element_supported(element_type) =>
+                            {
+                                let mut value = Vec::new();
+                                encode_expression(
+                                    expression,
+                                    parameters,
+                                    locals,
+                                    context,
+                                    &mut value,
+                                )?;
+                                if jit_expression_kind(&value)?.0 != JitKind::Array {
+                                    return None;
+                                }
+                                value.push("arrayhandle".into());
+                                (value, 'a')
+                            }
+                            thaw_hir::HirType::Dictionary(element_type)
+                                if matches!(
+                                    element_type.as_ref(),
+                                    thaw_hir::HirType::F64
+                                        | thaw_hir::HirType::Bool
+                                        | thaw_hir::HirType::Str
+                                ) =>
+                            {
+                                let mut value = Vec::new();
+                                encode_expression(
+                                    expression,
+                                    parameters,
+                                    locals,
+                                    context,
+                                    &mut value,
+                                )?;
+                                if jit_expression_kind(&value)?.0 != JitKind::Dictionary {
+                                    return None;
+                                }
+                                (value, 'o')
+                            }
                             primitive => {
                                 let mut value = Vec::new();
                                 encode_expression(
@@ -12297,7 +12497,7 @@ fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
 }
 
 fn array_prefix(expression: &[String]) -> Option<&'static str> {
-    expression.iter().find_map(|token| {
+    expression.iter().rev().find_map(|token| {
         if matches!(token.as_str(), "strarray" | "dkeys") {
             return Some("rs");
         }
@@ -12324,6 +12524,24 @@ fn array_prefix(expression: &[String]) -> Option<&'static str> {
             }
         }
         for (field, prefix) in [
+            ("objoptrn", "rn"),
+            ("objoptrb", "rb"),
+            ("objoptrs", "rs"),
+            ("objnullrn", "rn"),
+            ("objnullrb", "rb"),
+            ("objnullrs", "rs"),
+            ("tupoptrn", "rn"),
+            ("tupoptrb", "rb"),
+            ("tupoptrs", "rs"),
+            ("tupnullrn", "rn"),
+            ("tupnullrb", "rb"),
+            ("tupnullrs", "rs"),
+        ] {
+            if token.starts_with(field) {
+                return Some(prefix);
+            }
+        }
+        for (field, prefix) in [
             ("ragetrn", "rn"),
             ("ragetrb", "rb"),
             ("ragetrs", "rs"),
@@ -12339,7 +12557,7 @@ fn array_prefix(expression: &[String]) -> Option<&'static str> {
 }
 
 fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
-    expression.iter().find_map(|token| {
+    expression.iter().rev().find_map(|token| {
         match token.as_str() {
             "untagdn" => return Some("dn"),
             "untagdb" => return Some("db"),
@@ -12355,6 +12573,24 @@ fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
             return Some("dn");
         }
         for (field, prefix) in [("objdn", "dn"), ("objdb", "db"), ("objds", "ds")] {
+            if token.starts_with(field) {
+                return Some(prefix);
+            }
+        }
+        for (field, prefix) in [
+            ("objoptdn", "dn"),
+            ("objoptdb", "db"),
+            ("objoptds", "ds"),
+            ("objnulldn", "dn"),
+            ("objnulldb", "db"),
+            ("objnullds", "ds"),
+            ("tupoptdn", "dn"),
+            ("tupoptdb", "db"),
+            ("tupoptds", "ds"),
+            ("tupnulldn", "dn"),
+            ("tupnulldb", "db"),
+            ("tupnullds", "ds"),
+        ] {
             if token.starts_with(field) {
                 return Some(prefix);
             }
@@ -13816,11 +14052,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             ("tupnulls", JitKind::String),
             ("tupnullo", JitKind::Dictionary),
             ("tupnullt", JitKind::Array),
+            ("tupnullrn", JitKind::Array),
+            ("tupnullrb", JitKind::Array),
+            ("tupnullrs", JitKind::Array),
+            ("tupnulldn", JitKind::Dictionary),
+            ("tupnulldb", JitKind::Dictionary),
+            ("tupnullds", JitKind::Dictionary),
             ("tupoptn", JitKind::Number),
             ("tupoptb", JitKind::Boolean),
             ("tupopts", JitKind::String),
             ("tupopto", JitKind::Dictionary),
             ("tupoptt", JitKind::Array),
+            ("tupoptrn", JitKind::Array),
+            ("tupoptrb", JitKind::Array),
+            ("tupoptrs", JitKind::Array),
+            ("tupoptdn", JitKind::Dictionary),
+            ("tupoptdb", JitKind::Dictionary),
+            ("tupoptds", JitKind::Dictionary),
         ]
         .into_iter()
         .find_map(|(prefix, kind)| token.strip_prefix(prefix).map(|index| (kind, index)))
@@ -14096,11 +14344,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             ("objnulls", JitKind::String),
             ("objnullo", JitKind::Dictionary),
             ("objnullt", JitKind::Array),
+            ("objnullrn", JitKind::Array),
+            ("objnullrb", JitKind::Array),
+            ("objnullrs", JitKind::Array),
+            ("objnulldn", JitKind::Dictionary),
+            ("objnulldb", JitKind::Dictionary),
+            ("objnullds", JitKind::Dictionary),
             ("objoptn", JitKind::Number),
             ("objoptb", JitKind::Boolean),
             ("objopts", JitKind::String),
             ("objopto", JitKind::Dictionary),
             ("objoptt", JitKind::Array),
+            ("objoptrn", JitKind::Array),
+            ("objoptrb", JitKind::Array),
+            ("objoptrs", JitKind::Array),
+            ("objoptdn", JitKind::Dictionary),
+            ("objoptdb", JitKind::Dictionary),
+            ("objoptds", JitKind::Dictionary),
         ]
         .into_iter()
         .find_map(|(prefix, kind)| token.strip_prefix(prefix).map(|offset| (kind, offset)))

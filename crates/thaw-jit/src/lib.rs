@@ -6491,12 +6491,26 @@ impl NumericProgram {
                         })
                         .or_else(|| {
                             let encoded = value.strip_prefix("tupnull")?;
-                            let (kind, index) = encoded.split_at(1);
-                            let kind = match kind {
-                                "n" => 0,
-                                "b" => 1,
-                                "s" | "o" | "t" => 2,
-                                _ => return None,
+                            let (kind, index) = if let Some(index) = encoded
+                                .strip_prefix("rn")
+                                .or_else(|| encoded.strip_prefix("rb"))
+                                .or_else(|| encoded.strip_prefix("rs"))
+                                .or_else(|| encoded.strip_prefix("dn"))
+                                .or_else(|| encoded.strip_prefix("db"))
+                                .or_else(|| encoded.strip_prefix("ds"))
+                            {
+                                (2, index)
+                            } else {
+                                let (kind, index) = encoded.split_at(1);
+                                (
+                                    match kind {
+                                        "n" => 0,
+                                        "b" => 1,
+                                        "s" | "o" | "t" => 2,
+                                        _ => return None,
+                                    },
+                                    index,
+                                )
                             };
                             index
                                 .parse::<u16>()
@@ -6505,12 +6519,26 @@ impl NumericProgram {
                         })
                         .or_else(|| {
                             let encoded = value.strip_prefix("tupopt")?;
-                            let (kind, index) = encoded.split_at(1);
-                            let kind = match kind {
-                                "n" => 0,
-                                "b" => 1,
-                                "s" | "o" | "t" => 2,
-                                _ => return None,
+                            let (kind, index) = if let Some(index) = encoded
+                                .strip_prefix("rn")
+                                .or_else(|| encoded.strip_prefix("rb"))
+                                .or_else(|| encoded.strip_prefix("rs"))
+                                .or_else(|| encoded.strip_prefix("dn"))
+                                .or_else(|| encoded.strip_prefix("db"))
+                                .or_else(|| encoded.strip_prefix("ds"))
+                            {
+                                (2, index)
+                            } else {
+                                let (kind, index) = encoded.split_at(1);
+                                (
+                                    match kind {
+                                        "n" => 0,
+                                        "b" => 1,
+                                        "s" | "o" | "t" => 2,
+                                        _ => return None,
+                                    },
+                                    index,
+                                )
                             };
                             index
                                 .parse::<u16>()
@@ -6571,12 +6599,26 @@ impl NumericProgram {
                         })
                         .or_else(|| {
                             let encoded = value.strip_prefix("objnull")?;
-                            let (kind, offset) = encoded.split_at(1);
-                            let kind = match kind {
-                                "n" => 0,
-                                "b" => 1,
-                                "s" | "o" | "t" => 2,
-                                _ => return None,
+                            let (kind, offset) = if let Some(offset) = encoded
+                                .strip_prefix("rn")
+                                .or_else(|| encoded.strip_prefix("rb"))
+                                .or_else(|| encoded.strip_prefix("rs"))
+                                .or_else(|| encoded.strip_prefix("dn"))
+                                .or_else(|| encoded.strip_prefix("db"))
+                                .or_else(|| encoded.strip_prefix("ds"))
+                            {
+                                (2, offset)
+                            } else {
+                                let (kind, offset) = encoded.split_at(1);
+                                (
+                                    match kind {
+                                        "n" => 0,
+                                        "b" => 1,
+                                        "s" | "o" | "t" => 2,
+                                        _ => return None,
+                                    },
+                                    offset,
+                                )
                             };
                             offset
                                 .parse::<u16>()
@@ -6585,12 +6627,26 @@ impl NumericProgram {
                         })
                         .or_else(|| {
                             let encoded = value.strip_prefix("objopt")?;
-                            let (kind, offset) = encoded.split_at(1);
-                            let kind = match kind {
-                                "n" => 0,
-                                "b" => 1,
-                                "s" | "a" | "o" | "t" | "d" => 2,
-                                _ => return None,
+                            let (kind, offset) = if let Some(offset) = encoded
+                                .strip_prefix("rn")
+                                .or_else(|| encoded.strip_prefix("rb"))
+                                .or_else(|| encoded.strip_prefix("rs"))
+                                .or_else(|| encoded.strip_prefix("dn"))
+                                .or_else(|| encoded.strip_prefix("db"))
+                                .or_else(|| encoded.strip_prefix("ds"))
+                            {
+                                (2, offset)
+                            } else {
+                                let (kind, offset) = encoded.split_at(1);
+                                (
+                                    match kind {
+                                        "n" => 0,
+                                        "b" => 1,
+                                        "s" | "a" | "o" | "t" | "d" => 2,
+                                        _ => return None,
+                                    },
+                                    offset,
+                                )
                             };
                             offset
                                 .parse::<u16>()

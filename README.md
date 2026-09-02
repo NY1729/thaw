@@ -2440,8 +2440,9 @@ available to ordinary JIT operations;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
-loading QuickJS; object and tuple payloads inside those tagged fields are
-followed recursively, including optional chaining into nested fields;
+loading QuickJS; object, tuple, homogeneous primitive array, and primitive
+dictionary payloads inside those tagged fields retain their native handles and
+support optional chaining and their ordinary specialized operations;
 the same tagged value can also return through LLVM without changing object
 identity or layout. Object literals with an exact fixed shape and recursively
 nested fixed objects, primitive arrays, homogeneous primitive dictionaries, or
@@ -2455,8 +2456,9 @@ and passed directly to another specialized call. Optional, nullable, and
 nullish primitive tuple elements use the native 16-byte element stride and
 support the same reads, `??`, optional string chains, JIT construction, and
 cross-call forwarding. Nullish construction preserves distinct `null` and
-`undefined` tags across the LLVM/JIT boundary. Tagged object and tuple payloads
-can likewise be constructed by the JIT and forwarded without conversion.
+`undefined` tags across the LLVM/JIT boundary. Tagged object, tuple, array, and
+dictionary payloads can likewise be constructed by the JIT and forwarded
+without conversion.
 Array fields retain their
 shared mutable handle, including shorthand
 fields sourced from JIT parameters.
