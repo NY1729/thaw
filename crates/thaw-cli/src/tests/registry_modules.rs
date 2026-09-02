@@ -1559,6 +1559,53 @@ function main(): void { const value: Item = { nullable: null, nullish: undefined
 }
 
 #[test]
+fn nullable_and_nullish_parameters_round_trip_without_quickjs() {
+    let declarations = thaw_bridge::parse_dts(
+        "export declare function nullable(value: number | null): number | null;\nexport declare function nullish(value: number | null | undefined): number | null | undefined;\n",
+    )
+    .unwrap();
+    let source = "module.exports.nullable = value => value; module.exports.nullish = value => value;";
+    assert!(jit_numeric_export(source, "nullable", false, &declarations[0]).is_some());
+    assert!(jit_numeric_export(source, "nullish", false, &declarations[1]).is_some());
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-nullish-parameters-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-nullish-parameters");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function nullable(value: number | null): number | null;\nexport declare function nullish(value: number | null | undefined): number | null | undefined;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.nullable = value => value; module.exports.nullish = value => value;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { nullable, nullish } from 'jit-nullish-parameters';\nfunction main(): void { const numberValue: number | null = nullable(7); const nullValue: number | null = nullable(null); const nullishNumber: number | null | undefined = nullish(8); const nullishNull: number | null | undefined = nullish(null); const undefinedValue: number | null | undefined = nullish(undefined); console.log(numberValue!); console.log(nullValue === null); console.log(nullishNumber!); console.log(nullishNull === null); console.log(undefinedValue === undefined); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "7\ntrue\n8\ntrue\ntrue\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_tuple_elements_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-tuple-element-{}",

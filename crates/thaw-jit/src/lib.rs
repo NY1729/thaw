@@ -2417,6 +2417,13 @@ extern "C" fn absent_value() -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn null_value() -> f64 {
+    CALL_ABSENCE.with(|absence| absence.set(2));
+    CALL_PRESENT.with(|present| present.set(false));
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn preserve_absent_value() -> f64 {
     CALL_PRESENT.with(|present| present.set(false));
     0.0
@@ -5720,6 +5727,7 @@ enum NumericValue {
     ConditionalAlternate,
     ShortCircuitEnd,
     Absent,
+    Null,
     PreserveAbsent,
     AsBoolean,
     BooleanNot,
@@ -6262,6 +6270,7 @@ impl NumericProgram {
                     "keepabsentn" | "keepabsentb" | "keepabsents" => {
                         Some(NumericValue::PreserveAbsent)
                     }
+                    "nulln" | "nullb" | "nulls" => Some(NumericValue::Null),
                     "asbool" => Some(NumericValue::AsBoolean),
                     "boolnot" => Some(NumericValue::BooleanNot),
                     "strictfalse" => Some(NumericValue::StrictMismatch(false)),
@@ -9000,6 +9009,7 @@ impl NumericProgram {
                 | NumericValue::ProcessPpid
                 | NumericValue::MissingCallable
                 | NumericValue::Absent
+                | NumericValue::Null
                 | NumericValue::PreserveAbsent => {
                     if depth > 7 {
                         return None;
@@ -9014,6 +9024,7 @@ impl NumericProgram {
                         NumericValue::ProcessPpid => process_ppid,
                         NumericValue::MissingCallable => missing_callable,
                         NumericValue::Absent => absent_value,
+                        NumericValue::Null => null_value,
                         NumericValue::PreserveAbsent => preserve_absent_value,
                         _ => unreachable!(),
                     };
