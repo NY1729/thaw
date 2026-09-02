@@ -1681,12 +1681,12 @@ fn aggregate_union_narrows_array_then_dictionary_in_jit() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function describe(value: number[] | Record<string, number> | string): string;\nexport declare function multiSize(value: number[] | string[] | boolean[] | string): number;\nexport declare function multiJoin(value: number[] | string[] | boolean[] | string): string;\nexport declare function multiText(value: number[] | string[] | boolean[] | string): string;\nexport declare function multiSlice(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiConcat(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiReversed(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiReverse(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiLast(value: number[] | string[] | boolean[] | string): number | string | boolean;\nexport declare function multiIncludes(value: number[] | string[] | boolean[] | string, needle: number | string | boolean): boolean;\nexport declare function multiIndex(value: number[] | string[] | boolean[] | string, needle: number | string | boolean): number;\nexport declare function multiLastIndex(value: number[] | string[] | boolean[] | string, needle: number | string | boolean): number;\n",
+        "export declare function describe(value: number[] | Record<string, number> | string): string;\nexport declare function multiSize(value: number[] | string[] | boolean[] | string): number;\nexport declare function multiJoin(value: number[] | string[] | boolean[] | string): string;\nexport declare function multiText(value: number[] | string[] | boolean[] | string): string;\nexport declare function multiSlice(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiConcat(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiReversed(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiReverse(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiSorted(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiSort(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\nexport declare function multiLast(value: number[] | string[] | boolean[] | string): number | string | boolean;\nexport declare function multiIncludes(value: number[] | string[] | boolean[] | string, needle: number | string | boolean): boolean;\nexport declare function multiIndex(value: number[] | string[] | boolean[] | string, needle: number | string | boolean): number;\nexport declare function multiLastIndex(value: number[] | string[] | boolean[] | string, needle: number | string | boolean): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function describe(value) { if (Array.isArray(value)) return String(value.length); if (typeof value === 'object') return String(value.count); return value.toUpperCase(); } function multiSize(value) { if (Array.isArray(value)) return value.length; return value.length; } function multiJoin(value) { if (Array.isArray(value)) return value.join('|'); return value.toUpperCase(); } function multiText(value) { if (Array.isArray(value)) return value.toString(); return value.toUpperCase(); } function multiSlice(value) { if (Array.isArray(value)) return value.slice(1); return value.slice(1); } function multiConcat(value) { if (Array.isArray(value)) return value.concat(value); return value.concat(value); } function multiReversed(value) { if (Array.isArray(value)) return value.toReversed(); return value; } function multiReverse(value) { if (Array.isArray(value)) return value.reverse(); return value; } function multiLast(value) { if (Array.isArray(value)) return value.at(-1); return value; } function multiIncludes(value, needle) { if (Array.isArray(value)) return value.includes(needle); return false; } function multiIndex(value, needle) { if (Array.isArray(value)) return value.indexOf(needle); return -1; } function multiLastIndex(value, needle) { if (Array.isArray(value)) return value.lastIndexOf(needle); return -1; } module.exports = { describe, multiSize, multiJoin, multiText, multiSlice, multiConcat, multiReversed, multiReverse, multiLast, multiIncludes, multiIndex, multiLastIndex };\n",
+        "function describe(value) { if (Array.isArray(value)) return String(value.length); if (typeof value === 'object') return String(value.count); return value.toUpperCase(); } function multiSize(value) { if (Array.isArray(value)) return value.length; return value.length; } function multiJoin(value) { if (Array.isArray(value)) return value.join('|'); return value.toUpperCase(); } function multiText(value) { if (Array.isArray(value)) return value.toString(); return value.toUpperCase(); } function multiSlice(value) { if (Array.isArray(value)) return value.slice(1); return value.slice(1); } function multiConcat(value) { if (Array.isArray(value)) return value.concat(value); return value.concat(value); } function multiReversed(value) { if (Array.isArray(value)) return value.toReversed(); return value; } function multiReverse(value) { if (Array.isArray(value)) return value.reverse(); return value; } function multiSorted(value) { if (Array.isArray(value)) return value.toSorted(); return value; } function multiSort(value) { if (Array.isArray(value)) return value.sort(); return value; } function multiLast(value) { if (Array.isArray(value)) return value.at(-1); return value; } function multiIncludes(value, needle) { if (Array.isArray(value)) return value.includes(needle); return false; } function multiIndex(value, needle) { if (Array.isArray(value)) return value.indexOf(needle); return -1; } function multiLastIndex(value, needle) { if (Array.isArray(value)) return value.lastIndexOf(needle); return -1; } module.exports = { describe, multiSize, multiJoin, multiText, multiSlice, multiConcat, multiReversed, multiReverse, multiSorted, multiSort, multiLast, multiIncludes, multiIndex, multiLastIndex };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -1709,6 +1709,52 @@ fn aggregate_union_narrows_array_then_dictionary_in_jit() {
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
         "3\n42\nWORD\n2\n3\n1\n4\n1|2\na|b\ntrue|false\nWORD\n1,2\na,b\ntrue,false\n2\n2\n1\n3\n6\n6\n4\n8\n3|2|1\nc|b|a\nfalse|true\n3|2|1\nc|b|a\nfalse|true\n3\nc\nfalse\nword\ntrue\ntrue\ntrue\n1\n1\n1\n2\n2\n2\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mixed_array_default_sort_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-mixed-array-sort-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-mixed-array-sort");
+    std::fs::create_dir_all(&package).unwrap();
+    let union = "number[] | string[] | boolean[] | string";
+    std::fs::write(
+        package.join("package.d.ts"),
+        format!(
+            "export declare function sorted(value: {union}): {union};\nexport declare function sort(value: {union}): {union};\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function sorted(value) { if (Array.isArray(value)) return value.toSorted(); return value; } function sort(value) { if (Array.isArray(value)) return value.sort(); return value; } module.exports = { sorted, sort };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { sorted, sort } from 'jit-mixed-array-sort'; function main(): void { console.log(sorted([10, 2, 1])); console.log(sorted(['z', 'a', 'b'])); console.log(sorted([true, false, true])); console.log(sort([10, 2, 1])); console.log(sort(['z', 'a', 'b'])); console.log(sort([true, false, true])); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[1,10,2]\n[\"a\",\"b\",\"z\"]\n[false,true,true]\n[1,10,2]\n[\"a\",\"b\",\"z\"]\n[false,true,true]\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
