@@ -4193,11 +4193,12 @@ fn jit_export(
         let kinds = source
             .iter()
             .find_map(|token| jit_dynamic_argument(token).map(|(_, kinds)| kinds))?;
+        let not_array = source.iter().any(|token| token == "notarray");
         let arrays = kinds
             .bytes()
             .filter(|kind| matches!(kind, b'N' | b'B' | b'S'))
             .collect::<Vec<_>>();
-        if arrays.len() != 1 {
+        if not_array || arrays.len() != 1 {
             return None;
         }
         let mut array_value = source.clone();
@@ -4225,6 +4226,8 @@ fn jit_export(
                 }
                 .into(),
             );
+        } else {
+            other_value.push("notarray".into());
         }
         let narrowed = |value: Vec<String>| {
             let mut narrowed = locals.clone();
@@ -4280,14 +4283,18 @@ fn jit_export(
         let kinds = source
             .iter()
             .find_map(|token| jit_dynamic_argument(token).map(|(_, kinds)| kinds))?;
+        let not_array = source.iter().any(|token| token == "notarray");
+        let not_object = source.iter().any(|token| token == "notobject");
         let aggregates = kinds
             .bytes()
             .filter(|kind| matches!(kind, b'D' | b'E' | b'F'))
             .collect::<Vec<_>>();
-        if aggregates.len() != 1
-            || kinds
+        if not_object
+            || aggregates.len() != 1
+            || (!not_array
+                && kinds
                 .bytes()
-                .any(|kind| matches!(kind, b'N' | b'B' | b'S'))
+                .any(|kind| matches!(kind, b'N' | b'B' | b'S')))
         {
             return None;
         }
@@ -4303,7 +4310,10 @@ fn jit_export(
         );
         let remaining = kinds
             .bytes()
-            .filter(|kind| !matches!(kind, b'D' | b'E' | b'F'))
+            .filter(|kind| {
+                !(matches!(kind, b'D' | b'E' | b'F')
+                    || not_array && matches!(kind, b'N' | b'B' | b'S'))
+            })
             .collect::<Vec<_>>();
         let mut other_value = source.clone();
         if remaining.len() == 1 {
@@ -4316,6 +4326,8 @@ fn jit_export(
                 }
                 .into(),
             );
+        } else {
+            other_value.push("notobject".into());
         }
         let narrowed = |value: Vec<String>| {
             let mut narrowed = locals.clone();
@@ -11717,7 +11729,10 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         ) {
             stack.pop()?;
             stack.push(JitKind::String);
-        } else if matches!(token.as_str(), "notnum" | "notbool" | "notstr") {
+        } else if matches!(
+            token.as_str(),
+            "notnum" | "notbool" | "notstr" | "notarray" | "notobject"
+        ) {
         } else if token == "asbool" {
             if !matches!(*stack.last()?, JitKind::Number | JitKind::Boolean) {
                 return None;

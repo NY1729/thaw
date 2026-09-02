@@ -3895,6 +3895,8 @@ enum NumericValue {
     ExcludeNumber,
     ExcludeString,
     ExcludeBoolean,
+    ExcludeArray,
+    ExcludeObject,
     GlobalGet,
     GlobalInit,
     GlobalSet,
@@ -4235,6 +4237,8 @@ impl NumericProgram {
                     "notnum" => Some(NumericValue::ExcludeNumber),
                     "notstr" => Some(NumericValue::ExcludeString),
                     "notbool" => Some(NumericValue::ExcludeBoolean),
+                    "notarray" => Some(NumericValue::ExcludeArray),
+                    "notobject" => Some(NumericValue::ExcludeObject),
                     "globalget" => Some(NumericValue::GlobalGet),
                     "globalinit" => Some(NumericValue::GlobalInit),
                     "globalset" => Some(NumericValue::GlobalSet),
@@ -5201,7 +5205,9 @@ impl NumericProgram {
                 }
                 NumericValue::ExcludeNumber
                 | NumericValue::ExcludeString
-                | NumericValue::ExcludeBoolean => {}
+                | NumericValue::ExcludeBoolean
+                | NumericValue::ExcludeArray
+                | NumericValue::ExcludeObject => {}
                 NumericValue::GlobalGet => {
                     if depth == 0 {
                         return None;
