@@ -2824,6 +2824,8 @@ fn jit_export(
                             | "includes"
                             | "indexOf"
                             | "lastIndexOf"
+                            | "toReversed"
+                            | "reverse"
                     )
                 {
                     return None;
@@ -3287,7 +3289,13 @@ fn jit_export(
                         return None;
                     }
                     output.push(if method == "reverse" {
-                        "arrayreverse".into()
+                        if dynamic_array {
+                            "dynarrayreverse".into()
+                        } else {
+                            "arrayreverse".into()
+                        }
+                    } else if dynamic_array {
+                        "dynarrayreversed".into()
                     } else {
                         "arrayreversed".into()
                     });
@@ -12288,6 +12296,8 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             token.as_str(),
             "arrayreversed"
                 | "arrayreverse"
+                | "dynarrayreversed"
+                | "dynarrayreverse"
                 | "rnsorted"
                 | "rssorted"
                 | "rbsorted"
@@ -12301,10 +12311,15 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "rssorteddesc"
                 | "rssortdesc"
         ) {
-            if stack.pop()? != JitKind::Array {
+            let expected = if token.starts_with("dynarray") {
+                JitKind::Dynamic
+            } else {
+                JitKind::Array
+            };
+            if stack.pop()? != expected {
                 return None;
             }
-            stack.push(JitKind::Array);
+            stack.push(expected);
         } else if matches!(token.as_str(), "isarray" | "isnotarray" | "dynisarray") {
             stack.pop()?;
             stack.push(JitKind::Boolean);
