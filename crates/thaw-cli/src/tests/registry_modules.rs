@@ -1283,6 +1283,46 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
 }
 
 #[test]
+fn finite_computed_object_keys_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-finite-object-key-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-finite-object-key");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Pair { left: number; right: number; }\nexport declare function pick(value: Pair | string, right: boolean): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.pick = (value, right) => typeof value === 'object' ? value[right ? 'right' : 'left'] : -1;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { pick } from 'jit-finite-object-key';\nfunction main(): void { const pair = { left: 3, right: 7 }; console.log(pick(pair, false)); console.log(pick(pair, true)); console.log(pick('none', true)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n7\n-1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn object_dictionary_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-object-dictionary-union-{}",
