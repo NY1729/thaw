@@ -6845,22 +6845,25 @@ fn jit_export(
             Pat::Object(pattern) => {
                 collect_fixed_object_pattern(pattern, path, bindings)?;
             }
-            Pat::Array(pattern) => {
-                for (index, element) in pattern.elems.iter().enumerate() {
-                    let Some(element) = element else {
-                        continue;
-                    };
-                    if matches!(element, Pat::Rest(_)) {
-                        return None;
-                    }
-                    collect_fixed_object_bindings(
-                        element,
-                        &format!("{path}.{index}"),
-                        bindings,
-                    )?;
-                }
-            }
+            Pat::Array(pattern) => collect_fixed_array_pattern(pattern, path, bindings)?,
             _ => return None,
+        }
+        Some(())
+    }
+
+    fn collect_fixed_array_pattern<'a>(
+        pattern: &'a thaw_parser::ast::ArrayPat,
+        path: &str,
+        bindings: &mut Vec<(String, &'a Ident, Option<&'a Expr>)>,
+    ) -> Option<()> {
+        for (index, element) in pattern.elems.iter().enumerate() {
+            let Some(element) = element else {
+                continue;
+            };
+            if matches!(element, Pat::Rest(_)) {
+                return None;
+            }
+            collect_fixed_object_bindings(element, &format!("{path}.{index}"), bindings)?;
         }
         Some(())
     }
@@ -6941,14 +6944,27 @@ fn jit_export(
                                 mutable: declaration.kind != VarDeclKind::Const,
                             }),
                             Pat::Array(pattern) => {
-                                let (bindings, rest) = collect_array_bindings(pattern)?;
-                                steps.push(LocalStep::DestructureArray {
-                                    bindings,
-                                    rest,
-                                    initializer: declarator.init.as_deref()?,
-                                    mutable: declaration.kind != VarDeclKind::Const,
-                                    assign_existing: false,
-                                });
+                                if let Some((bindings, rest)) = collect_array_bindings(pattern) {
+                                    steps.push(LocalStep::DestructureArray {
+                                        bindings,
+                                        rest,
+                                        initializer: declarator.init.as_deref()?,
+                                        mutable: declaration.kind != VarDeclKind::Const,
+                                        assign_existing: false,
+                                    });
+                                } else {
+                                    let mut bindings = Vec::new();
+                                    collect_fixed_array_pattern(pattern, "", &mut bindings)?;
+                                    if bindings.is_empty() {
+                                        return None;
+                                    }
+                                    steps.push(LocalStep::DestructureObject {
+                                        bindings,
+                                        initializer: declarator.init.as_deref()?,
+                                        mutable: declaration.kind != VarDeclKind::Const,
+                                        assign_existing: false,
+                                    });
+                                }
                             }
                             Pat::Object(_) => {
                                 let mut bindings = Vec::new();
@@ -6989,14 +7005,27 @@ fn jit_export(
                             AssignTarget::Pat(thaw_parser::ast::AssignTargetPat::Array(pattern))
                                 if assignment.op == AssignOp::Assign =>
                             {
-                                let (bindings, rest) = collect_array_bindings(pattern)?;
-                                steps.push(LocalStep::DestructureArray {
-                                    bindings,
-                                    rest,
-                                    initializer: assignment.right.as_ref(),
-                                    mutable: true,
-                                    assign_existing: true,
-                                });
+                                if let Some((bindings, rest)) = collect_array_bindings(pattern) {
+                                    steps.push(LocalStep::DestructureArray {
+                                        bindings,
+                                        rest,
+                                        initializer: assignment.right.as_ref(),
+                                        mutable: true,
+                                        assign_existing: true,
+                                    });
+                                } else {
+                                    let mut bindings = Vec::new();
+                                    collect_fixed_array_pattern(pattern, "", &mut bindings)?;
+                                    if bindings.is_empty() {
+                                        return None;
+                                    }
+                                    steps.push(LocalStep::DestructureObject {
+                                        bindings,
+                                        initializer: assignment.right.as_ref(),
+                                        mutable: true,
+                                        assign_existing: true,
+                                    });
+                                }
                             }
                             AssignTarget::Pat(thaw_parser::ast::AssignTargetPat::Object(pattern))
                                 if assignment.op == AssignOp::Assign =>

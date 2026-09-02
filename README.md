@@ -2577,6 +2577,8 @@ assignment patterns can write those same nested leaves back to existing
 mutable locals without QuickJS, including locals materialized for following
 control flow. The same fixed-path updates work when the object assignment
 itself occurs inside `if`, loops, or `try`/`finally`.
+Top-level fixed tuples can use the same recursively nested array/object
+declaration and assignment patterns instead of falling back to QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
