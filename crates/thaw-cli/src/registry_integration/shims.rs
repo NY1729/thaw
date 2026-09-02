@@ -49,12 +49,12 @@ fn jit_argument_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
             .all(|(index, element)| !elements[..index].contains(element))
         && elements
             .iter()
-            .filter(|element| {
-                matches!(
-                    element,
-                    thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
-                )
-            })
+            .filter(|element| matches!(element, thaw_hir::HirType::Object(_)))
+            .count()
+            <= 1
+        && elements
+            .iter()
+            .filter(|element| matches!(element, thaw_hir::HirType::Tuple(_)))
             .count()
             <= 1
         && (elements.contains(&thaw_hir::HirType::Str)
@@ -86,7 +86,8 @@ fn jit_union_member_code(ty: &thaw_hir::HirType) -> Option<char> {
             thaw_hir::HirType::Str => Some('F'),
             _ => None,
         },
-        thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_) => Some('O'),
+        thaw_hir::HirType::Object(_) => Some('O'),
+        thaw_hir::HirType::Tuple(_) => Some('T'),
         _ => None,
     }
 }
@@ -276,14 +277,14 @@ fn jit_export(
         source: &[String],
         locals: &mut std::collections::HashMap<String, Vec<String>>,
     ) -> Option<()> {
-        let Some(aggregate) = elements.iter().find(|element| {
+        if !elements.iter().any(|element| {
             matches!(
                 element,
                 thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
             )
-        }) else {
+        }) {
             return Some(());
-        };
+        }
         fn bind_fields(
             path: &str,
             fields: &[(String, thaw_hir::HirType)],
@@ -517,18 +518,21 @@ fn jit_export(
             }
             Some(())
         }
-        let mut object = source.to_vec();
-        match aggregate {
-            thaw_hir::HirType::Object(fields) => {
-                object.push("untagobject".into());
-                bind_fields(path, fields, &object, locals)
+        for aggregate in elements {
+            let mut object = source.to_vec();
+            match aggregate {
+                thaw_hir::HirType::Object(fields) => {
+                    object.push("untagobject".into());
+                    bind_fields(path, fields, &object, locals)?;
+                }
+                thaw_hir::HirType::Tuple(types) => {
+                    object.push("untagtuple".into());
+                    bind_tuple(path, types, &object, locals)?;
+                }
+                _ => {}
             }
-            thaw_hir::HirType::Tuple(types) => {
-                object.push("untagtuple".into());
-                bind_tuple(path, types, &object, locals)
-            }
-            _ => unreachable!(),
         }
+        Some(())
     }
 
     fn member_path(expression: &Expr) -> Option<String> {
@@ -6142,7 +6146,7 @@ fn jit_export(
         let not_array = source.iter().any(|token| token == "notarray");
         let arrays = kinds
             .bytes()
-            .filter(|kind| matches!(kind, b'N' | b'B' | b'S'))
+            .filter(|kind| matches!(kind, b'N' | b'B' | b'S' | b'T'))
             .collect::<Vec<_>>();
         if not_array || arrays.is_empty() {
             return None;
@@ -6153,13 +6157,15 @@ fn jit_export(
                 [b'N'] => "untagrn",
                 [b'B'] => "untagrb",
                 [b'S'] => "untagrs",
+                [b'T'] => "untagtuple",
+                _ if arrays.contains(&b'T') => return None,
                 _ => "untagarray",
             }
             .into(),
         );
         let remaining = kinds
             .bytes()
-            .filter(|kind| !matches!(kind, b'N' | b'B' | b'S'))
+            .filter(|kind| !matches!(kind, b'N' | b'B' | b'S' | b'T'))
             .collect::<Vec<_>>();
         let mut other_value = source.clone();
         if remaining.len() == 1 {
@@ -6168,6 +6174,10 @@ fn jit_export(
                     b'n' => "untagnum",
                     b'b' => "untagbool",
                     b's' => "untagstr",
+                    b'D' => "untagdn",
+                    b'E' => "untagdb",
+                    b'F' => "untagds",
+                    b'O' => "untagobject",
                     _ => return None,
                 }
                 .into(),
@@ -6233,14 +6243,14 @@ fn jit_export(
         let not_object = source.iter().any(|token| token == "notobject");
         let aggregates = kinds
             .bytes()
-            .filter(|kind| matches!(kind, b'D' | b'E' | b'F' | b'O'))
+            .filter(|kind| matches!(kind, b'D' | b'E' | b'F' | b'O' | b'T'))
             .collect::<Vec<_>>();
         if not_object
             || aggregates.is_empty()
             || (!not_array
                 && kinds
-                .bytes()
-                .any(|kind| matches!(kind, b'N' | b'B' | b'S')))
+                    .bytes()
+                    .any(|kind| matches!(kind, b'N' | b'B' | b'S')))
         {
             return None;
         }
@@ -6251,6 +6261,7 @@ fn jit_export(
                 [b'E'] => "untagdb",
                 [b'F'] => "untagds",
                 [b'O'] => "untagobject",
+                [b'T'] => "untagtuple",
                 _ if aggregates
                     .iter()
                     .all(|kind| matches!(kind, b'D' | b'E' | b'F')) =>
@@ -6264,7 +6275,7 @@ fn jit_export(
         let remaining = kinds
             .bytes()
             .filter(|kind| {
-                !(matches!(kind, b'D' | b'E' | b'F' | b'O')
+                !(matches!(kind, b'D' | b'E' | b'F' | b'O' | b'T')
                     || not_array && matches!(kind, b'N' | b'B' | b'S'))
             })
             .collect::<Vec<_>>();
@@ -13288,7 +13299,7 @@ fn jit_dynamic_argument(token: &str) -> Option<(usize, &str)> {
     if kinds.is_empty()
         || !kinds
             .bytes()
-            .all(|kind| matches!(kind, b'n' | b'b' | b's' | b'N' | b'B' | b'S' | b'D' | b'E' | b'F' | b'O'))
+            .all(|kind| matches!(kind, b'n' | b'b' | b's' | b'N' | b'B' | b'S' | b'D' | b'E' | b'F' | b'O' | b'T'))
     {
         return None;
     }

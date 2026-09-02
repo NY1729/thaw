@@ -73,7 +73,12 @@ fn jit_argument_tagged_union(elements: &[HirType]) -> bool {
             .all(|(index, element)| !elements[..index].contains(element))
         && elements
             .iter()
-            .filter(|element| matches!(element, HirType::Object(_) | HirType::Tuple(_)))
+            .filter(|element| matches!(element, HirType::Object(_)))
+            .count()
+            <= 1
+        && elements
+            .iter()
+            .filter(|element| matches!(element, HirType::Tuple(_)))
             .count()
             <= 1
         && (elements.contains(&HirType::Str)
@@ -107,7 +112,8 @@ fn jit_union_member_tag(ty: &HirType) -> Option<u64> {
             HirType::Str => Some(9),
             _ => None,
         },
-        HirType::Object(_) | HirType::Tuple(_) => Some(10),
+        HirType::Object(_) => Some(10),
+        HirType::Tuple(_) => Some(11),
         _ => None,
     }
 }

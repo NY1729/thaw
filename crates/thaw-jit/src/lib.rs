@@ -30,6 +30,7 @@ const DYNAMIC_NUMBER_DICTIONARY_TAG: u64 = 7;
 const DYNAMIC_BOOLEAN_DICTIONARY_TAG: u64 = 8;
 const DYNAMIC_STRING_DICTIONARY_TAG: u64 = 9;
 const DYNAMIC_OBJECT_TAG: u64 = 10;
+const DYNAMIC_TUPLE_TAG: u64 = 11;
 #[cfg(not(all(target_arch = "x86_64", target_family = "unix")))]
 static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -3875,11 +3876,13 @@ aggregate_tagger!(tag_boolean_dictionary, DYNAMIC_BOOLEAN_DICTIONARY_TAG);
 aggregate_tagger!(tag_string_dictionary, DYNAMIC_STRING_DICTIONARY_TAG);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 aggregate_tagger!(tag_object, DYNAMIC_OBJECT_TAG);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+aggregate_tagger!(tag_tuple, DYNAMIC_TUPLE_TAG);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn dynamic_from_parts(tag: f64, payload: f64) -> f64 {
     let tag = tag as u64;
-    if !(DYNAMIC_NUMBER_TAG..=DYNAMIC_OBJECT_TAG).contains(&tag) {
+    if !(DYNAMIC_NUMBER_TAG..=DYNAMIC_TUPLE_TAG).contains(&tag) {
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
     }
@@ -3900,7 +3903,7 @@ fn dynamic_primitive(value: f64, expected: Option<u64>) -> Option<&'static Dynam
         return None;
     }
     let dynamic = unsafe { pointer.as_ref() }?;
-    (DYNAMIC_NUMBER_TAG..=DYNAMIC_OBJECT_TAG)
+    (DYNAMIC_NUMBER_TAG..=DYNAMIC_TUPLE_TAG)
         .contains(&dynamic.tag)
         .then_some(dynamic)
         .filter(|dynamic| expected.is_none_or(|tag| dynamic.tag == tag))
@@ -3929,7 +3932,7 @@ extern "C" fn type_of_dynamic(value: f64) -> f64 {
                 DYNAMIC_NUMBER_TAG => c"number".as_ptr(),
                 DYNAMIC_STRING_TAG => c"string".as_ptr(),
                 DYNAMIC_BOOLEAN_TAG => c"boolean".as_ptr(),
-                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_OBJECT_TAG => c"object".as_ptr(),
+                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_TUPLE_TAG => c"object".as_ptr(),
                 _ => unreachable!(),
             } as usize as u64)
         },
@@ -3954,7 +3957,7 @@ extern "C" fn dynamic_to_boolean(value: f64) -> f64 {
                     .is_some_and(|value| *value != 0)
             }),
             DYNAMIC_BOOLEAN_TAG => f64::from(dynamic.payload != 0),
-            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_OBJECT_TAG => 1.0,
+            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_TUPLE_TAG => 1.0,
             _ => unreachable!(),
         },
     )
@@ -3970,7 +3973,7 @@ extern "C" fn dynamic_is_array(value: f64) -> f64 {
         |dynamic| {
             f64::from(matches!(
                 dynamic.tag,
-                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG | DYNAMIC_TUPLE_TAG
             ))
         },
     )
@@ -4072,6 +4075,11 @@ extern "C" fn untag_dictionary(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn untag_object(value: f64) -> f64 {
     untag_dynamic(value, DYNAMIC_OBJECT_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_tuple(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_TUPLE_TAG)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -4591,7 +4599,7 @@ extern "C" fn dynamic_to_string(value: f64) -> f64 {
                 f64::from_bits(dynamic.payload),
                 f64::from_bits(c",".as_ptr() as usize as u64),
             ),
-            DYNAMIC_NUMBER_DICTIONARY_TAG..=DYNAMIC_OBJECT_TAG => {
+            DYNAMIC_NUMBER_DICTIONARY_TAG..=DYNAMIC_TUPLE_TAG => {
                 arena_string("[object Object]".into())
             }
             _ => unreachable!(),
@@ -4625,7 +4633,7 @@ extern "C" fn dynamic_to_number(value: f64) -> f64 {
             DYNAMIC_NUMBER_TAG => f64::from_bits(dynamic.payload),
             DYNAMIC_STRING_TAG => string_to_number(f64::from_bits(dynamic.payload)),
             DYNAMIC_BOOLEAN_TAG => dynamic.payload as f64,
-            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_OBJECT_TAG => {
+            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_TUPLE_TAG => {
                 string_to_number(dynamic_to_string(value))
             }
             _ => unreachable!(),
@@ -4675,7 +4683,7 @@ fn dynamic_compare(left: f64, right: f64, operation: u8) -> f64 {
                 ) != 0.0
             }
             DYNAMIC_BOOLEAN_TAG => left_value.payload == right_value.payload,
-            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_OBJECT_TAG => {
+            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_TUPLE_TAG => {
                 left_value.payload == right_value.payload
             }
             _ => unreachable!(),
@@ -5509,6 +5517,7 @@ enum NumericValue {
     UntagStringDictionary,
     UntagDictionary,
     UntagObject,
+    UntagTuple,
     ObjectField(u8, u16),
     OptionalObjectField(u8, u16),
     OptionalTupleField(u8, u16),
@@ -5891,7 +5900,8 @@ impl NumericProgram {
                     "tagdn" => Some(NumericValue::TagAggregate(3)),
                     "tagdb" => Some(NumericValue::TagAggregate(4)),
                     "tagds" => Some(NumericValue::TagAggregate(5)),
-                    "tagobject" | "tagtuple" => Some(NumericValue::TagAggregate(6)),
+                    "tagobject" => Some(NumericValue::TagAggregate(6)),
+                    "tagtuple" => Some(NumericValue::TagAggregate(7)),
                     "tagkind" => Some(NumericValue::DynamicTag),
                     "untagnum" => Some(NumericValue::UntagNumber),
                     "untagstr" => Some(NumericValue::UntagString),
@@ -5904,7 +5914,8 @@ impl NumericProgram {
                     "untagdb" => Some(NumericValue::UntagBooleanDictionary),
                     "untagds" => Some(NumericValue::UntagStringDictionary),
                     "untagdictionary" => Some(NumericValue::UntagDictionary),
-                    "untagobject" | "untagtuple" => Some(NumericValue::UntagObject),
+                    "untagobject" => Some(NumericValue::UntagObject),
+                    "untagtuple" => Some(NumericValue::UntagTuple),
                     "notnum" => Some(NumericValue::ExcludeNumber),
                     "notstr" => Some(NumericValue::ExcludeString),
                     "notbool" => Some(NumericValue::ExcludeBoolean),
@@ -6596,6 +6607,7 @@ impl NumericProgram {
                                             | b'E'
                                             | b'F'
                                             | b'O'
+                                            | b'T'
                                     )
                                 }))
                             .then_some(index)?
@@ -7272,6 +7284,7 @@ impl NumericProgram {
                 | NumericValue::UntagStringDictionary
                 | NumericValue::UntagDictionary
                 | NumericValue::UntagObject
+                | NumericValue::UntagTuple
                 | NumericValue::ParseFloat
                 | NumericValue::NumberToExponentialShortest => {
                     if depth == 0 {
@@ -7294,6 +7307,7 @@ impl NumericProgram {
                             tag_boolean_dictionary,
                             tag_string_dictionary,
                             tag_object,
+                            tag_tuple,
                         ][*kind as usize],
                         NumericValue::DynamicTag => dynamic_tag,
                         NumericValue::UntagNumber => untag_number,
@@ -7308,6 +7322,7 @@ impl NumericProgram {
                         NumericValue::UntagStringDictionary => untag_string_dictionary,
                         NumericValue::UntagDictionary => untag_dictionary,
                         NumericValue::UntagObject => untag_object,
+                        NumericValue::UntagTuple => untag_tuple,
                         NumericValue::ParseFloat => parse_float,
                         NumericValue::NumberToExponentialShortest => number_to_exponential_shortest,
                         _ => unreachable!(),
