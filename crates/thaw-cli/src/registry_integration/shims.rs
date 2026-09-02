@@ -296,6 +296,12 @@ fn jit_export(
                         })
                     }
                     thaw_hir::HirType::Object(_) => Some("objo"),
+                    thaw_hir::HirType::Dictionary(element) => Some(match element.as_ref() {
+                        thaw_hir::HirType::F64 => "objdn",
+                        thaw_hir::HirType::Bool => "objdb",
+                        thaw_hir::HirType::Str => "objds",
+                        _ => return None,
+                    }),
                     _ => None,
                 };
                 if let Some(operation) = operation {
@@ -591,6 +597,21 @@ fn jit_export(
                         value.push("arrayhandle".into());
                         (value, 'a')
                     }
+                    thaw_hir::HirType::Dictionary(element)
+                        if matches!(
+                            element.as_ref(),
+                            thaw_hir::HirType::F64
+                                | thaw_hir::HirType::Bool
+                                | thaw_hir::HirType::Str
+                        ) =>
+                    {
+                        let mut value = Vec::new();
+                        encode_expression(expression, parameters, locals, context, &mut value)?;
+                        if jit_expression_kind(&value)?.0 != JitKind::Dictionary {
+                            return None;
+                        }
+                        (value, 'o')
+                    }
                     _ => {
                         let mut value = Vec::new();
                         encode_expression(expression, parameters, locals, context, &mut value)?;
@@ -631,6 +652,16 @@ fn jit_export(
                             if jit_array_result_element_supported(element) =>
                         {
                             'a'
+                        }
+                        thaw_hir::HirType::Dictionary(element)
+                            if matches!(
+                                element.as_ref(),
+                                thaw_hir::HirType::F64
+                                    | thaw_hir::HirType::Bool
+                                    | thaw_hir::HirType::Str
+                            ) =>
+                        {
+                            'o'
                         }
                         _ => return None,
                     };
@@ -11773,6 +11804,11 @@ fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
             "untagds" => return Some("ds"),
             _ => {}
         }
+        for (field, prefix) in [("objdn", "dn"), ("objdb", "db"), ("objds", "ds")] {
+            if token.starts_with(field) {
+                return Some(prefix);
+            }
+        }
         ["dn", "db", "ds"]
             .into_iter()
             .find(|prefix| token.starts_with(prefix))
@@ -13395,6 +13431,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             ("objrb", JitKind::Array),
             ("objrs", JitKind::Array),
             ("objo", JitKind::Dictionary),
+            ("objdn", JitKind::Dictionary),
+            ("objdb", JitKind::Dictionary),
+            ("objds", JitKind::Dictionary),
         ]
         .into_iter()
         .find_map(|(prefix, kind)| token.strip_prefix(prefix).map(|offset| (kind, offset)))
