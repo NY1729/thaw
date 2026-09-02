@@ -7388,24 +7388,53 @@ fn jit_export(
             }
             Stmt::For(statement)
                 if !rest.is_empty()
-                    && !matches!(statement.init.as_ref(), Some(VarDeclOrExpr::VarDecl(_)))
                     && contains_aggregate_return(statement.body.as_ref()) =>
             {
-                if let Some(VarDeclOrExpr::Expr(initializer)) = statement.init.as_ref() {
-                    let control_kinds = helper_control_kinds(kinds, locals)?;
-                    encode_loop_expression(
+                let mut loop_locals = locals.clone();
+                let mut loop_mutable = mutable.clone();
+                let mut loop_kinds = kinds.clone();
+                match statement.init.as_ref() {
+                    Some(VarDeclOrExpr::Expr(initializer)) => encode_loop_expression(
                         initializer.as_ref(),
                         parameters,
-                        locals,
-                        mutable,
-                        &control_kinds,
+                        &loop_locals,
+                        &loop_mutable,
+                        &loop_kinds,
                         context,
                         output,
-                    )?;
+                    )?,
+                    Some(VarDeclOrExpr::VarDecl(declaration)) => {
+                        for declarator in &declaration.decls {
+                            let Pat::Ident(name) = &declarator.name else {
+                                return None;
+                            };
+                            encode_loop_declaration(
+                                LocalStep::Declare {
+                                    name: &name.id,
+                                    initializer: declarator.init.as_deref()?,
+                                    mutable: declaration.kind != VarDeclKind::Const,
+                                },
+                                None,
+                                parameters,
+                                &mut loop_locals,
+                                &mut loop_mutable,
+                                &mut loop_kinds,
+                                context,
+                                output,
+                            )?;
+                        }
+                    }
+                    None => {}
                 }
                 let mut loop_output = vec!["resultstart".into(), "loop".into()];
                 if let Some(test) = statement.test.as_deref() {
-                    encode_condition(test, parameters, locals, context, &mut loop_output)?;
+                    encode_condition(
+                        test,
+                        parameters,
+                        &loop_locals,
+                        context,
+                        &mut loop_output,
+                    )?;
                 } else {
                     loop_output.extend([
                         format!("c{:016x}", 1.0f64.to_bits()),
@@ -7413,17 +7442,17 @@ fn jit_export(
                     ]);
                 }
                 loop_output.push("while".into());
-                let control_kinds = helper_control_kinds(kinds, locals)?;
+                let control_kinds = helper_control_kinds(&loop_kinds, &loop_locals)?;
                 let mut early_kinds = None;
                 let mut early_values = None;
                 encode_aggregate_return_effects(
                     statement.body.as_ref(),
                     requested,
                     parameters,
-                    locals,
-                    mutable,
+                    &loop_locals,
+                    &loop_mutable,
                     &control_kinds,
-                    kinds,
+                    &loop_kinds,
                     context,
                     &mut early_kinds,
                     &mut early_values,
@@ -7436,15 +7465,15 @@ fn jit_export(
                     encode_loop_expression(
                         update,
                         parameters,
-                        locals,
-                        mutable,
+                        &loop_locals,
+                        &loop_mutable,
                         &control_kinds,
                         context,
                         &mut loop_output,
                     )?;
                 }
                 loop_output.push("loopend".into());
-                let mut fallback_kinds = kinds.clone();
+                let mut fallback_kinds = loop_kinds.clone();
                 let mut fallback_values = std::collections::HashMap::new();
                 let mut fallback_output = Vec::new();
                 materialize_helper_returns(
@@ -7464,6 +7493,10 @@ fn jit_export(
                 output.extend(loop_output);
                 output.extend(fallback_output);
                 output.push("resultend".into());
+                for name in loop_kinds.keys().filter(|name| !kinds.contains_key(*name)) {
+                    let kind = fallback_kinds.remove(name)?;
+                    fallback_kinds.insert(format!("\0for-result-{}", fallback_kinds.len()), kind);
+                }
                 *kinds = fallback_kinds;
                 *materialized = fallback_values;
                 Some(())
