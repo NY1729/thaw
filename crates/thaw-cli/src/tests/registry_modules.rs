@@ -1450,6 +1450,162 @@ fn tuple_union_array_length_changes_use_jit_without_quickjs() {
 }
 
 #[test]
+fn tuple_union_array_predicates_use_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function someAbove(value: number[] | [number, number], threshold: number): boolean;\n",
+        "export declare function everyPositive(value: number[] | [number, number]): boolean;\n",
+        "export declare function findAbove(value: number[] | [number, number], threshold: number): number;\n",
+        "export declare function findIndexAbove(value: number[] | [number, number], threshold: number): number;\n",
+        "export declare function findLastBelow(value: number[] | [number, number], threshold: number): number;\n",
+        "export declare function findLastIndexBelow(value: number[] | [number, number], threshold: number): number;\n",
+        "export declare function filterAbove(value: number[] | [number, number], threshold: number): number[];\n",
+    );
+    let source = concat!(
+        "module.exports.someAbove = (value, threshold) => Array.isArray(value) ? value.some(item => item > threshold) : false; ",
+        "module.exports.everyPositive = value => Array.isArray(value) ? value.every(item => item > 0) : false; ",
+        "module.exports.findAbove = (value, threshold) => Array.isArray(value) ? value.find(item => item > threshold) ?? -1 : -1; ",
+        "module.exports.findIndexAbove = (value, threshold) => Array.isArray(value) ? value.findIndex(item => item > threshold) : -1; ",
+        "module.exports.findLastBelow = (value, threshold) => Array.isArray(value) ? value.findLast(item => item < threshold) ?? -1 : -1; ",
+        "module.exports.findLastIndexBelow = (value, threshold) => Array.isArray(value) ? value.findLastIndex(item => item < threshold) : -1; ",
+        "module.exports.filterAbove = (value, threshold) => Array.isArray(value) ? value.filter(item => item > threshold) : [0];",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in [
+        "someAbove",
+        "everyPositive",
+        "findAbove",
+        "findIndexAbove",
+        "findLastBelow",
+        "findLastIndexBelow",
+        "filterAbove",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-predicates-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union-predicates");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { everyPositive, filterAbove, findAbove, findIndexAbove, findLastBelow, findLastIndexBelow, someAbove } from 'jit-tuple-union-predicates';\n",
+            "function main(): void {\n",
+            "  console.log(someAbove([1, 2, 3], 2));\n",
+            "  console.log(someAbove([5, 6] as [number, number], 6));\n",
+            "  console.log(everyPositive([-1, 2]));\n",
+            "  console.log(everyPositive([5, 6] as [number, number]));\n",
+            "  console.log(findAbove([1, 2, 3], 1));\n",
+            "  console.log(findAbove([5, 6] as [number, number], 6));\n",
+            "  console.log(findIndexAbove([1, 2, 3], 1));\n",
+            "  console.log(findIndexAbove([5, 6] as [number, number], 5));\n",
+            "  console.log(findLastBelow([1, 4, 2], 4));\n",
+            "  console.log(findLastBelow([5, 6] as [number, number], 6));\n",
+            "  console.log(findLastIndexBelow([1, 4, 2], 4));\n",
+            "  console.log(findLastIndexBelow([5, 6] as [number, number], 6));\n",
+            "  console.log(filterAbove([1, 2, 3], 1).join(','));\n",
+            "  console.log(filterAbove([5, 6] as [number, number], 5).join(','));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nfalse\nfalse\ntrue\n2\n-1\n1\n1\n2\n5\n2\n0\n2,3\n6\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tuple_union_array_transforms_use_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function scale(value: number[] | [number, number], factor: number): number[];\n",
+        "export declare function sum(value: number[] | [number, number], initial: number): number;\n",
+        "export declare function reverseDigits(value: number[] | [number, number]): number;\n",
+    );
+    let source = concat!(
+        "module.exports.scale = (value, factor) => Array.isArray(value) ? value.map(item => item * factor) : [0]; ",
+        "module.exports.sum = (value, initial) => Array.isArray(value) ? value.reduce((total, item) => total + item, initial) : initial; ",
+        "module.exports.reverseDigits = value => Array.isArray(value) ? value.reduceRight((total, item) => total * 10 + item, 0) : 0;",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in ["scale", "sum", "reverseDigits"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-transforms-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union-transforms");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { reverseDigits, scale, sum } from 'jit-tuple-union-transforms';\n",
+            "function main(): void {\n",
+            "  console.log(scale([1, 2, 3], 3).join(','));\n",
+            "  console.log(scale([5, 6] as [number, number], 2).join(','));\n",
+            "  console.log(sum([1, 2, 3], 10));\n",
+            "  console.log(sum([5, 6] as [number, number], 10));\n",
+            "  console.log(reverseDigits([1, 2, 3]));\n",
+            "  console.log(reverseDigits([5, 6] as [number, number]));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "3,6,9\n10,12\n16\n21\n321\n65\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
