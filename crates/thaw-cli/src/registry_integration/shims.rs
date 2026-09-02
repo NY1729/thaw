@@ -2813,7 +2813,7 @@ fn jit_export(
                 }
                 let prefix = array_prefix(&encoded)
                     .or_else(|| dynamic_array.then_some("dynamic"))?;
-                if dynamic_array && !matches!(method, "join" | "toString" | "slice") {
+                if dynamic_array && !matches!(method, "join" | "toString" | "slice" | "concat") {
                     return None;
                 }
                 let encoded_receiver = encoded.clone();
@@ -3214,7 +3214,34 @@ fn jit_export(
                     if call.args.is_empty() {
                         output.push("c0000000000000000".into());
                         output.push("c7ff0000000000000".into());
-                        output.push("arrayslice".into());
+                        output.push(
+                            if dynamic_array {
+                                "dynarrayslice"
+                            } else {
+                                "arrayslice"
+                            }
+                            .into(),
+                        );
+                    }
+                    if dynamic_array {
+                        for argument in &call.args {
+                            let mut encoded_argument = Vec::new();
+                            encode_expression(
+                                argument.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut encoded_argument,
+                            )?;
+                            if encoded_argument.pop().as_deref() != Some("untagarray")
+                                || jit_expression_kind(&encoded_argument)?.0 != JitKind::Dynamic
+                            {
+                                return None;
+                            }
+                            output.extend(encoded_argument);
+                            output.push("dynarrayconcat".into());
+                        }
+                        return Some(());
                     }
                     let scalar_kind = match prefix {
                         "rn" => JitKind::Number,
@@ -12208,11 +12235,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             } else {
                 JitKind::Array
             });
-        } else if token == "arrayconcat" {
-            if stack.pop()? != JitKind::Array || stack.pop()? != JitKind::Array {
+        } else if matches!(token.as_str(), "arrayconcat" | "dynarrayconcat") {
+            let expected = if token == "dynarrayconcat" {
+                JitKind::Dynamic
+            } else {
+                JitKind::Array
+            };
+            if stack.pop()? != expected || stack.pop()? != expected {
                 return None;
             }
-            stack.push(JitKind::Array);
+            stack.push(expected);
         } else if token == "captureappend" {
             stack.pop()?;
             if stack.pop()? != JitKind::Array {
