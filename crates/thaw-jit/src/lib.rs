@@ -3854,6 +3854,8 @@ aggregate_tagger!(tag_number_dictionary, DYNAMIC_NUMBER_DICTIONARY_TAG);
 aggregate_tagger!(tag_boolean_dictionary, DYNAMIC_BOOLEAN_DICTIONARY_TAG);
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 aggregate_tagger!(tag_string_dictionary, DYNAMIC_STRING_DICTIONARY_TAG);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+aggregate_tagger!(tag_object, DYNAMIC_OBJECT_TAG);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn dynamic_from_parts(tag: f64, payload: f64) -> f64 {
@@ -4082,6 +4084,63 @@ extern "C" fn object_string_field(object: f64, offset: f64) -> f64 {
     }
     f64::from_bits(unsafe { pointer.add(offset as usize).cast::<usize>().read() } as u64)
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn fixed_object_new(size: f64) -> f64 {
+    if !size.is_finite() || size <= 0.0 || size.fract() != 0.0 {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let Some(output) = ARENA_ALLOC.with(|allocator| {
+        allocator
+            .get()
+            .map(|allocate| unsafe { allocate(size as usize, 8) })
+    }) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { output.write_bytes(0, size as usize) };
+    f64::from_bits(output as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn fixed_object_set(object: f64, value: f64, offset: f64, kind: u8) -> f64 {
+    let pointer = object.to_bits() as usize as *mut u8;
+    if pointer.is_null() || !offset.is_finite() || offset < 0.0 || offset.fract() != 0.0 {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe {
+        let field = pointer.add(offset as usize);
+        match kind {
+            0 => field.cast::<f64>().write(value),
+            1 => field.write(u8::from(value != 0.0)),
+            2 => field.cast::<usize>().write(value.to_bits() as usize),
+            _ => unreachable!(),
+        }
+    }
+    object
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! fixed_object_setter {
+    ($name:ident, $kind:expr) => {
+        extern "C" fn $name(object: f64, value: f64, offset: f64) -> f64 {
+            fixed_object_set(object, value, offset, $kind)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_object_setter!(fixed_object_set_number, 0);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_object_setter!(fixed_object_set_boolean, 1);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_object_setter!(fixed_object_set_string, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn untag_dynamic(value: f64, expected: u64) -> f64 {
@@ -5059,6 +5118,8 @@ enum NumericValue {
     UntagDictionary,
     UntagObject,
     ObjectField(u8, u16),
+    FixedObjectNew(u16),
+    FixedObjectSet(u8, u16),
     ExcludeNumber,
     ExcludeString,
     ExcludeBoolean,
@@ -5426,6 +5487,7 @@ impl NumericProgram {
                     "tagdn" => Some(NumericValue::TagAggregate(3)),
                     "tagdb" => Some(NumericValue::TagAggregate(4)),
                     "tagds" => Some(NumericValue::TagAggregate(5)),
+                    "tagobject" => Some(NumericValue::TagAggregate(6)),
                     "tagkind" => Some(NumericValue::DynamicTag),
                     "untagnum" => Some(NumericValue::UntagNumber),
                     "untagstr" => Some(NumericValue::UntagString),
@@ -6130,6 +6192,28 @@ impl NumericProgram {
                             .map(NumericValue::DynamicArgument)
                         })
                         .or_else(|| {
+                            value
+                                .strip_prefix("objnew")?
+                                .parse::<u16>()
+                                .ok()
+                                .filter(|size| *size > 0)
+                                .map(NumericValue::FixedObjectNew)
+                        })
+                        .or_else(|| {
+                            let encoded = value.strip_prefix("objset")?;
+                            let (kind, offset) = encoded.split_at(1);
+                            let kind = match kind {
+                                "n" => 0,
+                                "b" => 1,
+                                "s" => 2,
+                                _ => return None,
+                            };
+                            offset
+                                .parse::<u16>()
+                                .ok()
+                                .map(|offset| NumericValue::FixedObjectSet(kind, offset))
+                        })
+                        .or_else(|| {
                             let encoded = value.strip_prefix("obj")?;
                             let (kind, offset) = encoded.split_at(1);
                             let kind = match kind {
@@ -6553,6 +6637,7 @@ impl NumericProgram {
                             tag_number_dictionary,
                             tag_boolean_dictionary,
                             tag_string_dictionary,
+                            tag_object,
                         ][*kind as usize],
                         NumericValue::DynamicTag => dynamic_tag,
                         NumericValue::UntagNumber => untag_number,
@@ -6587,6 +6672,33 @@ impl NumericProgram {
                         object_string_field,
                     ][usize::from(*kind)];
                     emit_binary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::FixedObjectNew(size) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    let size = f64::from(*size);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&size.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_unary_call(&mut code, fixed_object_new as *const () as u64, depth);
+                    depth += 1;
+                }
+                NumericValue::FixedObjectSet(kind, offset) => {
+                    if depth < 2 || depth == 8 {
+                        return None;
+                    }
+                    let offset = f64::from(*offset);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&offset.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    let function = [
+                        fixed_object_set_number,
+                        fixed_object_set_boolean,
+                        fixed_object_set_string,
+                    ][usize::from(*kind)];
+                    emit_ternary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
                 }
                 NumericValue::ExcludeNumber
                 | NumericValue::ExcludeString
