@@ -1895,6 +1895,48 @@ fn mixed_array_comparison_scans_use_jit_without_quickjs() {
 }
 
 #[test]
+fn mixed_array_conversion_maps_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-mixed-array-map-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-mixed-array-map");
+    std::fs::create_dir_all(&package).unwrap();
+    let union = "number[] | string[] | boolean[] | string";
+    std::fs::write(
+        package.join("package.d.ts"),
+        format!(
+            "export declare function numbers(value: {union}): number[];\nexport declare function booleans(value: {union}): boolean[];\nexport declare function strings(value: {union}): string[];\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function numbers(value) { if (Array.isArray(value)) return value.map(Number); return []; } function booleans(value) { if (Array.isArray(value)) return value.map(Boolean); return []; } function strings(value) { if (Array.isArray(value)) return value.map(String); return []; } module.exports = { numbers, booleans, strings };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { numbers, booleans, strings } from 'jit-mixed-array-map'; function main(): void { console.log(numbers([2, -1])); console.log(numbers(['2', ''])); console.log(numbers([true, false])); console.log(booleans([0, 2])); console.log(booleans(['', 'x'])); console.log(booleans([false, true])); console.log(strings([2, -1])); console.log(strings(['a', ''])); console.log(strings([true, false])); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[2,-1]\n[2,0]\n[1,0]\n[false,true]\n[false,true]\n[false,true]\n[\"2\",\"-1\"]\n[\"a\",\"\"]\n[\"true\",\"false\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",

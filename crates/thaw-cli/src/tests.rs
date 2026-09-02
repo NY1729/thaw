@@ -4305,6 +4305,21 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         );
         assert!(jit_numeric_export(&source, method, false, &compared).is_some());
     }
+    for (callback, element) in [
+        ("Number", thaw_hir::HirType::F64),
+        ("Boolean", thaw_hir::HirType::Bool),
+        ("String", thaw_hir::HirType::Str),
+    ] {
+        let map = thaw_bridge::DtsFunction {
+            name: format!("map{callback}"),
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(element))),
+            ..function.clone()
+        };
+        let source = format!(
+            "function map{callback}(value) {{ if (Array.isArray(value)) return value.map({callback}); return []; }} module.exports = {{ map{callback} }};"
+        );
+        assert!(jit_numeric_export(&source, &map.name, false, &map).is_some());
+    }
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],
