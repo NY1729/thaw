@@ -2828,6 +2828,8 @@ fn jit_export(
                             | "reverse"
                             | "toSorted"
                             | "sort"
+                            | "fill"
+                            | "copyWithin"
                     )
                 {
                     return None;
@@ -3124,6 +3126,7 @@ fn jit_export(
                         "rn" => JitKind::Number,
                         "rs" => JitKind::String,
                         "rb" => JitKind::Boolean,
+                        "dynamic" => JitKind::Dynamic,
                         _ => return None,
                     };
                     let arguments: Vec<_> = if method == "unshift" {
@@ -3351,6 +3354,7 @@ fn jit_export(
                         "rn" => JitKind::Number,
                         "rs" => JitKind::String,
                         "rb" => JitKind::Boolean,
+                        "dynamic" => JitKind::Dynamic,
                         _ => return None,
                     };
                     if jit_expression_kind(&encoded)?.0 != expected {
@@ -3372,7 +3376,11 @@ fn jit_export(
                         }
                         _ => unreachable!(),
                     }
-                    output.push(format!("{prefix}fill"));
+                    output.push(if dynamic_array {
+                        "dynarrayfill".into()
+                    } else {
+                        format!("{prefix}fill")
+                    });
                 } else if method == "copyWithin" {
                     match call.args.as_slice() {
                         [target, start] => {
@@ -3387,7 +3395,11 @@ fn jit_export(
                         }
                         _ => return None,
                     }
-                    output.push("arraycopywithin".into());
+                    output.push(if dynamic_array {
+                        "dynarraycopywithin".into()
+                    } else {
+                        "arraycopywithin".into()
+                    });
                 } else if method == "with" {
                     let [index, value] = call.args.as_slice() else {
                         return None;
@@ -11871,32 +11883,51 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Dictionary);
-        } else if matches!(token.as_str(), "rnfill" | "rsfill" | "rbfill") {
+        } else if matches!(
+            token.as_str(),
+            "rnfill" | "rsfill" | "rbfill" | "dynarrayfill"
+        ) {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Number {
                 return None;
             }
-            let value = stack.pop()?;
-            if stack.pop()? != JitKind::Array
-                || value
-                    != match &token[..2] {
-                        "rn" => JitKind::Number,
-                        "rs" => JitKind::String,
-                        "rb" => JitKind::Boolean,
-                        _ => return None,
+            if token == "dynarrayfill" {
+                if stack.pop()? != JitKind::Dynamic || stack.pop()? != JitKind::Dynamic {
+                    return None;
+                }
+                stack.push(JitKind::Dynamic);
+            } else {
+                let value = stack.pop()?;
+                if stack.pop()? != JitKind::Array
+                    || value
+                        != match &token[..2] {
+                            "rn" => JitKind::Number,
+                            "rs" => JitKind::String,
+                            "rb" => JitKind::Boolean,
+                            _ => return None,
+                        }
+                {
+                    return None;
+                }
+                stack.push(JitKind::Array);
+            }
+        } else if matches!(token.as_str(), "arraycopywithin" | "dynarraycopywithin") {
+            if stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()? != JitKind::Number
+                || stack.pop()?
+                    != if token == "dynarraycopywithin" {
+                        JitKind::Dynamic
+                    } else {
+                        JitKind::Array
                     }
             {
                 return None;
             }
-            stack.push(JitKind::Array);
-        } else if token == "arraycopywithin" {
-            if stack.pop()? != JitKind::Number
-                || stack.pop()? != JitKind::Number
-                || stack.pop()? != JitKind::Number
-                || stack.pop()? != JitKind::Array
-            {
-                return None;
-            }
-            stack.push(JitKind::Array);
+            stack.push(if token == "dynarraycopywithin" {
+                JitKind::Dynamic
+            } else {
+                JitKind::Array
+            });
         } else if matches!(token.as_str(), "arraysplice" | "arraytospliced") {
             if stack.pop()? != JitKind::Array
                 || stack.pop()? != JitKind::Number

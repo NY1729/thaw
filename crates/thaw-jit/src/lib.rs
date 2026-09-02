@@ -2349,6 +2349,36 @@ array_fill_fn!(string_array_fill, 1);
 array_fill_fn!(bool_array_fill, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_fill(array: f64, value: f64, start: f64, end: f64) -> f64 {
+    let (Some(array), Some(value)) = (
+        dynamic_primitive(array, None),
+        dynamic_primitive(value, None),
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let operation = match (array.tag, value.tag) {
+        (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG) => 0,
+        (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG) => 1,
+        (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG) => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    dynamic_array_result(
+        array.tag,
+        array_fill(
+            operation,
+            f64::from_bits(array.payload),
+            f64::from_bits(value.payload),
+            start,
+            end,
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_copy_within(array: f64, target: f64, start: f64, end: f64) -> f64 {
     let (Some(copy), Some((data, _))) = (ARRAY_COPY_WITHIN.with(Cell::get), unsafe {
         array_data(array)
@@ -2363,6 +2393,25 @@ extern "C" fn array_copy_within(array: f64, target: f64, start: f64, end: f64) -
     } else {
         array_result(result)
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_copy_within(array: f64, target: f64, start: f64, end: f64) -> f64 {
+    let Some(array) = dynamic_primitive(array, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if !matches!(
+        array.tag,
+        DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+    ) {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    dynamic_array_result(
+        array.tag,
+        array_copy_within(f64::from_bits(array.payload), target, start, end),
+    )
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -4260,7 +4309,9 @@ enum NumericValue {
     NumberArrayFill,
     StringArrayFill,
     BoolArrayFill,
+    DynamicArrayFill,
     ArrayCopyWithin,
+    DynamicArrayCopyWithin,
     NumberArrayPush,
     StringArrayPush,
     BoolArrayPush,
@@ -4618,7 +4669,9 @@ impl NumericProgram {
                     "rnfill" => Some(NumericValue::NumberArrayFill),
                     "rsfill" => Some(NumericValue::StringArrayFill),
                     "rbfill" => Some(NumericValue::BoolArrayFill),
+                    "dynarrayfill" => Some(NumericValue::DynamicArrayFill),
                     "arraycopywithin" => Some(NumericValue::ArrayCopyWithin),
+                    "dynarraycopywithin" => Some(NumericValue::DynamicArrayCopyWithin),
                     "arraysplice" => Some(NumericValue::ArraySplice),
                     "arraytospliced" => Some(NumericValue::ArrayToSpliced),
                     "rnpush" => Some(NumericValue::NumberArrayPush),
@@ -6188,7 +6241,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArrayFill
                 | NumericValue::StringArrayFill
-                | NumericValue::BoolArrayFill => {
+                | NumericValue::BoolArrayFill
+                | NumericValue::DynamicArrayFill => {
                     if depth < 4 {
                         return None;
                     }
@@ -6196,20 +6250,22 @@ impl NumericProgram {
                         NumericValue::NumberArrayFill => number_array_fill,
                         NumericValue::StringArrayFill => string_array_fill,
                         NumericValue::BoolArrayFill => bool_array_fill,
+                        NumericValue::DynamicArrayFill => dynamic_array_fill,
                         _ => unreachable!(),
                     };
                     emit_quaternary_call(&mut code, function as *const () as u64, depth - 4);
                     depth -= 3;
                 }
-                NumericValue::ArrayCopyWithin => {
+                NumericValue::ArrayCopyWithin | NumericValue::DynamicArrayCopyWithin => {
                     if depth < 4 {
                         return None;
                     }
-                    emit_quaternary_call(
-                        &mut code,
-                        array_copy_within as *const () as u64,
-                        depth - 4,
-                    );
+                    let function = if *value == NumericValue::DynamicArrayCopyWithin {
+                        dynamic_array_copy_within
+                    } else {
+                        array_copy_within
+                    };
+                    emit_quaternary_call(&mut code, function as *const () as u64, depth - 4);
                     depth -= 3;
                 }
                 NumericValue::ArraySplice => {

@@ -1760,6 +1760,52 @@ fn mixed_array_default_sort_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn mixed_array_range_updates_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-mixed-array-range-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-mixed-array-range");
+    std::fs::create_dir_all(&package).unwrap();
+    let union = "number[] | string[] | boolean[] | string";
+    std::fs::write(
+        package.join("package.d.ts"),
+        format!(
+            "export declare function fill(value: {union}, replacement: number | string | boolean): {union};\nexport declare function copy(value: {union}): {union};\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function fill(value, replacement) { if (Array.isArray(value)) return value.fill(replacement, 1); return value; } function copy(value) { if (Array.isArray(value)) return value.copyWithin(0, 1); return value; } module.exports = { fill, copy };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { fill, copy } from 'jit-mixed-array-range'; function main(): void { console.log(fill([1, 2, 3], 9)); console.log(fill(['a', 'b', 'c'], 'x')); console.log(fill([true, false, false], true)); console.log(copy([1, 2, 3])); console.log(copy(['a', 'b', 'c'])); console.log(copy([true, false, false])); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[1,9,9]\n[\"a\",\"x\",\"x\"]\n[true,true,true]\n[2,3,3]\n[\"b\",\"c\",\"c\"]\n[false,false,false]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
