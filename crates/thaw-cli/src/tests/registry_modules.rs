@@ -1585,6 +1585,49 @@ fn aggregate_unions_round_trip_through_jit_without_quickjs() {
 }
 
 #[test]
+fn array_predicate_narrows_dynamic_union_in_jit() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-narrowing-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-array-narrowing");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function size(value: number[] | string): number;\nexport declare function first(value: number[] | string): string;\nexport declare function inverted(value: number[] | string): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function size(value) { if (Array.isArray(value)) return value.length; return value.length; } function first(value) { if (Array.isArray(value)) return String(value[0]); return value.toUpperCase(); } function inverted(value) { if (!Array.isArray(value)) return value.length; return value.length; } module.exports = { size, first, inverted };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { size, first, inverted } from 'jit-array-narrowing'; function main(): void { console.log(size([1, 2, 3])); console.log(size('word')); console.log(first([7, 8])); console.log(first('word')); console.log(inverted([1, 2])); console.log(inverted('word')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "3\n4\n7\nWORD\n2\n4\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
