@@ -2615,6 +2615,10 @@ Single-typed primitive throws can also join a normal fixed-aggregate return with
 a catch-side fixed-aggregate return. The JIT exception edge preserves a typed
 placeholder plus every aggregate leaf, allowing the catch parameter to feed the
 returned object without loading QuickJS.
+An expression-only `finally` block may run after that aggregate catch join as
+well. Its side effects execute on both the normal and caught paths while the
+already selected primitive return leaves remain intact; mutations through a
+passed primitive-array handle remain visible to the caller.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,

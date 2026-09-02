@@ -7267,7 +7267,12 @@ fn jit_export(
             Stmt::Try(statement)
                 if rest.is_empty()
                     && statement.handler.is_some()
-                    && statement.finalizer.is_none() =>
+                    && statement.finalizer.as_ref().is_none_or(|finalizer| {
+                        finalizer
+                            .stmts
+                            .iter()
+                            .all(|statement| matches!(statement, Stmt::Expr(_)))
+                    }) =>
             {
                 let handler = statement.handler.as_ref()?;
                 let (Stmt::Return(returned), control) = statement.block.stmts.split_last()? else {
@@ -7360,6 +7365,18 @@ fn jit_export(
                 }
                 output.extend(catch_output);
                 output.push("tryend".into());
+                if let Some(finalizer) = &statement.finalizer {
+                    let control_kinds = helper_control_kinds(&normal_kinds, locals)?;
+                    encode_loop_effects(
+                        &Stmt::Block(finalizer.clone()),
+                        parameters,
+                        locals,
+                        mutable,
+                        (&control_kinds, root_loop_control(), &[]),
+                        context,
+                        output,
+                    )?;
+                }
                 *kinds = normal_kinds;
                 *materialized = normal_values;
                 Some(())
