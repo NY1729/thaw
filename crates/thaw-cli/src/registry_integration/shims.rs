@@ -302,9 +302,28 @@ fn jit_export(
                         _ => return None,
                     }),
                     thaw_hir::HirType::Tuple(_) => Some("objt"),
-                    thaw_hir::HirType::Optional(payload)
-                    | thaw_hir::HirType::Nullable(payload) => Some(match payload.as_ref() {
+                    thaw_hir::HirType::Optional(payload) => Some(match payload.as_ref() {
                         thaw_hir::HirType::F64 => "objoptn",
+                        thaw_hir::HirType::Bool => "objoptb",
+                        thaw_hir::HirType::Str => "objopts",
+                        thaw_hir::HirType::Object(_) => "objopto",
+                        thaw_hir::HirType::Tuple(_) => "objoptt",
+                        thaw_hir::HirType::Array(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "objoptrn",
+                            thaw_hir::HirType::Bool => "objoptrb",
+                            thaw_hir::HirType::Str => "objoptrs",
+                            _ => return None,
+                        },
+                        thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                            thaw_hir::HirType::F64 => "objoptdn",
+                            thaw_hir::HirType::Bool => "objoptdb",
+                            thaw_hir::HirType::Str => "objoptds",
+                            _ => return None,
+                        },
+                        _ => return None,
+                    }),
+                    thaw_hir::HirType::Nullable(payload) => Some(match payload.as_ref() {
+                        thaw_hir::HirType::F64 => "objnullablen",
                         thaw_hir::HirType::Bool => "objoptb",
                         thaw_hir::HirType::Str => "objopts",
                         thaw_hir::HirType::Object(_) => "objopto",
@@ -3053,6 +3072,52 @@ fn jit_export(
                         .cloned()
                         .or_else(|| parameters.get(&field).map(|value| vec![value.clone()]))?;
                     let (getter, receiver) = operation.split_last()?;
+                    if assignment != AssignOp::Assign {
+                        if let Some((semantic, offset)) = getter
+                            .strip_prefix("objoptn")
+                            .map(|offset| ('o', offset))
+                            .or_else(|| {
+                                getter
+                                    .strip_prefix("objnullablen")
+                                    .map(|offset| ('l', offset))
+                            })
+                            .or_else(|| {
+                                getter.strip_prefix("objnulln").map(|offset| ('n', offset))
+                            })
+                        {
+                            let operation = match assignment {
+                                AssignOp::AddAssign => 'a',
+                                AssignOp::SubAssign => 's',
+                                AssignOp::MulAssign => 'm',
+                                AssignOp::DivAssign => 'd',
+                                AssignOp::ModAssign => 'r',
+                                AssignOp::LShiftAssign => 'l',
+                                AssignOp::RShiftAssign => 'h',
+                                AssignOp::ZeroFillRShiftAssign => 'u',
+                                AssignOp::BitOrAssign => 'o',
+                                AssignOp::BitXorAssign => 'x',
+                                AssignOp::BitAndAssign => 'b',
+                                AssignOp::ExpAssign => 'p',
+                                AssignOp::Assign
+                                | AssignOp::AndAssign
+                                | AssignOp::OrAssign
+                                | AssignOp::NullishAssign => return None,
+                            };
+                            let offset = offset.parse::<u16>().ok()?;
+                            let mut encoded = Vec::new();
+                            encode_expression(
+                                value,
+                                parameters,
+                                locals,
+                                context,
+                                &mut encoded,
+                            )?;
+                            let mut output = receiver.to_vec();
+                            append_number(encoded, &mut output)?;
+                            output.push(format!("objca{semantic}{operation}{offset}"));
+                            return Some(output);
+                        }
+                    }
                     let (prefix, expected, offset, present_tag) = if getter
                         .strip_prefix("objn")
                         .is_some_and(|offset| offset.parse::<u16>().is_ok())
@@ -3087,6 +3152,11 @@ fn jit_export(
                         let (encoded, present_tag) = getter
                             .strip_prefix("objopt")
                             .map(|offset| (offset, 1u8))
+                            .or_else(|| {
+                                getter
+                                    .strip_prefix("objnullable")
+                                    .map(|offset| (offset, 1u8))
+                            })
                             .or_else(|| getter.strip_prefix("objnull").map(|offset| (offset, 0u8)))?;
                         let (kind, offset) = encoded.split_at(1);
                         let offset = offset.parse::<u16>().ok()?;
@@ -3220,6 +3290,26 @@ fn jit_export(
                         .cloned()
                         .or_else(|| parameters.get(&field).map(|value| vec![value.clone()]))?;
                     let (getter, receiver) = operation.split_last()?;
+                    if let Some((semantic, offset)) = getter
+                        .strip_prefix("objoptn")
+                        .map(|offset| ('o', offset))
+                        .or_else(|| {
+                            getter
+                                .strip_prefix("objnullablen")
+                                .map(|offset| ('l', offset))
+                        })
+                        .or_else(|| getter.strip_prefix("objnulln").map(|offset| ('n', offset)))
+                    {
+                        let offset = offset.parse::<u16>().ok()?;
+                        let operation = match update {
+                            UpdateOp::PlusPlus => 'i',
+                            UpdateOp::MinusMinus => 'd',
+                        };
+                        let result = if prefix { 'p' } else { 'o' };
+                        let mut output = receiver.to_vec();
+                        output.push(format!("objup{semantic}{operation}{result}{offset}"));
+                        return Some(output);
+                    }
                     let offset = getter.strip_prefix("objn")?.parse::<u16>().ok()?;
                     let mut output = receiver.to_vec();
                     output.extend(["dup".into(), getter.clone()]);
@@ -14752,6 +14842,21 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
+        } else if let Some(encoded) = token.strip_prefix("objca") {
+            if !matches!(stack.pop()?, JitKind::Number | JitKind::Boolean)
+                || stack.pop()? != JitKind::Dictionary
+                || !matches!(encoded.as_bytes(), [b'o' | b'l' | b'n', b'a' | b's' | b'm' | b'd' | b'r' | b'l' | b'h' | b'u' | b'o' | b'x' | b'b' | b'p', rest @ ..] if !rest.is_empty() && rest.iter().all(u8::is_ascii_digit))
+            {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if let Some(encoded) = token.strip_prefix("objup") {
+            if stack.pop()? != JitKind::Dictionary
+                || !matches!(encoded.as_bytes(), [b'o' | b'l' | b'n', b'i' | b'd', b'p' | b'o', rest @ ..] if !rest.is_empty() && rest.iter().all(u8::is_ascii_digit))
+            {
+                return None;
+            }
+            stack.push(JitKind::Number);
         } else if let Some(encoded) = token.strip_prefix("objset") {
             let (kind, offset) = encoded.split_at(1);
             let value = stack.pop()?;
@@ -14802,6 +14907,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             });
         } else if let Some((kind, offset)) = [
             ("objnulln", JitKind::Number),
+            ("objnullablen", JitKind::Number),
             ("objnullb", JitKind::Boolean),
             ("objnulls", JitKind::String),
             ("objnullo", JitKind::Dictionary),
