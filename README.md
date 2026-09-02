@@ -2618,6 +2618,10 @@ returned object without loading QuickJS.
 Homogeneous primitive arrays and primitive dictionaries use the same aggregate
 catch path. A typed empty native handle supplies the unreachable normal-side
 placeholder, while the catch branch reads the thrown collection directly.
+Heterogeneous throws use the existing native tag-and-payload pair at that same
+aggregate join. Catch branches can narrow the value with `typeof` or
+`Array.isArray`, read the selected primitive or collection, and return a common
+fixed aggregate without loading QuickJS.
 An expression-only `finally` block may run after that aggregate catch join as
 well. Its side effects execute on both the normal and caught paths while the
 already selected primitive return leaves remain intact; mutations through a
