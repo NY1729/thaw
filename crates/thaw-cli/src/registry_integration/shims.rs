@@ -155,7 +155,9 @@ fn jit_export(
             thaw_hir::HirType::Tuple(elements) => elements.iter().try_fold(0usize, |slots, ty| {
                 jit_parameter_slots(ty).map(|count| slots + count)
             }),
-            thaw_hir::HirType::Optional(payload) => {
+            thaw_hir::HirType::Optional(payload)
+            | thaw_hir::HirType::Nullable(payload)
+            | thaw_hir::HirType::Nullish(payload) => {
                 jit_parameter_slots(payload).map(|slots| slots + 1)
             }
             _ => None,
@@ -12691,6 +12693,52 @@ fn jit_export(
     let mut parameters = std::collections::HashMap::new();
     let mut slot = 0usize;
     for (parameter, ty, default, optional_parameter) in &bindings {
+        if let thaw_hir::HirType::Nullable(payload) | thaw_hir::HirType::Nullish(payload) = ty {
+            if default.is_some() || *optional_parameter {
+                return None;
+            }
+            let (prefix, null, absent) = match payload.as_ref() {
+                thaw_hir::HirType::F64 => ("a", "nulln", "absentn"),
+                thaw_hir::HirType::Bool => ("b", "nullb", "absentb"),
+                thaw_hir::HirType::Str => ("s", "nulls", "absents"),
+                _ => return None,
+            };
+            let tag = format!("a{slot}");
+            let value = format!("{prefix}{}", slot + 1);
+            let selected = if matches!(ty, thaw_hir::HirType::Nullable(_)) {
+                vec![
+                    tag,
+                    "asbool".into(),
+                    "if".into(),
+                    value,
+                    "else".into(),
+                    null.into(),
+                    "end".into(),
+                ]
+            } else {
+                vec![
+                    tag.clone(),
+                    "c0000000000000000".into(),
+                    "==".into(),
+                    "if".into(),
+                    value,
+                    "else".into(),
+                    tag,
+                    format!("c{:016x}", 1.0f64.to_bits()),
+                    "==".into(),
+                    "if".into(),
+                    null.into(),
+                    "else".into(),
+                    absent.into(),
+                    "end".into(),
+                    "end".into(),
+                ]
+            };
+            jit_expression_kind(&selected)?;
+            locals.insert(parameter.clone(), selected);
+            slot += 2;
+            continue;
+        }
         let (ty, optional_type) = match ty {
             thaw_hir::HirType::Optional(payload) => (payload.as_ref(), true),
             ty => (*ty, false),
@@ -13337,6 +13385,9 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
                 | "keepabsentn"
                 | "keepabsentb"
                 | "keepabsents"
+                | "nulln"
+                | "nullb"
+                | "nulls"
         )
     }) {
         return true;
@@ -15104,14 +15155,20 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "keepabsentn"
                 | "keepabsentb"
                 | "keepabsents"
+                | "nulln"
+                | "nullb"
+                | "nulls"
         ) {
             stack.push(match token.as_str() {
                 "absentn" => JitKind::Number,
                 "keepabsentn" => JitKind::Number,
+                "nulln" => JitKind::Number,
                 "absentb" => JitKind::Boolean,
                 "keepabsentb" => JitKind::Boolean,
+                "nullb" => JitKind::Boolean,
                 "absents" => JitKind::String,
                 "keepabsents" => JitKind::String,
+                "nulls" => JitKind::String,
                 "absentdyn" => JitKind::Dynamic,
                 "absenta" => JitKind::Array,
                 "absentd" => JitKind::Dictionary,
