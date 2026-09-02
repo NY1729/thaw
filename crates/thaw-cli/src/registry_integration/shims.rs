@@ -6615,6 +6615,7 @@ fn jit_export(
             bindings: Vec<(String, &'a Ident, Option<&'a Expr>)>,
             initializer: &'a Expr,
             mutable: bool,
+            assign_existing: bool,
         },
         Assign {
             name: &'a Ident,
@@ -6878,23 +6879,7 @@ fn jit_export(
                         Some(assignment.right.as_ref()),
                     ));
                 }
-                Pat::Object(pattern) => {
-                    for property in &pattern.props {
-                        match property {
-                            ObjectPatProp::Assign(property) => bindings.push((
-                                format!("{path}.{}", property.key.sym),
-                                &property.key.id,
-                                property.value.as_deref(),
-                            )),
-                            ObjectPatProp::KeyValue(property) => collect_object_bindings(
-                                property.value.as_ref(),
-                                &format!("{path}.{}", property_name(&property.key)?),
-                                bindings,
-                            )?,
-                            ObjectPatProp::Rest(_) => return None,
-                        }
-                    }
-                }
+                Pat::Object(pattern) => collect_object_pattern(pattern, path, bindings)?,
                 Pat::Array(pattern) => {
                     for (index, element) in pattern.elems.iter().enumerate() {
                         let Some(element) = element else {
@@ -6911,6 +6896,29 @@ fn jit_export(
                     }
                 }
                 _ => return None,
+            }
+            Some(())
+        }
+
+        fn collect_object_pattern<'a>(
+            pattern: &'a thaw_parser::ast::ObjectPat,
+            path: &str,
+            bindings: &mut Vec<(String, &'a Ident, Option<&'a Expr>)>,
+        ) -> Option<()> {
+            for property in &pattern.props {
+                match property {
+                    ObjectPatProp::Assign(property) => bindings.push((
+                        format!("{path}.{}", property.key.sym),
+                        &property.key.id,
+                        property.value.as_deref(),
+                    )),
+                    ObjectPatProp::KeyValue(property) => collect_object_bindings(
+                        property.value.as_ref(),
+                        &format!("{path}.{}", property_name(&property.key)?),
+                        bindings,
+                    )?,
+                    ObjectPatProp::Rest(_) => return None,
+                }
             }
             Some(())
         }
@@ -6951,13 +6959,19 @@ fn jit_export(
                                     bindings,
                                     initializer: declarator.init.as_deref()?,
                                     mutable: declaration.kind != VarDeclKind::Const,
+                                    assign_existing: false,
                                 });
                             }
                             _ => return None,
                         }
                     }
                 }
-                Some(Stmt::Expr(statement)) => match statement.expr.as_ref() {
+                Some(Stmt::Expr(statement)) => {
+                    let mut expression = statement.expr.as_ref();
+                    while let Expr::Paren(parenthesized) = expression {
+                        expression = parenthesized.expr.as_ref();
+                    }
+                    match expression {
                     Expr::Assign(assignment) => {
                         match &assignment.left {
                             AssignTarget::Simple(SimpleAssignTarget::Ident(name)) => {
@@ -6979,6 +6993,21 @@ fn jit_export(
                                     assign_existing: true,
                                 });
                             }
+                            AssignTarget::Pat(thaw_parser::ast::AssignTargetPat::Object(pattern))
+                                if assignment.op == AssignOp::Assign =>
+                            {
+                                let mut bindings = Vec::new();
+                                collect_object_pattern(pattern, "", &mut bindings)?;
+                                if bindings.is_empty() {
+                                    return None;
+                                }
+                                steps.push(LocalStep::DestructureObject {
+                                    bindings,
+                                    initializer: assignment.right.as_ref(),
+                                    mutable: true,
+                                    assign_existing: true,
+                                });
+                            }
                             _ => steps.push(LocalStep::Effect(statement.expr.as_ref())),
                         }
                     }
@@ -6993,7 +7022,8 @@ fn jit_export(
                         }
                     }
                     _ => steps.push(LocalStep::Effect(statement.expr.as_ref())),
-                },
+                }
+                }
                 _ => break,
             }
             offset += 1;
@@ -9718,11 +9748,17 @@ fn jit_export(
                     bindings,
                     initializer,
                     mutable: is_mutable,
+                    assign_existing,
                 } => {
                     let base = member_path(initializer)?;
                     if bindings.iter().any(|(_, name, _)| {
-                        parameters.contains_key(name.sym.as_ref())
-                            || locals.contains_key(name.sym.as_ref())
+                        if assign_existing {
+                            !mutable.contains(name.sym.as_ref())
+                                || runtime_kinds.contains_key(name.sym.as_ref())
+                        } else {
+                            parameters.contains_key(name.sym.as_ref())
+                                || locals.contains_key(name.sym.as_ref())
+                        }
                     }) {
                         return None;
                     }
@@ -9756,7 +9792,7 @@ fn jit_export(
                             value.push("end".into());
                         }
                         locals.insert(name.sym.to_string(), value);
-                        if is_mutable {
+                        if is_mutable && !assign_existing {
                             mutable.insert(name.sym.to_string());
                         }
                     }
