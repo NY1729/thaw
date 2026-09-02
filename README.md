@@ -2614,6 +2614,10 @@ Primitive-array `for...of` loops use the same early aggregate path. The native
 source handle is reused when it is already materialized, and the hidden index
 plus number, boolean, or string element slots remain stable across both return
 paths.
+Primitive-dictionary `for...in` loops can likewise return a fixed aggregate
+early. Their native source handle is reused, while an explicit typed key slot
+supports computed number, boolean, or string dictionary reads in the returned
+leaves before joining the post-loop fallback.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
