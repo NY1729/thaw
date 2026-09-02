@@ -4025,7 +4025,7 @@ extern "C" fn untag_array(value: f64) -> f64 {
         |dynamic| {
             if matches!(
                 dynamic.tag,
-                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG | DYNAMIC_TUPLE_TAG
             ) {
                 f64::from_bits(dynamic.payload)
             } else {
