@@ -2813,7 +2813,9 @@ fn jit_export(
                 }
                 let prefix = array_prefix(&encoded)
                     .or_else(|| dynamic_array.then_some("dynamic"))?;
-                if dynamic_array && !matches!(method, "join" | "toString" | "slice" | "concat") {
+                if dynamic_array
+                    && !matches!(method, "join" | "toString" | "slice" | "concat" | "at")
+                {
                     return None;
                 }
                 let encoded_receiver = encoded.clone();
@@ -3416,7 +3418,11 @@ fn jit_export(
                         )?,
                         _ => return None,
                     }
-                    output.push(format!("{prefix}at"));
+                    output.push(if dynamic_array {
+                        "dynarrayat".into()
+                    } else {
+                        format!("{prefix}at")
+                    });
                 } else {
                     let ([needle] | [needle, ..]) = call.args.as_slice() else {
                         return None;
@@ -12390,15 +12396,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Array);
         } else if matches!(
             token.as_str(),
-            "rnat" | "rbat" | "rsat" | "rnget" | "rbget" | "rsget"
+            "rnat" | "rbat" | "rsat" | "dynarrayat" | "rnget" | "rbget" | "rsget"
         ) {
-            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Array {
+            if stack.pop()? != JitKind::Number
+                || stack.pop()?
+                    != if token == "dynarrayat" {
+                        JitKind::Dynamic
+                    } else {
+                        JitKind::Array
+                    }
+            {
                 return None;
             }
             stack.push(match token.as_str() {
                 "rnat" | "rnget" => JitKind::Number,
                 "rbat" | "rbget" => JitKind::Boolean,
                 "rsat" | "rsget" => JitKind::String,
+                "dynarrayat" => JitKind::Dynamic,
                 _ => unreachable!(),
             });
         } else if matches!(
