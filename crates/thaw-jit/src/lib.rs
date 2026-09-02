@@ -22,6 +22,11 @@ const ARRAY_RESULT_TAG: u64 = 1;
 const DYNAMIC_NUMBER_TAG: u64 = 1;
 const DYNAMIC_STRING_TAG: u64 = 2;
 const DYNAMIC_BOOLEAN_TAG: u64 = 3;
+const DYNAMIC_NUMBER_ARRAY_TAG: u64 = 4;
+const DYNAMIC_BOOLEAN_ARRAY_TAG: u64 = 5;
+const DYNAMIC_STRING_ARRAY_TAG: u64 = 6;
+const DYNAMIC_NUMBER_DICTIONARY_TAG: u64 = 7;
+const DYNAMIC_STRING_DICTIONARY_TAG: u64 = 9;
 #[cfg(not(all(target_arch = "x86_64", target_family = "unix")))]
 static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -2774,10 +2779,7 @@ extern "C" fn tag_boolean(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn dynamic_from_parts(tag: f64, payload: f64) -> f64 {
     let tag = tag as u64;
-    if !matches!(
-        tag,
-        DYNAMIC_NUMBER_TAG | DYNAMIC_STRING_TAG | DYNAMIC_BOOLEAN_TAG
-    ) {
+    if !(DYNAMIC_NUMBER_TAG..=DYNAMIC_STRING_DICTIONARY_TAG).contains(&tag) {
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
     }
@@ -2791,12 +2793,10 @@ fn dynamic_primitive(value: f64, expected: Option<u64>) -> Option<&'static Dynam
         return None;
     }
     let dynamic = unsafe { pointer.as_ref() }?;
-    matches!(
-        dynamic.tag,
-        DYNAMIC_NUMBER_TAG | DYNAMIC_STRING_TAG | DYNAMIC_BOOLEAN_TAG
-    )
-    .then_some(dynamic)
-    .filter(|dynamic| expected.is_none_or(|tag| dynamic.tag == tag))
+    (DYNAMIC_NUMBER_TAG..=DYNAMIC_STRING_DICTIONARY_TAG)
+        .contains(&dynamic.tag)
+        .then_some(dynamic)
+        .filter(|dynamic| expected.is_none_or(|tag| dynamic.tag == tag))
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -2822,6 +2822,7 @@ extern "C" fn type_of_dynamic(value: f64) -> f64 {
                 DYNAMIC_NUMBER_TAG => c"number".as_ptr(),
                 DYNAMIC_STRING_TAG => c"string".as_ptr(),
                 DYNAMIC_BOOLEAN_TAG => c"boolean".as_ptr(),
+                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_DICTIONARY_TAG => c"object".as_ptr(),
                 _ => unreachable!(),
             } as usize as u64)
         },
@@ -2846,6 +2847,7 @@ extern "C" fn dynamic_to_boolean(value: f64) -> f64 {
                     .is_some_and(|value| *value != 0)
             }),
             DYNAMIC_BOOLEAN_TAG => f64::from(dynamic.payload != 0),
+            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_DICTIONARY_TAG => 1.0,
             _ => unreachable!(),
         },
     )
@@ -2914,6 +2916,24 @@ extern "C" fn dynamic_to_string(value: f64) -> f64 {
             DYNAMIC_NUMBER_TAG => number_to_string(f64::from_bits(dynamic.payload)),
             DYNAMIC_STRING_TAG => f64::from_bits(dynamic.payload),
             DYNAMIC_BOOLEAN_TAG => boolean_to_string(dynamic.payload as f64),
+            DYNAMIC_NUMBER_ARRAY_TAG => array_format(
+                0,
+                f64::from_bits(dynamic.payload),
+                f64::from_bits(c",".as_ptr() as usize as u64),
+            ),
+            DYNAMIC_BOOLEAN_ARRAY_TAG => array_format(
+                2,
+                f64::from_bits(dynamic.payload),
+                f64::from_bits(c",".as_ptr() as usize as u64),
+            ),
+            DYNAMIC_STRING_ARRAY_TAG => array_format(
+                1,
+                f64::from_bits(dynamic.payload),
+                f64::from_bits(c",".as_ptr() as usize as u64),
+            ),
+            DYNAMIC_NUMBER_DICTIONARY_TAG..=DYNAMIC_STRING_DICTIONARY_TAG => {
+                arena_string("[object Object]".into())
+            }
             _ => unreachable!(),
         },
     )
@@ -2945,6 +2965,9 @@ extern "C" fn dynamic_to_number(value: f64) -> f64 {
             DYNAMIC_NUMBER_TAG => f64::from_bits(dynamic.payload),
             DYNAMIC_STRING_TAG => string_to_number(f64::from_bits(dynamic.payload)),
             DYNAMIC_BOOLEAN_TAG => dynamic.payload as f64,
+            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_DICTIONARY_TAG => {
+                string_to_number(dynamic_to_string(value))
+            }
             _ => unreachable!(),
         },
     )
@@ -2958,7 +2981,9 @@ extern "C" fn dynamic_add(left: f64, right: f64) -> f64 {
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
     };
-    if left_value.tag == DYNAMIC_STRING_TAG || right_value.tag == DYNAMIC_STRING_TAG {
+    if !matches!(left_value.tag, DYNAMIC_NUMBER_TAG | DYNAMIC_BOOLEAN_TAG)
+        || !matches!(right_value.tag, DYNAMIC_NUMBER_TAG | DYNAMIC_BOOLEAN_TAG)
+    {
         let value = string_concat(dynamic_to_string(left), dynamic_to_string(right));
         arena_dynamic(DYNAMIC_STRING_TAG, value.to_bits())
     } else {
@@ -2990,21 +3015,27 @@ fn dynamic_compare(left: f64, right: f64, operation: u8) -> f64 {
                 ) != 0.0
             }
             DYNAMIC_BOOLEAN_TAG => left_value.payload == right_value.payload,
+            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_DICTIONARY_TAG => {
+                left_value.payload == right_value.payload
+            }
             _ => unreachable!(),
         }
     };
     let equal = || {
         strict_equal()
             || (left_value.tag != right_value.tag
+                && !(left_value.tag >= DYNAMIC_NUMBER_ARRAY_TAG
+                    && right_value.tag >= DYNAMIC_NUMBER_ARRAY_TAG)
                 && dynamic_to_number(left) == dynamic_to_number(right))
     };
     let result = match operation {
         0..=3 => {
-            if left_value.tag == DYNAMIC_STRING_TAG && right_value.tag == DYNAMIC_STRING_TAG {
-                let ordering = string_compare(
-                    f64::from_bits(left_value.payload),
-                    f64::from_bits(right_value.payload),
-                );
+            let left_string =
+                left_value.tag == DYNAMIC_STRING_TAG || left_value.tag >= DYNAMIC_NUMBER_ARRAY_TAG;
+            let right_string = right_value.tag == DYNAMIC_STRING_TAG
+                || right_value.tag >= DYNAMIC_NUMBER_ARRAY_TAG;
+            if left_string && right_string {
+                let ordering = string_compare(dynamic_to_string(left), dynamic_to_string(right));
                 match operation {
                     0 => ordering < 0.0,
                     1 => ordering <= 0.0,
@@ -4673,7 +4704,19 @@ impl NumericProgram {
                             let digits = encoded.bytes().take_while(u8::is_ascii_digit).count();
                             let (index, kinds) = encoded.split_at(digits);
                             (!kinds.is_empty()
-                                && kinds.bytes().all(|kind| matches!(kind, b'n' | b'b' | b's')))
+                                && kinds.bytes().all(|kind| {
+                                    matches!(
+                                        kind,
+                                        b'n' | b'b'
+                                            | b's'
+                                            | b'N'
+                                            | b'B'
+                                            | b'S'
+                                            | b'D'
+                                            | b'E'
+                                            | b'F'
+                                    )
+                                }))
                             .then_some(index)?
                             .parse::<u8>()
                             .ok()
@@ -7852,6 +7895,19 @@ mod tests {
         let result = call(&dynamic_argument, &[3.0, f64::from_bits(1)]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 1.0);
+        for tag in DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_DICTIONARY_TAG {
+            let result = call(
+                &CString::new("expr:u0NBSD,typeofdynamic:aggregate-type").unwrap(),
+                &[tag as f64, 0.0],
+            );
+            assert!(result.error.is_null());
+            assert_eq!(
+                unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }
+                    .to_str()
+                    .unwrap(),
+                "object"
+            );
+        }
 
         for (symbol, expected) in [
             ("expr:c0000000000000000,tagnum,dynbool:false-number", 0.0),

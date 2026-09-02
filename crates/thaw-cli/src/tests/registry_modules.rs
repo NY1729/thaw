@@ -1542,6 +1542,49 @@ fn dynamic_primitive_numeric_operators_use_jit_without_quickjs() {
 }
 
 #[test]
+fn aggregate_unions_round_trip_through_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-aggregate-unions-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-aggregate-unions");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function arrayIdentity(value: number[] | string): number[] | string;\nexport declare function arrayKind(value: number[] | string): string;\nexport declare function recordIdentity(value: Record<string, number> | string): Record<string, number> | string;\nexport declare function recordKind(value: Record<string, number> | string): string;\nexport declare function text(value: number[] | Record<string, number> | string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function arrayIdentity(value) { return value; } function arrayKind(value) { return typeof value; } function recordIdentity(value) { return value.valueOf(); } function recordKind(value) { return typeof value; } function text(value) { return String(value); } module.exports = { arrayIdentity, arrayKind, recordIdentity, recordKind, text };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { arrayIdentity, arrayKind, recordIdentity, recordKind, text } from 'jit-aggregate-unions'; function showArray(value: number[] | string): void { if (typeof value === 'string') console.log(value.toUpperCase()); else console.log(value.length); } function showRecord(value: Record<string, number> | string): void { if (typeof value === 'string') console.log(value.toUpperCase()); else console.log(value.count); } function main(): void { const record: Record<string, number> = { count: 42 }; showArray(arrayIdentity([1, 2, 3])); showArray(arrayIdentity('array')); console.log(arrayKind([1])); console.log(arrayKind('x')); showRecord(recordIdentity(record)); showRecord(recordIdentity('record')); console.log(recordKind(record)); console.log(recordKind('x')); console.log(text([1, 2])); console.log(text(record)); console.log(text('kept')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "3\nARRAY\nobject\nstring\n42\nRECORD\nobject\nstring\n1,2\n[object Object]\nkept\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
