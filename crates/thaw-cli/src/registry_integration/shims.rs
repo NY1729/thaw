@@ -7266,6 +7266,106 @@ fn jit_export(
             }
             Stmt::Try(statement)
                 if rest.is_empty()
+                    && statement.handler.is_some()
+                    && statement.finalizer.is_none() =>
+            {
+                let handler = statement.handler.as_ref()?;
+                let (Stmt::Return(returned), control) = statement.block.stmts.split_last()? else {
+                    return None;
+                };
+                let mut caught = Vec::new();
+                for statement in &statement.block.stmts {
+                    collect_caught_throw_kind(
+                        statement,
+                        parameters,
+                        locals,
+                        context,
+                        &mut caught,
+                    )?;
+                }
+                let [caught] = caught.as_slice() else {
+                    return None;
+                };
+                output.push("trystart".into());
+                let caught_control = LoopControl {
+                    catch_active: true,
+                    ..root_loop_control()
+                };
+                let control_kinds = helper_control_kinds(kinds, locals)?;
+                for statement in control {
+                    encode_loop_effects(
+                        statement,
+                        parameters,
+                        locals,
+                        mutable,
+                        (&control_kinds, caught_control, &[]),
+                        context,
+                        output,
+                    )?;
+                }
+                let placeholder = kinds.len();
+                match caught.kind {
+                    JitKind::Number => output.push("c0000000000000000".into()),
+                    JitKind::Boolean => {
+                        output.extend(["c0000000000000000".into(), "asbool".into()]);
+                    }
+                    JitKind::String => output.push("t".into()),
+                    _ => return None,
+                }
+                let mut normal_kinds = kinds.clone();
+                normal_kinds.insert(format!("\0catch-placeholder-{placeholder}"), caught.kind);
+                let mut normal_values = std::collections::HashMap::new();
+                materialize_fixed_literal(
+                    returned.arg.as_deref()?,
+                    "",
+                    requested,
+                    parameters,
+                    locals,
+                    context,
+                    &mut normal_kinds,
+                    &mut normal_values,
+                    output,
+                )?;
+                output.push("catch".into());
+                let mut catch_locals = locals.clone();
+                let mut catch_kinds = kinds.clone();
+                if let Some(parameter) = &handler.param {
+                    let Pat::Ident(parameter) = parameter else {
+                        return None;
+                    };
+                    catch_locals.insert(
+                        parameter.id.sym.to_string(),
+                        vec![format!("{}{placeholder}", caught.prefix)],
+                    );
+                    catch_kinds.insert(parameter.id.sym.to_string(), caught.kind);
+                } else {
+                    catch_kinds.insert(format!("\0catch-{placeholder}"), caught.kind);
+                }
+                let catch_body = handler.body.stmts.iter().collect::<Vec<_>>();
+                let mut catch_values = std::collections::HashMap::new();
+                let mut catch_output = Vec::new();
+                materialize_helper_returns(
+                    &catch_body,
+                    requested,
+                    parameters,
+                    &catch_locals,
+                    mutable,
+                    context,
+                    &mut catch_kinds,
+                    &mut catch_values,
+                    &mut catch_output,
+                )?;
+                if normal_values != catch_values || normal_kinds.len() != catch_kinds.len() {
+                    return None;
+                }
+                output.extend(catch_output);
+                output.push("tryend".into());
+                *kinds = normal_kinds;
+                *materialized = normal_values;
+                Some(())
+            }
+            Stmt::Try(statement)
+                if rest.is_empty()
                     && statement.handler.is_none()
                     && statement.finalizer.as_ref().is_some_and(|finalizer| {
                         finalizer
@@ -15555,10 +15655,12 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             }
         } else if token == "catch" {
             let (base, kind, tagged) = tries.pop()?;
-            if stack != base {
+            if !stack.starts_with(&base) {
                 return None;
             }
-            catches.push(base);
+            let results = stack.split_off(base.len());
+            catches.push((base.clone(), results));
+            stack = base;
             if tagged {
                 stack.push(JitKind::Number);
                 dynamic_slots.insert(stack.len());
@@ -15567,8 +15669,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 stack.push(kind?);
             }
         } else if token == "tryend" {
-            if stack != catches.pop()? {
+            let (base, expected) = catches.pop()?;
+            if !stack.starts_with(&base) || stack.len() != base.len() + expected.len() {
                 return None;
+            }
+            let caught = stack.split_off(base.len());
+            for (expected, caught) in expected.into_iter().zip(caught) {
+                stack.push(merge_jit_kinds(expected, caught)?);
             }
         } else if token == "return" {
             let result = stack.pop()?;
