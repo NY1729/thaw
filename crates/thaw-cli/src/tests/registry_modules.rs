@@ -1940,15 +1940,17 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "export declare function numberPair(value: number[] | [number, number]): number;\n",
         "export declare function stringEnds(value: string[] | [string, string, string]): string;\n",
         "export declare function booleanPair(value: boolean[] | [boolean, boolean]): boolean;\n",
-        "export declare function splicePair(value: number[]): number;\n",
-        "export declare function reversedPair(value: number[]): number;\n",
+        "export declare function splicePair(value: number[] | [number, number]): number;\n",
+        "export declare function reversedPair(value: number[] | [number, number]): number;\n",
+        "export declare function joined(value: number[] | [number, number]): string;\n",
     );
     let source = concat!(
         "module.exports.numberPair = value => { const [first, second] = value; return first * 10 + second; }; ",
         "module.exports.stringEnds = value => { const [first, , third] = value; return first + third; }; ",
         "module.exports.booleanPair = value => { let [first, second] = value; first = !first; return first && second; };",
         "module.exports.splicePair = value => { const [first, second] = value.splice(0, 2); return first * 100 + second * 10; }; ",
-        "module.exports.reversedPair = value => { const [first, second] = value.toReversed(); return first * 10 + second; };",
+        "module.exports.reversedPair = value => { const [first, second] = value.toReversed(); return first * 10 + second; }; ",
+        "module.exports.joined = value => value.join('-');",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -1957,6 +1959,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "booleanPair",
         "splicePair",
         "reversedPair",
+        "joined",
     ]
     .into_iter()
     .enumerate()
@@ -1980,7 +1983,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     std::fs::write(
         &entry,
         concat!(
-            "import { booleanPair, numberPair, reversedPair, splicePair, stringEnds } from 'jit-tuple-union-destructuring';\n",
+            "import { booleanPair, joined, numberPair, reversedPair, splicePair, stringEnds } from 'jit-tuple-union-destructuring';\n",
             "function main(): void {\n",
             "  console.log(numberPair([1, 2, 3]));\n",
             "  console.log(numberPair([5, 6] as [number, number]));\n",
@@ -1989,9 +1992,11 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
             "  console.log(booleanPair([false, true, false]));\n",
             "  console.log(booleanPair([true, true] as [boolean, boolean]));\n",
             "  console.log(splicePair([1, 2, 3]));\n",
-            "  console.log(splicePair([5, 6]));\n",
+            "  console.log(splicePair([5, 6] as [number, number]));\n",
             "  console.log(reversedPair([1, 2, 3]));\n",
-            "  console.log(reversedPair([5, 6]));\n",
+            "  console.log(reversedPair([5, 6] as [number, number]));\n",
+            "  console.log(joined([1, 2, 3]));\n",
+            "  console.log(joined([5, 6] as [number, number]));\n",
             "}\n",
         ),
     )
@@ -2009,7 +2014,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "12\n56\nac\nxz\ntrue\nfalse\n120\n560\n32\n65\n"
+        "12\n56\nac\nxz\ntrue\nfalse\n120\n560\n32\n65\n1-2-3\n5-6\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
