@@ -926,17 +926,22 @@ extern "C" fn dynamic_array_truthy(value: f64, mode: f64) -> f64 {
         }
     };
     let result = primitive_array_truthy(f64::from_bits(array.payload), f64::from(kind * 8 + mode));
+    dynamic_array_scan_result(array.tag, mode, result)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_scan_result(array_tag: u64, mode: u8, result: f64) -> f64 {
     match mode {
-        2 | 4 if CALL_PRESENT.with(Cell::get) => {
-            let tag = match array.tag {
+        2 | 4 if CALL_PRESENT.with(Cell::get) => dynamic_from_parts(
+            match array_tag {
                 DYNAMIC_NUMBER_ARRAY_TAG => DYNAMIC_NUMBER_TAG,
                 DYNAMIC_BOOLEAN_ARRAY_TAG => DYNAMIC_BOOLEAN_TAG,
                 DYNAMIC_STRING_ARRAY_TAG => DYNAMIC_STRING_TAG,
                 _ => unreachable!(),
-            };
-            dynamic_from_parts(tag as f64, result)
-        }
-        6 => dynamic_array_result(array.tag, result),
+            } as f64,
+            result,
+        ),
+        6 => dynamic_array_result(array_tag, result),
         _ => result,
     }
 }
@@ -968,6 +973,92 @@ fn primitive_array_compare(value: f64, operand: f64, encoded: f64) -> f64 {
             _ => false,
         }
     })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_compare(value: f64, operand: f64, encoded: f64) -> f64 {
+    let encoded = encoded as u8;
+    let mode = encoded / 8;
+    let operation = encoded % 8;
+    let Some((array, operand)) =
+        dynamic_primitive(value, None).zip(dynamic_primitive(operand, None))
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let (kind, element_tag) = match array.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => (0, DYNAMIC_NUMBER_TAG),
+        DYNAMIC_BOOLEAN_ARRAY_TAG => (1, DYNAMIC_BOOLEAN_TAG),
+        DYNAMIC_STRING_ARRAY_TAG => (2, DYNAMIC_STRING_TAG),
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    if operand.tag > DYNAMIC_BOOLEAN_TAG || mode > 6 || operation > 7 {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let result = primitive_array_scan(f64::from_bits(array.payload), kind, mode, |data, index| {
+        let element = unsafe { array_element(data, index, kind) };
+        let same = || match element_tag {
+            DYNAMIC_NUMBER_TAG => element == f64::from_bits(operand.payload),
+            DYNAMIC_BOOLEAN_TAG => (element != 0.0) == (operand.payload != 0),
+            DYNAMIC_STRING_TAG => {
+                string_same_value(element, f64::from_bits(operand.payload)) != 0.0
+            }
+            _ => unreachable!(),
+        };
+        let number = |tag, payload| match tag {
+            DYNAMIC_NUMBER_TAG => f64::from_bits(payload),
+            DYNAMIC_BOOLEAN_TAG => f64::from(payload != 0),
+            DYNAMIC_STRING_TAG => string_to_number(f64::from_bits(payload)),
+            _ => f64::NAN,
+        };
+        let element_payload = if element_tag == DYNAMIC_BOOLEAN_TAG {
+            u64::from(element != 0.0)
+        } else {
+            element.to_bits()
+        };
+        match operation {
+            0..=3 => {
+                if element_tag == DYNAMIC_STRING_TAG && operand.tag == DYNAMIC_STRING_TAG {
+                    let ordering = string_compare(element, f64::from_bits(operand.payload));
+                    match operation {
+                        0 => ordering < 0.0,
+                        1 => ordering <= 0.0,
+                        2 => ordering > 0.0,
+                        _ => ordering >= 0.0,
+                    }
+                } else {
+                    let left = number(element_tag, element_payload);
+                    let right = number(operand.tag, operand.payload);
+                    match operation {
+                        0 => left < right,
+                        1 => left <= right,
+                        2 => left > right,
+                        _ => left >= right,
+                    }
+                }
+            }
+            4 => {
+                element_tag == operand.tag && same()
+                    || element_tag != operand.tag
+                        && number(element_tag, element_payload)
+                            == number(operand.tag, operand.payload)
+            }
+            5 => {
+                !(element_tag == operand.tag && same()
+                    || element_tag != operand.tag
+                        && number(element_tag, element_payload)
+                            == number(operand.tag, operand.payload))
+            }
+            6 => element_tag == operand.tag && same(),
+            7 => element_tag != operand.tag || !same(),
+            _ => false,
+        }
+    });
+    dynamic_array_scan_result(array.tag, mode, result)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -4595,6 +4686,7 @@ enum NumericValue {
     PrimitiveArrayTruthy(u8, u8),
     DynamicArrayTruthy(u8),
     PrimitiveArrayCompare(u8, CompareOp, u8),
+    DynamicArrayCompare(u8, u8),
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
     NumberArrayMap(NumericReduceOp, bool),
@@ -4960,6 +5052,48 @@ impl NumericProgram {
                     "dynarrayfindlasttruthy" => Some(NumericValue::DynamicArrayTruthy(4)),
                     "dynarrayfindlastindextruthy" => Some(NumericValue::DynamicArrayTruthy(5)),
                     "dynarrayfiltertruthy" => Some(NumericValue::DynamicArrayTruthy(6)),
+                    _ if token.strip_prefix("dynarray").is_some_and(|operation| {
+                        [
+                            "findlastindex",
+                            "findlast",
+                            "findindex",
+                            "filter",
+                            "every",
+                            "some",
+                            "find",
+                        ]
+                        .iter()
+                        .any(|method| operation.starts_with(method))
+                    }) => {
+                        let operation = token.strip_prefix("dynarray")?;
+                        let (operation, mode) = [
+                            ("findlastindex", 5),
+                            ("findlast", 4),
+                            ("findindex", 3),
+                            ("filter", 6),
+                            ("every", 1),
+                            ("some", 0),
+                            ("find", 2),
+                        ]
+                        .into_iter()
+                        .find_map(|(method, mode)| {
+                            operation
+                                .strip_prefix(method)
+                                .map(|operation| (operation, mode))
+                        })?;
+                        let operation = match operation {
+                            "lt" => 0,
+                            "lte" => 1,
+                            "gt" => 2,
+                            "gte" => 3,
+                            "eq" => 4,
+                            "ne" => 5,
+                            "seq" => 6,
+                            "sne" => 7,
+                            _ => return None,
+                        };
+                        Some(NumericValue::DynamicArrayCompare(operation, mode))
+                    }
                     "arrayvalue" => Some(NumericValue::ArrayValue),
                     "arrayhandle" => Some(NumericValue::MutableArrayHandle),
                     "arrayempty" => Some(NumericValue::EmptyArray),
@@ -6191,6 +6325,22 @@ impl NumericProgram {
                     emit_ternary_call(
                         &mut code,
                         primitive_array_compare as *const () as u64,
+                        depth - 2,
+                    );
+                    depth -= 1;
+                }
+                NumericValue::DynamicArrayCompare(operation, mode) => {
+                    if depth < 2 || depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(
+                        &f64::from(mode * 8 + operation).to_bits().to_le_bytes(),
+                    );
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_ternary_call(
+                        &mut code,
+                        dynamic_array_compare as *const () as u64,
                         depth - 2,
                     );
                     depth -= 1;

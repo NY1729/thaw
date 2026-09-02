@@ -4260,6 +4260,51 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &filter,
     )
     .is_some());
+    for method in ["some", "every"] {
+        let predicate = thaw_bridge::DtsFunction {
+            name: method.into(),
+            params: vec![
+                function.params[0].clone(),
+                ("needle".into(), needle.clone()),
+            ],
+            required_params: 2,
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+            ..function.clone()
+        };
+        for comparison in ["==", "===", "!=", "!==", "<", "<=", ">", ">="] {
+            let source = format!(
+                "function {method}(value, needle) {{ if (Array.isArray(value)) return value.{method}(item => item {comparison} needle); return false; }} module.exports = {{ {method} }};"
+            );
+            assert!(jit_numeric_export(&source, method, false, &predicate).is_some());
+        }
+    }
+    for method in ["find", "findIndex", "findLast", "findLastIndex", "filter"] {
+        let compared = thaw_bridge::DtsFunction {
+            name: method.into(),
+            params: vec![
+                function.params[0].clone(),
+                ("needle".into(), needle.clone()),
+            ],
+            required_params: 2,
+            ret: match method {
+                "findIndex" | "findLastIndex" => {
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::F64)
+                }
+                "filter" => function.params[0].1.clone(),
+                _ => function.ret.clone(),
+            },
+            ..function.clone()
+        };
+        let fallback = if method == "findIndex" || method == "findLastIndex" {
+            "-1"
+        } else {
+            "value"
+        };
+        let source = format!(
+            "function {method}(value, needle) {{ if (Array.isArray(value)) return value.{method}(item => item === needle); return {fallback}; }} module.exports = {{ {method} }};"
+        );
+        assert!(jit_numeric_export(&source, method, false, &compared).is_some());
+    }
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],

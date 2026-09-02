@@ -1852,6 +1852,49 @@ fn mixed_array_truthy_scans_use_jit_without_quickjs() {
 }
 
 #[test]
+fn mixed_array_comparison_scans_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-mixed-array-comparison-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-mixed-array-comparison");
+    std::fs::create_dir_all(&package).unwrap();
+    let arrays = "number[] | string[] | boolean[] | string";
+    let primitive = "number | string | boolean";
+    std::fs::write(
+        package.join("package.d.ts"),
+        format!(
+            "export declare function some(value: {arrays}, needle: {primitive}): boolean;\nexport declare function looseSome(value: {arrays}, needle: {primitive}): boolean;\nexport declare function every(value: {arrays}, needle: {primitive}): boolean;\nexport declare function find(value: {arrays}, needle: {primitive}): {primitive};\nexport declare function findIndex(value: {arrays}, needle: {primitive}): number;\nexport declare function findLast(value: {arrays}, needle: {primitive}): {primitive};\nexport declare function findLastIndex(value: {arrays}, needle: {primitive}): number;\nexport declare function filter(value: {arrays}, needle: {primitive}): {arrays};\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function some(value, needle) { if (Array.isArray(value)) return value.some(item => item === needle); return false; } function looseSome(value, needle) { if (Array.isArray(value)) return value.some(item => item == needle); return false; } function every(value, needle) { if (Array.isArray(value)) return value.every(item => item !== needle); return false; } function find(value, needle) { if (Array.isArray(value)) return value.find(item => item === needle); return value; } function findIndex(value, needle) { if (Array.isArray(value)) return value.findIndex(item => item >= needle); return -1; } function findLast(value, needle) { if (Array.isArray(value)) return value.findLast(item => item < needle); return value; } function findLastIndex(value, needle) { if (Array.isArray(value)) return value.findLastIndex(item => item === needle); return -1; } function filter(value, needle) { if (Array.isArray(value)) return value.filter(item => item !== needle); return value; } module.exports = { some, looseSome, every, find, findIndex, findLast, findLastIndex, filter };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { some, looseSome, every, find, findIndex, findLast, findLastIndex, filter } from 'jit-mixed-array-comparison'; function main(): void { console.log(some([1, 2], 2)); console.log(some(['a', 'b'], 'b')); console.log(some([false, true], true)); console.log(some([1, 2], '2')); console.log(looseSome([1, 2], '2')); console.log(every(['a', 'b'], 'x')); console.log(find(['a', 'b'], 'b')); console.log(findIndex([1, 3], 2)); console.log(findLast([1, 3, 2], 3)); console.log(findLastIndex([false, true, false], false)); console.log(filter(['a', 'b', 'a'], 'a')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\ntrue\ntrue\nfalse\ntrue\ntrue\nb\n1\n2\n2\n[\"b\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
