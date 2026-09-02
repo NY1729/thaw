@@ -1221,7 +1221,7 @@ fn classify_native_union(
     union: &swc_ecma_ast::TsUnionType,
     mut classify: impl FnMut(&TsType) -> DtsType,
 ) -> DtsType {
-    let mut native = None;
+    let mut native = Vec::new();
     let mut has_null = false;
     let mut has_undefined = false;
     for element in &union.types {
@@ -1235,26 +1235,26 @@ fn classify_native_union(
                 has_undefined = true;
             }
             other => match classify(other) {
-                DtsType::Native(ty) if native.as_ref().is_none_or(|current| current == &ty) => {
-                    native = Some(ty)
+                DtsType::Native(HirType::Union(elements)) => {
+                    for ty in elements {
+                        if !native.contains(&ty) {
+                            native.push(ty);
+                        }
+                    }
                 }
-                DtsType::Native(_) => {
-                    return DtsType::Unsupported(format!(
-                        "unsupported type `{}`",
-                        union
-                            .types
-                            .iter()
-                            .map(|ty| describe_ts_type(ty))
-                            .collect::<Vec<_>>()
-                            .join(" | ")
-                    ))
-                }
+                DtsType::Native(ty) if !native.contains(&ty) => native.push(ty),
+                DtsType::Native(_) => {}
                 unsupported => return unsupported,
             },
         }
     }
-    let Some(payload) = native else {
+    if native.is_empty() {
         return DtsType::Unsupported("union has no native value type".into());
+    }
+    let payload = if native.len() == 1 {
+        native.pop().unwrap()
+    } else {
+        HirType::Union(native)
     };
     let tagged = match (payload, has_null, has_undefined) {
         (HirType::Nullish(inner), _, _) => HirType::Nullish(inner),

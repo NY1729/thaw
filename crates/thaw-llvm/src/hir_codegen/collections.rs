@@ -71,7 +71,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn compile_array_lit(&mut self, elems: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
-        let element_bytes = elems
+        let mut element_bytes = elems
             .iter()
             .filter_map(|element| self.expr_hir_type(element))
             .map(|element| array_element_storage_bytes(&element))
@@ -81,6 +81,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .iter()
             .map(|e| self.compile_expr(e))
             .collect::<Result<Vec<_>, _>>()?;
+        if elem_vals.iter().any(|value| value.is_struct_value()) {
+            element_bytes = element_bytes.max(ASYNC_SLOT_BYTES);
+        }
 
         let size = ARRAY_HEADER_BYTES + element_bytes * elem_vals.len() as u64;
         let i64_type = self.context.i64_type();

@@ -2248,7 +2248,10 @@ fn fallback_reason_renders_union_types_readably() {
     let Classification::Fallback { reason, .. } = classify(&funcs[0]) else {
         panic!("expected Fallback");
     };
-    assert_eq!(reason, "parameter `x`: unsupported type `string | number`");
+    assert_eq!(
+        reason,
+        "parameter `x` uses a tagged union without an explicit C ABI"
+    );
 }
 
 /// The exact shape found in date-fns v4's real `.d.ts` files (e.g.
