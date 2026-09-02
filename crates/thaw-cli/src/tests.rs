@@ -4046,6 +4046,23 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &function,
     )
     .is_some());
+
+    let function = thaw_bridge::DtsFunction {
+        name: "at".into(),
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
+            thaw_hir::HirType::F64,
+            thaw_hir::HirType::Str,
+            thaw_hir::HirType::Bool,
+        ])),
+        ..function
+    };
+    assert!(jit_numeric_export(
+        "function at(value) { if (Array.isArray(value)) return value.at(-1); return value; } module.exports = { at };",
+        "at",
+        false,
+        &function,
+    )
+    .is_some());
 }
 
 #[test]
