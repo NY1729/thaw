@@ -18,6 +18,7 @@ struct JitGlobals {
 
 static INVALID_SYMBOL: &[u8] = b"invalid JIT symbol\0";
 const ABSENT_STATUS: *const c_char = ptr::dangling();
+const NULL_STATUS: *const c_char = 2usize as *const c_char;
 const ARRAY_RESULT_TAG: u64 = 1;
 const DYNAMIC_NUMBER_TAG: u64 = 1;
 const DYNAMIC_STRING_TAG: u64 = 2;
@@ -129,6 +130,7 @@ thread_local! {
     static DICTIONARY_QUERY: Cell<Option<DictionaryQuery>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
+    static CALL_ABSENCE: Cell<u8> = const { Cell::new(1) };
     static JIT_GLOBALS: Cell<*const JitGlobals> = const { Cell::new(ptr::null()) };
     static DYNAMIC_VALUES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
@@ -2409,6 +2411,13 @@ extern "C" fn is_not_array(_: f64) -> f64 {
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn absent_value() -> f64 {
+    CALL_ABSENCE.with(|absence| absence.set(1));
+    CALL_PRESENT.with(|present| present.set(false));
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn preserve_absent_value() -> f64 {
     CALL_PRESENT.with(|present| present.set(false));
     0.0
 }
@@ -4100,7 +4109,11 @@ fn object_tagged_field(object: f64, offset: f64, kind: u8, present_tag: u8) -> f
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
     }
-    if unsafe { pointer.add(offset as usize).read() } != present_tag {
+    let tag = unsafe { pointer.add(offset as usize).read() };
+    if tag != present_tag {
+        if present_tag == 0 {
+            CALL_ABSENCE.with(|absence| absence.set(if tag == 1 { 2 } else { 1 }));
+        }
         CALL_PRESENT.with(|present| present.set(false));
         return 0.0;
     }
@@ -5707,6 +5720,7 @@ enum NumericValue {
     ConditionalAlternate,
     ShortCircuitEnd,
     Absent,
+    PreserveAbsent,
     AsBoolean,
     BooleanNot,
     StrictMismatch(bool),
@@ -6244,6 +6258,9 @@ impl NumericProgram {
                     "end" => Some(NumericValue::ShortCircuitEnd),
                     "absentn" | "absentb" | "absents" | "absentdyn" | "absenta" | "absentd" => {
                         Some(NumericValue::Absent)
+                    }
+                    "keepabsentn" | "keepabsentb" | "keepabsents" => {
+                        Some(NumericValue::PreserveAbsent)
                     }
                     "asbool" => Some(NumericValue::AsBoolean),
                     "boolnot" => Some(NumericValue::BooleanNot),
@@ -8982,7 +8999,8 @@ impl NumericProgram {
                 | NumericValue::ProcessPid
                 | NumericValue::ProcessPpid
                 | NumericValue::MissingCallable
-                | NumericValue::Absent => {
+                | NumericValue::Absent
+                | NumericValue::PreserveAbsent => {
                     if depth > 7 {
                         return None;
                     }
@@ -8996,6 +9014,7 @@ impl NumericProgram {
                         NumericValue::ProcessPpid => process_ppid,
                         NumericValue::MissingCallable => missing_callable,
                         NumericValue::Absent => absent_value,
+                        NumericValue::PreserveAbsent => preserve_absent_value,
                         _ => unreachable!(),
                     };
                     code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
@@ -10070,6 +10089,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_dictionary_query = DICTIONARY_QUERY.with(|query| query.replace(dictionary_query));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
+    let previous_absence = CALL_ABSENCE.with(|absence| absence.replace(1));
     let previous_globals = JIT_GLOBALS.with(|slot| slot.replace(globals));
     let previous_dynamic_values =
         DYNAMIC_VALUES.with(|values| std::mem::take(&mut *values.borrow_mut()));
@@ -10079,6 +10099,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     }
     let error = CALL_ERROR.with(|error| error.replace(previous_error));
     let present = CALL_PRESENT.with(|state| state.replace(previous_present));
+    let absence = CALL_ABSENCE.with(|state| state.replace(previous_absence));
     JIT_GLOBALS.with(|slot| slot.set(previous_globals));
     DYNAMIC_VALUES.with(|values| *values.borrow_mut() = previous_dynamic_values);
     ARENA_ALLOC.with(|allocator| allocator.set(previous_allocator));
@@ -10123,7 +10144,11 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     if !present {
         return ThawJitResult {
             value: 0.0,
-            error: ABSENT_STATUS,
+            error: if absence == 2 {
+                NULL_STATUS
+            } else {
+                ABSENT_STATUS
+            },
         };
     }
     ThawJitResult {

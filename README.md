@@ -2454,7 +2454,9 @@ updates also operate on tagged fields directly; absent `undefined` converts to
 Fixed primitive fields support lazy `&&=` and `||=`, and tagged scalar fields
 support lazy `??=` while updating both payload and presence tag. Tagged scalar
 `||=` assigns on either nullish absence, while optional and nullable scalar
-`&&=` preserves an absent result without evaluating its right-hand side;
+`&&=` preserves an absent result without evaluating its right-hand side. The
+JIT result ABI distinguishes present, `null`, and `undefined`, so three-way
+nullish `&&=` and direct nullable/nullish scalar returns retain their exact tag;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
