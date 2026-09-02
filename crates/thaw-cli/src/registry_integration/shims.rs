@@ -35,6 +35,13 @@ struct JitLocal {
 }
 
 fn jit_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
+    jit_argument_tagged_union(elements)
+        && !elements
+            .iter()
+            .any(|element| matches!(element, thaw_hir::HirType::Object(_)))
+}
+
+fn jit_argument_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
     (2..=9).contains(&elements.len())
         && elements.iter().all(|element| jit_union_member_code(element).is_some())
         && elements
@@ -45,7 +52,9 @@ fn jit_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
             || elements.iter().any(|element| {
                 matches!(
                     element,
-                    thaw_hir::HirType::Array(_) | thaw_hir::HirType::Dictionary(_)
+                    thaw_hir::HirType::Array(_)
+                        | thaw_hir::HirType::Dictionary(_)
+                        | thaw_hir::HirType::Object(_)
                 )
             }))
 }
@@ -67,6 +76,7 @@ fn jit_union_member_code(ty: &thaw_hir::HirType) -> Option<char> {
             thaw_hir::HirType::Str => Some('F'),
             _ => None,
         },
+        thaw_hir::HirType::Object(_) => Some('O'),
         _ => None,
     }
 }
@@ -121,7 +131,7 @@ fn jit_export(
     fn jit_parameter_slots(ty: &thaw_hir::HirType) -> Option<usize> {
         match ty {
             thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => Some(1),
-            thaw_hir::HirType::Union(elements) if jit_tagged_union(elements) => Some(2),
+            thaw_hir::HirType::Union(elements) if jit_argument_tagged_union(elements) => Some(2),
             thaw_hir::HirType::Array(element)
                 if jit_array_result_element_supported(element) =>
             {
@@ -187,7 +197,7 @@ fn jit_export(
         slot: &mut usize,
     ) -> Option<()> {
         if let thaw_hir::HirType::Union(elements) = ty {
-            if !jit_tagged_union(elements) {
+            if !jit_argument_tagged_union(elements) {
                 return None;
             }
             let kinds = elements
@@ -11009,7 +11019,7 @@ fn jit_export(
         };
         let optional = *optional_parameter || optional_type;
         if let thaw_hir::HirType::Union(elements) = ty {
-            if !jit_tagged_union(elements) {
+            if !jit_argument_tagged_union(elements) {
                 return None;
             }
             let kinds = elements
@@ -11408,7 +11418,7 @@ fn jit_dynamic_argument(token: &str) -> Option<(usize, &str)> {
     if kinds.is_empty()
         || !kinds
             .bytes()
-            .all(|kind| matches!(kind, b'n' | b'b' | b's' | b'N' | b'B' | b'S' | b'D' | b'E' | b'F'))
+            .all(|kind| matches!(kind, b'n' | b'b' | b's' | b'N' | b'B' | b'S' | b'D' | b'E' | b'F' | b'O'))
     {
         return None;
     }
