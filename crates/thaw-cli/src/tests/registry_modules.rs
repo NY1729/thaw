@@ -1869,6 +1869,72 @@ fn tuple_union_reducers_without_initial_use_jit_without_quickjs() {
 }
 
 #[test]
+fn tuple_union_iteration_and_spread_use_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function spreadCopy(value: number[] | [number, number]): number[];\n",
+        "export declare function sumForOf(value: number[] | [number, number]): number;\n",
+        "export declare function weightedForOf(value: number[] | [number, number], factor: number): number;\n",
+    );
+    let source = concat!(
+        "module.exports.spreadCopy = value => [0, ...value, 9]; ",
+        "module.exports.sumForOf = value => { let total = 0; for (const item of value) total += item; return total; }; ",
+        "module.exports.weightedForOf = (value, factor) => { let total = 0; for (const item of value) total += item * factor; return total; };",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in ["spreadCopy", "sumForOf", "weightedForOf"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-iteration-spread-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union-iteration-spread");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { spreadCopy, sumForOf, weightedForOf } from 'jit-tuple-union-iteration-spread';\n",
+            "function main(): void {\n",
+            "  console.log(spreadCopy([1, 2, 3]).join(','));\n",
+            "  console.log(spreadCopy([5, 6] as [number, number]).join(','));\n",
+            "  console.log(sumForOf([1, 2, 3]));\n",
+            "  console.log(sumForOf([5, 6] as [number, number]));\n",
+            "  console.log(weightedForOf([1, 2, 3], 2));\n",
+            "  console.log(weightedForOf([5, 6] as [number, number], 3));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "0,1,2,3,9\n0,5,6,9\n6\n11\n12\n33\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
