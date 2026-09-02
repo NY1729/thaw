@@ -2528,7 +2528,10 @@ runtime value. The same narrowing now feeds `.at()`, `.includes()`,
 `.indexOf()`, `.lastIndexOf()`, `.join()`, `.slice()`, `.concat()`,
 `.reverse()`, `.toReversed()`, `.sort()`, and `.toSorted()` into their existing
 typed array instructions, so both ordinary arrays and fixed tuples use those
-methods without loading QuickJS.
+methods without loading QuickJS. Typed narrowing also covers the updating
+`.fill()`, `.copyWithin()`, `.with()`, `.splice()`, and `.toSpliced()` paths;
+mutating operations keep the shared native handle while copying operations
+return a new typed array handle.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,

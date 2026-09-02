@@ -1303,6 +1303,83 @@ fn fixed_tuple_unions_use_jit_without_quickjs() {
 }
 
 #[test]
+fn tuple_union_array_updates_use_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function fillNumbers(value: number[] | [number, number], replacement: number): number[];\n",
+        "export declare function copyNumbers(value: number[] | [number, number]): number[];\n",
+        "export declare function withNumber(value: number[] | [number, number], replacement: number): number[];\n",
+        "export declare function spliceNumbers(value: number[] | [number, number]): number[];\n",
+        "export declare function toSplicedNumbers(value: number[] | [number, number]): number[];\n",
+    );
+    let source = concat!(
+        "module.exports.fillNumbers = (value, replacement) => Array.isArray(value) ? value.fill(replacement, 1) : [replacement]; ",
+        "module.exports.copyNumbers = value => Array.isArray(value) ? value.copyWithin(0, 1) : [0]; ",
+        "module.exports.withNumber = (value, replacement) => Array.isArray(value) ? value.with(-1, replacement) : [replacement]; ",
+        "module.exports.spliceNumbers = value => Array.isArray(value) ? value.splice(0, 1) : [0]; ",
+        "module.exports.toSplicedNumbers = value => Array.isArray(value) ? value.toSpliced(1, 1, 9) : [0];",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in [
+        "fillNumbers",
+        "copyNumbers",
+        "withNumber",
+        "spliceNumbers",
+        "toSplicedNumbers",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(jit_numeric_export(source, name, false, &declarations[index]).is_some());
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-updates-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union-updates");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { copyNumbers, fillNumbers, spliceNumbers, toSplicedNumbers, withNumber } from 'jit-tuple-union-updates';\n",
+            "function main(): void {\n",
+            "  console.log(fillNumbers([1, 2, 3], 8).join(','));\n",
+            "  console.log(fillNumbers([5, 6] as [number, number], 7).join(','));\n",
+            "  console.log(copyNumbers([1, 2, 3]).join(','));\n",
+            "  console.log(copyNumbers([5, 6] as [number, number]).join(','));\n",
+            "  console.log(withNumber([1, 2, 3], 8).join(','));\n",
+            "  console.log(withNumber([5, 6] as [number, number], 7).join(','));\n",
+            "  console.log(spliceNumbers([1, 2, 3]).join(','));\n",
+            "  console.log(spliceNumbers([5, 6] as [number, number]).join(','));\n",
+            "  console.log(toSplicedNumbers([1, 2, 3]).join(','));\n",
+            "  console.log(toSplicedNumbers([5, 6] as [number, number]).join(','));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1,8,8\n5,7\n2,3,3\n6,6\n1,2,8\n5,7\n1\n5\n1,9,3\n5,9\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
