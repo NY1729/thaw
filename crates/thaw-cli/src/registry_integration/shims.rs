@@ -48,6 +48,11 @@ fn jit_argument_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
             .iter()
             .enumerate()
             .all(|(index, element)| !elements[..index].contains(element))
+        && elements
+            .iter()
+            .filter(|element| matches!(element, thaw_hir::HirType::Object(_)))
+            .count()
+            <= 1
         && (elements.contains(&thaw_hir::HirType::Str)
             || elements.iter().any(|element| {
                 matches!(
@@ -250,6 +255,47 @@ fn jit_export(
         }?;
         parameters.insert(path.into(), format!("{prefix}{slot}"));
         *slot += 1;
+        Some(())
+    }
+
+    fn bind_jit_union_object_fields(
+        path: &str,
+        elements: &[thaw_hir::HirType],
+        source: &[String],
+        locals: &mut std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<()> {
+        let Some(thaw_hir::HirType::Object(fields)) = elements
+            .iter()
+            .find(|element| matches!(element, thaw_hir::HirType::Object(_)))
+        else {
+            return Some(());
+        };
+        let mut offset = 0u16;
+        for (field, ty) in fields {
+            let operation = match ty {
+                thaw_hir::HirType::F64 => "objn",
+                thaw_hir::HirType::Bool => "objb",
+                thaw_hir::HirType::Str => "objs",
+                _ => {
+                    offset = offset.checked_add(if matches!(
+                        ty,
+                        thaw_hir::HirType::Optional(_)
+                            | thaw_hir::HirType::Nullable(_)
+                            | thaw_hir::HirType::Nullish(_)
+                            | thaw_hir::HirType::Union(_)
+                    ) {
+                        16
+                    } else {
+                        8
+                    })?;
+                    continue;
+                }
+            };
+            let mut value = source.to_vec();
+            value.extend(["untagobject".into(), format!("{operation}{offset}")]);
+            locals.insert(format!("{path}.{field}"), value);
+            offset = offset.checked_add(8)?;
+        }
         Some(())
     }
 
@@ -1963,7 +2009,12 @@ fn jit_export(
                 }
             }
             Expr::Member(member) => {
-                let object_field = member_path(expression).and_then(|path| parameters.get(&path));
+                let object_field = member_path(expression).and_then(|path| {
+                    locals
+                        .get(&path)
+                        .cloned()
+                        .or_else(|| parameters.get(&path).map(|field| vec![field.clone()]))
+                });
                 if matches!(
                     (member.obj.as_ref(), &member.prop),
                     (Expr::Ident(object), MemberProp::Ident(property))
@@ -1977,7 +2028,7 @@ fn jit_export(
                     };
                     output.push(format!("process{}", property.sym));
                 } else if let Some(field) = object_field {
-                    output.push(field.clone());
+                    output.extend(field);
                 } else if let MemberProp::Computed(computed) = &member.prop {
                     let mut receiver = Vec::new();
                     encode_expression(
@@ -4476,7 +4527,7 @@ fn jit_export(
         let not_object = source.iter().any(|token| token == "notobject");
         let aggregates = kinds
             .bytes()
-            .filter(|kind| matches!(kind, b'D' | b'E' | b'F'))
+            .filter(|kind| matches!(kind, b'D' | b'E' | b'F' | b'O'))
             .collect::<Vec<_>>();
         if not_object
             || aggregates.is_empty()
@@ -4493,14 +4544,21 @@ fn jit_export(
                 [b'D'] => "untagdn",
                 [b'E'] => "untagdb",
                 [b'F'] => "untagds",
-                _ => "untagdictionary",
+                [b'O'] => "untagobject",
+                _ if aggregates
+                    .iter()
+                    .all(|kind| matches!(kind, b'D' | b'E' | b'F')) =>
+                {
+                    "untagdictionary"
+                }
+                _ => return None,
             }
             .into(),
         );
         let remaining = kinds
             .bytes()
             .filter(|kind| {
-                !(matches!(kind, b'D' | b'E' | b'F')
+                !(matches!(kind, b'D' | b'E' | b'F' | b'O')
                     || not_array && matches!(kind, b'N' | b'B' | b'S'))
             })
             .collect::<Vec<_>>();
@@ -11030,6 +11088,12 @@ fn jit_export(
                 if !optional {
                     return None;
                 }
+                if elements
+                    .iter()
+                    .any(|element| matches!(element, thaw_hir::HirType::Object(_)))
+                {
+                    return None;
+                }
                 let mut present = vec![format!("u{}{kinds}", slot + 1)];
                 let mut fallback = Vec::new();
                 encode_expression(
@@ -11050,6 +11114,8 @@ fn jit_export(
                 continue;
             }
             if optional {
+                let source = vec![format!("u{}{kinds}", slot + 1)];
+                bind_jit_union_object_fields(parameter, elements, &source, &mut locals)?;
                 parameters.insert(
                     parameter.clone(),
                     format!("optional:a{slot}:u{}{kinds}", slot + 1),
@@ -11057,7 +11123,9 @@ fn jit_export(
                 slot += 3;
                 continue;
             }
-            locals.insert(parameter.clone(), vec![format!("u{slot}{kinds}")]);
+            let source = vec![format!("u{slot}{kinds}")];
+            bind_jit_union_object_fields(parameter, elements, &source, &mut locals)?;
+            locals.insert(parameter.clone(), source);
             slot += 2;
             continue;
         }
@@ -13066,6 +13134,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "untagdb"
                 | "untagds"
                 | "untagdictionary"
+                | "untagobject"
         ) {
             if stack.pop()? != JitKind::Dynamic {
                 return None;
@@ -13076,6 +13145,21 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "untagstr" => JitKind::String,
                 "untagrn" | "untagrb" | "untagrs" | "untagarray" => JitKind::Array,
                 _ => JitKind::Dictionary,
+            });
+        } else if token.starts_with("objn")
+            || token.starts_with("objb")
+            || token.starts_with("objs")
+        {
+            if stack.pop()? != JitKind::Dictionary
+                || token.get(4..)?.parse::<u16>().is_err()
+            {
+                return None;
+            }
+            stack.push(match token.as_bytes().get(3)? {
+                b'n' => JitKind::Number,
+                b'b' => JitKind::Boolean,
+                b's' => JitKind::String,
+                _ => return None,
             });
         } else if matches!(
             token.as_str(),

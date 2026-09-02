@@ -1193,18 +1193,18 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Item { count: number; label: string; }\nexport declare function valueOr(value?: Item | string): string;\n",
+        "export interface Item { count: number; label: string; enabled: boolean; }\nexport declare function valueOr(value?: Item | string): string;\nexport declare function describe(value: Item | string): string;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.valueOr = value => String(value ?? 'missing');\n",
+        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.label + ':' + String(value.enabled) : value.toUpperCase();\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { valueOr } from 'jit-optional-object-union';\nfunction main(): void { console.log(valueOr({ count: 1, label: 'one' })); console.log(valueOr('text')); console.log(valueOr()); }\n",
+        "import { valueOr, describe } from 'jit-optional-object-union';\nfunction main(): void { const item = { count: 1, label: 'one', enabled: true }; console.log(valueOr(item)); console.log(valueOr('text')); console.log(valueOr()); console.log(describe(item)); console.log(describe('text')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1220,7 +1220,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[object Object]\ntext\nmissing\n"
+        "[object Object]\ntext\nmissing\n1:one:true\nTEXT\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
