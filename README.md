@@ -2407,7 +2407,10 @@ without embedding QuickJS. Other heterogeneous result mixtures still remain on
 the QuickJS path. Tagged primitive unions also use their runtime tag for direct
 JavaScript truthiness in conditions, unary `!`, and value-preserving `&&`/`||`.
 `String(value)` and `Number(value)` dispatch over the same number/boolean/string
-tag without returning to QuickJS.
+tag without returning to QuickJS. Binary `+` selects numeric addition or string
+concatenation from the runtime tags, while relational, loose-equality, and
+strict-equality comparisons preserve primitive JavaScript coercion rules in the
+same JIT.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
