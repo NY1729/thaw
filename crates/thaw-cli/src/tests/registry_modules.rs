@@ -1671,6 +1671,46 @@ fn typeof_object_narrows_dynamic_dictionary_union_in_jit() {
 }
 
 #[test]
+fn aggregate_union_narrows_array_then_dictionary_in_jit() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-staged-aggregate-narrowing-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-staged-aggregate-narrowing");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function describe(value: number[] | Record<string, number> | string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function describe(value) { if (Array.isArray(value)) return String(value.length); if (typeof value === 'object') return String(value.count); return value.toUpperCase(); } module.exports = { describe };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { describe } from 'jit-staged-aggregate-narrowing'; function main(): void { const record: Record<string, number> = { count: 42 }; console.log(describe([1, 2, 3])); console.log(describe(record)); console.log(describe('word')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n42\nWORD\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
