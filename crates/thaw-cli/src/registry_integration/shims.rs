@@ -7159,6 +7159,7 @@ fn jit_export(
             }
             Stmt::While(statement) => contains_aggregate_return(statement.body.as_ref()),
             Stmt::DoWhile(statement) => contains_aggregate_return(statement.body.as_ref()),
+            Stmt::For(statement) => contains_aggregate_return(statement.body.as_ref()),
             _ => false,
         }
     }
@@ -7325,6 +7326,88 @@ fn jit_export(
                     output,
                 )?;
                 output.extend(["while".into(), "loopend".into()]);
+                Some(())
+            }
+            Stmt::For(loop_statement)
+                if contains_aggregate_return(loop_statement.body.as_ref()) =>
+            {
+                let mut nested_locals = locals.clone();
+                let mut nested_mutable = mutable.clone();
+                let mut nested_kinds = control_kinds.clone();
+                match loop_statement.init.as_ref() {
+                    Some(VarDeclOrExpr::Expr(initializer)) => encode_loop_expression(
+                        initializer.as_ref(),
+                        parameters,
+                        &nested_locals,
+                        &nested_mutable,
+                        &nested_kinds,
+                        context,
+                        output,
+                    )?,
+                    Some(VarDeclOrExpr::VarDecl(declaration)) => {
+                        for declarator in &declaration.decls {
+                            let Pat::Ident(name) = &declarator.name else {
+                                return None;
+                            };
+                            encode_loop_declaration(
+                                LocalStep::Declare {
+                                    name: &name.id,
+                                    initializer: declarator.init.as_deref()?,
+                                    mutable: declaration.kind != VarDeclKind::Const,
+                                },
+                                None,
+                                parameters,
+                                &mut nested_locals,
+                                &mut nested_mutable,
+                                &mut nested_kinds,
+                                context,
+                                output,
+                            )?;
+                        }
+                    }
+                    None => {}
+                }
+                output.push("loop".into());
+                if let Some(test) = loop_statement.test.as_deref() {
+                    encode_condition(test, parameters, &nested_locals, context, output)?;
+                } else {
+                    output.extend([
+                        format!("c{:016x}", 1.0f64.to_bits()),
+                        "asbool".into(),
+                    ]);
+                }
+                output.push("while".into());
+                let nested_control_kinds = helper_control_kinds(&nested_kinds, &nested_locals)?;
+                encode_aggregate_return_effects(
+                    loop_statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    &nested_locals,
+                    &nested_mutable,
+                    &nested_control_kinds,
+                    result_base_kinds,
+                    context,
+                    expected_kinds,
+                    expected_values,
+                    output,
+                )?;
+                output.push("looptail".into());
+                if let Some(update) = loop_statement.update.as_deref() {
+                    encode_loop_expression(
+                        update,
+                        parameters,
+                        &nested_locals,
+                        &nested_mutable,
+                        &nested_control_kinds,
+                        context,
+                        output,
+                    )?;
+                }
+                output.push("loopend".into());
+                output.extend(std::iter::repeat_n(
+                    "drop".into(),
+                    nested_kinds.len().checked_sub(control_kinds.len())?,
+                ));
                 Some(())
             }
             Stmt::For(_)
@@ -16638,6 +16721,12 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if token == "resultstart" {
             result_regions.push((stack.clone(), None));
         } else if token == "resultreturn" || token.starts_with("resultreturn") {
+            let continuation_depth = loops
+                .last()
+                .map(Vec::len)
+                .into_iter()
+                .chain(guards.last().map(|guard| guard.0.len()))
+                .max();
             let (base, expected) = result_regions.last_mut()?;
             if !stack.starts_with(base.as_slice()) || stack.len() == base.len() {
                 return None;
@@ -16653,7 +16742,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             let returned = stack.split_off(stack.len() - count);
-            stack.truncate(base.len());
+            stack.truncate(continuation_depth.unwrap_or(base.len()).max(base.len()));
             if let Some(previous) = expected.take() {
                 if previous.len() != returned.len() {
                     return None;
