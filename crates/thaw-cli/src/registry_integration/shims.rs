@@ -1538,6 +1538,9 @@ fn jit_export(
             {
                 Some(JitKind::Dictionary)
             }
+            thaw_hir::HirType::Optional(payload)
+            | thaw_hir::HirType::Nullable(payload)
+            | thaw_hir::HirType::Nullish(payload) => jit_return_kind(payload),
             _ => None,
         }
     }
@@ -3077,11 +3080,9 @@ fn jit_export(
                         let tagged = getter.starts_with("objopt")
                             || getter.starts_with("objnullable")
                             || getter.starts_with("objnull");
-                        if !matches!(kind, JitKind::Number | JitKind::Boolean | JitKind::String)
-                            || (assignment == AssignOp::AndAssign
-                                && getter.starts_with("objnull")
-                                && !getter.starts_with("objnullable"))
-                        {
+                        let preserve_absence = getter.starts_with("objnull")
+                            && !getter.starts_with("objnullable");
+                        if !matches!(kind, JitKind::Number | JitKind::Boolean | JitKind::String) {
                             return None;
                         }
                         let mut assigned = encode_fixed_field_assignment(
@@ -3096,10 +3097,13 @@ fn jit_export(
                         let mut current = operation;
                         normalize_callable_branches([&mut current, &mut assigned])?;
                         if tagged {
-                            let absent = match kind {
-                                JitKind::Number => "absentn",
-                                JitKind::Boolean => "absentb",
-                                JitKind::String => "absents",
+                            let absent = match (kind, preserve_absence) {
+                                (JitKind::Number, false) => "absentn",
+                                (JitKind::Boolean, false) => "absentb",
+                                (JitKind::String, false) => "absents",
+                                (JitKind::Number, true) => "keepabsentn",
+                                (JitKind::Boolean, true) => "keepabsentb",
+                                (JitKind::String, true) => "keepabsents",
                                 _ => unreachable!(),
                             };
                             let fallback = assigned.clone();
@@ -12165,7 +12169,11 @@ fn jit_export(
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(elements)) => {
                 jit_tagged_union(elements)
             }
-            thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
+            thaw_bridge::DtsType::Native(
+                thaw_hir::HirType::Optional(payload)
+                | thaw_hir::HirType::Nullable(payload)
+                | thaw_hir::HirType::Nullish(payload),
+            ) => {
                 jit_result_supported(payload)
                     && matches!(
                         payload.as_ref(),
@@ -13001,7 +13009,12 @@ fn jit_export(
     if local_steps.is_empty() && !starts_loop {
         if let thaw_bridge::DtsType::Native(ty) = &function.ret {
             if jit_result_supported(ty)
-                && !matches!(ty, thaw_hir::HirType::Optional(_))
+                && !matches!(
+                    ty,
+                    thaw_hir::HirType::Optional(_)
+                        | thaw_hir::HirType::Nullable(_)
+                        | thaw_hir::HirType::Nullish(_)
+                )
             {
                 return encode_aggregate_body(body, ty, &parameters, &locals, &mut context);
             }
@@ -13027,16 +13040,11 @@ fn jit_export(
             if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str) => JitKind::Array,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Dictionary(element))
             if matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str) => JitKind::Dictionary,
-        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
-            if **payload == thaw_hir::HirType::Str => JitKind::String,
-        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
-            if **payload == thaw_hir::HirType::Bool => JitKind::Boolean,
-        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
-            if matches!(payload.as_ref(), thaw_hir::HirType::Array(_)) => JitKind::Array,
-        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
-            if matches!(payload.as_ref(), thaw_hir::HirType::Dictionary(_)) => JitKind::Dictionary,
-        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
-            if matches!(payload.as_ref(), thaw_hir::HirType::Union(elements) if jit_tagged_union(elements)) => JitKind::Dynamic,
+        thaw_bridge::DtsType::Native(
+            thaw_hir::HirType::Optional(payload)
+            | thaw_hir::HirType::Nullable(payload)
+            | thaw_hir::HirType::Nullish(payload),
+        ) => jit_return_kind(payload)?,
         _ => JitKind::Number,
     };
     validated_jit_expression(expression, expected).map(JitExport::Value)
@@ -13320,7 +13328,15 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
     if operation.iter().any(|token| {
         matches!(
             token.as_str(),
-            "absentn" | "absentb" | "absents" | "absentdyn" | "absenta" | "absentd"
+            "absentn"
+                | "absentb"
+                | "absents"
+                | "absentdyn"
+                | "absenta"
+                | "absentd"
+                | "keepabsentn"
+                | "keepabsentb"
+                | "keepabsents"
         )
     }) {
         return true;
@@ -15079,12 +15095,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             maximum_depth = maximum_depth.max(stack.len());
         } else if matches!(
             token.as_str(),
-            "absentn" | "absentb" | "absents" | "absentdyn" | "absenta" | "absentd"
+            "absentn"
+                | "absentb"
+                | "absents"
+                | "absentdyn"
+                | "absenta"
+                | "absentd"
+                | "keepabsentn"
+                | "keepabsentb"
+                | "keepabsents"
         ) {
             stack.push(match token.as_str() {
                 "absentn" => JitKind::Number,
+                "keepabsentn" => JitKind::Number,
                 "absentb" => JitKind::Boolean,
+                "keepabsentb" => JitKind::Boolean,
                 "absents" => JitKind::String,
+                "keepabsents" => JitKind::String,
                 "absentdyn" => JitKind::Dynamic,
                 "absenta" => JitKind::Array,
                 "absentd" => JitKind::Dictionary,
@@ -15600,6 +15627,22 @@ fn jit_numeric_declaration(
                     thaw_hir::HirType::Str => "{ [key: string]: string } | undefined",
                     _ => "never",
                 },
+                _ => "never",
+            }
+        }
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Nullable(payload)) => {
+            match payload.as_ref() {
+                thaw_hir::HirType::F64 => "number | null",
+                thaw_hir::HirType::Bool => "boolean | null",
+                thaw_hir::HirType::Str => "string | null",
+                _ => "never",
+            }
+        }
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Nullish(payload)) => {
+            match payload.as_ref() {
+                thaw_hir::HirType::F64 => "number | null | undefined",
+                thaw_hir::HirType::Bool => "boolean | null | undefined",
+                thaw_hir::HirType::Str => "string | null | undefined",
                 _ => "never",
             }
         }

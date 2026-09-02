@@ -1202,6 +1202,8 @@ impl<'ctx> HirCompiler<'ctx> {
         if signature.backend == DynamicBackend::Jit {
             let return_type = match &signature.ret {
                 HirType::Optional(payload)
+                | HirType::Nullable(payload)
+                | HirType::Nullish(payload)
                     if matches!(payload.as_ref(), HirType::F64 | HirType::Bool | HirType::Str)
                         || matches!(payload.as_ref(), HirType::Array(element) if jit_array_result_element_supported(element))
                         || matches!(payload.as_ref(), HirType::Dictionary(element) if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str))
@@ -1623,7 +1625,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     "jit_status",
                 )
                 .map_err(|error| error.to_string())?;
-            let absent = self
+            let undefined = self
                 .builder
                 .build_int_compare(
                     inkwell::IntPredicate::EQ,
@@ -1631,6 +1633,19 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.context.i64_type().const_int(1, false),
                     "jit_value_absent",
                 )
+                .map_err(|error| error.to_string())?;
+            let null = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    status,
+                    self.context.i64_type().const_int(2, false),
+                    "jit_value_null",
+                )
+                .map_err(|error| error.to_string())?;
+            let absent = self
+                .builder
+                .build_or(undefined, null, "jit_value_nullish")
                 .map_err(|error| error.to_string())?;
             let error = self
                 .builder
@@ -1678,7 +1693,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         "jit_dynamic_value",
                     )
                     .map_err(|error| error.to_string())?;
-                let pointer = if matches!(signature.ret, HirType::Optional(_)) {
+                let pointer = if matches!(
+                    signature.ret,
+                    HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                ) {
                     let storage_type = self.context.i64_type().array_type(2);
                     let absent_storage = self
                         .builder
@@ -1784,7 +1802,7 @@ impl<'ctx> HirCompiler<'ctx> {
             } else {
                 value
             };
-            if let HirType::Optional(payload) = &signature.ret {
+            if let HirType::Optional(payload) | HirType::Nullable(payload) = &signature.ret {
                 let tagged_type = self.basic_type(&signature.ret)?.into_struct_type();
                 let present = self
                     .builder
@@ -1800,6 +1818,38 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_insert_value(tagged, value, 1, "jit_optional_payload")
                     .map(|value| value.into_struct_value().into())
                     .map_err(|error| format!("JIT optional {payload:?} result: {error}"));
+            }
+            if let HirType::Nullish(payload) = &signature.ret {
+                let tagged_type = self.basic_type(&signature.ret)?.into_struct_type();
+                let absent_tag = self
+                    .builder
+                    .build_select(
+                        null,
+                        self.context.i8_type().const_int(1, false),
+                        self.context.i8_type().const_int(2, false),
+                        "jit_nullish_absent_tag",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let tag = self
+                    .builder
+                    .build_select(
+                        absent,
+                        absent_tag,
+                        self.context.i8_type().const_zero(),
+                        "jit_nullish_tag",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let tagged = self
+                    .builder
+                    .build_insert_value(tagged_type.get_undef(), tag, 0, "jit_nullish_with_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_struct_value();
+                return self
+                    .builder
+                    .build_insert_value(tagged, value, 1, "jit_nullish_with_payload")
+                    .map(|value| value.into_struct_value().into())
+                    .map_err(|error| format!("JIT nullish {payload:?} result: {error}"));
             }
             return Ok(value);
         }
