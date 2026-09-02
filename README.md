@@ -2426,9 +2426,10 @@ the present value and `undefined` now cross the native JIT boundary without
 loading QuickJS. The same presence channel composes with tagged primitive
 unions such as `(number | string) | undefined` without dereferencing an absent
 payload. Optional parameters whose payload is a tagged union use three JIT
-slots for presence, runtime tag, and payload; `??` normalizes its selected
-fallback to the same tagged representation. JavaScript default initializers on
-those parameters use the same selection path when the argument is omitted.
+slots for presence, runtime tag, and payload, including unions with native
+array or fixed-shape object members; `??` normalizes its selected fallback to
+the same tagged representation. JavaScript default initializers on those
+parameters use the same selection path when the argument is omitted.
 Mutable dynamic locals may be reassigned between these representable shapes;
 array results are converted to stable native handles before tagging. Other
 heterogeneous result mixtures still remain on the QuickJS path. Tagged
