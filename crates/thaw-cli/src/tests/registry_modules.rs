@@ -1482,13 +1482,24 @@ fn optional_object_fields_use_jit_without_quickjs() {
 #[test]
 fn tagged_object_field_assignments_use_jit_without_quickjs() {
     let declarations = thaw_bridge::parse_dts(
-        "export interface Item { optional?: number; nullable: number | null; nullish: number | null | undefined; }\nexport declare function setOptional(value: Item | string, next: number): number;\nexport declare function setNullable(value: Item | string, next: number): number;\nexport declare function setNullish(value: Item | string, next: number): number;\n",
+        "export interface Item { optional?: number; nullable: number | null; nullish: number | null | undefined; }\nexport declare function setOptional(value: Item | string, next: number): number;\nexport declare function setNullable(value: Item | string, next: number): number;\nexport declare function setNullish(value: Item | string, next: number): number;\nexport declare function postOptional(value: Item | string): number;\nexport declare function preNullable(value: Item | string): number;\nexport declare function postNullish(value: Item | string): number;\nexport declare function preNullish(value: Item | string): number;\nexport declare function addOptional(value: Item | string, next: number): number;\nexport declare function addNullable(value: Item | string, next: number): number;\nexport declare function addNullish(value: Item | string, next: number): number;\n",
     )
     .unwrap();
-    let source = "module.exports.setOptional = (value, next) => typeof value === 'object' ? value.optional = next : -1; module.exports.setNullable = (value, next) => typeof value === 'object' ? value.nullable = next : -1; module.exports.setNullish = (value, next) => typeof value === 'object' ? value.nullish = next : -1;";
-    for (index, name) in ["setOptional", "setNullable", "setNullish"]
-        .into_iter()
-        .enumerate()
+    let source = "module.exports.setOptional = (value, next) => typeof value === 'object' ? value.optional = next : -1; module.exports.setNullable = (value, next) => typeof value === 'object' ? value.nullable = next : -1; module.exports.setNullish = (value, next) => typeof value === 'object' ? value.nullish = next : -1; module.exports.postOptional = value => typeof value === 'object' ? value.optional++ : -1; module.exports.preNullable = value => typeof value === 'object' ? ++value.nullable : -1; module.exports.postNullish = value => typeof value === 'object' ? value.nullish++ : -1; module.exports.preNullish = value => typeof value === 'object' ? ++value.nullish : -1; module.exports.addOptional = (value, next) => typeof value === 'object' ? value.optional += next : -1; module.exports.addNullable = (value, next) => typeof value === 'object' ? value.nullable += next : -1; module.exports.addNullish = (value, next) => typeof value === 'object' ? value.nullish += next : -1;";
+    for (index, name) in [
+        "setOptional",
+        "setNullable",
+        "setNullish",
+        "postOptional",
+        "preNullable",
+        "postNullish",
+        "preNullish",
+        "addOptional",
+        "addNullable",
+        "addNullish",
+    ]
+    .into_iter()
+    .enumerate()
     {
         assert!(
             jit_numeric_export(source, name, false, &declarations[index]).is_some(),
@@ -1504,19 +1515,19 @@ fn tagged_object_field_assignments_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Item { optional?: number; nullable: number | null; nullish: number | null | undefined; }\nexport declare function setOptional(value: Item | string, next: number): number;\nexport declare function setNullable(value: Item | string, next: number): number;\nexport declare function setNullish(value: Item | string, next: number): number;\nexport declare function optional(value: Item | string): number;\nexport declare function nullable(value: Item | string): number;\nexport declare function nullish(value: Item | string): number;\n",
+        "export interface Item { optional?: number; nullable: number | null; nullish: number | null | undefined; }\nexport declare function setOptional(value: Item | string, next: number): number;\nexport declare function setNullable(value: Item | string, next: number): number;\nexport declare function setNullish(value: Item | string, next: number): number;\nexport declare function postOptional(value: Item | string): number;\nexport declare function preNullable(value: Item | string): number;\nexport declare function postNullish(value: Item | string): number;\nexport declare function preNullish(value: Item | string): number;\nexport declare function addOptional(value: Item | string, next: number): number;\nexport declare function addNullable(value: Item | string, next: number): number;\nexport declare function addNullish(value: Item | string, next: number): number;\nexport declare function optional(value: Item | string): number;\nexport declare function nullable(value: Item | string): number;\nexport declare function nullish(value: Item | string): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.setOptional = (value, next) => typeof value === 'object' ? value.optional = next : -1; module.exports.setNullable = (value, next) => typeof value === 'object' ? value.nullable = next : -1; module.exports.setNullish = (value, next) => typeof value === 'object' ? value.nullish = next : -1; module.exports.optional = value => typeof value === 'object' ? value.optional ?? 0 : -1; module.exports.nullable = value => typeof value === 'object' ? value.nullable ?? 0 : -1; module.exports.nullish = value => typeof value === 'object' ? value.nullish ?? 0 : -1;\n",
+        "module.exports.setOptional = (value, next) => typeof value === 'object' ? value.optional = next : -1; module.exports.setNullable = (value, next) => typeof value === 'object' ? value.nullable = next : -1; module.exports.setNullish = (value, next) => typeof value === 'object' ? value.nullish = next : -1; module.exports.postOptional = value => typeof value === 'object' ? value.optional++ : -1; module.exports.preNullable = value => typeof value === 'object' ? ++value.nullable : -1; module.exports.postNullish = value => typeof value === 'object' ? value.nullish++ : -1; module.exports.preNullish = value => typeof value === 'object' ? ++value.nullish : -1; module.exports.addOptional = (value, next) => typeof value === 'object' ? value.optional += next : -1; module.exports.addNullable = (value, next) => typeof value === 'object' ? value.nullable += next : -1; module.exports.addNullish = (value, next) => typeof value === 'object' ? value.nullish += next : -1; module.exports.optional = value => typeof value === 'object' ? value.optional ?? 0 : -1; module.exports.nullable = value => typeof value === 'object' ? value.nullable ?? 0 : -1; module.exports.nullish = value => typeof value === 'object' ? value.nullish ?? 0 : -1;\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { nullable, nullish, optional, setNullable, setNullish, setOptional } from 'jit-tagged-object-field-assignment';\ntype Item = { optional?: number; nullable: number | null; nullish: number | null | undefined };
-function main(): void { const value: Item = { nullable: null, nullish: undefined }; console.log(optional(value)); console.log(nullable(value)); console.log(nullish(value)); console.log(setOptional(value, 3)); console.log(setNullable(value, 5)); console.log(setNullish(value, 7)); console.log(optional(value)); console.log(nullable(value)); console.log(nullish(value)); }\n",
+        "import { addNullable, addNullish, addOptional, nullable, nullish, optional, postNullish, postOptional, preNullable, preNullish, setNullable, setNullish, setOptional } from 'jit-tagged-object-field-assignment';\ntype Item = { optional?: number; nullable: number | null; nullish: number | null | undefined };
+function main(): void { const value: Item = { nullable: null, nullish: undefined }; const nullValue: Item = { nullable: null, nullish: null }; const missing: Item = { nullable: null, nullish: undefined }; console.log(optional(value)); console.log(nullable(value)); console.log(nullish(value)); console.log(postOptional(value)); console.log(preNullable(value)); console.log(postNullish(value)); console.log(preNullish(nullValue)); console.log(addOptional(missing, 2)); console.log(addNullable(missing, 2)); console.log(addNullish(missing, 2)); console.log(setOptional(value, 3)); console.log(setNullable(value, 5)); console.log(setNullish(value, 7)); console.log(addOptional(value, 2)); console.log(addNullable(value, 2)); console.log(addNullish(value, 2)); console.log(optional(value)); console.log(nullable(value)); console.log(nullish(value)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1532,7 +1543,7 @@ function main(): void { const value: Item = { nullable: null, nullish: undefined
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "0\n0\n0\n3\n5\n7\n3\n5\n7\n"
+        "0\n0\n0\nNaN\n1\nNaN\n1\nNaN\n2\nNaN\n3\n5\n7\n5\n7\n9\n5\n7\n9\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
