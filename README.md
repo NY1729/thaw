@@ -2450,7 +2450,9 @@ identity across later calls; assigning a present number, boolean, or string to
 an optional, nullable, or nullish field updates its native payload and presence
 tag through the same path. Numeric compound assignments and prefix/postfix
 updates also operate on tagged fields directly; absent `undefined` converts to
-`NaN`, while `null` converts to zero before the update, matching JavaScript;
+`NaN`, while `null` converts to zero before the update, matching JavaScript.
+Fixed primitive fields support lazy `&&=` and `||=`, and tagged scalar fields
+support lazy `??=` while updating both payload and presence tag;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
