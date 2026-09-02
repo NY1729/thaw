@@ -7162,6 +7162,11 @@ fn jit_export(
             Stmt::For(statement) => contains_aggregate_return(statement.body.as_ref()),
             Stmt::ForOf(statement) => contains_aggregate_return(statement.body.as_ref()),
             Stmt::ForIn(statement) => contains_aggregate_return(statement.body.as_ref()),
+            Stmt::Switch(statement) => statement
+                .cases
+                .iter()
+                .flat_map(|case| &case.cons)
+                .any(contains_aggregate_return),
             _ => false,
         }
     }
@@ -7672,6 +7677,86 @@ fn jit_export(
                     "drop".into(),
                     nested_kinds.len().checked_sub(control_kinds.len())?,
                 ));
+                Some(())
+            }
+            Stmt::Switch(switch_statement) if contains_aggregate_return(statement) => {
+                let mut discriminant = Vec::new();
+                encode_expression(
+                    switch_statement.discriminant.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut discriminant,
+                )?;
+                let discriminant_kind =
+                    if boolean_literal(switch_statement.discriminant.as_ref()) {
+                        discriminant.push("asbool".into());
+                        JitKind::Boolean
+                    } else {
+                        jit_expression_kind(&discriminant)?.0
+                    };
+                if matches!(discriminant_kind, JitKind::Array | JitKind::Dictionary) {
+                    return None;
+                }
+                output.extend(discriminant);
+                output.push("switch".into());
+                for case in &switch_statement.cases {
+                    if let Some(test) = case.test.as_deref() {
+                        output.extend(["case".into(), "dup".into()]);
+                        let mut encoded = Vec::new();
+                        encode_expression(test, parameters, locals, context, &mut encoded)?;
+                        let test_kind = if boolean_literal(test) {
+                            encoded.push("asbool".into());
+                            JitKind::Boolean
+                        } else {
+                            jit_expression_kind(&encoded)?.0
+                        };
+                        output.extend(encoded);
+                        if discriminant_kind == JitKind::String && test_kind == JitKind::String {
+                            output.extend([
+                                "strcmp".into(),
+                                format!("c{:016x}", 0.0f64.to_bits()),
+                                "==".into(),
+                            ]);
+                        } else if discriminant_kind == test_kind
+                            && matches!(
+                                discriminant_kind,
+                                JitKind::Number | JitKind::Boolean
+                            )
+                        {
+                            output.push("==".into());
+                        } else {
+                            output.push("strictfalse".into());
+                        }
+                        output.push("casebody".into());
+                    } else {
+                        output.push("default".into());
+                    }
+                    for case_statement in &case.cons {
+                        if matches!(case_statement, Stmt::Break(statement) if statement.label.is_none())
+                        {
+                            output.push("switchbreak".into());
+                            break;
+                        }
+                        encode_aggregate_return_effects(
+                            case_statement,
+                            requested,
+                            parameters,
+                            locals,
+                            mutable,
+                            control_kinds,
+                            result_base_kinds,
+                            context,
+                            expected_kinds,
+                            expected_values,
+                            output,
+                        )?;
+                        if matches!(case_statement, Stmt::Return(_)) {
+                            break;
+                        }
+                    }
+                }
+                output.push("switchend".into());
                 Some(())
             }
             Stmt::For(_)
@@ -16990,6 +17075,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 .map(Vec::len)
                 .into_iter()
                 .chain(guards.last().map(|guard| guard.0.len()))
+                .chain(switches.last().map(Vec::len))
                 .max();
             let (base, expected) = result_regions.last_mut()?;
             if !stack.starts_with(base.as_slice()) || stack.len() == base.len() {

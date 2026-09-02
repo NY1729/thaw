@@ -9038,6 +9038,7 @@ impl NumericProgram {
                         .map(|loop_patch| loop_patch.base_depth)
                         .into_iter()
                         .chain(guards.last().map(|guard| guard.0))
+                        .chain(switches.last().map(|switch| switch.base_depth))
                         .max();
                     let result = results.last_mut()?;
                     if depth <= result.base_depth {
@@ -10859,6 +10860,16 @@ mod tests {
         .unwrap();
         for (early, expected) in [(0.0, 70.0), (1.0, 30.0)] {
             let result = call(&nested_loop_values, &[early]);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
+
+        let nested_switch_values = CString::new(format!(
+            "expr:{zero},resultstart,a0,switch,case,dup,{five},==,casebody,{ten},{twenty},resultreturn2,default,switchbreak,switchend,{thirty},{forty},resultend,+,nip:nested-switch-early-multiple"
+        ))
+        .unwrap();
+        for (value, expected) in [(1.0, 70.0), (5.0, 30.0)] {
+            let result = call(&nested_switch_values, &[value]);
             assert!(result.error.is_null());
             assert_eq!(result.value, expected);
         }
