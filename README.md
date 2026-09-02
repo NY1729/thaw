@@ -2534,6 +2534,10 @@ mutating operations keep the shared native handle while copying operations
 return a new typed array handle. Length-changing `.push()`, `.unshift()`,
 `.pop()`, and `.shift()` operations use that same handle and preserve their
 JavaScript length or removed-element result for both arrays and fixed tuples.
+Typed JIT callbacks are shared by `.some()`, `.every()`, `.find()`,
+`.findIndex()`, `.findLast()`, `.findLastIndex()`, `.filter()`, `.map()`,
+`.reduce()`, and `.reduceRight()` on the same unions, including callbacks that
+capture primitive export parameters.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
