@@ -1234,10 +1234,16 @@ fn jit_export(
             Expr::Ident(identifier) => locals
                 .get(identifier.sym.as_ref())
                 .and_then(|expression| jit_expression_kind(expression))
-                .is_some_and(|(kind, _)| kind == JitKind::String),
+                .is_some_and(|(kind, _)| matches!(kind, JitKind::String | JitKind::Dynamic)),
             _ => false,
         };
-        if !local_string && !is_string_expression(member.obj.as_ref(), parameters) {
+        let dynamic_parameter = matches!(member.obj.as_ref(), Expr::Ident(identifier) if parameters
+            .get(identifier.sym.as_ref())
+            .is_some_and(|token| jit_dynamic_argument(token).is_some()));
+        if !local_string
+            && !dynamic_parameter
+            && !is_string_expression(member.obj.as_ref(), parameters)
+        {
             return None;
         }
         let MemberProp::Ident(property) = &member.prop else {
@@ -2533,7 +2539,7 @@ fn jit_export(
                         }
                         JitKind::String => output.extend(encoded),
                         JitKind::Number => append_string(encoded, output)?,
-                        JitKind::Dynamic => return None,
+                        JitKind::Dynamic => append_string(encoded, output)?,
                         JitKind::Array | JitKind::Dictionary => return None,
                     }
                     return Some(());
@@ -3389,7 +3395,16 @@ fn jit_export(
             }
             Expr::Call(call) if string_method(call, parameters, locals).is_some() => {
                 let (operation, receiver) = string_method(call, parameters, locals)?;
-                encode_expression(receiver, parameters, locals, context, output)?;
+                let mut encoded = Vec::new();
+                encode_expression(receiver, parameters, locals, context, &mut encoded)?;
+                match jit_expression_kind(&encoded)?.0 {
+                    JitKind::String => output.extend(encoded),
+                    JitKind::Dynamic => {
+                        output.extend(encoded);
+                        output.push("untagstr".into());
+                    }
+                    _ => return None,
+                }
                 if operation == "concat" {
                     for argument in &call.args {
                         let mut encoded = Vec::new();
