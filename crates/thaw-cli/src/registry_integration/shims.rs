@@ -1474,7 +1474,8 @@ fn jit_export(
             JitKind::Number => output.push("numstr".into()),
             JitKind::Boolean => output.push("boolstr".into()),
             JitKind::String => {}
-            JitKind::Dynamic | JitKind::Array | JitKind::Dictionary => return None,
+            JitKind::Dynamic => output.push("dynstr".into()),
+            JitKind::Array | JitKind::Dictionary => return None,
         }
         Some(())
     }
@@ -1484,7 +1485,8 @@ fn jit_export(
         output.append(&mut expression);
         match kind {
             JitKind::String => output.push("strnum".into()),
-            JitKind::Dynamic | JitKind::Array | JitKind::Dictionary => return None,
+            JitKind::Dynamic => output.push("dynnum".into()),
+            JitKind::Array | JitKind::Dictionary => return None,
             JitKind::Number | JitKind::Boolean => {}
         }
         Some(())
@@ -1509,7 +1511,8 @@ fn jit_export(
             JitKind::Number => output.push("asbool".into()),
             JitKind::String => output.push("strbool".into()),
             JitKind::Boolean => {}
-            JitKind::Dynamic | JitKind::Array | JitKind::Dictionary => return None,
+            JitKind::Dynamic => output.push("dynbool".into()),
+            JitKind::Array | JitKind::Dictionary => return None,
         }
         Some(())
     }
@@ -2312,10 +2315,34 @@ fn jit_export(
                 let mut right = Vec::new();
                 encode_expression(binary.left.as_ref(), parameters, locals, context, &mut left)?;
                 encode_expression(binary.right.as_ref(), parameters, locals, context, &mut right)?;
-                let kind = jit_expression_kind(&left)?.0;
-                if jit_expression_kind(&right)?.0 != kind
-                    || matches!(kind, JitKind::Array | JitKind::Dictionary)
+                let left_kind = jit_expression_kind(&left)?.0;
+                let right_kind = jit_expression_kind(&right)?.0;
+                let kind = if left_kind == right_kind {
+                    left_kind
+                } else if left_kind == JitKind::Dynamic
+                    && matches!(right_kind, JitKind::Number | JitKind::Boolean | JitKind::String)
                 {
+                    right.push(match right_kind {
+                        JitKind::Number => "tagnum",
+                        JitKind::Boolean => "tagbool",
+                        JitKind::String => "tagstr",
+                        _ => unreachable!(),
+                    }.into());
+                    JitKind::Dynamic
+                } else if right_kind == JitKind::Dynamic
+                    && matches!(left_kind, JitKind::Number | JitKind::Boolean | JitKind::String)
+                {
+                    left.push(match left_kind {
+                        JitKind::Number => "tagnum",
+                        JitKind::Boolean => "tagbool",
+                        JitKind::String => "tagstr",
+                        _ => unreachable!(),
+                    }.into());
+                    JitKind::Dynamic
+                } else {
+                    return None;
+                };
+                if matches!(kind, JitKind::Array | JitKind::Dictionary) {
                     return None;
                 }
                 output.extend(left);
@@ -2324,7 +2351,7 @@ fn jit_export(
                     JitKind::Number => output.push("asbool".into()),
                     JitKind::String => output.push("strbool".into()),
                     JitKind::Boolean => {}
-                    JitKind::Dynamic => return None,
+                    JitKind::Dynamic => output.push("dynbool".into()),
                     JitKind::Array | JitKind::Dictionary => unreachable!(),
                 }
                 output.push(if binary.op == BinaryOp::LogicalAnd {
@@ -11352,6 +11379,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token == "dynstr" {
+            if stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::String);
+        } else if token == "dynnum" {
+            if stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Number);
         } else if token == "parseint" {
             if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::String {
                 return None;
@@ -11370,6 +11407,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::String);
         } else if token == "strbool" {
             if stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
+        } else if token == "dynbool" {
+            if stack.pop()? != JitKind::Dynamic {
                 return None;
             }
             stack.push(JitKind::Boolean);
