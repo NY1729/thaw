@@ -1772,19 +1772,19 @@ fn mixed_array_range_updates_use_jit_without_quickjs() {
     std::fs::write(
         package.join("package.d.ts"),
         format!(
-            "export declare function fill(value: {union}, replacement: number | string | boolean): {union};\nexport declare function copy(value: {union}): {union};\nexport declare function withValue(value: {union}, replacement: number | string | boolean): {union};\nexport declare function insert(value: {union}, replacement: number | string | boolean): number;\nexport declare function prepend(value: {union}, replacement: number | string | boolean): number;\n"
+            "export declare function fill(value: {union}, replacement: number | string | boolean): {union};\nexport declare function copy(value: {union}): {union};\nexport declare function withValue(value: {union}, replacement: number | string | boolean): {union};\nexport declare function insert(value: {union}, replacement: number | string | boolean): number;\nexport declare function prepend(value: {union}, replacement: number | string | boolean): number;\nexport declare function popValue(value: {union}): number | string | boolean;\nexport declare function shiftValue(value: {union}): number | string | boolean;\n"
         ),
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function fill(value, replacement) { if (Array.isArray(value)) return value.fill(replacement, 1); return value; } function copy(value) { if (Array.isArray(value)) return value.copyWithin(0, 1); return value; } function withValue(value, replacement) { if (Array.isArray(value)) return value.with(1, replacement); return value; } function insert(value, replacement) { if (Array.isArray(value)) return value.push(replacement); return 0; } function prepend(value, replacement) { if (Array.isArray(value)) return value.unshift(replacement); return 0; } module.exports = { fill, copy, withValue, insert, prepend };\n",
+        "function fill(value, replacement) { if (Array.isArray(value)) return value.fill(replacement, 1); return value; } function copy(value) { if (Array.isArray(value)) return value.copyWithin(0, 1); return value; } function withValue(value, replacement) { if (Array.isArray(value)) return value.with(1, replacement); return value; } function insert(value, replacement) { if (Array.isArray(value)) return value.push(replacement); return 0; } function prepend(value, replacement) { if (Array.isArray(value)) return value.unshift(replacement); return 0; } function popValue(value) { if (Array.isArray(value)) return value.pop(); return value; } function shiftValue(value) { if (Array.isArray(value)) return value.shift(); return value; } module.exports = { fill, copy, withValue, insert, prepend, popValue, shiftValue };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { fill, copy, withValue, insert, prepend } from 'jit-mixed-array-range'; function main(): void { console.log(fill([1, 2, 3], 9)); console.log(fill(['a', 'b', 'c'], 'x')); console.log(fill([true, false, false], true)); console.log(copy([1, 2, 3])); console.log(copy(['a', 'b', 'c'])); console.log(copy([true, false, false])); console.log(withValue([1, 2, 3], 9)); console.log(withValue(['a', 'b', 'c'], 'x')); console.log(withValue([true, false, false], true)); console.log(insert([1, 2], 9)); console.log(insert(['a', 'b'], 'x')); console.log(insert([true, false], true)); console.log(prepend([1, 2], 9)); console.log(prepend(['a', 'b'], 'x')); console.log(prepend([true, false], true)); }\n",
+        "import { fill, copy, withValue, insert, prepend, popValue, shiftValue } from 'jit-mixed-array-range'; function main(): void { console.log(fill([1, 2, 3], 9)); console.log(fill(['a', 'b', 'c'], 'x')); console.log(fill([true, false, false], true)); console.log(copy([1, 2, 3])); console.log(copy(['a', 'b', 'c'])); console.log(copy([true, false, false])); console.log(withValue([1, 2, 3], 9)); console.log(withValue(['a', 'b', 'c'], 'x')); console.log(withValue([true, false, false], true)); console.log(insert([1, 2], 9)); console.log(insert(['a', 'b'], 'x')); console.log(insert([true, false], true)); console.log(prepend([1, 2], 9)); console.log(prepend(['a', 'b'], 'x')); console.log(prepend([true, false], true)); console.log(popValue([1, 2])); console.log(popValue(['a', 'b'])); console.log(popValue([true, false])); console.log(shiftValue([1, 2])); console.log(shiftValue(['a', 'b'])); console.log(shiftValue([true, false])); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1800,7 +1800,7 @@ fn mixed_array_range_updates_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[1,9,9]\n[\"a\",\"x\",\"x\"]\n[true,true,true]\n[2,3,3]\n[\"b\",\"c\",\"c\"]\n[false,false,false]\n[1,9,3]\n[\"a\",\"x\",\"c\"]\n[true,true,false]\n3\n3\n3\n3\n3\n3\n"
+        "[1,9,9]\n[\"a\",\"x\",\"x\"]\n[true,true,true]\n[2,3,3]\n[\"b\",\"c\",\"c\"]\n[false,false,false]\n[1,9,3]\n[\"a\",\"x\",\"c\"]\n[true,true,false]\n3\n3\n3\n3\n3\n3\n2\nb\nfalse\n1\na\ntrue\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -4150,6 +4150,35 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &prepend,
     )
     .is_some());
+    let remove = thaw_bridge::DtsFunction {
+        name: "popValue".into(),
+        params: vec![function.params[0].clone()],
+        required_params: 1,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
+            thaw_hir::HirType::F64,
+            thaw_hir::HirType::Str,
+            thaw_hir::HirType::Bool,
+        ])),
+        ..function.clone()
+    };
+    assert!(jit_numeric_export(
+        "function popValue(value) { if (Array.isArray(value)) return value.pop(); return value; } module.exports = { popValue };",
+        "popValue",
+        false,
+        &remove,
+    )
+    .is_some());
+    let shift_value = thaw_bridge::DtsFunction {
+        name: "shiftValue".into(),
+        ..remove
+    };
+    assert!(jit_numeric_export(
+        "function shiftValue(value) { if (Array.isArray(value)) return value.shift(); return value; } module.exports = { shiftValue };",
+        "shiftValue",
+        false,
+        &shift_value,
+    )
+    .is_some());
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],
