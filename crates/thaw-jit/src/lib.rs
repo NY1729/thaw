@@ -8996,19 +8996,20 @@ impl NumericProgram {
                 }
                 NumericValue::CatchStart => {
                     let exception = tries.pop()?;
-                    if depth != exception.base_depth || exception.throws.is_empty() {
+                    if depth < exception.base_depth || exception.throws.is_empty() {
                         return None;
                     }
+                    let result_depth = depth - exception.base_depth;
                     let normal_exit = emit_unconditional_jump(&mut code);
                     for jump in exception.throws {
                         patch_near_jump(&mut code, jump)?;
                     }
-                    catches.push((exception.base_depth, normal_exit));
-                    depth += if exception.tagged { 2 } else { 1 };
+                    catches.push((exception.base_depth, normal_exit, result_depth));
+                    depth = exception.base_depth + if exception.tagged { 2 } else { 1 };
                 }
                 NumericValue::TryEnd => {
-                    let (base_depth, normal_exit) = catches.pop()?;
-                    if depth != base_depth {
+                    let (base_depth, normal_exit, result_depth) = catches.pop()?;
+                    if depth != base_depth + result_depth {
                         return None;
                     }
                     patch_near_jump(&mut code, normal_exit)?;
@@ -10753,6 +10754,21 @@ mod tests {
             ))
             .unwrap();
             let result = call(&multiple, &[]);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
+
+        let five = format!("c{:016x}", 5.0f64.to_bits());
+        let ten = format!("c{:016x}", 10.0f64.to_bits());
+        let twenty = format!("c{:016x}", 20.0f64.to_bits());
+        let thirty = format!("c{:016x}", 30.0f64.to_bits());
+        let forty = format!("c{:016x}", 40.0f64.to_bits());
+        let try_values = CString::new(format!(
+            "expr:trystart,a0,asbool,if,{five},throw,{zero},else,{zero},end,drop,{zero},{ten},{twenty},catch,{thirty},{forty},tryend,+,nip:try-multiple"
+        ))
+        .unwrap();
+        for (throws, expected) in [(0.0, 30.0), (1.0, 70.0)] {
+            let result = call(&try_values, &[throws]);
             assert!(result.error.is_null());
             assert_eq!(result.value, expected);
         }

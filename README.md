@@ -2611,6 +2611,10 @@ An aggregate returned from a `try` block is materialized before a straight-line
 `finally` body runs. Primitive leaves therefore preserve the already selected
 return value, while returned primitive arrays retain identity and observe
 in-place mutations performed by `finally`.
+Single-typed primitive throws can also join a normal fixed-aggregate return with
+a catch-side fixed-aggregate return. The JIT exception edge preserves a typed
+placeholder plus every aggregate leaf, allowing the catch parameter to feed the
+returned object without loading QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
