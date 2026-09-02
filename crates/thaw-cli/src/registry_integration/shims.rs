@@ -2534,7 +2534,30 @@ fn jit_export(
                     || matches!(tokens.as_slice(), [token] if jit_dynamic_array_argument(token)
                         || jit_typed_array_union_untag(token).is_some())
             });
-        if !parameter_array && !local_array {
+        let returned_array = match member.obj.as_ref() {
+            Expr::Call(receiver) => array_method(receiver, parameters, locals).is_some_and(
+                |(method, _)| {
+                    matches!(
+                        method,
+                        "slice"
+                            | "concat"
+                            | "toReversed"
+                            | "toSorted"
+                            | "reverse"
+                            | "sort"
+                            | "fill"
+                            | "copyWithin"
+                            | "splice"
+                            | "toSpliced"
+                            | "with"
+                            | "filter"
+                            | "map"
+                    )
+                },
+            ),
+            _ => false,
+        };
+        if !parameter_array && !local_array && !returned_array {
             return None;
         }
         matches!(

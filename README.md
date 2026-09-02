@@ -2552,7 +2552,9 @@ and synchronous `for...of` loops directly. Both constructs reuse the typed
 untag operation, so callers do not need a redundant `Array.isArray` guard;
 loop elements retain their number, boolean, or string JIT type. The same
 guard-free receiver handling applies to supported read-only, copying, callback,
-and mutating array methods.
+and mutating array methods. Array-returning methods can be chained directly;
+their typed result becomes the next receiver without an intermediate guard or
+QuickJS round trip.
 Fixed-position array destructuring declarations over homogeneous array/tuple
 union sources materialize the initializer once in a typed JIT local before
 lowering each binding to an index read. Number, boolean, and string bindings,
