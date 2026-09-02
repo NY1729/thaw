@@ -2465,7 +2465,9 @@ The same tagged ABI now carries homogeneous primitive arrays and dictionaries
 alongside primitive alternatives. Their native one-word handles round-trip
 through union arguments and results without JSON conversion; `typeof`,
 truthiness, identity, and JavaScript string coercion operate on the runtime tag
-without embedding QuickJS.
+without embedding QuickJS. Fixed-shape objects and homogeneous primitive
+dictionaries may also coexist in one tagged union; identity returns and
+subsequent specialized calls preserve their distinct runtime tags.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
