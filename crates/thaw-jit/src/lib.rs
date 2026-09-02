@@ -6267,10 +6267,10 @@ impl NumericProgram {
                     "absentn" | "absentb" | "absents" | "absentdyn" | "absenta" | "absentd" => {
                         Some(NumericValue::Absent)
                     }
-                    "keepabsentn" | "keepabsentb" | "keepabsents" => {
+                    "keepabsentn" | "keepabsentb" | "keepabsents" | "keepabsenta" => {
                         Some(NumericValue::PreserveAbsent)
                     }
-                    "nulln" | "nullb" | "nulls" => Some(NumericValue::Null),
+                    "nulln" | "nullb" | "nulls" | "nulla" | "nulld" => Some(NumericValue::Null),
                     "asbool" => Some(NumericValue::AsBoolean),
                     "boolnot" => Some(NumericValue::BooleanNot),
                     "strictfalse" => Some(NumericValue::StrictMismatch(false)),
