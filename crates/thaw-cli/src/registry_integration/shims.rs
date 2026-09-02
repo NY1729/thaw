@@ -7386,6 +7386,61 @@ fn jit_export(
                 *materialized = fallback_values;
                 Some(())
             }
+            Stmt::DoWhile(statement)
+                if !rest.is_empty() && contains_aggregate_return(statement.body.as_ref()) =>
+            {
+                let mut loop_output = vec!["resultstart".into(), "loop".into()];
+                let control_kinds = helper_control_kinds(kinds, locals)?;
+                let mut early_kinds = None;
+                let mut early_values = None;
+                encode_aggregate_return_effects(
+                    statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    &control_kinds,
+                    kinds,
+                    context,
+                    &mut early_kinds,
+                    &mut early_values,
+                    &mut loop_output,
+                )?;
+                let early_kinds = early_kinds?;
+                let early_values = early_values?;
+                loop_output.push("looptail".into());
+                encode_condition(
+                    statement.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut loop_output,
+                )?;
+                loop_output.extend(["while".into(), "loopend".into()]);
+                let mut fallback_kinds = kinds.clone();
+                let mut fallback_values = std::collections::HashMap::new();
+                let mut fallback_output = Vec::new();
+                materialize_helper_returns(
+                    rest,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    &mut fallback_kinds,
+                    &mut fallback_values,
+                    &mut fallback_output,
+                )?;
+                if early_kinds != fallback_kinds || early_values != fallback_values {
+                    return None;
+                }
+                output.extend(loop_output);
+                output.extend(fallback_output);
+                output.push("resultend".into());
+                *kinds = fallback_kinds;
+                *materialized = fallback_values;
+                Some(())
+            }
             Stmt::For(statement)
                 if !rest.is_empty()
                     && contains_aggregate_return(statement.body.as_ref()) =>
