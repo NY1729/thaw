@@ -3092,13 +3092,21 @@ fn jit_export(
                                 parameters,
                                 locals,
                                 context,
-                                if prefix == "rs" { JitKind::String } else { JitKind::Boolean },
+                                match prefix {
+                                    "rs" => JitKind::String,
+                                    "rb" => JitKind::Boolean,
+                                    "dynamic" => JitKind::Dynamic,
+                                    _ => return None,
+                                },
                                 &mut operand,
                             )
                         };
                         if let Some(operation) = operation {
                             output.extend(operand);
-                            output.push(format!("{prefix}{method}{operation}"));
+                            output.push(format!(
+                                "{}{method}{operation}",
+                                if dynamic_array { "dynarray" } else { prefix }
+                            ));
                         } else {
                             let element_prefix = match prefix {
                                 "rn" => "a",
@@ -4893,6 +4901,7 @@ fn jit_export(
                 || token.starts_with("rnreduce")
                 || token.starts_with("rnreduceright")
                 || token.starts_with("rnfilter")
+                || token.starts_with("dynarray")
                 || token.contains("mapjit")
                 || token.contains("filterjit")
         })
@@ -8419,8 +8428,12 @@ fn jit_export(
             (BinaryOp::LtEq, false) | (BinaryOp::GtEq, true) => "lte",
             (BinaryOp::Gt, false) | (BinaryOp::Lt, true) => "gt",
             (BinaryOp::GtEq, false) | (BinaryOp::LtEq, true) => "gte",
-            (BinaryOp::EqEq | BinaryOp::EqEqEq, _) => "eq",
-            (BinaryOp::NotEq | BinaryOp::NotEqEq, _) => "ne",
+            (BinaryOp::EqEq, _) => "eq",
+            (BinaryOp::NotEq, _) => "ne",
+            (BinaryOp::EqEqEq, _) if expected == JitKind::Dynamic => "seq",
+            (BinaryOp::NotEqEq, _) if expected == JitKind::Dynamic => "sne",
+            (BinaryOp::EqEqEq, _) => "eq",
+            (BinaryOp::NotEqEq, _) => "ne",
             _ => return None,
         };
         let mut encoded = Vec::new();
@@ -11393,7 +11406,7 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
             | "dynarrayshift"
             | "dynarrayfindtruthy"
             | "dynarrayfindlasttruthy"
-    ) || ["rn", "rb", "rs"].iter().any(|prefix| {
+    ) || ["rn", "rb", "rs", "dynarray"].iter().any(|prefix| {
         token.strip_prefix(prefix).is_some_and(|suffix| {
             suffix.starts_with("find")
                 && !suffix.starts_with("findindex")
@@ -11446,6 +11459,30 @@ fn primitive_comparison_result(token: &str) -> Option<(JitKind, JitKind)> {
         _ => unreachable!(),
     };
     Some((element, result))
+}
+
+fn dynamic_array_comparison_result(token: &str) -> Option<JitKind> {
+    let operation = token.strip_prefix("dynarray")?;
+    let (method, comparison) = [
+        "findlastindex",
+        "findlast",
+        "findindex",
+        "filter",
+        "every",
+        "some",
+        "find",
+    ]
+    .into_iter()
+    .find_map(|method| operation.strip_prefix(method).map(|comparison| (method, comparison)))?;
+    if !matches!(comparison, "lt" | "lte" | "gt" | "gte" | "eq" | "ne" | "seq" | "sne") {
+        return None;
+    }
+    Some(match method {
+        "some" | "every" => JitKind::Boolean,
+        "findindex" | "findlastindex" => JitKind::Number,
+        "find" | "findlast" | "filter" => JitKind::Dynamic,
+        _ => unreachable!(),
+    })
 }
 
 fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
@@ -12216,6 +12253,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "dynarrayfindindextruthy" | "dynarrayfindlastindextruthy" => JitKind::Number,
                 _ => JitKind::Dynamic,
             });
+        } else if let Some(result) = dynamic_array_comparison_result(token) {
+            if stack.pop()? != JitKind::Dynamic || stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(result);
         } else if let Some(result) = primitive_truthy_result(token) {
             if stack.pop()? != JitKind::Array {
                 return None;
