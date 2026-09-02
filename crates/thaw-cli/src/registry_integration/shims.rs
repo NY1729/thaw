@@ -307,21 +307,7 @@ fn jit_export(
                     if let thaw_hir::HirType::Object(nested) = ty {
                         bind_fields(&field_path, nested, &value, locals)?;
                     } else if let thaw_hir::HirType::Tuple(types) = ty {
-                        for (index, element) in types.iter().enumerate() {
-                            let operation = match element {
-                                thaw_hir::HirType::F64 => "rnget",
-                                thaw_hir::HirType::Bool => "rbget",
-                                thaw_hir::HirType::Str => "rsget",
-                                _ => return None,
-                            };
-                            let mut element_value = value.clone();
-                            element_value.push(format!(
-                                "c{:016x}",
-                                (index as f64).to_bits()
-                            ));
-                            element_value.push(operation.into());
-                            locals.insert(format!("{field_path}.{index}"), element_value);
-                        }
+                        bind_tuple(&field_path, types, &value, locals)?;
                     }
                 }
                 offset = offset.checked_add(if matches!(
@@ -335,6 +321,31 @@ fn jit_export(
                 } else {
                     8
                 })?;
+            }
+            Some(())
+        }
+        fn bind_tuple(
+            path: &str,
+            types: &[thaw_hir::HirType],
+            source: &[String],
+            locals: &mut std::collections::HashMap<String, Vec<String>>,
+        ) -> Option<()> {
+            for (index, element) in types.iter().enumerate() {
+                let operation = match element {
+                    thaw_hir::HirType::F64 => "rnget",
+                    thaw_hir::HirType::Bool => "rbget",
+                    thaw_hir::HirType::Str => "rsget",
+                    thaw_hir::HirType::Tuple(_) => "raget",
+                    _ => return None,
+                };
+                let element_path = format!("{path}.{index}");
+                let mut value = source.to_vec();
+                value.push(format!("c{:016x}", (index as f64).to_bits()));
+                value.push(operation.into());
+                locals.insert(element_path.clone(), value.clone());
+                if let thaw_hir::HirType::Tuple(types) = element {
+                    bind_tuple(&element_path, types, &value, locals)?;
+                }
             }
             Some(())
         }
@@ -585,23 +596,38 @@ fn jit_export(
             if element.spread.is_some() {
                 return None;
             }
-            let mut value = Vec::new();
-            encode_expression(
-                element.expr.as_ref(),
-                parameters,
-                locals,
-                context,
-                &mut value,
-            )?;
-            let expected = jit_return_kind(ty)?;
-            if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
-                return None;
-            }
-            let kind = match ty {
-                thaw_hir::HirType::F64 => 'n',
-                thaw_hir::HirType::Bool => 'b',
-                thaw_hir::HirType::Str => 's',
-                _ => return None,
+            let (value, kind) = match ty {
+                thaw_hir::HirType::Tuple(types) => (
+                    encode_fixed_tuple_value(
+                        element.expr.as_ref(),
+                        types,
+                        parameters,
+                        locals,
+                        context,
+                    )?,
+                    'p',
+                ),
+                _ => {
+                    let mut value = Vec::new();
+                    encode_expression(
+                        element.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut value,
+                    )?;
+                    let expected = jit_return_kind(ty)?;
+                    if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                        return None;
+                    }
+                    let kind = match ty {
+                        thaw_hir::HirType::F64 => 'n',
+                        thaw_hir::HirType::Bool => 'b',
+                        thaw_hir::HirType::Str => 's',
+                        _ => return None,
+                    };
+                    (value, kind)
+                }
             };
             output.extend(value);
             output.push(format!("tupset{kind}{index}"));
@@ -11955,6 +11981,7 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
             | "rnget"
             | "rbget"
             | "rsget"
+            | "raget"
             | "rnpop"
             | "rspop"
             | "rbpop"
@@ -13298,7 +13325,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Array);
         } else if matches!(
             token.as_str(),
-            "rnat" | "rbat" | "rsat" | "dynarrayat" | "rnget" | "rbget" | "rsget"
+            "rnat"
+                | "rbat"
+                | "rsat"
+                | "dynarrayat"
+                | "rnget"
+                | "rbget"
+                | "rsget"
+                | "raget"
         ) {
             if stack.pop()? != JitKind::Number
                 || stack.pop()?
@@ -13314,6 +13348,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "rnat" | "rnget" => JitKind::Number,
                 "rbat" | "rbget" => JitKind::Boolean,
                 "rsat" | "rsget" => JitKind::String,
+                "raget" => JitKind::Array,
                 "dynarrayat" => JitKind::Dynamic,
                 _ => unreachable!(),
             });
@@ -13453,6 +13488,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                     "n" => matches!(value, JitKind::Number | JitKind::Boolean),
                     "b" => matches!(value, JitKind::Number | JitKind::Boolean),
                     "s" => value == JitKind::String,
+                    "p" => value == JitKind::Array,
                     _ => return None,
                 }
             {
