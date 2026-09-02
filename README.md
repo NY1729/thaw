@@ -2618,11 +2618,12 @@ Primitive-dictionary `for...in` loops can likewise return a fixed aggregate
 early. Their native source handle is reused, while an explicit typed key slot
 supports computed number, boolean, or string dictionary reads in the returned
 leaves before joining the post-loop fallback.
-Nested `while`, `do...while`, and classic `for` loops can exit the same aggregate
-result region. A classic loop's scoped initializer is recreated for every
-reached outer iteration and discarded on its normal exit. The counted return
-instruction moves only the trailing result leaves across any temporary
-inner-loop slots, then jumps directly to the shared helper result.
+Nested `while`, `do...while`, classic `for`, and array `for...of` loops can exit
+the same aggregate result region. A classic loop's scoped initializer and a
+`for...of` loop's iterator state are recreated for every reached outer
+iteration and discarded on normal exit. The counted return instruction moves
+only the trailing result leaves across any temporary inner-loop slots, then
+jumps directly to the shared helper result.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
