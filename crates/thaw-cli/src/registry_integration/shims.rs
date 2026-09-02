@@ -7747,6 +7747,163 @@ fn jit_export(
                 *materialized = fallback_values;
                 Some(())
             }
+            Stmt::ForIn(statement)
+                if !rest.is_empty() && contains_aggregate_return(statement.body.as_ref()) =>
+            {
+                let mut loop_locals = locals.clone();
+                let mut loop_mutable = mutable.clone();
+                let mut loop_kinds = kinds.clone();
+                let mut source = Vec::new();
+                encode_expression(
+                    statement.right.as_ref(),
+                    parameters,
+                    &loop_locals,
+                    context,
+                    &mut source,
+                )?;
+                if jit_expression_kind(&source)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                let dictionary = dictionary_prefix(&source)?;
+                let local_prefix = format!("{dictionary}l");
+                let source_local = if let [source] = source.as_slice() {
+                    source
+                        .starts_with(&local_prefix)
+                        .then(|| source.clone())
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| {
+                    let source_index = loop_kinds.len();
+                    output.extend(source);
+                    loop_kinds.insert(
+                        format!("\0forin-source-{source_index}"),
+                        JitKind::Dictionary,
+                    );
+                    format!("{dictionary}l{source_index}")
+                });
+                let index = loop_kinds.len();
+                output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                loop_kinds.insert(format!("\0forin-index-{index}"), JitKind::Number);
+                let index_local = format!("ln{index}");
+                let key_index = match &statement.left {
+                    ForHead::VarDecl(declaration) => {
+                        let [declarator] = declaration.decls.as_slice() else {
+                            return None;
+                        };
+                        let Pat::Ident(name) = &declarator.name else {
+                            return None;
+                        };
+                        if declarator.init.is_some()
+                            || parameters.contains_key(name.id.sym.as_ref())
+                            || loop_locals.contains_key(name.id.sym.as_ref())
+                        {
+                            return None;
+                        }
+                        encode_string("", output)?;
+                        let key_index = loop_kinds.len();
+                        loop_locals.insert(
+                            name.id.sym.to_string(),
+                            vec![format!("ls{key_index}")],
+                        );
+                        loop_kinds.insert(name.id.sym.to_string(), JitKind::String);
+                        if declaration.kind != VarDeclKind::Const {
+                            loop_mutable.insert(name.id.sym.to_string());
+                        }
+                        Some(key_index)
+                    }
+                    ForHead::Pat(pattern) => {
+                        let Pat::Ident(name) = pattern.as_ref() else {
+                            return None;
+                        };
+                        if !loop_mutable.contains(name.id.sym.as_ref())
+                            || loop_kinds.get(name.id.sym.as_ref())? != &JitKind::String
+                        {
+                            return None;
+                        }
+                        Some(loop_local_index(
+                            loop_locals.get(name.id.sym.as_ref())?.first()?,
+                        )?)
+                    }
+                    ForHead::UsingDecl(_) => return None,
+                };
+                let mut loop_output = vec![
+                    "resultstart".into(),
+                    "loop".into(),
+                    index_local.clone(),
+                    source_local.clone(),
+                    "dlen".into(),
+                    "<".into(),
+                    "while".into(),
+                ];
+                if let Some(key_index) = key_index {
+                    loop_output.extend([
+                        source_local,
+                        index_local.clone(),
+                        "dkeyat".into(),
+                        format!("setl{key_index}"),
+                    ]);
+                }
+                let mut early_kinds = None;
+                let mut early_values = None;
+                encode_aggregate_return_effects(
+                    statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    &loop_locals,
+                    &loop_mutable,
+                    &loop_kinds,
+                    &loop_kinds,
+                    context,
+                    &mut early_kinds,
+                    &mut early_values,
+                    &mut loop_output,
+                )?;
+                let early_kinds = early_kinds?;
+                let early_values = early_values?;
+                loop_output.extend([
+                    "looptail".into(),
+                    index_local,
+                    format!("c{:016x}", 1.0f64.to_bits()),
+                    "+".into(),
+                    format!("setl{index}"),
+                    "loopend".into(),
+                ]);
+                let mut fallback_kinds = loop_kinds.clone();
+                let mut fallback_values = std::collections::HashMap::new();
+                let mut fallback_output = Vec::new();
+                materialize_helper_returns(
+                    rest,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    &mut fallback_kinds,
+                    &mut fallback_values,
+                    &mut fallback_output,
+                )?;
+                if early_kinds != fallback_kinds || early_values != fallback_values {
+                    return None;
+                }
+                output.extend(loop_output);
+                output.extend(fallback_output);
+                output.push("resultend".into());
+                for (slot, name) in loop_kinds
+                    .keys()
+                    .filter(|name| !kinds.contains_key(*name))
+                    .enumerate()
+                {
+                    let kind = fallback_kinds.remove(name)?;
+                    fallback_kinds.insert(
+                        format!("\0forin-result-{slot}-{}", fallback_kinds.len()),
+                        kind,
+                    );
+                }
+                *kinds = fallback_kinds;
+                *materialized = fallback_values;
+                Some(())
+            }
             Stmt::If(branch) => {
                 if let Some((name, tag_index, value_index, selected, alternate, probe)) =
                     dynamic_catch_narrowing(branch.test.as_ref(), locals)
