@@ -2443,6 +2443,9 @@ such as `value[flag ? "left" : "right"]`, is evaluated once and lowered to a
 typed JIT branch over those fixed field reads. An arbitrary runtime string key
 can select among a fixed object's same-typed fields through the same one-time
 evaluation path; an unknown key produces the native absent state for `??`;
+assignments through a constant or finite conditional key update the selected
+native fixed-object field in place and return the assigned value, preserving
+shared identity across later calls;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without

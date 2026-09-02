@@ -2992,6 +2992,102 @@ fn jit_export(
             Some(output)
         }
 
+        fn encode_fixed_field_assignment(
+            path: &str,
+            key: &Expr,
+            value: &Expr,
+            parameters: &std::collections::HashMap<String, String>,
+            locals: &std::collections::HashMap<String, Vec<String>>,
+            context: &mut InlineContext<'_>,
+        ) -> Option<Vec<String>> {
+            match key {
+                Expr::Paren(parenthesized) => encode_fixed_field_assignment(
+                    path,
+                    parenthesized.expr.as_ref(),
+                    value,
+                    parameters,
+                    locals,
+                    context,
+                ),
+                Expr::Cond(conditional) => {
+                    let mut output = Vec::new();
+                    encode_condition(
+                        conditional.test.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut output,
+                    )?;
+                    let mut consequent = encode_fixed_field_assignment(
+                        path,
+                        conditional.cons.as_ref(),
+                        value,
+                        parameters,
+                        locals,
+                        context,
+                    )?;
+                    let mut alternate = encode_fixed_field_assignment(
+                        path,
+                        conditional.alt.as_ref(),
+                        value,
+                        parameters,
+                        locals,
+                        context,
+                    )?;
+                    normalize_callable_branches([&mut consequent, &mut alternate])?;
+                    output.push("if".into());
+                    output.extend(consequent);
+                    output.push("else".into());
+                    output.extend(alternate);
+                    output.push("end".into());
+                    Some(output)
+                }
+                Expr::Lit(Lit::Str(property)) => {
+                    let field = format!("{path}.{}", property.value.to_string_lossy());
+                    let operation = locals
+                        .get(&field)
+                        .cloned()
+                        .or_else(|| parameters.get(&field).map(|value| vec![value.clone()]))?;
+                    let (getter, receiver) = operation.split_last()?;
+                    let (prefix, expected) = if getter
+                        .strip_prefix("objn")
+                        .is_some_and(|offset| offset.parse::<u16>().is_ok())
+                    {
+                        ("objsetn", JitKind::Number)
+                    } else if getter
+                        .strip_prefix("objb")
+                        .is_some_and(|offset| offset.parse::<u16>().is_ok())
+                    {
+                        ("objsetb", JitKind::Boolean)
+                    } else if getter
+                        .strip_prefix("objs")
+                        .is_some_and(|offset| offset.parse::<u16>().is_ok())
+                    {
+                        ("objsets", JitKind::String)
+                    } else {
+                        return None;
+                    };
+                    let offset = getter.bytes().skip_while(|byte| !byte.is_ascii_digit()).count();
+                    let offset = &getter[getter.len() - offset..];
+                    let mut encoded = Vec::new();
+                    encode_expression(value, parameters, locals, context, &mut encoded)?;
+                    if !jit_kind_compatible(jit_expression_kind(&encoded)?.0, expected) {
+                        return None;
+                    }
+                    let mut output = receiver.to_vec();
+                    output.extend(encoded);
+                    output.extend([
+                        "dup2".into(),
+                        format!("{prefix}{offset}"),
+                        "drop".into(),
+                        "nip".into(),
+                    ]);
+                    Some(output)
+                }
+                _ => None,
+            }
+        }
+
         match expression {
             Expr::Ident(identifier) if locals.contains_key(identifier.sym.as_ref()) => {
                 output.extend(locals.get(identifier.sym.as_ref())?.iter().cloned());
@@ -3240,6 +3336,28 @@ fn jit_export(
                 else {
                     return None;
                 };
+                if assignment.op == AssignOp::Assign {
+                    let key = match &target.prop {
+                        MemberProp::Ident(property) => {
+                            Expr::Lit(Lit::Str(property.sym.to_string().into()))
+                        }
+                        MemberProp::Computed(property) => property.expr.as_ref().clone(),
+                        MemberProp::PrivateName(_) => return None,
+                    };
+                    if let Some(path) = member_path(target.obj.as_ref()) {
+                        if let Some(encoded) = encode_fixed_field_assignment(
+                            &path,
+                            &key,
+                            assignment.right.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                        ) {
+                            output.extend(encoded);
+                            return (output.len() <= 256).then_some(());
+                        }
+                    }
+                }
                 let mut receiver = Vec::new();
                 encode_expression(
                     target.obj.as_ref(),
