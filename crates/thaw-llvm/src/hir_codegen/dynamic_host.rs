@@ -1194,7 +1194,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 HirType::Optional(payload)
                     if matches!(payload.as_ref(), HirType::F64 | HirType::Bool | HirType::Str)
                         || matches!(payload.as_ref(), HirType::Array(element) if jit_array_result_element_supported(element))
-                        || matches!(payload.as_ref(), HirType::Dictionary(element) if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str)) =>
+                        || matches!(payload.as_ref(), HirType::Dictionary(element) if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str))
+                        || matches!(payload.as_ref(), HirType::Union(elements) if jit_tagged_union(elements)) =>
                 {
                     payload.as_ref()
                 }
@@ -1206,10 +1207,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 ty @ HirType::Dictionary(element)
                     if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 _ => {
-                    return Err(
-                        "JIT calls currently return supported primitives, tagged unions, arrays, dictionaries, or optional supported values"
-                            .into(),
-                    )
+                    return Err(format!(
+                        "JIT calls currently return supported primitives, tagged unions, arrays, dictionaries, or optional supported values, not {:?}",
+                        signature.ret
+                    ));
                 }
             };
             let argument_slots = signature
@@ -1667,6 +1668,27 @@ impl<'ctx> HirCompiler<'ctx> {
                         "jit_dynamic_value",
                     )
                     .map_err(|error| error.to_string())?;
+                let pointer = if matches!(signature.ret, HirType::Optional(_)) {
+                    let storage_type = self.context.i64_type().array_type(2);
+                    let absent_storage = self
+                        .builder
+                        .build_alloca(storage_type, "jit_absent_dynamic_value")
+                        .map_err(|error| error.to_string())?;
+                    self.builder
+                        .build_store(absent_storage, storage_type.const_zero())
+                        .map_err(|error| error.to_string())?;
+                    self.builder
+                        .build_select(
+                            absent,
+                            absent_storage,
+                            pointer,
+                            "jit_present_dynamic_value",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .into_pointer_value()
+                } else {
+                    pointer
+                };
                 let payload_pointer = unsafe {
                     self.builder
                         .build_in_bounds_gep(
