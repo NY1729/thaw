@@ -2146,6 +2146,34 @@ array_append_fn!(string_array_append, 1);
 array_append_fn!(bool_array_append, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_append(array: f64, value: f64) -> f64 {
+    let (Some(array), Some(value)) = (
+        dynamic_primitive(array, None),
+        dynamic_primitive(value, None),
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let operation = match (array.tag, value.tag) {
+        (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG) => 0,
+        (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG) => 1,
+        (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG) => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    dynamic_array_result(
+        array.tag,
+        array_append(
+            operation,
+            f64::from_bits(array.payload),
+            f64::from_bits(value.payload),
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_to_reversed(value: f64) -> f64 {
     let (Some(reverse), Some((data, _))) = (ARRAY_TO_REVERSED.with(Cell::get), unsafe {
         array_data(value)
@@ -2706,6 +2734,62 @@ extern "C" fn array_to_spliced(array: f64, start: f64, delete_count: f64, insert
     } else {
         array_result(output)
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_splice(
+    array: f64,
+    start: f64,
+    delete_count: f64,
+    inserts: f64,
+    copy: bool,
+) -> f64 {
+    let (Some(array), Some(inserts)) = (
+        dynamic_primitive(array, None),
+        dynamic_primitive(inserts, None),
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if array.tag != inserts.tag
+        || !matches!(
+            array.tag,
+            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+        )
+    {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let splice = if copy { array_to_spliced } else { array_splice };
+    dynamic_array_result(
+        array.tag,
+        splice(
+            f64::from_bits(array.payload),
+            start,
+            delete_count,
+            f64::from_bits(inserts.payload),
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_splice_in_place(
+    array: f64,
+    start: f64,
+    delete_count: f64,
+    inserts: f64,
+) -> f64 {
+    dynamic_array_splice(array, start, delete_count, inserts, false)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_to_spliced(
+    array: f64,
+    start: f64,
+    delete_count: f64,
+    inserts: f64,
+) -> f64 {
+    dynamic_array_splice(array, start, delete_count, inserts, true)
 }
 
 macro_rules! array_remove_fn {
@@ -4426,6 +4510,7 @@ enum NumericValue {
     NumberArrayAppend,
     StringArrayAppend,
     BoolArrayAppend,
+    DynamicArrayAppend,
     ArrayToReversed,
     ArrayReverse,
     DynamicArrayToReversed,
@@ -4497,6 +4582,8 @@ enum NumericValue {
     DynamicArrayShift,
     ArraySplice,
     ArrayToSpliced,
+    DynamicArraySplice,
+    DynamicArrayToSpliced,
     NumberArrayWith,
     StringArrayWith,
     BoolArrayWith,
@@ -4789,6 +4876,7 @@ impl NumericProgram {
                     "rnappend" => Some(NumericValue::NumberArrayAppend),
                     "rsappend" => Some(NumericValue::StringArrayAppend),
                     "rbappend" => Some(NumericValue::BoolArrayAppend),
+                    "dynarrayappend" => Some(NumericValue::DynamicArrayAppend),
                     "captureappend" => Some(NumericValue::NumberArrayAppend),
                     "arrayreversed" => Some(NumericValue::ArrayToReversed),
                     "arrayreverse" => Some(NumericValue::ArrayReverse),
@@ -4817,6 +4905,8 @@ impl NumericProgram {
                     "dynarraywith" => Some(NumericValue::DynamicArrayWith),
                     "arraysplice" => Some(NumericValue::ArraySplice),
                     "arraytospliced" => Some(NumericValue::ArrayToSpliced),
+                    "dynarraysplice" => Some(NumericValue::DynamicArraySplice),
+                    "dynarraytospliced" => Some(NumericValue::DynamicArrayToSpliced),
                     "rnpush" => Some(NumericValue::NumberArrayPush),
                     "rspush" => Some(NumericValue::StringArrayPush),
                     "rbpush" => Some(NumericValue::BoolArrayPush),
@@ -6287,7 +6377,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArrayAppend
                 | NumericValue::StringArrayAppend
-                | NumericValue::BoolArrayAppend => {
+                | NumericValue::BoolArrayAppend
+                | NumericValue::DynamicArrayAppend => {
                     if depth < 2 {
                         return None;
                     }
@@ -6295,6 +6386,7 @@ impl NumericProgram {
                         NumericValue::NumberArrayAppend => number_array_append,
                         NumericValue::StringArrayAppend => string_array_append,
                         NumericValue::BoolArrayAppend => bool_array_append,
+                        NumericValue::DynamicArrayAppend => dynamic_array_append,
                         _ => unreachable!(),
                     };
                     emit_binary_call(&mut code, function as *const () as u64, depth - 2);
@@ -6432,6 +6524,18 @@ impl NumericProgram {
                         array_to_spliced as *const () as u64,
                         depth - 4,
                     );
+                    depth -= 3;
+                }
+                NumericValue::DynamicArraySplice | NumericValue::DynamicArrayToSpliced => {
+                    if depth < 4 {
+                        return None;
+                    }
+                    let function = if *value == NumericValue::DynamicArrayToSpliced {
+                        dynamic_array_to_spliced
+                    } else {
+                        dynamic_array_splice_in_place
+                    };
+                    emit_quaternary_call(&mut code, function as *const () as u64, depth - 4);
                     depth -= 3;
                 }
                 NumericValue::NumberArrayPush
