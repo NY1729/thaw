@@ -2543,7 +2543,10 @@ may change element type, such as `string[]` or `boolean[]` to `number[]`, while
 remaining on the JIT path. Three-argument callbacks receive the typed element,
 numeric index, and original array/tuple handle; they may combine its `.length`
 with multiple captured number, boolean, or string export parameters without
-leaving the JIT.
+leaving the JIT. Numeric `.reduce()` and `.reduceRight()` also support omitted
+initial values on array/tuple unions: the first element is retained as the
+typed accumulator, left/right iteration order is preserved, and an empty
+ordinary array raises the standard reduction error through the JIT path.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
