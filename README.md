@@ -2540,7 +2540,10 @@ Typed JIT callbacks are shared by `.some()`, `.every()`, `.find()`,
 capture primitive export parameters. Boolean and string array/tuple unions use
 the same callback ABI for truthiness, comparisons and typed maps; map results
 may change element type, such as `string[]` or `boolean[]` to `number[]`, while
-remaining on the JIT path.
+remaining on the JIT path. Three-argument callbacks receive the typed element,
+numeric index, and original array/tuple handle; they may combine its `.length`
+with multiple captured number, boolean, or string export parameters without
+leaving the JIT.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
