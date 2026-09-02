@@ -1431,7 +1431,15 @@ fn jit_export(
     ) -> Option<()> {
         let left_kind = jit_expression_kind(&left)?.0;
         let right_kind = jit_expression_kind(&right)?.0;
-        if left_kind == JitKind::Array || right_kind == JitKind::Array {
+        if left_kind == JitKind::Dynamic || right_kind == JitKind::Dynamic {
+            append_dynamic(left, output)?;
+            append_dynamic(right, output)?;
+            output.push("dynadd".into());
+            return Some(());
+        }
+        if matches!(left_kind, JitKind::Array | JitKind::Dictionary)
+            || matches!(right_kind, JitKind::Array | JitKind::Dictionary)
+        {
             return None;
         }
         output.append(&mut left);
@@ -1464,6 +1472,19 @@ fn jit_export(
             }
             .into(),
         );
+        Some(())
+    }
+
+    fn append_dynamic(mut expression: Vec<String>, output: &mut Vec<String>) -> Option<()> {
+        let kind = jit_expression_kind(&expression)?.0;
+        output.append(&mut expression);
+        match kind {
+            JitKind::Number => output.push("tagnum".into()),
+            JitKind::Boolean => output.push("tagbool".into()),
+            JitKind::String => output.push("tagstr".into()),
+            JitKind::Dynamic => {}
+            JitKind::Array | JitKind::Dictionary => return None,
+        }
         Some(())
     }
 
@@ -2322,22 +2343,16 @@ fn jit_export(
                 } else if left_kind == JitKind::Dynamic
                     && matches!(right_kind, JitKind::Number | JitKind::Boolean | JitKind::String)
                 {
-                    right.push(match right_kind {
-                        JitKind::Number => "tagnum",
-                        JitKind::Boolean => "tagbool",
-                        JitKind::String => "tagstr",
-                        _ => unreachable!(),
-                    }.into());
+                    let mut tagged = Vec::new();
+                    append_dynamic(right, &mut tagged)?;
+                    right = tagged;
                     JitKind::Dynamic
                 } else if right_kind == JitKind::Dynamic
                     && matches!(left_kind, JitKind::Number | JitKind::Boolean | JitKind::String)
                 {
-                    left.push(match left_kind {
-                        JitKind::Number => "tagnum",
-                        JitKind::Boolean => "tagbool",
-                        JitKind::String => "tagstr",
-                        _ => unreachable!(),
-                    }.into());
+                    let mut tagged = Vec::new();
+                    append_dynamic(left, &mut tagged)?;
+                    left = tagged;
                     JitKind::Dynamic
                 } else {
                     return None;
@@ -3893,7 +3908,24 @@ fn jit_export(
                 let left_kind = jit_expression_kind(&left)?.0;
                 let right_kind = jit_expression_kind(&right)?.0;
                 let strict = matches!(binary.op, BinaryOp::EqEqEq | BinaryOp::NotEqEq);
-                if strict && left_kind != right_kind {
+                if left_kind == JitKind::Dynamic || right_kind == JitKind::Dynamic {
+                    append_dynamic(left, output)?;
+                    append_dynamic(right, output)?;
+                    output.push(
+                        match binary.op {
+                            BinaryOp::Lt => "dynlt",
+                            BinaryOp::LtEq => "dynlte",
+                            BinaryOp::Gt => "dyngt",
+                            BinaryOp::GtEq => "dyngte",
+                            BinaryOp::EqEq => "dyneq",
+                            BinaryOp::NotEq => "dynne",
+                            BinaryOp::EqEqEq => "dynseq",
+                            BinaryOp::NotEqEq => "dynsne",
+                            _ => unreachable!(),
+                        }
+                        .into(),
+                    );
+                } else if strict && left_kind != right_kind {
                     output.extend(left);
                     output.extend(right);
                     output.push(
@@ -11227,6 +11259,19 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             returns.push(result);
+        } else if token == "dynadd" {
+            if stack.pop()? != JitKind::Dynamic || stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Dynamic);
+        } else if matches!(
+            token.as_str(),
+            "dynlt" | "dynlte" | "dyngt" | "dyngte" | "dyneq" | "dynne" | "dynseq" | "dynsne"
+        ) {
+            if stack.pop()? != JitKind::Dynamic || stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if matches!(
             token.as_str(),
             "+"
@@ -12220,7 +12265,10 @@ fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> O
         || (expected == JitKind::Dynamic
             && !expression
                 .iter()
-                .any(|token| matches!(token.as_str(), "tagnum" | "tagbool" | "tagstr")))
+                .any(|token| {
+                    matches!(token.as_str(), "tagnum" | "tagbool" | "tagstr")
+                        || jit_dynamic_argument(token).is_some()
+                }))
     {
         return None;
     }
