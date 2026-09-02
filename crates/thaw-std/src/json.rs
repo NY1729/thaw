@@ -334,6 +334,9 @@ pub extern "C" fn thaw_jit_dictionary_mutate(
 /// string. Operations `1` through `7` return an arena-backed array handle.
 /// For operations `8` through `10`, `object` must be such an array handle.
 /// For operation `11`, `object` and `key` must point to valid JSON values.
+/// Operation `12` ignores both pointers and creates an empty object. Operation
+/// `13` returns an object's enumerable-key count. Operation `14` interprets
+/// `key` as an encoded numeric index and returns that ordered key as a string.
 pub unsafe extern "C" fn thaw_jit_dictionary_query(
     operation: u8,
     object: *mut Value,
@@ -371,6 +374,28 @@ pub unsafe extern "C" fn thaw_jit_dictionary_query(
         } as usize as u64),
         11 => {
             f64::from_bits(unsafe { thaw_json_object_assign(object, key.cast()) } as usize as u64)
+        }
+        12 => f64::from_bits(thaw_json_object_new() as usize as u64),
+        13 => unsafe { object.as_ref() }.map_or(0.0, |value| match value {
+            Value::Object(fields) => fields.len() as f64,
+            _ => 0.0,
+        }),
+        14 => {
+            let index = f64::from_bits(key as usize as u64);
+            let Some(index) = (index.is_finite() && index >= 0.0 && index.fract() == 0.0)
+                .then_some(index as usize)
+            else {
+                return 0.0;
+            };
+            let Some(Value::Object(fields)) = (unsafe { object.as_ref() }) else {
+                return 0.0;
+            };
+            let Some((key, _)) = ordered_object_fields(fields).into_iter().nth(index) else {
+                return 0.0;
+            };
+            f64::from_bits(
+                CString::new(key.as_str()).unwrap_or_default().into_raw() as usize as u64,
+            )
         }
         _ => 0.0,
     }

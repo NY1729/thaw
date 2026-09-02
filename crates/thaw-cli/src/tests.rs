@@ -1295,7 +1295,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &predicate,
         ),
-        Some("expr:b0,c0000000000000000,c3ff0000000000000,?,asbool".into())
+        Some("expr:b0,boolnot".into())
     );
     let string_length = thaw_bridge::DtsFunction {
         name: "length".into(),
@@ -3047,7 +3047,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         ),
         (
             "module.exports.matches = value => !value;",
-            "expr:s0,strbool,c0000000000000000,c3ff0000000000000,?,asbool",
+            "expr:s0,strbool,boolnot",
         ),
     ] {
         assert_eq!(
@@ -3530,6 +3530,24 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             false,
             &function,
         ),
+        Some("expr:a0,a1,+,c4000000000000000,*".into())
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "let SCALE = Math.random(); module.exports.add = (left, right) => (left + right) * SCALE;",
+            "add",
+            false,
+            &function,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "let SCALE = LATER; let LATER = 2; module.exports.add = (left, right) => (left + right) * SCALE;",
+            "add",
+            false,
+            &function,
+        ),
         None
     );
     assert_eq!(
@@ -3596,6 +3614,43 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
             "add",
             false,
             &function,
+        ),
+        None
+    );
+    let mut dispatcher = function.clone();
+    dispatcher.name = "tableAlias".into();
+    dispatcher.params = vec![
+        (
+            "name".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        ),
+        (
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ),
+    ];
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { increment, double: twice }; function tableAlias(name, value) { return operations[name](value); } module.exports = { tableAlias };",
+        "tableAlias",
+        false,
+        &dispatcher,
+    )
+    .is_some());
+    assert_eq!(
+        jit_numeric_export(
+            "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { increment }; function tableAlias(name, value) { operations[name] = twice; return operations[name](value); } module.exports = { tableAlias };",
+            "tableAlias",
+            false,
+            &dispatcher,
+        ),
+        None
+    );
+    assert_eq!(
+        jit_numeric_export(
+            "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const key = 'increment'; const operations = { increment }; operations[key] = twice; function tableAlias(name, value) { return operations[name](value); } module.exports = { tableAlias };",
+            "tableAlias",
+            false,
+            &dispatcher,
         ),
         None
     );

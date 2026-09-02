@@ -2213,10 +2213,124 @@ normalized to the same IR, including direct boolean/numeric conditions.
 Return-only `switch` statements over number, boolean, or string values also
 stay in that IR. The discriminant executes once, case expressions remain lazy,
 empty-case fallthrough and a default at any source position are preserved.
+Primitive `while`, `do...while`, and classic `for` loops with typed
+number/boolean locals now compile to native backward branches in the same JIT. Conditions are
+re-evaluated per iteration, mutable locals remain in JIT registers, and plain
+assignments, numeric compound assignments, and increments/decrements execute
+without loading QuickJS. Classic `for` supports declaration or expression
+initializers and omitted initializer, condition, or update clauses.
+`for...of` over native `number[]`, `boolean[]`, and `string[]` values reuses the
+same loop IR and typed array loads; the iterable is evaluated once and empty
+arrays skip the body without loading QuickJS.
+`for...in` over homogeneous primitive dictionaries uses direct native key-count
+and ordered-key loads. The dictionary expression is evaluated once, `const`
+loop keys are computed from the current index without occupying another JIT
+register, and nested dictionary loops retain `break`, `continue`, and early
+`return` without loading QuickJS.
+Unlabelled `break` and `continue` work inside these JIT loops, including under
+nested `if`/`else` guards. Each loop retains its own exit and continuation
+target, so classic `for` runs its update and `do...while` rechecks its condition
+after a continued iteration.
+Loop bodies may contain primitive `switch` statements. The discriminant runs
+once, case tests stay lazy after a match, source-order fallthrough is preserved,
+and a default clause works at any source position. Switch-local `break`, an
+enclosing-loop `continue`, nested guarded breaks, and early returns use distinct
+native jump targets without loading QuickJS.
+Loop bodies may also use `try...finally` without a `catch`. Normal completion,
+early `return`, and unlabelled `break`/`continue` run active finalizers from
+innermost to outermost. Return expressions are evaluated and retained before
+the finalizers execute, while an abrupt completion produced by a finalizer
+overrides the pending completion as in JavaScript. Control-flow boundaries
+prevent an inner loop or switch-local exit from prematurely running a
+surrounding finalizer. Explicit number, boolean, and string throws can transfer
+their typed value directly to a nearest `catch`, including an omitted catch
+binding, nested finalizers, and rethrow to an outer catch. Native-helper errors,
+including invalid string repeat counts and the checked number-format,
+normalization, code-point, reduction, and array-`with` paths, are cleared from
+the outer call status and delivered to the same catch as native strings.
+Uncaught primitive throws also leave the generated function through the typed
+JIT result ABI: strings retain their value, numbers use the native JavaScript
+formatter, and booleans become `true`/`false`, after every active finalizer has
+run. Caught homogeneous `number[]`, `boolean[]`, `string[]`, and primitive
+dictionary throws retain their native handle and element type, so catch
+bindings can immediately use supported length, index, and dictionary operations.
+Heterogeneous primitive throws use a compact type-tag/value pair inside the JIT.
+A catch binding can narrow number, boolean, or string alternatives with a direct
+`typeof value === "..."` `if`/`else`, after which each branch reuses the ordinary
+typed operations. When exactly one typed array and one typed dictionary can
+reach the catch, `Array.isArray(value)` similarly selects their existing native
+handle and enables array length/index operations or dictionary key access in
+the corresponding branch; both incoming dictionary parameters and dictionaries
+constructed from object literals retain their values across the transfer.
+Uncaught typed arrays and primitive dictionaries also leave through the JIT
+error result, using JavaScript string conversion after active finalizers run.
+When several typed array or primitive-dictionary element types reach one catch,
+`typeof value[index]` and `typeof value.property` narrow the hidden exception
+tag. The JIT checks array bounds or dictionary ownership only after that tag
+matches, preserving `undefined` behavior for empty arrays and missing keys.
+Checked native-helper failures can share that tagged catch with explicitly
+thrown values and enter as the string alternative. Fallible string formatting,
+padding, replacement, slicing, case conversion, array formatting/copying,
+sorting, mutation, filtering/mapping, and dictionary enumeration instructions
+insert that check immediately after the native call, before a later JIT
+instruction can consume its failed result. Allocation failure while initially
+materializing an array or dictionary literal remains an outer JIT call error.
+All four loop forms may nest in JIT loop bodies. Inner classic `for`
+declarations and `for...of` iterator state are initialized per outer iteration
+and dropped at the inner scope boundary; inner `break`/`continue` target only
+the innermost loop.
+Number, boolean, string, primitive-array, and homogeneous primitive-dictionary
+values may return early from any of these loop bodies, including nested guarded
+loops. Arrays are converted from mutable local handles to the native result
+layout at the return edge; dictionaries retain their native handle. The JIT
+moves the selected value directly into its result register and returns without
+executing later iterations or the fall-through return path.
+Loop blocks may declare mutable or immutable number, boolean, string,
+primitive-array, and homogeneous string-keyed primitive-dictionary locals,
+including nested-block shadowing. Array literals are materialized as mutable
+native handles before local storage, so indexed writes, `push`/`unshift`, and
+later same-typed reassignment stay in the JIT. Object literals use typed native
+dictionary construction and static-key writes; member reads, writes, and
+same-typed reassignment remain on that path as well. Initializers run in
+statement order on every reached iteration; normal block exits discard their
+slots, while `break`, `continue`, and early `return` jump over unreachable
+cleanup safely.
 Side-effect-free local declarations, assignments,
 numeric compound assignments, and standalone increments/decrements are
-expanded in statement order. Calls, property mutation, and forward references
-to mutable values remain on the QuickJS path. Calls to side-effect-free function
+expanded in statement order. Exported functions may reference stable module-level
+`let`/`var` values declared later in source order; straight-line assignments,
+compound numeric/string assignments, and increments before module initialization
+completes are folded to the value visible when an import can first call the
+function. Exported functions may also update numeric module `let`/`var`
+bindings: module-scoped atomic JIT slots preserve initialized values across
+repeated calls and share updates between specialized exports without embedding
+QuickJS. Initializers that actually
+cross a `let`/`const` temporal dead zone remain unsupported. Local and
+module-level function aliases whose final target
+is statically known reuse the same helper inliner, including straight-line
+mutable alias reassignment. A direct `(condition ? left : right)(args)` call
+lowers to lazy typed JIT branches when both targets are supported helpers.
+Immutable module-level function tables such as `{ add, double: twice }` also
+lower computed string-key calls to lazy JIT comparisons when every target has a
+common supported result type: number, boolean, string, primitive array, or
+primitive dictionary. The key is evaluated once, and a missing entry reports
+`value is not a function` directly from the JIT. Straight-line module
+initialization may replace a mutable table or assign identifier/string-literal
+properties; specialization uses the final state visible after initialization.
+Exported functions may also assign a known helper to an existing
+identifier/string-literal table key: an atomic module-scoped selector preserves
+the choice across calls and exports, and both static and computed-key calls use
+the selected helper. Computed-key updates also stay in the JIT when the key
+expression proves a finite set of existing string keys, such as
+`table[flag ? "left" : "right"] = helper`; the key is evaluated once before the
+atomic selector update. These updates also compose with the typed `if`, loop,
+and `try`/`finally` control-flow lowering, so only reached assignments change
+the persistent selector. Assignment values may likewise be a finite conditional
+helper expression such as `flag ? twice : increment`; key and helper conditions
+are each evaluated once on the selected update path. Function values obtained
+from arbitrary external runtime data, unbounded computed-key mutation, new keys
+created during an exported call, or mixed-result tables remain on the QuickJS
+path. Calls to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
 including nested calls and forward function declarations; dynamic, shadowed, or
 indirect cycles that do not return to the exported root deliberately fall back

@@ -76,8 +76,9 @@ fn jit_export(
 ) -> Option<JitExport> {
     use thaw_parser::ast::{
         ArrowExpr, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr,
-        ExprOrSpread, Function, Ident, Lit, MemberProp, ModuleItem, OptChainBase, Pat, Prop,
-        PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp, UpdateOp, VarDeclKind,
+        ExprOrSpread, ForHead, Function, Ident, Lit, MemberProp, ModuleItem, OptChainBase, Pat,
+        Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp, UpdateOp, VarDeclKind,
+        VarDeclOrExpr,
     };
 
     fn jit_parameter_slots(ty: &thaw_hir::HirType) -> Option<usize> {
@@ -1282,6 +1283,7 @@ fn jit_export(
     fn array_method<'a>(
         call: &'a CallExpr,
         parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
     ) -> Option<(&'a str, &'a Expr)> {
         if call.args.iter().any(|argument| argument.spread.is_some()) {
             return None;
@@ -1301,6 +1303,10 @@ fn jit_export(
         if !parameters
             .get(receiver.sym.as_ref())
             .is_some_and(|token| token.starts_with('r'))
+            && locals
+                .get(receiver.sym.as_ref())
+                .and_then(|tokens| array_prefix(tokens))
+                .is_none()
         {
             return None;
         }
@@ -1822,6 +1828,51 @@ fn jit_export(
                     )?;
                 }
             }
+            Expr::Object(object) => {
+                let mut entries = Vec::new();
+                let mut kind = None;
+                for property in &object.props {
+                    let (key, value) = object_property(property)?;
+                    let mut encoded = Vec::new();
+                    match value {
+                        ObjectReturnValue::Expression(expression) => encode_expression(
+                            expression,
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?,
+                        ObjectReturnValue::Shorthand(identifier) => encode_expression(
+                            &Expr::Ident(identifier.clone()),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?,
+                    }
+                    let value_kind = jit_expression_kind(&encoded)?.0;
+                    if matches!(value_kind, JitKind::Array | JitKind::Dictionary)
+                        || kind.replace(value_kind).is_some_and(|kind| kind != value_kind)
+                    {
+                        return None;
+                    }
+                    entries.push((key, encoded));
+                }
+                let prefix = match kind? {
+                    JitKind::Number => "dn",
+                    JitKind::Boolean => "db",
+                    JitKind::String => "ds",
+                    JitKind::Array | JitKind::Dictionary => return None,
+                };
+                output.push(format!("{prefix}empty"));
+                for (key, value) in entries {
+                    let mut encoded_key = Vec::new();
+                    encode_string(&key, &mut encoded_key)?;
+                    let encoded_key = encoded_key.pop()?.strip_prefix('t')?.to_owned();
+                    output.extend(value);
+                    output.push(format!("{prefix}put{encoded_key}"));
+                }
+            }
             Expr::Member(member) => {
                 let object_field = member_path(expression).and_then(|path| parameters.get(&path));
                 if matches!(
@@ -1943,7 +1994,26 @@ fn jit_export(
                     Some(b'b') => JitKind::Boolean,
                     _ => return None,
                 };
-                output.extend(receiver);
+                let local_set = if assignment.op == AssignOp::Assign {
+                    match target.obj.as_ref() {
+                        Expr::Ident(identifier) => locals
+                            .get(identifier.sym.as_ref())
+                            .and_then(|tokens| tokens.first())
+                            .and_then(|local| {
+                                local
+                                    .starts_with(&format!("{prefix}l"))
+                                    .then(|| loop_local_index(local))
+                                    .flatten()
+                            })
+                            .map(|index| format!("{prefix}lset{index}")),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if local_set.is_none() {
+                    output.extend(receiver);
+                }
                 match (&target.prop, receiver_kind) {
                     (MemberProp::Computed(index), JitKind::Array) => {
                         encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
@@ -2007,7 +2077,7 @@ fn jit_export(
                         );
                     }
                 }
-                output.push(format!("{prefix}set"));
+                output.push(local_set.unwrap_or_else(|| format!("{prefix}set")));
             }
             Expr::Update(update) => {
                 let Expr::Member(target) = update.arg.as_ref() else {
@@ -2127,12 +2197,7 @@ fn jit_export(
                 match unary.op {
                     UnaryOp::Minus => output.push("neg".into()),
                     UnaryOp::Tilde => output.push("bnot".into()),
-                    UnaryOp::Bang => {
-                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
-                        output.push(format!("c{:016x}", 1.0f64.to_bits()));
-                        output.push("?".into());
-                        output.push("asbool".into());
-                    }
+                    UnaryOp::Bang => output.push("boolnot".into()),
                     _ => {}
                 }
             }
@@ -2591,8 +2656,8 @@ fn jit_export(
                 output.extend(encoded);
                 output.push(if is_array { "isarray" } else { "isnotarray" }.into());
             }
-            Expr::Call(call) if array_method(call, parameters).is_some() => {
-                let (method, receiver) = array_method(call, parameters)?;
+            Expr::Call(call) if array_method(call, parameters, locals).is_some() => {
+                let (method, receiver) = array_method(call, parameters, locals)?;
                 let mut encoded = Vec::new();
                 encode_expression(receiver, parameters, locals, context, &mut encoded)?;
                 if jit_expression_kind(&encoded)?.0 != JitKind::Array {
@@ -2600,7 +2665,19 @@ fn jit_export(
                 }
                 let prefix = array_prefix(&encoded)?;
                 let encoded_receiver = encoded.clone();
-                output.extend(encoded);
+                let local_insert = matches!(method, "push" | "unshift")
+                    .then(|| match receiver {
+                        Expr::Ident(identifier) => locals
+                            .get(identifier.sym.as_ref())
+                            .and_then(|tokens| tokens.first())
+                            .and_then(|token| loop_local_index(token)),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter(|_| !call.args.is_empty());
+                if local_insert.is_none() {
+                    output.extend(encoded);
+                }
                 if matches!(method, "reduce" | "reduceRight") {
                     let (callback, initial) = match call.args.as_slice() {
                         [callback] => (callback, None),
@@ -2882,7 +2959,7 @@ fn jit_export(
                         call.args.iter().collect()
                     };
                     for (index, argument) in arguments.iter().enumerate() {
-                        if index != 0 {
+                        if index != 0 && local_insert.is_none() {
                             output.extend(encoded_receiver.iter().cloned());
                         }
                         let mut encoded_value = Vec::new();
@@ -2897,7 +2974,10 @@ fn jit_export(
                             return None;
                         }
                         output.extend(encoded_value);
-                        output.push(format!("{prefix}{method}"));
+                        output.push(local_insert.map_or_else(
+                            || format!("{prefix}{method}"),
+                            |local| format!("{prefix}l{method}{local}"),
+                        ));
                         if index + 1 != arguments.len() {
                             output.push("drop".into());
                         }
@@ -3743,6 +3823,14 @@ fn jit_export(
         Statements(&'a [Stmt]),
     }
 
+    fn boolean_literal(expression: &Expr) -> bool {
+        let mut expression = expression;
+        while let Expr::Paren(parenthesized) = expression {
+            expression = parenthesized.expr.as_ref();
+        }
+        matches!(expression, Expr::Lit(Lit::Bool(_)))
+    }
+
     fn encode_switch_case_return(
         switch: &thaw_parser::ast::SwitchStmt,
         start: usize,
@@ -3774,13 +3862,6 @@ fn jit_export(
             context,
             &mut discriminant,
         )?;
-        let boolean_literal = |expression: &Expr| {
-            let mut expression = expression;
-            while let Expr::Paren(parenthesized) = expression {
-                expression = parenthesized.expr.as_ref();
-            }
-            matches!(expression, Expr::Lit(Lit::Bool(_)))
-        };
         let kind = if boolean_literal(switch.discriminant.as_ref()) {
             JitKind::Boolean
         } else {
@@ -3916,6 +3997,167 @@ fn jit_export(
         Effect(&'a Expr),
     }
 
+    #[derive(Clone, Copy)]
+    enum BreakTarget {
+        Loop,
+        Switch,
+    }
+
+    #[derive(Clone, Copy)]
+    struct LoopControl {
+        break_target: BreakTarget,
+        break_finalizer_depth: usize,
+        continue_finalizer_depth: usize,
+        throw_finalizer_depth: usize,
+        catch_active: bool,
+        catch_tagged: bool,
+    }
+
+    type LoopScope<'a> = (
+        &'a std::collections::HashMap<String, String>,
+        &'a std::collections::HashMap<String, Vec<String>>,
+        &'a std::collections::HashSet<String>,
+        &'a std::collections::HashMap<String, JitKind>,
+    );
+
+    fn nested_loop_control(finalizer_depth: usize, parent: LoopControl) -> LoopControl {
+        LoopControl {
+            break_target: BreakTarget::Loop,
+            break_finalizer_depth: finalizer_depth,
+            continue_finalizer_depth: finalizer_depth,
+            ..parent
+        }
+    }
+
+    fn root_loop_control() -> LoopControl {
+        LoopControl {
+            break_target: BreakTarget::Loop,
+            break_finalizer_depth: 0,
+            continue_finalizer_depth: 0,
+            throw_finalizer_depth: 0,
+            catch_active: false,
+            catch_tagged: false,
+        }
+    }
+
+    fn jit_tokens_may_error(tokens: &[String]) -> bool {
+        tokens.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "repeat"
+                    | "fromcodepoint"
+                    | "normalize"
+                    | "tofixed"
+                    | "toprecision"
+                    | "toexponential"
+                    | "tostringradix"
+                    | "rnwith"
+                    | "rswith"
+                    | "rbwith"
+                    | "charat"
+                    | "at"
+                    | "concat"
+                    | "numstr"
+                    | "boolstr"
+                    | "padend"
+                    | "padstart"
+                    | "split"
+                    | "strarray"
+                    | "fromcharcode"
+                    | "replace"
+                    | "replaceall"
+                    | "slice"
+                    | "slice2"
+                    | "substring"
+                    | "substring2"
+                    | "tolowercase"
+                    | "towellformed"
+                    | "touppercase"
+                    | "trim"
+                    | "trimend"
+                    | "trimstart"
+                    | "rnjoin"
+                    | "rbjoin"
+                    | "rsjoin"
+                    | "arrayslice"
+                    | "arrayconcat"
+                    | "arrayreversed"
+                    | "arrayreverse"
+                    | "rnsorted"
+                    | "rssorted"
+                    | "rbsorted"
+                    | "rnsort"
+                    | "rnsortedasc"
+                    | "rnsorteddesc"
+                    | "rnsortasc"
+                    | "rnsortdesc"
+                    | "rssorteddesc"
+                    | "rssortdesc"
+                    | "rssort"
+                    | "rbsort"
+                    | "rnfill"
+                    | "rsfill"
+                    | "rbfill"
+                    | "arraycopywithin"
+                    | "arraysplice"
+                    | "arraytospliced"
+                    | "rnpush"
+                    | "rspush"
+                    | "rbpush"
+                    | "rnunshift"
+                    | "rsunshift"
+                    | "rbunshift"
+                    | "rnset"
+                    | "rnpostset"
+                    | "rsset"
+                    | "rbset"
+                    | "rnpop"
+                    | "rspop"
+                    | "rbpop"
+                    | "rnshift"
+                    | "rsshift"
+                    | "rbshift"
+                    | "dkeys"
+                    | "dnvalues"
+                    | "dbvalues"
+                    | "dsvalues"
+                    | "dnentries"
+                    | "dbentries"
+                    | "dsentries"
+                    | "dnfromentries"
+                    | "dbfromentries"
+                    | "dsfromentries"
+                    | "missingcalln"
+                    | "missingcallb"
+                    | "missingcalls"
+                    | "missingcalla"
+                    | "missingcalld"
+                    | "globalget"
+                    | "globalinit"
+                    | "globalset"
+            )
+                || token.starts_with("rnreduce")
+                || token.starts_with("rnreduceright")
+                || token.starts_with("rnfilter")
+                || token.contains("mapjit")
+                || token.contains("filterjit")
+        })
+    }
+
+    fn insert_jit_error_checks(output: &mut Vec<String>, start: usize) {
+        if !jit_tokens_may_error(&output[start..]) {
+            return;
+        }
+        let tokens = output.split_off(start);
+        for token in tokens {
+            let may_error = jit_tokens_may_error(std::slice::from_ref(&token));
+            output.push(token);
+            if may_error {
+                output.push("checkerror".into());
+            }
+        }
+    }
+
     fn split_numeric_body(statements: &[Stmt]) -> Option<(Vec<LocalStep<'_>>, NumericBody<'_>)> {
         let mut steps = Vec::new();
         let mut offset = 0;
@@ -3967,6 +4209,1894 @@ fn jit_export(
             .then_some((steps, NumericBody::Statements(&statements[offset..])))
     }
 
+    fn encode_for_in_loop(
+        statement: &thaw_parser::ast::ForInStmt,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &mut std::collections::HashMap<String, Vec<String>>,
+        mutable: &mut std::collections::HashSet<String>,
+        state: (
+            &mut std::collections::HashMap<String, JitKind>,
+            LoopControl,
+            &[&thaw_parser::ast::BlockStmt],
+        ),
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (kinds, loop_control, finalizers) = state;
+        let mut source = Vec::new();
+        encode_expression(
+            statement.right.as_ref(),
+            parameters,
+            locals,
+            context,
+            &mut source,
+        )?;
+        if jit_expression_kind(&source)?.0 != JitKind::Dictionary {
+            return None;
+        }
+        let source_prefix = dictionary_prefix(&source)?;
+        output.extend(source);
+        let source_index = kinds.len();
+        kinds.insert(
+            format!("\0forin-source-{source_index}"),
+            JitKind::Dictionary,
+        );
+        let source_local = format!("{source_prefix}l{source_index}");
+
+        let index = kinds.len();
+        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+        kinds.insert(format!("\0forin-index-{index}"), JitKind::Number);
+        let index_local = format!("ln{index}");
+
+        let element_index = match &statement.left {
+            ForHead::VarDecl(declaration) => {
+                let [declarator] = declaration.decls.as_slice() else {
+                    return None;
+                };
+                let Pat::Ident(name) = &declarator.name else {
+                    return None;
+                };
+                if declarator.init.is_some()
+                    || parameters.contains_key(name.id.sym.as_ref())
+                    || locals.contains_key(name.id.sym.as_ref())
+                {
+                    return None;
+                }
+                if declaration.kind == VarDeclKind::Const {
+                    locals.insert(
+                        name.id.sym.to_string(),
+                        vec![source_local.clone(), index_local.clone(), "dkeyat".into()],
+                    );
+                    None
+                } else {
+                    encode_string("", output)?;
+                    let element_index = kinds.len();
+                    locals.insert(
+                        name.id.sym.to_string(),
+                        vec![format!("ls{element_index}")],
+                    );
+                    kinds.insert(name.id.sym.to_string(), JitKind::String);
+                    mutable.insert(name.id.sym.to_string());
+                    Some(element_index)
+                }
+            }
+            ForHead::Pat(pattern) => {
+                let Pat::Ident(name) = pattern.as_ref() else {
+                    return None;
+                };
+                if !mutable.contains(name.id.sym.as_ref())
+                    || kinds.get(name.id.sym.as_ref())? != &JitKind::String
+                {
+                    return None;
+                }
+                Some(loop_local_index(
+                    locals.get(name.id.sym.as_ref())?.first()?,
+                )?)
+            }
+            ForHead::UsingDecl(_) => return None,
+        };
+
+        output.extend([
+            "loop".into(),
+            index_local.clone(),
+            source_local.clone(),
+            "dlen".into(),
+            "<".into(),
+            "while".into(),
+        ]);
+        if let Some(element_index) = element_index {
+            output.extend([
+                source_local,
+                index_local.clone(),
+                "dkeyat".into(),
+                format!("setl{element_index}"),
+            ]);
+        }
+        encode_loop_effects(
+            statement.body.as_ref(),
+            parameters,
+            locals,
+            mutable,
+            (
+                kinds,
+                nested_loop_control(finalizers.len(), loop_control),
+                finalizers,
+            ),
+            context,
+            output,
+        )?;
+        output.extend([
+            "looptail".into(),
+            index_local,
+            format!("c{:016x}", 1.0f64.to_bits()),
+            "+".into(),
+            format!("setl{index}"),
+            "loopend".into(),
+        ]);
+        Some(())
+    }
+
+    fn encode_loop_switch(
+        statement: &thaw_parser::ast::SwitchStmt,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        mutable: &std::collections::HashSet<String>,
+        control: (
+            &std::collections::HashMap<String, JitKind>,
+            LoopControl,
+            &[&thaw_parser::ast::BlockStmt],
+        ),
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (kinds, loop_control, finalizers) = control;
+        let mut discriminant = Vec::new();
+        encode_expression(
+            statement.discriminant.as_ref(),
+            parameters,
+            locals,
+            context,
+            &mut discriminant,
+        )?;
+        let kind = jit_expression_kind(&discriminant)?.0;
+        if matches!(kind, JitKind::Array | JitKind::Dictionary) {
+            return None;
+        }
+        output.extend(discriminant);
+        output.push("switch".into());
+        for case in &statement.cases {
+            if let Some(test) = case.test.as_deref() {
+                output.extend(["case".into(), "dup".into()]);
+                let mut encoded = Vec::new();
+                encode_expression(test, parameters, locals, context, &mut encoded)?;
+                let test_kind = jit_expression_kind(&encoded)?.0;
+                output.extend(encoded);
+                if kind == JitKind::String && test_kind == JitKind::String {
+                    output.extend([
+                        "strcmp".into(),
+                        format!("c{:016x}", 0.0f64.to_bits()),
+                        "==".into(),
+                    ]);
+                } else if kind == test_kind
+                    && matches!(kind, JitKind::Number | JitKind::Boolean)
+                {
+                    output.push("==".into());
+                } else {
+                    output.push("strictfalse".into());
+                }
+                output.push("casebody".into());
+            } else {
+                output.push("default".into());
+            }
+            for statement in &case.cons {
+                encode_loop_effects(
+                    statement,
+                    parameters,
+                    locals,
+                    mutable,
+                    (
+                        kinds,
+                        LoopControl {
+                            break_target: BreakTarget::Switch,
+                            break_finalizer_depth: finalizers.len(),
+                            continue_finalizer_depth: loop_control.continue_finalizer_depth,
+                            throw_finalizer_depth: loop_control.throw_finalizer_depth,
+                            catch_active: loop_control.catch_active,
+                            catch_tagged: loop_control.catch_tagged,
+                        },
+                        finalizers,
+                    ),
+                    context,
+                    output,
+                )?;
+            }
+        }
+        output.push("switchend".into());
+        Some(())
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct CaughtThrowKind {
+        kind: JitKind,
+        prefix: &'static str,
+    }
+
+    #[derive(Clone)]
+    enum CatchProbe {
+        Tag,
+        ArrayIndex(u32),
+        DictionaryKey(String),
+    }
+
+    fn caught_throw_kind(encoded: &[String]) -> Option<CaughtThrowKind> {
+        let kind = jit_expression_kind(encoded)?.0;
+        let prefix = match kind {
+            JitKind::Number => "ln",
+            JitKind::Boolean => "lb",
+            JitKind::String => "ls",
+            JitKind::Array => match array_prefix(encoded)? {
+                "rn" => "rnl",
+                "rb" => "rbl",
+                "rs" => "rsl",
+                _ => return None,
+            },
+            JitKind::Dictionary => match dictionary_prefix(encoded)? {
+                "dn" => "dnl",
+                "db" => "dbl",
+                "ds" => "dsl",
+                _ => return None,
+            },
+        };
+        Some(CaughtThrowKind { kind, prefix })
+    }
+
+    fn caught_throw_tag(kind: &CaughtThrowKind) -> Option<u8> {
+        match kind.prefix {
+            "ln" => Some(0),
+            "lb" => Some(1),
+            "ls" => Some(2),
+            "rnl" => Some(3),
+            "rbl" => Some(4),
+            "rsl" => Some(5),
+            "dnl" => Some(6),
+            "dbl" => Some(7),
+            "dsl" => Some(8),
+            _ => None,
+        }
+    }
+
+    fn collect_caught_native_error(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        kinds: &mut Vec<CaughtThrowKind>,
+    ) -> Option<()> {
+        let mut encoded = Vec::new();
+        if encode_expression(expression, parameters, locals, context, &mut encoded).is_none() {
+            return Some(());
+        }
+        let error = CaughtThrowKind {
+            kind: JitKind::String,
+            prefix: "ls",
+        };
+        if jit_tokens_may_error(&encoded) && !kinds.contains(&error) {
+            kinds.push(error);
+        }
+        Some(())
+    }
+
+    fn collect_caught_throw_kind(
+        statement: &Stmt,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        kinds: &mut Vec<CaughtThrowKind>,
+    ) -> Option<()> {
+        match statement {
+            Stmt::Throw(thrown) => {
+                let mut encoded = Vec::new();
+                encode_expression(
+                    thrown.arg.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut encoded,
+                )?;
+                let error = CaughtThrowKind {
+                    kind: JitKind::String,
+                    prefix: "ls",
+                };
+                if jit_tokens_may_error(&encoded) && !kinds.contains(&error) {
+                    kinds.push(error);
+                }
+                let thrown_kind = caught_throw_kind(&encoded)?;
+                if !kinds.contains(&thrown_kind) {
+                    kinds.push(thrown_kind);
+                }
+            }
+            Stmt::Expr(statement) => collect_caught_native_error(
+                statement.expr.as_ref(),
+                parameters,
+                locals,
+                context,
+                kinds,
+            )?,
+            Stmt::Return(statement) => {
+                if let Some(expression) = statement.arg.as_deref() {
+                    collect_caught_native_error(
+                        expression, parameters, locals, context, kinds,
+                    )?;
+                }
+            }
+            Stmt::Block(block) => {
+                for statement in &block.stmts {
+                    collect_caught_throw_kind(statement, parameters, locals, context, kinds)?;
+                }
+            }
+            Stmt::If(branch) => {
+                collect_caught_native_error(
+                    branch.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    kinds,
+                )?;
+                collect_caught_throw_kind(
+                    branch.cons.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    kinds,
+                )?;
+                if let Some(alternate) = branch.alt.as_deref() {
+                    collect_caught_throw_kind(
+                        alternate,
+                        parameters,
+                        locals,
+                        context,
+                        kinds,
+                    )?;
+                }
+            }
+            Stmt::While(statement) => {
+                collect_caught_native_error(
+                    statement.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    kinds,
+                )?;
+                collect_caught_throw_kind(
+                    statement.body.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    kinds,
+                )?;
+            }
+            Stmt::DoWhile(statement) => {
+                collect_caught_throw_kind(
+                    statement.body.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    kinds,
+                )?;
+                collect_caught_native_error(
+                    statement.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    kinds,
+                )?;
+            }
+            Stmt::For(statement) => collect_caught_throw_kind(
+                statement.body.as_ref(),
+                parameters,
+                locals,
+                context,
+                kinds,
+            )?,
+            Stmt::ForIn(statement) => collect_caught_throw_kind(
+                statement.body.as_ref(),
+                parameters,
+                locals,
+                context,
+                kinds,
+            )?,
+            Stmt::ForOf(statement) => collect_caught_throw_kind(
+                statement.body.as_ref(),
+                parameters,
+                locals,
+                context,
+                kinds,
+            )?,
+            Stmt::Switch(statement) => {
+                for statement in statement.cases.iter().flat_map(|case| &case.cons) {
+                    collect_caught_throw_kind(statement, parameters, locals, context, kinds)?;
+                }
+            }
+            Stmt::Try(statement) => {
+                if let Some(handler) = &statement.handler {
+                    let mut nested_kinds = Vec::new();
+                    for statement in &statement.block.stmts {
+                        collect_caught_throw_kind(
+                            statement,
+                            parameters,
+                            locals,
+                            context,
+                            &mut nested_kinds,
+                        )?;
+                    }
+                    let mut handler_locals = locals.clone();
+                    if let (Some(Pat::Ident(identifier)), [nested_kind]) =
+                        (&handler.param, nested_kinds.as_slice())
+                    {
+                        handler_locals.insert(
+                            identifier.id.sym.to_string(),
+                            vec![format!("{}0", nested_kind.prefix)],
+                        );
+                    }
+                    for statement in &handler.body.stmts {
+                        collect_caught_throw_kind(
+                            statement,
+                            parameters,
+                            &handler_locals,
+                            context,
+                            kinds,
+                        )?;
+                    }
+                } else {
+                    for statement in &statement.block.stmts {
+                        collect_caught_throw_kind(statement, parameters, locals, context, kinds)?;
+                    }
+                }
+                if let Some(finalizer) = &statement.finalizer {
+                    for statement in &finalizer.stmts {
+                        collect_caught_throw_kind(statement, parameters, locals, context, kinds)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
+    fn dynamic_catch_narrowing(
+        expression: &Expr,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<(
+        String,
+        usize,
+        usize,
+        CaughtThrowKind,
+        Option<CaughtThrowKind>,
+        CatchProbe,
+    )> {
+        let typeof_target = |expression: &Expr| {
+            let Expr::Unary(unary) = expression else {
+                return None;
+            };
+            if unary.op != UnaryOp::TypeOf {
+                return None;
+            }
+            match unary.arg.as_ref() {
+                Expr::Ident(identifier) => Some((identifier.sym.to_string(), CatchProbe::Tag)),
+                Expr::Member(member) => {
+                    let Expr::Ident(identifier) = member.obj.as_ref() else {
+                        return None;
+                    };
+                    let probe = match &member.prop {
+                        MemberProp::Ident(property) => {
+                            CatchProbe::DictionaryKey(property.sym.to_string())
+                        }
+                        MemberProp::Computed(property) => match property.expr.as_ref() {
+                            Expr::Lit(Lit::Num(index))
+                                if index.value >= 0.0
+                                    && index.value.fract() == 0.0
+                                    && index.value <= u32::MAX as f64 =>
+                            {
+                                CatchProbe::ArrayIndex(index.value as u32)
+                            }
+                            Expr::Lit(Lit::Str(key)) => CatchProbe::DictionaryKey(
+                                key.value.to_string_lossy().into_owned(),
+                            ),
+                            _ => return None,
+                        },
+                        _ => return None,
+                    };
+                    Some((identifier.sym.to_string(), probe))
+                }
+                _ => None,
+            }
+        };
+        let literal = |expression: &Expr| {
+            let Expr::Lit(Lit::Str(value)) = expression else {
+                return None;
+            };
+            Some(value.value.to_string_lossy().into_owned())
+        };
+        let (name, selector, probe) = if let Expr::Bin(binary) = expression {
+            if !matches!(binary.op, BinaryOp::EqEq | BinaryOp::EqEqEq) {
+                return None;
+            }
+            let ((name, probe), type_name) = typeof_target(binary.left.as_ref())
+                .zip(literal(binary.right.as_ref()))
+                .or_else(|| {
+                    literal(binary.left.as_ref())
+                        .zip(typeof_target(binary.right.as_ref()))
+                        .map(|(literal, target)| (target, literal))
+                })?;
+            let base = match &probe {
+                CatchProbe::Tag => 0,
+                CatchProbe::ArrayIndex(_) => 3,
+                CatchProbe::DictionaryKey(_) => 6,
+            };
+            let selector = match type_name.as_str() {
+                "number" => Some(base),
+                "boolean" => Some(base + 1),
+                "string" => Some(base + 2),
+                "object" => return None,
+                _ => return None,
+            };
+            (name, selector, probe)
+        } else {
+            let Expr::Call(call) = expression else {
+                return None;
+            };
+            let Callee::Expr(callee) = &call.callee else {
+                return None;
+            };
+            let Expr::Member(member) = callee.as_ref() else {
+                return None;
+            };
+            let (Expr::Ident(object), MemberProp::Ident(property)) =
+                (member.obj.as_ref(), &member.prop)
+            else {
+                return None;
+            };
+            if object.sym != *"Array" || property.sym != *"isArray" {
+                return None;
+            }
+            let [argument] = call.args.as_slice() else {
+                return None;
+            };
+            if argument.spread.is_some() {
+                return None;
+            }
+            let Expr::Ident(identifier) = argument.expr.as_ref() else {
+                return None;
+            };
+            (identifier.sym.to_string(), None, CatchProbe::Tag)
+        };
+        let [marker] = locals.get(&name)?.as_slice() else {
+            return None;
+        };
+        let marker = marker.strip_prefix('x')?;
+        let mut fields = marker.splitn(3, ':');
+        let tag_index = fields.next()?.parse().ok()?;
+        let value_index = fields.next()?.parse().ok()?;
+        let variants = fields
+            .next()?
+            .split('|')
+            .map(|variant| {
+                let (tag, prefix) = variant.split_once('=')?;
+                let tag = tag.parse::<u8>().ok()?;
+                let (kind, prefix) = match prefix {
+                    "ln" => (JitKind::Number, "ln"),
+                    "lb" => (JitKind::Boolean, "lb"),
+                    "ls" => (JitKind::String, "ls"),
+                    "rnl" => (JitKind::Array, "rnl"),
+                    "rbl" => (JitKind::Array, "rbl"),
+                    "rsl" => (JitKind::Array, "rsl"),
+                    "dnl" => (JitKind::Dictionary, "dnl"),
+                    "dbl" => (JitKind::Dictionary, "dbl"),
+                    "dsl" => (JitKind::Dictionary, "dsl"),
+                    _ => return None,
+                };
+                Some((tag, CaughtThrowKind { kind, prefix }))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let selected = if let Some(expected_tag) = selector {
+            variants
+                .iter()
+                .find(|(tag, _)| *tag == expected_tag)?
+                .1
+                .clone()
+        } else {
+            let mut objects = variants.iter().filter(|(_, kind)| kind.kind == JitKind::Array);
+            let selected = objects.next()?.1.clone();
+            if objects.next().is_some() {
+                return None;
+            }
+            selected
+        };
+        let selected_tag = caught_throw_tag(&selected)?;
+        let alternate = (matches!(&probe, CatchProbe::Tag) && variants.len() == 2)
+            .then(|| {
+                variants
+                    .iter()
+                    .find(|(tag, _)| *tag != selected_tag)
+                    .map(|(_, kind)| kind.clone())
+            })
+            .flatten();
+        Some((name, tag_index, value_index, selected, alternate, probe))
+    }
+
+    fn encode_loop_effects(
+        statement: &Stmt,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        mutable: &std::collections::HashSet<String>,
+        control: (
+            &std::collections::HashMap<String, JitKind>,
+            LoopControl,
+            &[&thaw_parser::ast::BlockStmt],
+        ),
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (kinds, loop_control, finalizers) = control;
+
+        fn encode_finalizers(
+            finalizers: &[&thaw_parser::ast::BlockStmt],
+            from: usize,
+            scope: LoopScope<'_>,
+            loop_control: LoopControl,
+            context: &mut InlineContext<'_>,
+            output: &mut Vec<String>,
+        ) -> Option<()> {
+            let (parameters, locals, mutable, kinds) = scope;
+            for index in (from..finalizers.len()).rev() {
+                encode_loop_effects(
+                    &Stmt::Block(finalizers[index].clone()),
+                    parameters,
+                    locals,
+                    mutable,
+                    (kinds, loop_control, &finalizers[..index]),
+                    context,
+                    output,
+                )?;
+            }
+            Some(())
+        }
+        if let Stmt::Block(block) = statement {
+            let mut block_locals = locals.clone();
+            let mut block_mutable = mutable.clone();
+            let mut block_kinds = kinds.clone();
+            let mut declared = std::collections::HashSet::new();
+            for statement in &block.stmts {
+                if let Stmt::Decl(Decl::Var(declaration)) = statement {
+                    for declarator in &declaration.decls {
+                        let Pat::Ident(name) = &declarator.name else {
+                            return None;
+                        };
+                        if !declared.insert(name.id.sym.to_string()) {
+                            return None;
+                        }
+                        block_locals.remove(name.id.sym.as_ref());
+                        block_mutable.remove(name.id.sym.as_ref());
+                        if let Some(kind) = block_kinds.remove(name.id.sym.as_ref()) {
+                            let slot = block_kinds.len();
+                            block_kinds.insert(format!("\0shadow-{slot}"), kind);
+                        }
+                        let start = output.len();
+                        encode_loop_declaration(
+                            LocalStep::Declare {
+                                name: &name.id,
+                                initializer: declarator.init.as_deref()?,
+                                mutable: declaration.kind != VarDeclKind::Const,
+                            },
+                            parameters,
+                            &mut block_locals,
+                            &mut block_mutable,
+                            &mut block_kinds,
+                            context,
+                            output,
+                        )?;
+                        if loop_control.catch_active {
+                            insert_jit_error_checks(output, start);
+                        }
+                    }
+                    continue;
+                }
+                encode_loop_effects(
+                    statement,
+                    parameters,
+                    &block_locals,
+                    &block_mutable,
+                    (&block_kinds, loop_control, finalizers),
+                    context,
+                    output,
+                )?;
+            }
+            output.extend(std::iter::repeat_n(
+                "drop".into(),
+                block_kinds.len().checked_sub(kinds.len())?,
+            ));
+            return Some(());
+        }
+        if let Stmt::If(branch) = statement {
+            if let Some((name, tag_index, value_index, selected, alternate_kind, probe)) =
+                dynamic_catch_narrowing(branch.test.as_ref(), locals)
+            {
+                output.extend([
+                    format!("ln{tag_index}"),
+                    format!("c{:016x}", f64::from(caught_throw_tag(&selected)?).to_bits()),
+                    "==".into(),
+                ]);
+                match probe {
+                    CatchProbe::Tag => {}
+                    CatchProbe::ArrayIndex(index) => output.extend([
+                        "if".into(),
+                        format!("{}{value_index}", selected.prefix),
+                        "arraylen".into(),
+                        format!("c{:016x}", f64::from(index).to_bits()),
+                        ">".into(),
+                        "else".into(),
+                        "c0000000000000000".into(),
+                        "end".into(),
+                    ]),
+                    CatchProbe::DictionaryKey(key) => {
+                        output.push("if".into());
+                        encode_string(&key, output)?;
+                        output.extend([
+                            format!("{}{value_index}", selected.prefix),
+                            "din".into(),
+                            "else".into(),
+                            "c0000000000000000".into(),
+                            "end".into(),
+                        ]);
+                    }
+                }
+                output.push("guard".into());
+                let mut selected_locals = locals.clone();
+                selected_locals.insert(
+                    name.clone(),
+                    vec![format!("{}{value_index}", selected.prefix)],
+                );
+                let mut selected_kinds = kinds.clone();
+                selected_kinds.insert(name.clone(), selected.kind);
+                encode_loop_effects(
+                    branch.cons.as_ref(),
+                    parameters,
+                    &selected_locals,
+                    mutable,
+                    (&selected_kinds, loop_control, finalizers),
+                    context,
+                    output,
+                )?;
+                if let Some(alternate) = branch.alt.as_deref() {
+                    let alternate_kind = alternate_kind?;
+                    output.push("guardelse".into());
+                    let mut alternate_locals = locals.clone();
+                    alternate_locals.insert(
+                        name.clone(),
+                        vec![format!("{}{value_index}", alternate_kind.prefix)],
+                    );
+                    let mut alternate_kinds = kinds.clone();
+                    alternate_kinds.insert(name, alternate_kind.kind);
+                    encode_loop_effects(
+                        alternate,
+                        parameters,
+                        &alternate_locals,
+                        mutable,
+                        (&alternate_kinds, loop_control, finalizers),
+                        context,
+                        output,
+                    )?;
+                }
+                output.push("guardend".into());
+                return Some(());
+            }
+            let start = output.len();
+            encode_condition(branch.test.as_ref(), parameters, locals, context, output)?;
+            if loop_control.catch_active {
+                insert_jit_error_checks(output, start);
+            }
+            output.push("guard".into());
+            encode_loop_effects(
+                branch.cons.as_ref(), parameters, locals, mutable, (kinds, loop_control, finalizers), context, output,
+            )?;
+            if let Some(alternate) = branch.alt.as_deref() {
+                output.push("guardelse".into());
+                encode_loop_effects(
+                    alternate, parameters, locals, mutable, (kinds, loop_control, finalizers), context, output,
+                )?;
+            }
+            output.push("guardend".into());
+            return Some(());
+        }
+        if matches!(statement, Stmt::Break(statement) if statement.label.is_none()) {
+            encode_finalizers(
+                finalizers,
+                loop_control.break_finalizer_depth,
+                (parameters, locals, mutable, kinds),
+                loop_control,
+                context,
+                output,
+            )?;
+            output.push(match loop_control.break_target {
+                BreakTarget::Loop => "break",
+                BreakTarget::Switch => "switchbreak",
+            }.into());
+            return Some(());
+        }
+        if matches!(statement, Stmt::Continue(statement) if statement.label.is_none()) {
+            encode_finalizers(
+                finalizers,
+                loop_control.continue_finalizer_depth,
+                (parameters, locals, mutable, kinds),
+                loop_control,
+                context,
+                output,
+            )?;
+            output.push("continue".into());
+            return Some(());
+        }
+        if let Stmt::Switch(statement) = statement {
+            return encode_loop_switch(
+                statement,
+                parameters,
+                locals,
+                mutable,
+                (kinds, loop_control, finalizers),
+                context,
+                output,
+            );
+        }
+        if let Stmt::Try(statement) = statement {
+            let mut nested_finalizers = finalizers.to_vec();
+            if let Some(finalizer) = &statement.finalizer {
+                nested_finalizers.push(finalizer);
+            }
+            if let Some(handler) = &statement.handler {
+                let mut caught_kinds = Vec::new();
+                for statement in &statement.block.stmts {
+                    collect_caught_throw_kind(
+                        statement,
+                        parameters,
+                        locals,
+                        context,
+                        &mut caught_kinds,
+                    )?;
+                }
+                if caught_kinds.is_empty() {
+                    caught_kinds.push(CaughtThrowKind {
+                        kind: JitKind::String,
+                        prefix: "ls",
+                    });
+                }
+                let tagged = caught_kinds.len() > 1;
+                output.push(if tagged { "trystarttag" } else { "trystart" }.into());
+                let caught_control = LoopControl {
+                    throw_finalizer_depth: nested_finalizers.len(),
+                    catch_active: true,
+                    catch_tagged: tagged,
+                    ..loop_control
+                };
+                encode_loop_effects(
+                    &Stmt::Block(statement.block.clone()),
+                    parameters,
+                    locals,
+                    mutable,
+                    (kinds, caught_control, &nested_finalizers),
+                    context,
+                    output,
+                )?;
+                output.push("catch".into());
+
+                let mut catch_locals = locals.clone();
+                let mut handler_kinds = kinds.clone();
+                if let Some(parameter) = &handler.param {
+                    let Pat::Ident(identifier) = parameter else {
+                        return None;
+                    };
+                    if parameters.contains_key(identifier.id.sym.as_ref())
+                        || locals.contains_key(identifier.id.sym.as_ref())
+                    {
+                        return None;
+                    }
+                    let index = handler_kinds.len();
+                    if tagged {
+                        let variants = caught_kinds
+                            .iter()
+                            .map(|kind| {
+                                Some(format!(
+                                    "{}={}",
+                                    caught_throw_tag(kind)?,
+                                    kind.prefix
+                                ))
+                            })
+                            .collect::<Option<Vec<_>>>()?
+                            .join("|");
+                        catch_locals.insert(
+                            identifier.id.sym.to_string(),
+                            vec![format!("x{index}:{}:{variants}", index + 1)],
+                        );
+                        handler_kinds.insert(
+                            format!("\0catch-tag-{index}"),
+                            JitKind::Number,
+                        );
+                        handler_kinds.insert(identifier.id.sym.to_string(), JitKind::Number);
+                    } else {
+                        let caught_kind = &caught_kinds[0];
+                        catch_locals.insert(
+                            identifier.id.sym.to_string(),
+                            vec![format!("{}{index}", caught_kind.prefix)],
+                        );
+                        handler_kinds.insert(identifier.id.sym.to_string(), caught_kind.kind);
+                    }
+                } else {
+                    let slots = if tagged { 2 } else { 1 };
+                    for slot in 0..slots {
+                        handler_kinds.insert(
+                            format!("\0catch-{}-{slot}", handler_kinds.len()),
+                            JitKind::Number,
+                        );
+                    }
+                }
+                encode_loop_effects(
+                    &Stmt::Block(handler.body.clone()),
+                    parameters,
+                    &catch_locals,
+                    mutable,
+                    (&handler_kinds, loop_control, &nested_finalizers),
+                    context,
+                    output,
+                )?;
+                output.extend(std::iter::repeat_n("drop".into(), if tagged { 2 } else { 1 }));
+                output.push("tryend".into());
+                if let Some(finalizer) = &statement.finalizer {
+                    return encode_loop_effects(
+                        &Stmt::Block(finalizer.clone()),
+                        parameters,
+                        locals,
+                        mutable,
+                        (kinds, loop_control, finalizers),
+                        context,
+                        output,
+                    );
+                }
+                return Some(());
+            }
+            let finalizer = statement.finalizer.as_ref()?;
+            encode_loop_effects(
+                &Stmt::Block(statement.block.clone()),
+                parameters,
+                locals,
+                mutable,
+                (kinds, loop_control, &nested_finalizers),
+                context,
+                output,
+            )?;
+            return encode_loop_effects(
+                &Stmt::Block(finalizer.clone()),
+                parameters,
+                locals,
+                mutable,
+                (kinds, loop_control, finalizers),
+                context,
+                output,
+            );
+        }
+        if let Stmt::Throw(thrown) = statement {
+            let mut encoded = Vec::new();
+            encode_expression(
+                thrown.arg.as_ref(),
+                parameters,
+                locals,
+                context,
+                &mut encoded,
+            )?;
+            let caught_kind = caught_throw_kind(&encoded)?;
+            let kind = caught_kind.kind;
+            let may_error = jit_tokens_may_error(&encoded);
+            let start = output.len();
+            output.extend(encoded);
+            if loop_control.catch_active && may_error {
+                insert_jit_error_checks(output, start);
+            }
+            let mut throw_kinds = kinds.clone();
+            throw_kinds.insert(format!("\0throw-{}", throw_kinds.len()), kind);
+            encode_finalizers(
+                finalizers,
+                loop_control.throw_finalizer_depth,
+                (parameters, locals, mutable, &throw_kinds),
+                loop_control,
+                context,
+                output,
+            )?;
+            output.push(
+                if loop_control.catch_active {
+                    if loop_control.catch_tagged {
+                        output.push(format!("throwtag{}", caught_throw_tag(&caught_kind)?));
+                        return Some(());
+                    }
+                    "throw"
+                } else {
+                    match caught_kind.prefix {
+                        "rnl" => "throwoutrn",
+                        "rbl" => "throwoutrb",
+                        "rsl" => "throwoutrs",
+                        "dnl" | "dbl" | "dsl" => "throwoutd",
+                        _ => match kind {
+                        JitKind::Number => "throwoutn",
+                        JitKind::Boolean => "throwoutb",
+                        JitKind::String => "throwouts",
+                        JitKind::Array | JitKind::Dictionary => return None,
+                        },
+                    }
+                }
+                .into(),
+            );
+            return Some(());
+        }
+        if let Stmt::Return(returned) = statement {
+            let mut encoded = Vec::new();
+            encode_expression(
+                returned.arg.as_deref()?, parameters, locals, context, &mut encoded,
+            )?;
+            let kind = jit_expression_kind(&encoded).map(|(kind, _)| kind);
+            if kind == Some(JitKind::Array) {
+                encoded.push("arrayvalue".into());
+            }
+            let may_error = jit_tokens_may_error(&encoded);
+            let start = output.len();
+            output.extend(encoded);
+            if loop_control.catch_active && may_error {
+                insert_jit_error_checks(output, start);
+            }
+            let mut return_kinds = kinds.clone();
+            return_kinds.insert(
+                format!("\0return-{}", return_kinds.len()),
+                kind.unwrap_or(JitKind::Number),
+            );
+            encode_finalizers(
+                finalizers,
+                0,
+                (parameters, locals, mutable, &return_kinds),
+                loop_control,
+                context,
+                output,
+            )?;
+            output.push("return".into());
+            return Some(());
+        }
+        if let Stmt::While(loop_statement) = statement {
+            output.extend(["loop".into(), "looptail".into()]);
+            let start = output.len();
+            encode_condition(loop_statement.test.as_ref(), parameters, locals, context, output)?;
+            if loop_control.catch_active {
+                insert_jit_error_checks(output, start);
+            }
+            output.push("while".into());
+            encode_loop_effects(
+                loop_statement.body.as_ref(),
+                parameters,
+                locals,
+                mutable,
+                (
+                    kinds,
+                    nested_loop_control(finalizers.len(), loop_control),
+                    finalizers,
+                ),
+                context,
+                output,
+            )?;
+            output.push("loopend".into());
+            return Some(());
+        }
+        if let Stmt::DoWhile(loop_statement) = statement {
+            output.push("loop".into());
+            encode_loop_effects(
+                loop_statement.body.as_ref(),
+                parameters,
+                locals,
+                mutable,
+                (
+                    kinds,
+                    nested_loop_control(finalizers.len(), loop_control),
+                    finalizers,
+                ),
+                context,
+                output,
+            )?;
+            output.push("looptail".into());
+            let start = output.len();
+            encode_condition(loop_statement.test.as_ref(), parameters, locals, context, output)?;
+            if loop_control.catch_active {
+                insert_jit_error_checks(output, start);
+            }
+            output.extend(["while".into(), "loopend".into()]);
+            return Some(());
+        }
+        if let Stmt::For(loop_statement) = statement {
+            let mut nested_locals = locals.clone();
+            let mut nested_mutable = mutable.clone();
+            let mut nested_kinds = kinds.clone();
+            match loop_statement.init.as_ref() {
+                Some(VarDeclOrExpr::Expr(initializer)) => encode_loop_expression(
+                    initializer.as_ref(),
+                    parameters,
+                    &nested_locals,
+                    &nested_mutable,
+                    &nested_kinds,
+                    context,
+                    output,
+                )?,
+                None => {}
+                Some(VarDeclOrExpr::VarDecl(declaration)) => {
+                    for declarator in &declaration.decls {
+                        let Pat::Ident(name) = &declarator.name else {
+                            return None;
+                        };
+                        encode_loop_declaration(
+                            LocalStep::Declare {
+                                name: &name.id,
+                                initializer: declarator.init.as_deref()?,
+                                mutable: declaration.kind != VarDeclKind::Const,
+                            },
+                            parameters,
+                            &mut nested_locals,
+                            &mut nested_mutable,
+                            &mut nested_kinds,
+                            context,
+                            output,
+                        )?;
+                    }
+                }
+            }
+            output.push("loop".into());
+            if let Some(test) = loop_statement.test.as_deref() {
+                let start = output.len();
+                encode_condition(test, parameters, &nested_locals, context, output)?;
+                if loop_control.catch_active {
+                    insert_jit_error_checks(output, start);
+                }
+            } else {
+                output.extend([
+                    format!("c{:016x}", 1.0f64.to_bits()),
+                    "asbool".into(),
+                ]);
+            }
+            output.push("while".into());
+            encode_loop_effects(
+                loop_statement.body.as_ref(),
+                parameters,
+                &nested_locals,
+                &nested_mutable,
+                (
+                    &nested_kinds,
+                    nested_loop_control(finalizers.len(), loop_control),
+                    finalizers,
+                ),
+                context,
+                output,
+            )?;
+            output.push("looptail".into());
+            if let Some(update) = loop_statement.update.as_deref() {
+                let start = output.len();
+                encode_loop_expression(
+                    update,
+                    parameters,
+                    &nested_locals,
+                    &nested_mutable,
+                    &nested_kinds,
+                    context,
+                    output,
+                )?;
+                if loop_control.catch_active {
+                    insert_jit_error_checks(output, start);
+                }
+            }
+            output.push("loopend".into());
+            output.extend(std::iter::repeat_n(
+                "drop".into(),
+                nested_kinds.len().checked_sub(kinds.len())?,
+            ));
+            return Some(());
+        }
+        if let Stmt::ForOf(loop_statement) = statement {
+            if loop_statement.is_await {
+                return None;
+            }
+            let mut nested_locals = locals.clone();
+            let mut nested_mutable = mutable.clone();
+            let mut nested_kinds = kinds.clone();
+            let mut source = Vec::new();
+            encode_expression(
+                loop_statement.right.as_ref(),
+                parameters,
+                &nested_locals,
+                context,
+                &mut source,
+            )?;
+            if jit_expression_kind(&source)?.0 != JitKind::Array {
+                return None;
+            }
+            let array = array_prefix(&source)?;
+            let element_kind = match array {
+                "rn" => JitKind::Number,
+                "rb" => JitKind::Boolean,
+                "rs" => JitKind::String,
+                _ => return None,
+            };
+            let source_index = nested_kinds.len();
+            output.extend(source);
+            nested_kinds.insert(format!("\0forof-source-{source_index}"), JitKind::Array);
+            let source_local = format!("{array}l{source_index}");
+            let index = nested_kinds.len();
+            output.push(format!("c{:016x}", 0.0f64.to_bits()));
+            nested_kinds.insert(format!("\0forof-index-{index}"), JitKind::Number);
+            let index_local = format!("ln{index}");
+            let element_index = match &loop_statement.left {
+                ForHead::VarDecl(declaration) => {
+                    let [declarator] = declaration.decls.as_slice() else {
+                        return None;
+                    };
+                    let Pat::Ident(name) = &declarator.name else {
+                        return None;
+                    };
+                    if declarator.init.is_some()
+                        || parameters.contains_key(name.id.sym.as_ref())
+                        || nested_locals.contains_key(name.id.sym.as_ref())
+                    {
+                        return None;
+                    }
+                    match element_kind {
+                        JitKind::String => encode_string("", output)?,
+                        JitKind::Number | JitKind::Boolean => {
+                            output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                            if element_kind == JitKind::Boolean {
+                                output.push("asbool".into());
+                            }
+                        }
+                        _ => return None,
+                    }
+                    let element_index = nested_kinds.len();
+                    let prefix = match element_kind {
+                        JitKind::Number => "ln",
+                        JitKind::Boolean => "lb",
+                        JitKind::String => "ls",
+                        _ => return None,
+                    };
+                    nested_locals.insert(
+                        name.id.sym.to_string(),
+                        vec![format!("{prefix}{element_index}")],
+                    );
+                    nested_kinds.insert(name.id.sym.to_string(), element_kind);
+                    if declaration.kind != VarDeclKind::Const {
+                        nested_mutable.insert(name.id.sym.to_string());
+                    }
+                    element_index
+                }
+                ForHead::Pat(pattern) => {
+                    let Pat::Ident(name) = pattern.as_ref() else {
+                        return None;
+                    };
+                    if !nested_mutable.contains(name.id.sym.as_ref())
+                        || nested_kinds.get(name.id.sym.as_ref())? != &element_kind
+                    {
+                        return None;
+                    }
+                    nested_locals
+                        .get(name.id.sym.as_ref())?
+                        .first()?
+                        .get(2..)?
+                        .parse::<usize>()
+                        .ok()?
+                }
+                ForHead::UsingDecl(_) => return None,
+            };
+            output.push("loop".into());
+            output.extend([
+                index_local.clone(),
+                source_local.clone(),
+                "arraylen".into(),
+                "<".into(),
+                "while".into(),
+                source_local,
+                index_local.clone(),
+                format!("{array}get"),
+                format!("setl{element_index}"),
+            ]);
+            encode_loop_effects(
+                loop_statement.body.as_ref(),
+                parameters,
+                &nested_locals,
+                &nested_mutable,
+                (
+                    &nested_kinds,
+                    nested_loop_control(finalizers.len(), loop_control),
+                    finalizers,
+                ),
+                context,
+                output,
+            )?;
+            output.extend([
+                "looptail".into(),
+                index_local,
+                format!("c{:016x}", 1.0f64.to_bits()),
+                "+".into(),
+                format!("setl{index}"),
+                "loopend".into(),
+            ]);
+            output.extend(std::iter::repeat_n(
+                "drop".into(),
+                nested_kinds.len().checked_sub(kinds.len())?,
+            ));
+            return Some(());
+        }
+        if let Stmt::ForIn(loop_statement) = statement {
+            let mut nested_locals = locals.clone();
+            let mut nested_mutable = mutable.clone();
+            let mut nested_kinds = kinds.clone();
+            encode_for_in_loop(
+                loop_statement,
+                parameters,
+                &mut nested_locals,
+                &mut nested_mutable,
+                (&mut nested_kinds, loop_control, finalizers),
+                context,
+                output,
+            )?;
+            output.extend(std::iter::repeat_n(
+                "drop".into(),
+                nested_kinds.len().checked_sub(kinds.len())?,
+            ));
+            return Some(());
+        }
+        let Stmt::Expr(statement) = statement else {
+            return None;
+        };
+        let start = output.len();
+        encode_loop_expression(
+            statement.expr.as_ref(), parameters, locals, mutable, kinds, context, output,
+        )?;
+        if loop_control.catch_active {
+            insert_jit_error_checks(output, start);
+        }
+        Some(())
+    }
+
+    fn encode_loop_expression(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        mutable: &std::collections::HashSet<String>,
+        kinds: &std::collections::HashMap<String, JitKind>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        if encode_callable_table_update(expression, parameters, locals, context, output).is_some() {
+            return Some(());
+        }
+        match expression {
+            Expr::Assign(assignment) => {
+                let AssignTarget::Simple(SimpleAssignTarget::Ident(name)) = &assignment.left else {
+                    encode_expression(expression, parameters, locals, context, output)?;
+                    output.push("drop".into());
+                    return Some(());
+                };
+                if !mutable.contains(name.id.sym.as_ref()) {
+                    return None;
+                }
+                let local = locals.get(name.id.sym.as_ref())?.first()?.clone();
+                let index = loop_local_index(&local)?;
+                if assignment.op != AssignOp::Assign {
+                    output.push(local.clone());
+                }
+                let mut value = Vec::new();
+                encode_expression(
+                    assignment.right.as_ref(), parameters, locals, context, &mut value,
+                )?;
+                match kinds.get(name.id.sym.as_ref())? {
+                    JitKind::Boolean => value.push("asbool".into()),
+                    JitKind::Array if array_prefix(&value)? != local.get(..2)? => return None,
+                    JitKind::Dictionary if dictionary_prefix(&value)? != local.get(..2)? => {
+                        return None;
+                    }
+                    _ => {}
+                }
+                output.extend(value);
+                if kinds.get(name.id.sym.as_ref())? == &JitKind::Array
+                    && assignment.op == AssignOp::Assign
+                {
+                    output.push("arrayhandle".into());
+                }
+                if assignment.op != AssignOp::Assign {
+                    output.push(
+                        match (kinds.get(name.id.sym.as_ref())?, assignment.op) {
+                            (JitKind::String, AssignOp::AddAssign) => "concat",
+                            (JitKind::Number, AssignOp::AddAssign) => "+",
+                            (JitKind::Number, AssignOp::SubAssign) => "-",
+                            (JitKind::Number, AssignOp::MulAssign) => "*",
+                            (JitKind::Number, AssignOp::DivAssign) => "/",
+                            (JitKind::Number, AssignOp::ModAssign) => "%",
+                            (JitKind::Number, AssignOp::LShiftAssign) => "shl",
+                            (JitKind::Number, AssignOp::RShiftAssign) => "shr",
+                            (JitKind::Number, AssignOp::ZeroFillRShiftAssign) => "ushr",
+                            (JitKind::Number, AssignOp::BitOrAssign) => "bor",
+                            (JitKind::Number, AssignOp::BitXorAssign) => "bxor",
+                            (JitKind::Number, AssignOp::BitAndAssign) => "band",
+                            (JitKind::Number, AssignOp::ExpAssign) => "pow",
+                            _ => return None,
+                        }
+                        .into(),
+                    );
+                }
+                output.push(format!("setl{index}"));
+            }
+            Expr::Update(update) => {
+                let Expr::Ident(name) = update.arg.as_ref() else {
+                    return None;
+                };
+                if !mutable.contains(name.sym.as_ref())
+                    || kinds.get(name.sym.as_ref())? != &JitKind::Number
+                {
+                    return None;
+                }
+                let local = locals.get(name.sym.as_ref())?.first()?.clone();
+                let index = loop_local_index(&local)?;
+                output.extend([
+                    local,
+                    format!("c{:016x}", 1.0f64.to_bits()),
+                    match update.op {
+                        UpdateOp::PlusPlus => "+".into(),
+                        UpdateOp::MinusMinus => "-".into(),
+                    },
+                    format!("setl{index}"),
+                ]);
+            }
+            expression => {
+                encode_expression(expression, parameters, locals, context, output)?;
+                output.push("drop".into());
+            }
+        }
+        Some(())
+    }
+
+    fn loop_local_index(token: &str) -> Option<usize> {
+        token.get(token.find(|character: char| character.is_ascii_digit())?..)?
+            .parse()
+            .ok()
+    }
+
+    fn encode_loop_declaration(
+        step: LocalStep<'_>,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &mut std::collections::HashMap<String, Vec<String>>,
+        mutable: &mut std::collections::HashSet<String>,
+        kinds: &mut std::collections::HashMap<String, JitKind>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let LocalStep::Declare {
+            name,
+            initializer,
+            mutable: is_mutable,
+        } = step
+        else {
+            return None;
+        };
+        if parameters.contains_key(name.sym.as_ref()) || locals.contains_key(name.sym.as_ref()) {
+            return None;
+        }
+        let mut encoded = Vec::new();
+        encode_expression(initializer, parameters, locals, context, &mut encoded)?;
+        let kind = if boolean_literal(initializer) {
+            JitKind::Boolean
+        } else {
+            jit_expression_kind(&encoded)?.0
+        };
+        let prefix = match kind {
+            JitKind::Number => "ln",
+            JitKind::Boolean => "lb",
+            JitKind::String => "ls",
+            JitKind::Array => match array_prefix(&encoded)? {
+                "rn" => "rnl",
+                "rb" => "rbl",
+                "rs" => "rsl",
+                _ => return None,
+            },
+            JitKind::Dictionary => match dictionary_prefix(&encoded)? {
+                "dn" => "dnl",
+                "db" => "dbl",
+                "ds" => "dsl",
+                _ => return None,
+            },
+        };
+        let index = kinds.len();
+        output.extend(encoded);
+        if kind == JitKind::Boolean {
+            output.push("asbool".into());
+        } else if kind == JitKind::Array {
+            output.push("arrayhandle".into());
+        }
+        locals.insert(name.sym.to_string(), vec![format!("{prefix}{index}")]);
+        kinds.insert(name.sym.to_string(), kind);
+        if is_mutable {
+            mutable.insert(name.sym.to_string());
+        }
+        Some(())
+    }
+
+    fn encode_loop_steps(
+        steps: Vec<LocalStep<'_>>,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &mut std::collections::HashMap<String, Vec<String>>,
+        mutable: &mut std::collections::HashSet<String>,
+        kinds: &mut std::collections::HashMap<String, JitKind>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        for step in steps {
+            encode_loop_declaration(
+                step,
+                parameters,
+                locals,
+                mutable,
+                kinds,
+                context,
+                output,
+            )?;
+        }
+        Some(())
+    }
+
+    fn encode_while_body(
+        steps: Vec<LocalStep<'_>>,
+        statements: &[Stmt],
+        parameters: &std::collections::HashMap<String, String>,
+        mut locals: std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut mutable = std::collections::HashSet::new();
+        let mut kinds = std::collections::HashMap::new();
+        encode_loop_steps(
+            steps,
+            parameters,
+            &mut locals,
+            &mut mutable,
+            &mut kinds,
+            context,
+            output,
+        )?;
+        let (first, rest) = statements.split_first()?;
+        let Stmt::While(loop_statement) = first else {
+            return None;
+        };
+        output.push("loop".into());
+        output.push("looptail".into());
+        encode_condition(
+            loop_statement.test.as_ref(), parameters, &locals, context, output,
+        )?;
+        output.push("while".into());
+        encode_loop_effects(
+            loop_statement.body.as_ref(),
+            parameters,
+            &locals,
+            &mutable,
+            (&kinds, root_loop_control(), &[]),
+            context,
+            output,
+        )?;
+        output.push("loopend".into());
+        encode_returning_statements(rest, parameters, &locals, context, output)?;
+        output.extend(std::iter::repeat_n("nip".into(), kinds.len()));
+        (output.len() <= 128).then_some(())
+    }
+
+    fn encode_for_body(
+        steps: Vec<LocalStep<'_>>,
+        statements: &[Stmt],
+        parameters: &std::collections::HashMap<String, String>,
+        mut locals: std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut mutable = std::collections::HashSet::new();
+        let mut kinds = std::collections::HashMap::new();
+        encode_loop_steps(
+            steps,
+            parameters,
+            &mut locals,
+            &mut mutable,
+            &mut kinds,
+            context,
+            output,
+        )?;
+        let (first, rest) = statements.split_first()?;
+        let Stmt::For(loop_statement) = first else {
+            return None;
+        };
+        match loop_statement.init.as_ref() {
+            Some(VarDeclOrExpr::VarDecl(declaration)) => {
+                for declarator in &declaration.decls {
+                    let Pat::Ident(name) = &declarator.name else {
+                        return None;
+                    };
+                    encode_loop_declaration(
+                        LocalStep::Declare {
+                            name: &name.id,
+                            initializer: declarator.init.as_deref()?,
+                            mutable: declaration.kind != VarDeclKind::Const,
+                        },
+                        parameters,
+                        &mut locals,
+                        &mut mutable,
+                        &mut kinds,
+                        context,
+                        output,
+                    )?;
+                }
+            }
+            Some(VarDeclOrExpr::Expr(initializer)) => encode_loop_expression(
+                initializer.as_ref(),
+                parameters,
+                &locals,
+                &mutable,
+                &kinds,
+                context,
+                output,
+            )?,
+            None => {}
+        }
+        output.push("loop".into());
+        if let Some(test) = loop_statement.test.as_deref() {
+            encode_condition(test, parameters, &locals, context, output)?;
+        } else {
+            output.extend([
+                format!("c{:016x}", 1.0f64.to_bits()),
+                "asbool".into(),
+            ]);
+        }
+        output.push("while".into());
+        encode_loop_effects(
+            loop_statement.body.as_ref(),
+            parameters,
+            &locals,
+            &mutable,
+            (&kinds, root_loop_control(), &[]),
+            context,
+            output,
+        )?;
+        output.push("looptail".into());
+        if let Some(update) = loop_statement.update.as_deref() {
+            encode_loop_expression(
+                update,
+                parameters,
+                &locals,
+                &mutable,
+                &kinds,
+                context,
+                output,
+            )?;
+        }
+        output.push("loopend".into());
+        encode_returning_statements(rest, parameters, &locals, context, output)?;
+        output.extend(std::iter::repeat_n("nip".into(), kinds.len()));
+        (output.len() <= 128).then_some(())
+    }
+
+    fn encode_do_while_body(
+        steps: Vec<LocalStep<'_>>,
+        statements: &[Stmt],
+        parameters: &std::collections::HashMap<String, String>,
+        mut locals: std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut mutable = std::collections::HashSet::new();
+        let mut kinds = std::collections::HashMap::new();
+        encode_loop_steps(
+            steps,
+            parameters,
+            &mut locals,
+            &mut mutable,
+            &mut kinds,
+            context,
+            output,
+        )?;
+        let (first, rest) = statements.split_first()?;
+        let Stmt::DoWhile(loop_statement) = first else {
+            return None;
+        };
+        output.push("loop".into());
+        encode_loop_effects(
+            loop_statement.body.as_ref(),
+            parameters,
+            &locals,
+            &mutable,
+            (&kinds, root_loop_control(), &[]),
+            context,
+            output,
+        )?;
+        output.push("looptail".into());
+        encode_condition(
+            loop_statement.test.as_ref(), parameters, &locals, context, output,
+        )?;
+        output.push("while".into());
+        output.push("loopend".into());
+        encode_returning_statements(rest, parameters, &locals, context, output)?;
+        output.extend(std::iter::repeat_n("nip".into(), kinds.len()));
+        (output.len() <= 128).then_some(())
+    }
+
+    fn encode_for_of_body(
+        steps: Vec<LocalStep<'_>>,
+        statements: &[Stmt],
+        parameters: &std::collections::HashMap<String, String>,
+        mut locals: std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut mutable = std::collections::HashSet::new();
+        let mut kinds = std::collections::HashMap::new();
+        encode_loop_steps(
+            steps,
+            parameters,
+            &mut locals,
+            &mut mutable,
+            &mut kinds,
+            context,
+            output,
+        )?;
+        let (first, rest) = statements.split_first()?;
+        let Stmt::ForOf(loop_statement) = first else {
+            return None;
+        };
+        if loop_statement.is_await {
+            return None;
+        }
+        let mut source = Vec::new();
+        encode_expression(
+            loop_statement.right.as_ref(), parameters, &locals, context, &mut source,
+        )?;
+        if jit_expression_kind(&source)?.0 != JitKind::Array {
+            return None;
+        }
+        let array = array_prefix(&source)?;
+        let element_kind = match array {
+            "rn" => JitKind::Number,
+            "rb" => JitKind::Boolean,
+            "rs" => JitKind::String,
+            _ => return None,
+        };
+        let source_index = kinds.len();
+        output.extend(source);
+        kinds.insert(format!("\0forof-source-{source_index}"), JitKind::Array);
+        let source_local = format!("{array}l{source_index}");
+
+        let index = kinds.len();
+        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+        kinds.insert(format!("\0forof-index-{index}"), JitKind::Number);
+        let index_local = format!("ln{index}");
+
+        let element_index = match &loop_statement.left {
+            ForHead::VarDecl(declaration) => {
+                let [declarator] = declaration.decls.as_slice() else {
+                    return None;
+                };
+                let Pat::Ident(name) = &declarator.name else {
+                    return None;
+                };
+                if declarator.init.is_some()
+                    || parameters.contains_key(name.id.sym.as_ref())
+                    || locals.contains_key(name.id.sym.as_ref())
+                {
+                    return None;
+                }
+                match element_kind {
+                    JitKind::String => encode_string("", output)?,
+                    JitKind::Number | JitKind::Boolean => {
+                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                        if element_kind == JitKind::Boolean {
+                            output.push("asbool".into());
+                        }
+                    }
+                    _ => return None,
+                }
+                let element_index = kinds.len();
+                let prefix = match element_kind {
+                    JitKind::Number => "ln",
+                    JitKind::Boolean => "lb",
+                    JitKind::String => "ls",
+                    _ => return None,
+                };
+                let element_local = format!("{prefix}{element_index}");
+                locals.insert(name.id.sym.to_string(), vec![element_local.clone()]);
+                kinds.insert(name.id.sym.to_string(), element_kind);
+                if declaration.kind != VarDeclKind::Const {
+                    mutable.insert(name.id.sym.to_string());
+                }
+                element_index
+            }
+            ForHead::Pat(pattern) => {
+                let Pat::Ident(name) = pattern.as_ref() else {
+                    return None;
+                };
+                if !mutable.contains(name.id.sym.as_ref())
+                    || kinds.get(name.id.sym.as_ref())? != &element_kind
+                {
+                    return None;
+                }
+                loop_local_index(locals.get(name.id.sym.as_ref())?.first()?)?
+            }
+            ForHead::UsingDecl(_) => return None,
+        };
+
+        output.push("loop".into());
+        output.extend([index_local.clone(), source_local.clone(), "arraylen".into(), "<".into()]);
+        output.push("while".into());
+        output.extend([
+            source_local.clone(),
+            index_local.clone(),
+            format!("{array}get"),
+            format!("setl{element_index}"),
+        ]);
+        encode_loop_effects(
+            loop_statement.body.as_ref(),
+            parameters,
+            &locals,
+            &mutable,
+            (&kinds, root_loop_control(), &[]),
+            context,
+            output,
+        )?;
+        output.push("looptail".into());
+        output.extend([
+            index_local,
+            format!("c{:016x}", 1.0f64.to_bits()),
+            "+".into(),
+            format!("setl{index}"),
+            "loopend".into(),
+        ]);
+        encode_returning_statements(rest, parameters, &locals, context, output)?;
+        output.extend(std::iter::repeat_n("nip".into(), kinds.len()));
+        (output.len() <= 128).then_some(())
+    }
+
+    fn encode_for_in_body(
+        steps: Vec<LocalStep<'_>>,
+        statements: &[Stmt],
+        parameters: &std::collections::HashMap<String, String>,
+        mut locals: std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let mut mutable = std::collections::HashSet::new();
+        let mut kinds = std::collections::HashMap::new();
+        encode_loop_steps(
+            steps,
+            parameters,
+            &mut locals,
+            &mut mutable,
+            &mut kinds,
+            context,
+            output,
+        )?;
+        let (first, rest) = statements.split_first()?;
+        let Stmt::ForIn(loop_statement) = first else {
+            return None;
+        };
+        encode_for_in_loop(
+            loop_statement,
+            parameters,
+            &mut locals,
+            &mut mutable,
+            (&mut kinds, root_loop_control(), &[]),
+            context,
+            output,
+        )?;
+        encode_returning_statements(rest, parameters, &locals, context, output)?;
+        output.extend(std::iter::repeat_n("nip".into(), kinds.len()));
+        (output.len() <= 128).then_some(())
+    }
+
     fn encode_steps_and_body(
         steps: Vec<LocalStep<'_>>,
         body: NumericBody<'_>,
@@ -3975,6 +6105,33 @@ fn jit_export(
         context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
+        if let NumericBody::Statements(statements) = &body {
+            if matches!(statements.first(), Some(Stmt::While(_))) {
+                return encode_while_body(
+                    steps, statements, parameters, locals, context, output,
+                );
+            }
+            if matches!(statements.first(), Some(Stmt::For(_))) {
+                return encode_for_body(
+                    steps, statements, parameters, locals, context, output,
+                );
+            }
+            if matches!(statements.first(), Some(Stmt::DoWhile(_))) {
+                return encode_do_while_body(
+                    steps, statements, parameters, locals, context, output,
+                );
+            }
+            if matches!(statements.first(), Some(Stmt::ForOf(_))) {
+                return encode_for_of_body(
+                    steps, statements, parameters, locals, context, output,
+                );
+            }
+            if matches!(statements.first(), Some(Stmt::ForIn(_))) {
+                return encode_for_in_body(
+                    steps, statements, parameters, locals, context, output,
+                );
+            }
+        }
         let mut mutable = std::collections::HashSet::new();
         for step in steps {
             match step {
@@ -3987,6 +6144,16 @@ fn jit_export(
                         || locals.contains_key(name.sym.as_ref())
                     {
                         return None;
+                    }
+                    if let Some(alias) = callable_alias(initializer, &locals, context) {
+                        locals.insert(
+                            name.sym.to_string(),
+                            vec![format!("{CALLABLE_ALIAS_PREFIX}{alias}")],
+                        );
+                        if is_mutable {
+                            mutable.insert(name.sym.to_string());
+                        }
+                        continue;
                     }
                     let mut encoded = Vec::new();
                     encode_expression(initializer, parameters, &locals, context, &mut encoded)?;
@@ -4003,8 +6170,47 @@ fn jit_export(
                     operation,
                     value,
                 } => {
+                    if let Some(slot) = context.module_globals.get(name.sym.as_ref()).copied() {
+                        let mut encoded = vec![format!("c{:016x}", (slot as f64).to_bits())];
+                        if operation != AssignOp::Assign {
+                            encoded.extend(locals.get(name.sym.as_ref())?.iter().cloned());
+                        }
+                        encode_expression(value, parameters, &locals, context, &mut encoded)?;
+                        if operation != AssignOp::Assign {
+                            encoded.push(
+                                match operation {
+                                    AssignOp::AddAssign => "+",
+                                    AssignOp::SubAssign => "-",
+                                    AssignOp::MulAssign => "*",
+                                    AssignOp::DivAssign => "/",
+                                    AssignOp::ModAssign => "%",
+                                    AssignOp::LShiftAssign => "shl",
+                                    AssignOp::RShiftAssign => "shr",
+                                    AssignOp::ZeroFillRShiftAssign => "ushr",
+                                    AssignOp::BitOrAssign => "bor",
+                                    AssignOp::BitXorAssign => "bxor",
+                                    AssignOp::BitAndAssign => "band",
+                                    AssignOp::ExpAssign => "pow",
+                                    _ => return None,
+                                }
+                                .into(),
+                            );
+                        }
+                        encoded.extend(["globalset".into(), "drop".into()]);
+                        output.extend(encoded);
+                        continue;
+                    }
                     if !mutable.contains(name.sym.as_ref()) {
                         return None;
+                    }
+                    if operation == AssignOp::Assign {
+                        if let Some(alias) = callable_alias(value, &locals, context) {
+                            locals.insert(
+                                name.sym.to_string(),
+                                vec![format!("{CALLABLE_ALIAS_PREFIX}{alias}")],
+                            );
+                            continue;
+                        }
                     }
                     let mut encoded = Vec::new();
                     if operation == AssignOp::AddAssign {
@@ -4046,6 +6252,20 @@ fn jit_export(
                     locals.insert(name.sym.to_string(), encoded);
                 }
                 LocalStep::Update { name, operation } => {
+                    if let Some(slot) = context.module_globals.get(name.sym.as_ref()).copied() {
+                        output.push(format!("c{:016x}", (slot as f64).to_bits()));
+                        output.extend(locals.get(name.sym.as_ref())?.iter().cloned());
+                        output.push(format!("c{:016x}", 1.0f64.to_bits()));
+                        output.push(
+                            match operation {
+                                UpdateOp::PlusPlus => "+",
+                                UpdateOp::MinusMinus => "-",
+                            }
+                            .into(),
+                        );
+                        output.extend(["globalset".into(), "drop".into()]);
+                        continue;
+                    }
                     if !mutable.contains(name.sym.as_ref()) {
                         return None;
                     }
@@ -4061,6 +6281,17 @@ fn jit_export(
                     locals.insert(name.sym.to_string(), encoded);
                 }
                 LocalStep::Effect(expression) => {
+                    if encode_callable_table_update(
+                        expression,
+                        parameters,
+                        &locals,
+                        context,
+                        output,
+                    )
+                    .is_some()
+                    {
+                        continue;
+                    }
                     encode_expression(expression, parameters, &locals, context, output)?;
                     output.push("drop".into());
                 }
@@ -4102,6 +6333,10 @@ fn jit_export(
     struct InlineContext<'a> {
         helpers: &'a std::collections::HashMap<String, NumericCallable<'a>>,
         module_locals: std::collections::HashMap<String, Vec<String>>,
+        module_globals: std::collections::HashMap<String, u8>,
+        callable_tables: std::collections::HashMap<String, Vec<(String, String)>>,
+        callable_table_states:
+            std::collections::HashMap<String, std::collections::HashMap<String, (u8, Vec<String>)>>,
         active: Vec<String>,
         recursive_names: Vec<String>,
         recursive_parameters: Vec<thaw_hir::HirType>,
@@ -5054,29 +7289,112 @@ fn jit_export(
         }
     }
 
-    fn encode_helper_call(
-        call: &CallExpr,
+    const CALLABLE_ALIAS_PREFIX: &str = "\0call:";
+
+    fn callable_alias(
+        expression: &Expr,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &InlineContext<'_>,
+    ) -> Option<String> {
+        match expression {
+            Expr::Ident(identifier) => {
+                if let Some(local) = locals.get(identifier.sym.as_ref()) {
+                    let [marker] = local.as_slice() else {
+                        return None;
+                    };
+                    marker.strip_prefix(CALLABLE_ALIAS_PREFIX).map(str::to_owned)
+                } else {
+                    context
+                        .helpers
+                        .contains_key(identifier.sym.as_ref())
+                        .then(|| identifier.sym.to_string())
+                }
+            }
+            Expr::Paren(parenthesized) => callable_alias(parenthesized.expr.as_ref(), locals, context),
+            _ => None,
+        }
+    }
+
+    fn encode_helper_target(
+        callee: &Expr,
+        arguments: &[thaw_parser::ast::ExprOrSpread],
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
-        let Callee::Expr(callee) = &call.callee else {
-            return None;
-        };
-        let Expr::Ident(identifier) = callee.as_ref() else {
-            return None;
-        };
-        let name = identifier.sym.as_ref();
+        if let Expr::Paren(parenthesized) = callee {
+            return encode_helper_target(
+                parenthesized.expr.as_ref(),
+                arguments,
+                parameters,
+                locals,
+                context,
+                output,
+            );
+        }
+        if let Expr::Cond(conditional) = callee {
+            encode_condition(
+                conditional.test.as_ref(),
+                parameters,
+                locals,
+                context,
+                output,
+            )?;
+            output.push("if".into());
+            encode_helper_target(
+                conditional.cons.as_ref(),
+                arguments,
+                parameters,
+                locals,
+                context,
+                output,
+            )?;
+            output.push("else".into());
+            encode_helper_target(
+                conditional.alt.as_ref(),
+                arguments,
+                parameters,
+                locals,
+                context,
+                output,
+            )?;
+            output.push("end".into());
+            return Some(());
+        }
+        if let Expr::Member(member) = callee {
+            return encode_callable_table_call(
+                member, arguments, parameters, locals, context, output,
+            );
+        }
+        let name = callable_alias(callee, locals, context)?;
+        encode_named_helper_target(
+            name.as_str(),
+            arguments,
+            parameters,
+            locals,
+            context,
+            output,
+        )
+    }
+
+    fn encode_named_helper_target(
+        name: &str,
+        arguments: &[thaw_parser::ast::ExprOrSpread],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
         if context.recursive_names.iter().any(|recursive| recursive == name) {
-            if call.args.len() != context.recursive_parameters.len()
-                || call.args.iter().any(|argument| argument.spread.is_some())
+            if arguments.len() != context.recursive_parameters.len()
+                || arguments.iter().any(|argument| argument.spread.is_some())
             {
                 return None;
             }
             let expected_parameters = context.recursive_parameters.clone();
             let mut arity = 0;
-            for (argument, expected) in call.args.iter().zip(&expected_parameters) {
+            for (argument, expected) in arguments.iter().zip(&expected_parameters) {
                 arity += encode_recursive_argument(
                     argument.expr.as_ref(),
                     expected,
@@ -5105,14 +7423,14 @@ fn jit_export(
         }
         let callable = *context.helpers.get(name)?;
         let (helper_parameters, steps, body) = callable_parts(callable)?;
-        if helper_parameters.len() != call.args.len()
-            || call.args.iter().any(|argument| argument.spread.is_some())
+        if helper_parameters.len() != arguments.len()
+            || arguments.iter().any(|argument| argument.spread.is_some())
         {
             return None;
         }
         let mut helper_locals = context.module_locals.clone();
         let mut bound_parameters = std::collections::HashSet::new();
-        for (parameter, argument) in helper_parameters.iter().zip(&call.args) {
+        for (parameter, argument) in helper_parameters.iter().zip(arguments) {
             let Pat::Ident(parameter) = parameter else {
                 return None;
             };
@@ -5140,6 +7458,348 @@ fn jit_export(
         );
         context.active.pop();
         result
+    }
+
+    fn encode_callable_table_call(
+        member: &thaw_parser::ast::MemberExpr,
+        arguments: &[thaw_parser::ast::ExprOrSpread],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let Expr::Ident(table) = member.obj.as_ref() else {
+            return None;
+        };
+        let entries = context.callable_tables.get(table.sym.as_ref())?.clone();
+        match &member.prop {
+            MemberProp::Ident(property) => {
+                let (_, helper) = entries
+                    .iter()
+                    .find(|(key, _)| key == property.sym.as_ref())?;
+                encode_callable_table_entry(
+                    table.sym.as_ref(),
+                    property.sym.as_ref(),
+                    helper,
+                    arguments,
+                    parameters,
+                    locals,
+                    context,
+                    output,
+                )
+            }
+            MemberProp::Computed(property) => {
+                let mut kind = None;
+                let branches = entries
+                    .iter()
+                    .map(|(key, helper)| {
+                        let mut encoded = Vec::new();
+                        encode_callable_table_entry(
+                            table.sym.as_ref(),
+                            key,
+                            helper,
+                            arguments,
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        let branch_kind = jit_expression_kind(&encoded)?.0;
+                        if kind.replace(branch_kind).is_some_and(|kind| kind != branch_kind) {
+                            return None;
+                        }
+                        Some((key.clone(), encoded))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let missing = match kind? {
+                    JitKind::Number => "missingcalln",
+                    JitKind::Boolean => "missingcallb",
+                    JitKind::String => "missingcalls",
+                    JitKind::Array => "missingcalla",
+                    JitKind::Dictionary => "missingcalld",
+                };
+                let mut key = Vec::new();
+                encode_expression(
+                    property.expr.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut key,
+                )?;
+                append_string(key, output)?;
+                encode_callable_table_branches(&branches, missing, output)?;
+                output.push("nip".into());
+                Some(())
+            }
+            MemberProp::PrivateName(_) => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_callable_table_entry(
+        table: &str,
+        key: &str,
+        initial: &str,
+        arguments: &[thaw_parser::ast::ExprOrSpread],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let Some((slot, helpers)) = context
+            .callable_table_states
+            .get(table)
+            .and_then(|entries| entries.get(key))
+            .cloned()
+        else {
+            return encode_named_helper_target(
+                initial, arguments, parameters, locals, context, output,
+            );
+        };
+        let mut branches = Vec::with_capacity(helpers.len());
+        let mut kind = None;
+        for helper in helpers {
+            let mut encoded = Vec::new();
+            encode_named_helper_target(
+                &helper,
+                arguments,
+                parameters,
+                locals,
+                context,
+                &mut encoded,
+            )?;
+            let branch_kind = jit_expression_kind(&encoded)?.0;
+            if kind.replace(branch_kind).is_some_and(|kind| kind != branch_kind) {
+                return None;
+            }
+            branches.push(encoded);
+        }
+        encode_callable_selection_branches(&branches, slot, 0, output)
+    }
+
+    fn encode_callable_selection_branches(
+        branches: &[Vec<String>],
+        slot: u8,
+        selection: usize,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (branch, remaining) = branches.split_first()?;
+        if remaining.is_empty() {
+            output.extend(branch.iter().cloned());
+            return Some(());
+        }
+        output.push(format!("c{:016x}", (slot as f64).to_bits()));
+        output.push("globalget".into());
+        output.push(format!("c{:016x}", (selection as f64).to_bits()));
+        output.push("==".into());
+        output.push("if".into());
+        output.extend(branch.iter().cloned());
+        output.push("else".into());
+        encode_callable_selection_branches(remaining, slot, selection + 1, output)?;
+        output.push("end".into());
+        Some(())
+    }
+
+    fn encode_callable_table_update(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (table, keys, assigned_helpers) = callable_table_assignment(expression)?;
+        let Expr::Assign(assignment) = expression else {
+            unreachable!()
+        };
+        let updates = keys
+            .iter()
+            .map(|key| {
+                let (slot, helpers) = context.callable_table_states.get(&table)?.get(key)?;
+                assigned_helpers
+                    .iter()
+                    .all(|helper| helpers.contains(helper))
+                    .then(|| (key.clone(), *slot, helpers.clone()))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if let [(_, slot, helpers)] = updates.as_slice() {
+            output.push(format!("c{:016x}", (*slot as f64).to_bits()));
+            encode_callable_assignment_selection(
+                assignment.right.as_ref(),
+                helpers,
+                parameters,
+                locals,
+                context,
+                output,
+            )?;
+            output.extend(["globalset".into(), "drop".into()]);
+            return Some(());
+        }
+        let AssignTarget::Simple(SimpleAssignTarget::Member(target)) = &assignment.left else {
+            unreachable!()
+        };
+        let MemberProp::Computed(property) = &target.prop else {
+            return None;
+        };
+        let mut key = Vec::new();
+        encode_expression(
+            property.expr.as_ref(),
+            parameters,
+            locals,
+            context,
+            &mut key,
+        )?;
+        append_string(key, output)?;
+        encode_callable_table_update_branches(
+            &updates,
+            assignment.right.as_ref(),
+            parameters,
+            locals,
+            context,
+            output,
+        )?;
+        output.extend(["nip".into(), "drop".into()]);
+        Some(())
+    }
+
+    fn encode_callable_assignment_selection(
+        expression: &Expr,
+        helpers: &[String],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        match expression {
+            Expr::Ident(helper) => {
+                let selection = helpers
+                    .iter()
+                    .position(|candidate| candidate == helper.sym.as_ref())?;
+                output.push(format!("c{:016x}", (selection as f64).to_bits()));
+            }
+            Expr::Paren(parenthesized) => encode_callable_assignment_selection(
+                parenthesized.expr.as_ref(),
+                helpers,
+                parameters,
+                locals,
+                context,
+                output,
+            )?,
+            Expr::Cond(conditional) => {
+                encode_condition(
+                    conditional.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    output,
+                )?;
+                output.push("if".into());
+                encode_callable_assignment_selection(
+                    conditional.cons.as_ref(),
+                    helpers,
+                    parameters,
+                    locals,
+                    context,
+                    output,
+                )?;
+                output.push("else".into());
+                encode_callable_assignment_selection(
+                    conditional.alt.as_ref(),
+                    helpers,
+                    parameters,
+                    locals,
+                    context,
+                    output,
+                )?;
+                output.push("end".into());
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_callable_table_update_branches(
+        updates: &[(String, u8, Vec<String>)],
+        assigned: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let ((key, slot, helpers), remaining) = updates.split_first()?;
+        if remaining.is_empty() {
+            output.push(format!("c{:016x}", (*slot as f64).to_bits()));
+            encode_callable_assignment_selection(
+                assigned, helpers, parameters, locals, context, output,
+            )?;
+            output.push("globalset".into());
+            return Some(());
+        }
+        output.push("dup".into());
+        encode_string(key, output)?;
+        output.extend([
+            "strcmp".into(),
+            "c0000000000000000".into(),
+            "==".into(),
+            "if".into(),
+            format!("c{:016x}", (*slot as f64).to_bits()),
+        ]);
+        encode_callable_assignment_selection(
+            assigned, helpers, parameters, locals, context, output,
+        )?;
+        output.extend(["globalset".into(), "else".into()]);
+        encode_callable_table_update_branches(
+            remaining,
+            assigned,
+            parameters,
+            locals,
+            context,
+            output,
+        )?;
+        output.push("end".into());
+        Some(())
+    }
+
+    fn encode_callable_table_branches(
+        branches: &[(String, Vec<String>)],
+        missing: &str,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let Some(((key, branch), remaining)) = branches.split_first() else {
+            output.push(missing.into());
+            return Some(());
+        };
+        output.push("dup".into());
+        encode_string(key, output)?;
+        output.push("strcmp".into());
+        output.push("c0000000000000000".into());
+        output.push("==".into());
+        output.push("if".into());
+        output.extend(branch.iter().cloned());
+        output.push("else".into());
+        encode_callable_table_branches(remaining, missing, output)?;
+        output.push("end".into());
+        Some(())
+    }
+
+    fn encode_helper_call(
+        call: &CallExpr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        encode_helper_target(
+            callee.as_ref(),
+            &call.args,
+            parameters,
+            locals,
+            context,
+            output,
+        )
     }
 
     fn encode_recursive_argument(
@@ -5258,6 +7918,165 @@ fn jit_export(
             Expr::Arrow(function) => Some(NumericCallable::Arrow(function)),
             Expr::Ident(identifier) => declarations.get(identifier.sym.as_ref()).copied(),
             _ => None,
+        }
+    }
+
+    fn resolve_callable_table(
+        object: &thaw_parser::ast::ObjectLit,
+        declarations: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<Vec<(String, String)>> {
+        let mut names = std::collections::HashSet::new();
+        let entries = object
+            .props
+            .iter()
+            .map(|property| {
+                let PropOrSpread::Prop(property) = property else {
+                    return None;
+                };
+                let (key, value) = match property.as_ref() {
+                    Prop::Shorthand(identifier) => {
+                        (identifier.sym.to_string(), identifier.sym.to_string())
+                    }
+                    Prop::KeyValue(property) => {
+                        let key = match &property.key {
+                            PropName::Ident(identifier) => identifier.sym.to_string(),
+                            PropName::Str(string) => {
+                                string.value.to_string_lossy().into_owned()
+                            }
+                            _ => return None,
+                        };
+                        let Expr::Ident(value) = property.value.as_ref() else {
+                            return None;
+                        };
+                        (key, value.sym.to_string())
+                    }
+                    _ => return None,
+                };
+                if !names.insert(key.clone()) || !declarations.contains_key(&value) {
+                    return None;
+                }
+                Some((key, value))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!entries.is_empty()).then_some(entries)
+    }
+
+    fn finite_string_keys(expression: &Expr) -> Option<Vec<String>> {
+        match expression {
+            Expr::Lit(Lit::Str(key)) => Some(vec![key.value.to_string_lossy().into_owned()]),
+            Expr::Paren(parenthesized) => finite_string_keys(parenthesized.expr.as_ref()),
+            Expr::Cond(conditional) => {
+                let mut keys = finite_string_keys(conditional.cons.as_ref())?;
+                keys.extend(finite_string_keys(conditional.alt.as_ref())?);
+                keys.sort();
+                keys.dedup();
+                Some(keys)
+            }
+            _ => None,
+        }
+    }
+
+    fn finite_callable_names(expression: &Expr) -> Option<Vec<String>> {
+        match expression {
+            Expr::Ident(helper) => Some(vec![helper.sym.to_string()]),
+            Expr::Paren(parenthesized) => finite_callable_names(parenthesized.expr.as_ref()),
+            Expr::Cond(conditional) => {
+                let mut helpers = finite_callable_names(conditional.cons.as_ref())?;
+                helpers.extend(finite_callable_names(conditional.alt.as_ref())?);
+                helpers.sort();
+                helpers.dedup();
+                Some(helpers)
+            }
+            _ => None,
+        }
+    }
+
+    fn callable_table_assignment(
+        expression: &Expr,
+    ) -> Option<(String, Vec<String>, Vec<String>)> {
+        let Expr::Assign(assignment) = expression else {
+            return None;
+        };
+        if assignment.op != AssignOp::Assign {
+            return None;
+        }
+        let AssignTarget::Simple(SimpleAssignTarget::Member(target)) = &assignment.left else {
+            return None;
+        };
+        let Expr::Ident(table) = target.obj.as_ref() else {
+            return None;
+        };
+        let keys = match &target.prop {
+            MemberProp::Ident(property) => vec![property.sym.to_string()],
+            MemberProp::Computed(property) => finite_string_keys(property.expr.as_ref())?,
+            MemberProp::PrivateName(_) => return None,
+        };
+        let helpers = finite_callable_names(assignment.right.as_ref())?;
+        Some((table.sym.to_string(), keys, helpers))
+    }
+
+    fn collect_callable_table_assignments(
+        statement: &Stmt,
+        output: &mut Vec<(String, Vec<String>, Vec<String>)>,
+    ) {
+        match statement {
+            Stmt::Expr(statement) => {
+                if let Some(assignment) = callable_table_assignment(statement.expr.as_ref()) {
+                    output.push(assignment);
+                }
+            }
+            Stmt::Block(block) => {
+                for statement in &block.stmts {
+                    collect_callable_table_assignments(statement, output);
+                }
+            }
+            Stmt::If(statement) => {
+                collect_callable_table_assignments(statement.cons.as_ref(), output);
+                if let Some(alternate) = statement.alt.as_deref() {
+                    collect_callable_table_assignments(alternate, output);
+                }
+            }
+            Stmt::While(statement) => {
+                collect_callable_table_assignments(statement.body.as_ref(), output);
+            }
+            Stmt::DoWhile(statement) => {
+                collect_callable_table_assignments(statement.body.as_ref(), output);
+            }
+            Stmt::For(statement) => {
+                collect_callable_table_assignments(statement.body.as_ref(), output);
+            }
+            Stmt::ForIn(statement) => {
+                collect_callable_table_assignments(statement.body.as_ref(), output);
+            }
+            Stmt::ForOf(statement) => {
+                collect_callable_table_assignments(statement.body.as_ref(), output);
+            }
+            Stmt::Switch(statement) => {
+                for case in &statement.cases {
+                    for statement in &case.cons {
+                        collect_callable_table_assignments(statement, output);
+                    }
+                }
+            }
+            Stmt::Try(statement) => {
+                for statement in &statement.block.stmts {
+                    collect_callable_table_assignments(statement, output);
+                }
+                if let Some(handler) = &statement.handler {
+                    for statement in &handler.body.stmts {
+                        collect_callable_table_assignments(statement, output);
+                    }
+                }
+                if let Some(finalizer) = &statement.finalizer {
+                    for statement in &finalizer.stmts {
+                        collect_callable_table_assignments(statement, output);
+                    }
+                }
+            }
+            Stmt::Labeled(statement) => {
+                collect_callable_table_assignments(statement.body.as_ref(), output);
+            }
+            _ => {}
         }
     }
 
@@ -5416,6 +8235,10 @@ fn jit_export(
     let mut style = None;
     let mut callable = None;
     let mut module_locals = std::collections::HashMap::new();
+    let mut module_mutable = std::collections::HashSet::new();
+    let mut module_callable_mutable = std::collections::HashSet::new();
+    let mut module_callable_tables = std::collections::HashMap::new();
+    let mut module_callable_table_mutable = std::collections::HashSet::new();
     let no_parameters = std::collections::HashMap::new();
     for item in &module.body {
         let ModuleItem::Stmt(statement) = item else {
@@ -5425,21 +8248,31 @@ fn jit_export(
             continue;
         }
         if let Stmt::Decl(Decl::Var(declaration)) = statement {
-            if declaration.kind != VarDeclKind::Const {
-                return None;
-            }
             for declarator in &declaration.decls {
                 let Pat::Ident(name) = &declarator.name else {
                     return None;
                 };
                 if module_locals.contains_key(name.id.sym.as_ref())
                     || module_functions.contains_key(name.id.sym.as_ref())
+                    || module_callable_tables.contains_key(name.id.sym.as_ref())
                 {
                     return None;
                 }
                 let initializer = declarator.init.as_deref()?;
+                if let Expr::Object(object) = initializer {
+                    if let Some(table) = resolve_callable_table(object, &module_functions) {
+                        module_callable_tables.insert(name.id.sym.to_string(), table);
+                        if declaration.kind != VarDeclKind::Const {
+                            module_callable_table_mutable.insert(name.id.sym.to_string());
+                        }
+                        continue;
+                    }
+                }
                 if let Some(callable) = resolve_callable(initializer, &module_functions) {
                     module_functions.insert(name.id.sym.to_string(), callable);
+                    if declaration.kind != VarDeclKind::Const {
+                        module_callable_mutable.insert(name.id.sym.to_string());
+                    }
                     continue;
                 }
                 let mut encoded = Vec::new();
@@ -5447,6 +8280,9 @@ fn jit_export(
                 let mut context = InlineContext {
                     helpers: &empty_helpers,
                     module_locals: module_locals.clone(),
+                    module_globals: std::collections::HashMap::new(),
+                    callable_tables: module_callable_tables.clone(),
+                    callable_table_states: std::collections::HashMap::new(),
                     active: Vec::new(),
                     recursive_names: Vec::new(),
                     recursive_parameters: Vec::new(),
@@ -5459,7 +8295,13 @@ fn jit_export(
                     &mut context,
                     &mut encoded,
                 )?;
+                if declaration.kind != VarDeclKind::Const && !stable_jit_tokens(&encoded) {
+                    return None;
+                }
                 module_locals.insert(name.id.sym.to_string(), encoded);
+                if declaration.kind != VarDeclKind::Const {
+                    module_mutable.insert(name.id.sym.to_string());
+                }
             }
             continue;
         }
@@ -5470,8 +8312,156 @@ fn jit_export(
             continue;
         }
         let Expr::Assign(assignment) = statement.expr.as_ref() else {
+            if let Expr::Update(update) = statement.expr.as_ref() {
+                if let Expr::Ident(name) = update.arg.as_ref() {
+                    if module_mutable.contains(name.sym.as_ref()) {
+                        let mut encoded = module_locals.get(name.sym.as_ref())?.clone();
+                        encoded.extend([
+                            format!("c{:016x}", 1.0_f64.to_bits()),
+                            match update.op {
+                                UpdateOp::PlusPlus => "+".into(),
+                                UpdateOp::MinusMinus => "-".into(),
+                            },
+                        ]);
+                        module_locals.insert(name.sym.to_string(), encoded);
+                        continue;
+                    }
+                }
+            }
             return None;
         };
+        if let AssignTarget::Simple(SimpleAssignTarget::Ident(name)) = &assignment.left {
+            if module_callable_table_mutable.contains(name.id.sym.as_ref()) {
+                if assignment.op != AssignOp::Assign {
+                    return None;
+                }
+                let Expr::Object(object) = assignment.right.as_ref() else {
+                    return None;
+                };
+                let table = resolve_callable_table(object, &module_functions)?;
+                module_callable_tables.insert(name.id.sym.to_string(), table);
+                continue;
+            }
+            if module_callable_mutable.contains(name.id.sym.as_ref()) {
+                if assignment.op != AssignOp::Assign {
+                    return None;
+                }
+                let callable = resolve_callable(assignment.right.as_ref(), &module_functions)?;
+                module_functions.insert(name.id.sym.to_string(), callable);
+                continue;
+            }
+            if !module_mutable.contains(name.id.sym.as_ref()) {
+                return None;
+            }
+            let mut encoded = Vec::new();
+            if assignment.op == AssignOp::AddAssign {
+                let mut right = Vec::new();
+                encode_expression(
+                    assignment.right.as_ref(),
+                    &no_parameters,
+                    &module_locals,
+                    &mut InlineContext {
+                        helpers: &module_functions,
+                        module_locals: module_locals.clone(),
+                        module_globals: std::collections::HashMap::new(),
+                        callable_tables: module_callable_tables.clone(),
+                        callable_table_states: std::collections::HashMap::new(),
+                        active: Vec::new(),
+                        recursive_names: Vec::new(),
+                        recursive_parameters: Vec::new(),
+                        recursive_result: None,
+                    },
+                    &mut right,
+                )?;
+                append_add(
+                    module_locals.get(name.id.sym.as_ref())?.clone(),
+                    right,
+                    &mut encoded,
+                )?;
+            } else {
+                if assignment.op != AssignOp::Assign {
+                    encoded.extend(
+                        module_locals
+                            .get(name.id.sym.as_ref())?
+                            .iter()
+                            .cloned(),
+                    );
+                }
+                let mut context = InlineContext {
+                    helpers: &module_functions,
+                    module_locals: module_locals.clone(),
+                    module_globals: std::collections::HashMap::new(),
+                    callable_tables: module_callable_tables.clone(),
+                    callable_table_states: std::collections::HashMap::new(),
+                    active: Vec::new(),
+                    recursive_names: Vec::new(),
+                    recursive_parameters: Vec::new(),
+                    recursive_result: None,
+                };
+                encode_expression(
+                    assignment.right.as_ref(),
+                    &no_parameters,
+                    &module_locals,
+                    &mut context,
+                    &mut encoded,
+                )?;
+                if assignment.op != AssignOp::Assign {
+                    encoded.push(
+                        match assignment.op {
+                            AssignOp::SubAssign => "-",
+                            AssignOp::MulAssign => "*",
+                            AssignOp::DivAssign => "/",
+                            AssignOp::ModAssign => "%",
+                            AssignOp::LShiftAssign => "shl",
+                            AssignOp::RShiftAssign => "shr",
+                            AssignOp::ZeroFillRShiftAssign => "ushr",
+                            AssignOp::BitOrAssign => "bor",
+                            AssignOp::BitXorAssign => "bxor",
+                            AssignOp::BitAndAssign => "band",
+                            AssignOp::ExpAssign => "pow",
+                            _ => return None,
+                        }
+                        .into(),
+                    );
+                }
+            }
+            if !stable_jit_tokens(&encoded) {
+                return None;
+            }
+            module_locals.insert(name.id.sym.to_string(), encoded);
+            continue;
+        }
+        if let AssignTarget::Simple(SimpleAssignTarget::Member(target)) = &assignment.left {
+            if let Expr::Ident(table) = target.obj.as_ref() {
+                if let Some(entries) = module_callable_tables.get_mut(table.sym.as_ref()) {
+                    if assignment.op != AssignOp::Assign {
+                        return None;
+                    }
+                    let key = match &target.prop {
+                        MemberProp::Ident(property) => property.sym.to_string(),
+                        MemberProp::Computed(property) => {
+                            let Expr::Lit(Lit::Str(key)) = property.expr.as_ref() else {
+                                return None;
+                            };
+                            key.value.to_string_lossy().into_owned()
+                        }
+                        MemberProp::PrivateName(_) => return None,
+                    };
+                    let helper = match assignment.right.as_ref() {
+                        Expr::Ident(helper) if module_functions.contains_key(helper.sym.as_ref()) => {
+                            helper.sym.to_string()
+                        }
+                        _ => return None,
+                    };
+                    if let Some((_, value)) = entries.iter_mut().find(|(name, _)| name == &key) {
+                        *value = helper;
+                    } else {
+                        entries.push((key, helper));
+                    }
+                    continue;
+                }
+            }
+        }
         let (assignment_style, selected) =
             exported_callable(assignment, export_name, allow_default, &module_functions)?;
         if style.replace(assignment_style).is_some_and(|style| {
@@ -5514,7 +8504,107 @@ fn jit_export(
         bindings.push((name, ty, default, index >= function.required_params));
     }
     let mut expression = Vec::new();
+    let mut module_globals = std::collections::HashMap::new();
+    let stateful_module_names = module_functions
+        .values()
+        .filter_map(|callable| callable_parts(*callable))
+        .flat_map(|(_, steps, _)| steps)
+        .filter_map(|step| match step {
+            LocalStep::Assign { name, .. } | LocalStep::Update { name, .. }
+                if module_mutable.contains(name.sym.as_ref()) =>
+            {
+                Some(name.sym.to_string())
+            }
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut global_names = stateful_module_names
+        .iter()
+        .filter_map(|name| {
+            let initial = module_locals.get(name)?;
+            (jit_expression_kind(initial)?.0 == JitKind::Number).then(|| name.clone())
+        })
+        .collect::<Vec<_>>();
+    global_names.sort();
+    global_names.dedup();
+    if global_names.len() > 16 {
+        return None;
+    }
+    let mut next_global_slot = global_names.len();
+    for (slot, name) in global_names.into_iter().enumerate() {
+        let initial = module_locals.get(&name)?.clone();
+        let mut read = vec![format!("c{:016x}", (slot as f64).to_bits())];
+        read.extend(initial);
+        read.push("globalinit".into());
+        module_locals.insert(name.clone(), read);
+        module_globals.insert(name, slot as u8);
+    }
+    let mut table_candidates = std::collections::BTreeMap::<
+        (String, String),
+        std::collections::BTreeSet<String>,
+    >::new();
+    for (_, steps, body) in module_functions
+        .values()
+        .filter_map(|callable| callable_parts(*callable))
+    {
+        let mut assignments = Vec::new();
+        for step in steps {
+            if let LocalStep::Effect(expression) = step {
+                if let Some(assignment) = callable_table_assignment(expression) {
+                    assignments.push(assignment);
+                }
+            }
+        }
+        if let NumericBody::Statements(statements) = body {
+            for statement in statements {
+                collect_callable_table_assignments(statement, &mut assignments);
+            }
+        }
+        for (table, keys, helpers) in assignments {
+            if helpers
+                .iter()
+                .any(|helper| !module_functions.contains_key(helper))
+            {
+                continue;
+            }
+            for key in keys {
+                if !module_callable_tables
+                    .get(&table)
+                    .is_some_and(|entries| entries.iter().any(|(name, _)| name == &key))
+                {
+                    continue;
+                }
+                table_candidates
+                    .entry((table.clone(), key))
+                    .or_default()
+                    .extend(helpers.iter().cloned());
+            }
+        }
+    }
+    if next_global_slot + table_candidates.len() > 16 {
+        return None;
+    }
+    let mut callable_table_states = std::collections::HashMap::<
+        String,
+        std::collections::HashMap<String, (u8, Vec<String>)>,
+    >::new();
+    for ((table, key), candidates) in table_candidates {
+        let initial = module_callable_tables
+            .get(&table)?
+            .iter()
+            .find(|(name, _)| name == &key)?
+            .1
+            .clone();
+        let mut helpers = vec![initial.clone()];
+        helpers.extend(candidates.into_iter().filter(|helper| helper != &initial));
+        callable_table_states
+            .entry(table)
+            .or_default()
+            .insert(key, (next_global_slot as u8, helpers));
+        next_global_slot += 1;
+    }
     let helper_module_locals = module_locals.clone();
+    let helper_callable_tables = module_callable_tables.clone();
     let mut locals = module_locals;
     for (parameter, _, _, _) in &bindings {
         locals.remove(parameter);
@@ -5555,6 +8645,9 @@ fn jit_export(
     let mut context = InlineContext {
         helpers: &module_functions,
         module_locals: helper_module_locals,
+        module_globals,
+        callable_tables: helper_callable_tables,
+        callable_table_states,
         active: Vec::new(),
         recursive_names,
         recursive_parameters,
@@ -5649,12 +8742,21 @@ fn jit_export(
     if slot > 16 {
         return None;
     }
-    if let thaw_bridge::DtsType::Native(
-        ty @ (thaw_hir::HirType::Object(_)
-        | thaw_hir::HirType::Dictionary(_)
-        | thaw_hir::HirType::Tuple(_)),
-    ) = &function.ret
+    let starts_loop = matches!(body, NumericBody::Statements(statements)
+        if matches!(statements.first(), Some(Stmt::While(_) | Stmt::For(_) | Stmt::DoWhile(_) | Stmt::ForIn(_) | Stmt::ForOf(_))));
+    if !starts_loop
+        && matches!(
+            &function.ret,
+            thaw_bridge::DtsType::Native(
+                thaw_hir::HirType::Object(_)
+                    | thaw_hir::HirType::Dictionary(_)
+                    | thaw_hir::HirType::Tuple(_)
+            )
+        )
     {
+        let thaw_bridge::DtsType::Native(ty) = &function.ret else {
+            unreachable!()
+        };
         let mut jit_locals = Vec::new();
         let mut mutable = std::collections::HashSet::new();
         for step in local_steps {
@@ -5808,7 +8910,7 @@ fn jit_export(
             JitExport::WithLocals(jit_locals, Box::new(result))
         });
     }
-    if local_steps.is_empty() {
+    if local_steps.is_empty() && !starts_loop {
         if let thaw_bridge::DtsType::Native(ty) = &function.ret {
             if jit_result_supported(ty) {
                 return encode_aggregate_body(body, ty, &parameters, &locals, &mut context);
@@ -5979,9 +9081,231 @@ fn primitive_comparison_result(token: &str) -> Option<(JitKind, JitKind)> {
 fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let mut stack = Vec::new();
     let mut branches = Vec::new();
+    let mut loops = Vec::new();
+    let mut guards = Vec::new();
+    let mut switches = Vec::new();
+    let mut tries = Vec::new();
+    let mut catches = Vec::new();
+    let mut dynamic_slots = std::collections::HashSet::new();
+    let mut returns = Vec::new();
     let mut maximum_depth = 0;
     for token in expression {
-        if matches!(
+        if let Some(index) = token
+            .strip_prefix("setl")
+            .and_then(|index| index.parse::<usize>().ok())
+        {
+            let value = stack.pop()?;
+            if stack.get(index).copied()? != value {
+                return None;
+            }
+        } else if let Some((receiver, value, index)) = token
+            .strip_prefix("rnlset")
+            .map(|index| (JitKind::Array, JitKind::Number, index))
+            .or_else(|| token.strip_prefix("rblset").map(|index| (JitKind::Array, JitKind::Boolean, index)))
+            .or_else(|| token.strip_prefix("rslset").map(|index| (JitKind::Array, JitKind::String, index)))
+            .or_else(|| token.strip_prefix("dnlset").map(|index| (JitKind::Dictionary, JitKind::Number, index)))
+            .or_else(|| token.strip_prefix("dblset").map(|index| (JitKind::Dictionary, JitKind::Boolean, index)))
+            .or_else(|| token.strip_prefix("dslset").map(|index| (JitKind::Dictionary, JitKind::String, index)))
+            .and_then(|(receiver, value, index)| index.parse::<usize>().ok().map(|index| (receiver, value, index)))
+        {
+            if stack.pop()? != value
+                || stack.pop()? != if receiver == JitKind::Array { JitKind::Number } else { JitKind::String }
+                || stack.get(index).copied()? != receiver
+            {
+                return None;
+            }
+            stack.push(value);
+        } else if let Some((value, index)) = token
+            .strip_prefix("rnlpush")
+            .or_else(|| token.strip_prefix("rnlunshift"))
+            .map(|index| (JitKind::Number, index))
+            .or_else(|| {
+                token
+                    .strip_prefix("rblpush")
+                    .or_else(|| token.strip_prefix("rblunshift"))
+                    .map(|index| (JitKind::Boolean, index))
+            })
+            .or_else(|| {
+                token
+                    .strip_prefix("rslpush")
+                    .or_else(|| token.strip_prefix("rslunshift"))
+                    .map(|index| (JitKind::String, index))
+            })
+            .and_then(|(value, index)| {
+                index
+                    .parse::<usize>()
+                    .ok()
+                    .map(|index| (value, index))
+            })
+        {
+            if stack.pop()? != value || stack.get(index).copied()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if let Some((kind, index)) = token
+            .strip_prefix("rnl")
+            .map(|index| (JitKind::Array, index))
+            .or_else(|| token.strip_prefix("rbl").map(|index| (JitKind::Array, index)))
+            .or_else(|| token.strip_prefix("rsl").map(|index| (JitKind::Array, index)))
+            .or_else(|| token.strip_prefix("dnl").map(|index| (JitKind::Dictionary, index)))
+            .or_else(|| token.strip_prefix("dbl").map(|index| (JitKind::Dictionary, index)))
+            .or_else(|| token.strip_prefix("dsl").map(|index| (JitKind::Dictionary, index)))
+            .or_else(|| token.strip_prefix("ln").map(|index| (JitKind::Number, index)))
+            .or_else(|| token.strip_prefix("lb").map(|index| (JitKind::Boolean, index)))
+            .or_else(|| token.strip_prefix("ls").map(|index| (JitKind::String, index)))
+            .and_then(|(kind, index)| index.parse::<usize>().ok().map(|index| (kind, index)))
+        {
+            if let Some(stored) = stack.get(index) {
+                if *stored != kind && !dynamic_slots.contains(&index) {
+                    return None;
+                }
+            }
+            stack.push(kind);
+        } else if token == "loop" {
+            loops.push(stack.clone());
+        } else if token == "while" {
+            if stack.pop()? != JitKind::Boolean || stack.as_slice() != loops.last()?.as_slice() {
+                return None;
+            }
+        } else if token == "looptail" {
+            if stack.as_slice() != loops.last()?.as_slice() {
+                return None;
+            }
+        } else if matches!(token.as_str(), "break" | "continue") {
+            if !stack.starts_with(loops.last()?) {
+                return None;
+            }
+        } else if token == "loopend" {
+            if stack.as_slice() != loops.pop()?.as_slice() {
+                return None;
+            }
+        } else if token == "guard" {
+            if stack.pop()? != JitKind::Boolean {
+                return None;
+            }
+            guards.push((stack.clone(), false));
+        } else if token == "guardelse" {
+            let (base, has_alternate) = guards.last_mut()?;
+            if *has_alternate || stack.as_slice() != base.as_slice() {
+                return None;
+            }
+            *has_alternate = true;
+        } else if token == "guardend" {
+            let (base, _) = guards.pop()?;
+            if stack != base {
+                return None;
+            }
+        } else if token == "switch" {
+            switches.push(stack.clone());
+        } else if token == "case" {
+            if stack.as_slice() != switches.last()?.as_slice() {
+                return None;
+            }
+        } else if token == "casebody" {
+            if stack.pop()? != JitKind::Boolean
+                || stack.as_slice() != switches.last()?.as_slice()
+            {
+                return None;
+            }
+        } else if token == "default" {
+            if stack.as_slice() != switches.last()?.as_slice() {
+                return None;
+            }
+        } else if token == "switchbreak" {
+            if !stack.starts_with(switches.last()?) {
+                return None;
+            }
+        } else if token == "switchend" {
+            if stack != switches.pop()? {
+                return None;
+            }
+            stack.pop()?;
+        } else if token == "trystart" {
+            tries.push((stack.clone(), None, false));
+        } else if token == "trystarttag" {
+            tries.push((stack.clone(), None, true));
+        } else if token == "throw" {
+            let thrown = stack.pop()?;
+            let (base, kind, tagged) = tries.last_mut()?;
+            if *tagged
+                || !stack.starts_with(base.as_slice())
+                || kind.replace(thrown).is_some_and(|kind| kind != thrown)
+            {
+                return None;
+            }
+        } else if let Some(tag) = token
+            .strip_prefix("throwtag")
+            .and_then(|tag| tag.parse::<u8>().ok())
+        {
+            stack.pop()?;
+            let (base, _, tagged) = tries.last()?;
+            if !*tagged || tag > 8 || !stack.starts_with(base.as_slice()) {
+                return None;
+            }
+        } else if token == "checkerror" {
+            let (_, kind, tagged) = tries.last_mut()?;
+            if !*tagged
+                && kind
+                .replace(JitKind::String)
+                .is_some_and(|kind| kind != JitKind::String)
+            {
+                return None;
+            }
+        } else if token == "globalget" {
+            if stack.pop()? != JitKind::Number {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if matches!(token.as_str(), "globalinit" | "globalset") {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Number {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if matches!(
+            token.as_str(),
+            "throwoutn"
+                | "throwoutb"
+                | "throwouts"
+                | "throwoutrn"
+                | "throwoutrb"
+                | "throwoutrs"
+                | "throwoutd"
+        ) {
+            let expected = match token.as_str() {
+                "throwoutn" => JitKind::Number,
+                "throwoutb" => JitKind::Boolean,
+                "throwouts" => JitKind::String,
+                "throwoutrn" | "throwoutrb" | "throwoutrs" => JitKind::Array,
+                "throwoutd" => JitKind::Dictionary,
+                _ => unreachable!(),
+            };
+            if stack.pop()? != expected || !stack.starts_with(loops.last()?) {
+                return None;
+            }
+        } else if token == "catch" {
+            let (base, kind, tagged) = tries.pop()?;
+            if stack != base {
+                return None;
+            }
+            catches.push(base);
+            if tagged {
+                stack.push(JitKind::Number);
+                dynamic_slots.insert(stack.len());
+                stack.push(JitKind::Number);
+            } else {
+                stack.push(kind?);
+            }
+        } else if token == "tryend" {
+            if stack != catches.pop()? {
+                return None;
+            }
+        } else if token == "return" {
+            let result = stack.pop()?;
+            if !stack.starts_with(loops.last()?) {
+                return None;
+            }
+            returns.push(result);
+        } else if matches!(
             token.as_str(),
             "+"
                 | "-"
@@ -6165,6 +9489,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             *stack.last_mut()? = JitKind::Boolean;
+        } else if token == "boolnot" {
+            if stack.pop()? != JitKind::Boolean {
+                return None;
+            }
+            stack.push(JitKind::Boolean);
         } else if matches!(token.as_str(), "isnan" | "isfinite" | "isinteger" | "issafeinteger") {
             if stack.pop()? != JitKind::Number {
                 return None;
@@ -6572,7 +9901,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if token == "arrayvalue"
+        } else if matches!(token.as_str(), "arrayvalue" | "arrayhandle")
             || matches!(token.as_str(), "rnmapneg" | "rnmapabs")
             || token
                 .strip_prefix("rnmap")
@@ -6646,6 +9975,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if matches!(token.as_str(), "isarray" | "isnotarray") {
             stack.pop()?;
             stack.push(JitKind::Boolean);
+        } else if token == "dlen" {
+            if stack.pop()? != JitKind::Dictionary {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if token == "dkeyat" {
+            if stack.pop()? != JitKind::Number || stack.pop()? != JitKind::Dictionary {
+                return None;
+            }
+            stack.push(JitKind::String);
         } else if matches!(token.as_str(), "dnget" | "dbget" | "dsget") {
             if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Dictionary {
                 return None;
@@ -6656,6 +9995,32 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "dsget" => JitKind::String,
                 _ => unreachable!(),
             });
+        } else if matches!(token.as_str(), "dnempty" | "dbempty" | "dsempty") {
+            stack.push(JitKind::Dictionary);
+        } else if let Some(value) = token
+            .strip_prefix("dnput")
+            .map(|_| JitKind::Number)
+            .or_else(|| token.strip_prefix("dbput").map(|_| JitKind::Boolean))
+            .or_else(|| token.strip_prefix("dsput").map(|_| JitKind::String))
+        {
+            if stack.pop()? != value || stack.last().copied()? != JitKind::Dictionary {
+                return None;
+            }
+        } else if matches!(token.as_str(), "dnappend" | "dbappend" | "dsappend") {
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::String
+                || stack.pop()? != JitKind::Dictionary
+                || value
+                    != match token.as_str() {
+                        "dnappend" => JitKind::Number,
+                        "dbappend" => JitKind::Boolean,
+                        "dsappend" => JitKind::String,
+                        _ => unreachable!(),
+                    }
+            {
+                return None;
+            }
+            stack.push(JitKind::Dictionary);
         } else if matches!(token.as_str(), "dnset" | "dbset" | "dsset") {
             let value = stack.pop()?;
             if stack.pop()? != JitKind::String
@@ -6796,6 +10161,19 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             *stack.last_mut()? = JitKind::Number;
+        } else if matches!(
+            token.as_str(),
+            "missingcalln" | "missingcallb" | "missingcalls" | "missingcalla" | "missingcalld"
+        ) {
+            stack.push(match token.as_str() {
+                "missingcalln" => JitKind::Number,
+                "missingcallb" => JitKind::Boolean,
+                "missingcalls" => JitKind::String,
+                "missingcalla" => JitKind::Array,
+                "missingcalld" => JitKind::Dictionary,
+                _ => unreachable!(),
+            });
+            maximum_depth = maximum_depth.max(stack.len());
         } else if matches!(token.as_str(), "absentn" | "absentb" | "absents") {
             stack.push(match token.as_str() {
                 "absentn" => JitKind::Number,
@@ -6831,9 +10209,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let [kind] = stack.as_slice() else {
         return None;
     };
-    branches
-        .is_empty()
-        .then_some((*kind, maximum_depth))
+    let kind = returns
+        .into_iter()
+        .try_fold(*kind, merge_jit_kinds)?;
+    (branches.is_empty()
+        && loops.is_empty()
+        && guards.is_empty()
+        && switches.is_empty()
+        && tries.is_empty()
+        && catches.is_empty())
+    .then_some((kind, maximum_depth))
 }
 
 fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> Option<String> {
