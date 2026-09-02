@@ -2162,6 +2162,37 @@ extern "C" fn array_reverse(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_reverse(value: f64, reverse: extern "C" fn(f64) -> f64) -> f64 {
+    let Some(dynamic) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if !matches!(
+        dynamic.tag,
+        DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+    ) {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let result = reverse(f64::from_bits(dynamic.payload));
+    if result == 0.0 {
+        0.0
+    } else {
+        dynamic_from_parts(dynamic.tag as f64, result)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_to_reversed(value: f64) -> f64 {
+    dynamic_array_reverse(value, array_to_reversed)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_reverse_in_place(value: f64) -> f64 {
+    dynamic_array_reverse(value, array_reverse)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_to_sorted(operation: u8, value: f64) -> f64 {
     let (Some(sort), Some((data, _))) = (ARRAY_TO_SORTED.with(Cell::get), unsafe {
         array_data(value)
@@ -4164,6 +4195,8 @@ enum NumericValue {
     BoolArrayAppend,
     ArrayToReversed,
     ArrayReverse,
+    DynamicArrayToReversed,
+    DynamicArrayReverse,
     NumberArrayToSorted,
     StringArrayToSorted,
     BoolArrayToSorted,
@@ -4516,6 +4549,8 @@ impl NumericProgram {
                     "captureappend" => Some(NumericValue::NumberArrayAppend),
                     "arrayreversed" => Some(NumericValue::ArrayToReversed),
                     "arrayreverse" => Some(NumericValue::ArrayReverse),
+                    "dynarrayreversed" => Some(NumericValue::DynamicArrayToReversed),
+                    "dynarrayreverse" => Some(NumericValue::DynamicArrayReverse),
                     "rnsorted" => Some(NumericValue::NumberArrayToSorted),
                     "rssorted" => Some(NumericValue::StringArrayToSorted),
                     "rbsorted" => Some(NumericValue::BoolArrayToSorted),
@@ -6023,6 +6058,17 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, array_reverse as *const () as u64, depth - 1);
+                }
+                NumericValue::DynamicArrayToReversed | NumericValue::DynamicArrayReverse => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = if *value == NumericValue::DynamicArrayReverse {
+                        dynamic_array_reverse_in_place
+                    } else {
+                        dynamic_array_to_reversed
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::NumberArrayToSorted
                 | NumericValue::StringArrayToSorted
