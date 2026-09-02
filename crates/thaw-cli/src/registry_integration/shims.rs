@@ -359,7 +359,12 @@ fn jit_export(
             context,
             &mut condition,
         )?;
-        let narrowed = narrowed_primitive_locals(branch.test.as_ref(), locals);
+        let narrowed = narrowed_locals(
+            branch.test.as_ref(),
+            parameters,
+            locals,
+            context.helpers,
+        );
         let consequent_locals = narrowed.as_ref().map_or(locals, |locals| &locals.0);
         let alternate_locals = narrowed.as_ref().map_or(locals, |locals| &locals.1);
         let consequent = encode_aggregate_statement(
@@ -1420,6 +1425,9 @@ fn jit_export(
                 return Some("rs");
             }
             match token.as_str() {
+                "untagrn" => return Some("rn"),
+                "untagrb" => return Some("rb"),
+                "untagrs" => return Some("rs"),
                 "dnvalues" => return Some("rn"),
                 "dbvalues" => return Some("rb"),
                 "dsvalues" => return Some("rs"),
@@ -2770,9 +2778,16 @@ fn jit_export(
                     context,
                     &mut encoded,
                 )?;
-                let is_array = jit_expression_kind(&encoded)?.0 == JitKind::Array;
+                let kind = jit_expression_kind(&encoded)?.0;
                 output.extend(encoded);
-                output.push(if is_array { "isarray" } else { "isnotarray" }.into());
+                output.push(
+                    match kind {
+                        JitKind::Array => "isarray",
+                        JitKind::Dynamic => "dynisarray",
+                        _ => "isnotarray",
+                    }
+                    .into(),
+                );
             }
             Expr::Call(call) if array_method(call, parameters, locals).is_some() => {
                 let (method, receiver) = array_method(call, parameters, locals)?;
@@ -3864,7 +3879,12 @@ fn jit_export(
             }
             Expr::Cond(conditional) => {
                 encode_condition(conditional.test.as_ref(), parameters, locals, context, output)?;
-                let narrowed = narrowed_primitive_locals(conditional.test.as_ref(), locals);
+                let narrowed = narrowed_locals(
+                    conditional.test.as_ref(),
+                    parameters,
+                    locals,
+                    context.helpers,
+                );
                 let consequent_locals = narrowed.as_ref().map_or(locals, |locals| &locals.0);
                 let alternate_locals = narrowed.as_ref().map_or(locals, |locals| &locals.1);
                 let mut consequent = Vec::new();
@@ -4136,6 +4156,97 @@ fn jit_export(
         Some((narrow(equal)?, narrow(!equal)?))
     }
 
+    #[allow(clippy::type_complexity)]
+    fn narrowed_array_locals(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<(
+        std::collections::HashMap<String, Vec<String>>,
+        std::collections::HashMap<String, Vec<String>>,
+    )> {
+        let expression = match expression {
+            Expr::Paren(expression) => expression.expr.as_ref(),
+            expression => expression,
+        };
+        let (call, positive) = match expression {
+            Expr::Call(call) => (call, true),
+            Expr::Unary(unary) if unary.op == UnaryOp::Bang => {
+                let Expr::Call(call) = unary.arg.as_ref() else {
+                    return None;
+                };
+                (call, false)
+            }
+            _ => return None,
+        };
+        let Expr::Ident(identifier) = array_predicate(call, parameters, locals, helpers)? else {
+            return None;
+        };
+        let source = locals.get(identifier.sym.as_ref())?;
+        let kinds = source
+            .iter()
+            .find_map(|token| jit_dynamic_argument(token).map(|(_, kinds)| kinds))?;
+        let arrays = kinds
+            .bytes()
+            .filter(|kind| matches!(kind, b'N' | b'B' | b'S'))
+            .collect::<Vec<_>>();
+        if arrays.len() != 1 {
+            return None;
+        }
+        let mut array_value = source.clone();
+        array_value.push(
+            match arrays[0] {
+                b'N' => "untagrn",
+                b'B' => "untagrb",
+                b'S' => "untagrs",
+                _ => unreachable!(),
+            }
+            .into(),
+        );
+        let remaining = kinds
+            .bytes()
+            .filter(|kind| !matches!(kind, b'N' | b'B' | b'S'))
+            .collect::<Vec<_>>();
+        let mut other_value = source.clone();
+        if remaining.len() == 1 {
+            other_value.push(
+                match remaining[0] {
+                    b'n' => "untagnum",
+                    b'b' => "untagbool",
+                    b's' => "untagstr",
+                    _ => return None,
+                }
+                .into(),
+            );
+        }
+        let narrowed = |value: Vec<String>| {
+            let mut narrowed = locals.clone();
+            narrowed.insert(identifier.sym.to_string(), value);
+            narrowed
+        };
+        let branches = (narrowed(array_value), narrowed(other_value));
+        Some(if positive {
+            branches
+        } else {
+            (branches.1, branches.0)
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn narrowed_locals(
+        expression: &Expr,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
+    ) -> Option<(
+        std::collections::HashMap<String, Vec<String>>,
+        std::collections::HashMap<String, Vec<String>>,
+    )> {
+        narrowed_primitive_locals(expression, locals)
+            .or_else(|| narrowed_array_locals(expression, parameters, locals, helpers))
+    }
+
     fn encode_switch_case_return(
         switch: &thaw_parser::ast::SwitchStmt,
         start: usize,
@@ -4292,7 +4403,12 @@ fn jit_export(
             return None;
         };
         encode_condition(branch.test.as_ref(), parameters, locals, context, output)?;
-        let narrowed = narrowed_primitive_locals(branch.test.as_ref(), locals);
+        let narrowed = narrowed_locals(
+            branch.test.as_ref(),
+            parameters,
+            locals,
+            context.helpers,
+        );
         let consequent_locals = narrowed.as_ref().map_or(locals, |locals| &locals.0);
         let alternate_locals = narrowed.as_ref().map_or(locals, |locals| &locals.1);
         let mut consequent = Vec::new();
@@ -5358,8 +5474,12 @@ fn jit_export(
             if loop_control.catch_active {
                 insert_jit_error_checks(output, start);
             }
-            if let Some((consequent_locals, alternate_locals)) =
-                narrowed_primitive_locals(branch.test.as_ref(), locals)
+            if let Some((consequent_locals, alternate_locals)) = narrowed_locals(
+                branch.test.as_ref(),
+                parameters,
+                locals,
+                context.helpers,
+            )
             {
                 output.push("guard".into());
                 encode_loop_effects(
@@ -11988,7 +12108,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if matches!(token.as_str(), "isarray" | "isnotarray") {
+        } else if matches!(token.as_str(), "isarray" | "isnotarray" | "dynisarray") {
             stack.pop()?;
             stack.push(JitKind::Boolean);
         } else if token == "dlen" {
@@ -12197,14 +12317,18 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(token.as_str(), "untagnum" | "untagstr" | "untagbool") {
+        } else if matches!(
+            token.as_str(),
+            "untagnum" | "untagstr" | "untagbool" | "untagrn" | "untagrb" | "untagrs"
+        ) {
             if stack.pop()? != JitKind::Dynamic {
                 return None;
             }
             stack.push(match token.as_str() {
                 "untagnum" => JitKind::Number,
                 "untagbool" => JitKind::Boolean,
-                _ => JitKind::String,
+                "untagstr" => JitKind::String,
+                _ => JitKind::Array,
             });
         } else if matches!(
             token.as_str(),

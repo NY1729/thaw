@@ -2854,6 +2854,22 @@ extern "C" fn dynamic_to_boolean(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_is_array(value: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| {
+            f64::from(matches!(
+                dynamic.tag,
+                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+            ))
+        },
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn untag_number(value: f64) -> f64 {
     untag_dynamic(value, DYNAMIC_NUMBER_TAG)
 }
@@ -2872,6 +2888,21 @@ extern "C" fn untag_boolean(value: f64) -> f64 {
         },
         |dynamic| dynamic.payload as f64,
     )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_number_array(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_NUMBER_ARRAY_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_boolean_array(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_BOOLEAN_ARRAY_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_string_array(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_STRING_ARRAY_TAG)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -3839,6 +3870,9 @@ enum NumericValue {
     UntagNumber,
     UntagString,
     UntagBoolean,
+    UntagNumberArray,
+    UntagBooleanArray,
+    UntagStringArray,
     ExcludeNumber,
     ExcludeString,
     ExcludeBoolean,
@@ -3868,6 +3902,7 @@ enum NumericValue {
     ArrayLength,
     IsArray,
     IsNotArray,
+    DynamicIsArray,
     NumberArrayAt,
     BoolArrayAt,
     StringArrayAt,
@@ -4172,6 +4207,9 @@ impl NumericProgram {
                     "untagnum" => Some(NumericValue::UntagNumber),
                     "untagstr" => Some(NumericValue::UntagString),
                     "untagbool" => Some(NumericValue::UntagBoolean),
+                    "untagrn" => Some(NumericValue::UntagNumberArray),
+                    "untagrb" => Some(NumericValue::UntagBooleanArray),
+                    "untagrs" => Some(NumericValue::UntagStringArray),
                     "notnum" => Some(NumericValue::ExcludeNumber),
                     "notstr" => Some(NumericValue::ExcludeString),
                     "notbool" => Some(NumericValue::ExcludeBoolean),
@@ -4200,6 +4238,7 @@ impl NumericProgram {
                     "arraylen" => Some(NumericValue::ArrayLength),
                     "isarray" => Some(NumericValue::IsArray),
                     "isnotarray" => Some(NumericValue::IsNotArray),
+                    "dynisarray" => Some(NumericValue::DynamicIsArray),
                     "rnat" => Some(NumericValue::NumberArrayAt),
                     "rbat" => Some(NumericValue::BoolArrayAt),
                     "rsat" => Some(NumericValue::StringArrayAt),
@@ -5102,6 +5141,9 @@ impl NumericProgram {
                 | NumericValue::UntagNumber
                 | NumericValue::UntagString
                 | NumericValue::UntagBoolean
+                | NumericValue::UntagNumberArray
+                | NumericValue::UntagBooleanArray
+                | NumericValue::UntagStringArray
                 | NumericValue::ParseFloat
                 | NumericValue::NumberToExponentialShortest => {
                     if depth == 0 {
@@ -5120,6 +5162,9 @@ impl NumericProgram {
                         NumericValue::UntagNumber => untag_number,
                         NumericValue::UntagString => untag_string,
                         NumericValue::UntagBoolean => untag_boolean,
+                        NumericValue::UntagNumberArray => untag_number_array,
+                        NumericValue::UntagBooleanArray => untag_boolean_array,
+                        NumericValue::UntagStringArray => untag_string_array,
                         NumericValue::ParseFloat => parse_float,
                         NumericValue::NumberToExponentialShortest => number_to_exponential_shortest,
                         _ => unreachable!(),
@@ -6458,6 +6503,12 @@ impl NumericProgram {
                         } as *const () as u64,
                         depth - 1,
                     );
+                }
+                NumericValue::DynamicIsArray => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, dynamic_is_array as *const () as u64, depth - 1);
                 }
                 NumericValue::NumberArrayAt
                 | NumericValue::BoolArrayAt
