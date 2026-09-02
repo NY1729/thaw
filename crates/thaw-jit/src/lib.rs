@@ -4146,6 +4146,74 @@ fixed_object_setter!(fixed_object_set_boolean, 1);
 fixed_object_setter!(fixed_object_set_string, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn fixed_tuple_new(length: f64) -> f64 {
+    if !length.is_finite() || length < 0.0 || length.fract() != 0.0 {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let Some(size) = (length as usize)
+        .checked_mul(8)
+        .and_then(|size| size.checked_add(8))
+    else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let Some(output) =
+        ARENA_ALLOC.with(|allocator| allocator.get().map(|allocate| unsafe { allocate(size, 8) }))
+    else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe {
+        output.write_bytes(0, size);
+        output.cast::<u64>().write(length as u64);
+    }
+    mutable_array_handle(array_result(output))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn fixed_tuple_set(tuple: f64, value: f64, index: f64, kind: u8) -> f64 {
+    let Some((data, length)) = (unsafe { array_data(tuple) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index as usize >= length {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe {
+        let element = data.cast_mut().add(8 + index as usize * 8);
+        match kind {
+            0 => element.cast::<f64>().write(value),
+            1 => element.write(u8::from(value != 0.0)),
+            2 => element.cast::<usize>().write(value.to_bits() as usize),
+            _ => unreachable!(),
+        }
+    }
+    tuple
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! fixed_tuple_setter {
+    ($name:ident, $kind:expr) => {
+        extern "C" fn $name(tuple: f64, value: f64, index: f64) -> f64 {
+            fixed_tuple_set(tuple, value, index, $kind)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_tuple_setter!(fixed_tuple_set_number, 0);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_tuple_setter!(fixed_tuple_set_boolean, 1);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_tuple_setter!(fixed_tuple_set_pointer, 2);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn untag_dynamic(value: f64, expected: u64) -> f64 {
     dynamic_primitive(value, Some(expected)).map_or_else(
         || {
@@ -5123,6 +5191,8 @@ enum NumericValue {
     ObjectField(u8, u16),
     FixedObjectNew(u16),
     FixedObjectSet(u8, u16),
+    FixedTupleNew(u16),
+    FixedTupleSet(u8, u16),
     ExcludeNumber,
     ExcludeString,
     ExcludeBoolean,
@@ -6203,6 +6273,27 @@ impl NumericProgram {
                                 .map(NumericValue::FixedObjectNew)
                         })
                         .or_else(|| {
+                            value
+                                .strip_prefix("tupnew")?
+                                .parse::<u16>()
+                                .ok()
+                                .map(NumericValue::FixedTupleNew)
+                        })
+                        .or_else(|| {
+                            let encoded = value.strip_prefix("tupset")?;
+                            let (kind, index) = encoded.split_at(1);
+                            let kind = match kind {
+                                "n" => 0,
+                                "b" => 1,
+                                "s" => 2,
+                                _ => return None,
+                            };
+                            index
+                                .parse::<u16>()
+                                .ok()
+                                .map(|index| NumericValue::FixedTupleSet(kind, index))
+                        })
+                        .or_else(|| {
                             let encoded = value.strip_prefix("objset")?;
                             let (kind, offset) = encoded.split_at(1);
                             let kind = match kind {
@@ -6236,7 +6327,7 @@ impl NumericProgram {
                                     match kind {
                                         "n" => 0,
                                         "b" => 1,
-                                        "s" | "o" => 2,
+                                        "s" | "o" | "t" => 2,
                                         _ => return None,
                                     },
                                     offset,
@@ -6716,6 +6807,33 @@ impl NumericProgram {
                         fixed_object_set_number,
                         fixed_object_set_boolean,
                         fixed_object_set_string,
+                    ][usize::from(*kind)];
+                    emit_ternary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::FixedTupleNew(length) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    let length = f64::from(*length);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&length.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_unary_call(&mut code, fixed_tuple_new as *const () as u64, depth);
+                    depth += 1;
+                }
+                NumericValue::FixedTupleSet(kind, index) => {
+                    if depth < 2 || depth == 8 {
+                        return None;
+                    }
+                    let index = f64::from(*index);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&index.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    let function = [
+                        fixed_tuple_set_number,
+                        fixed_tuple_set_boolean,
+                        fixed_tuple_set_pointer,
                     ][usize::from(*kind)];
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 2);
                     depth -= 1;

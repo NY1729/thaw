@@ -302,6 +302,7 @@ fn jit_export(
                         thaw_hir::HirType::Str => "objds",
                         _ => return None,
                     }),
+                    thaw_hir::HirType::Tuple(_) => Some("objt"),
                     _ => None,
                 };
                 if let Some(operation) = operation {
@@ -311,6 +312,22 @@ fn jit_export(
                     locals.insert(field_path.clone(), value.clone());
                     if let thaw_hir::HirType::Object(nested) = ty {
                         bind_fields(&field_path, nested, &value, locals)?;
+                    } else if let thaw_hir::HirType::Tuple(types) = ty {
+                        for (index, element) in types.iter().enumerate() {
+                            let operation = match element {
+                                thaw_hir::HirType::F64 => "rnget",
+                                thaw_hir::HirType::Bool => "rbget",
+                                thaw_hir::HirType::Str => "rsget",
+                                _ => return None,
+                            };
+                            let mut element_value = value.clone();
+                            element_value.push(format!(
+                                "c{:016x}",
+                                (index as f64).to_bits()
+                            ));
+                            element_value.push(operation.into());
+                            locals.insert(format!("{field_path}.{index}"), element_value);
+                        }
                     }
                 }
                 offset = offset.checked_add(if matches!(
@@ -554,6 +571,50 @@ fn jit_export(
                 && matches!(expected, JitKind::Number | JitKind::Boolean))
     }
 
+    fn encode_fixed_tuple_value(
+        expression: &Expr,
+        types: &[thaw_hir::HirType],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<Vec<String>> {
+        let Expr::Array(tuple) = expression else {
+            return None;
+        };
+        if tuple.elems.len() != types.len() {
+            return None;
+        }
+        let length = u16::try_from(types.len()).ok()?;
+        let mut output = vec![format!("tupnew{length}")];
+        for (index, (element, ty)) in tuple.elems.iter().zip(types).enumerate() {
+            let element = element.as_ref()?;
+            if element.spread.is_some() {
+                return None;
+            }
+            let mut value = Vec::new();
+            encode_expression(
+                element.expr.as_ref(),
+                parameters,
+                locals,
+                context,
+                &mut value,
+            )?;
+            let expected = jit_return_kind(ty)?;
+            if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                return None;
+            }
+            let kind = match ty {
+                thaw_hir::HirType::F64 => 'n',
+                thaw_hir::HirType::Bool => 'b',
+                thaw_hir::HirType::Str => 's',
+                _ => return None,
+            };
+            output.extend(value);
+            output.push(format!("tupset{kind}{index}"));
+        }
+        Some(output)
+    }
+
     fn encode_fixed_object_value(
         object: &thaw_parser::ast::ObjectLit,
         fields: &[(String, thaw_hir::HirType)],
@@ -612,6 +673,16 @@ fn jit_export(
                         }
                         (value, 'o')
                     }
+                    thaw_hir::HirType::Tuple(types) => (
+                        encode_fixed_tuple_value(
+                            expression,
+                            types,
+                            parameters,
+                            locals,
+                            context,
+                        )?,
+                        'a',
+                    ),
                     _ => {
                         let mut value = Vec::new();
                         encode_expression(expression, parameters, locals, context, &mut value)?;
@@ -13376,6 +13447,24 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if let Some(size) = token.strip_prefix("objnew") {
             size.parse::<u16>().ok().filter(|size| *size > 0)?;
             stack.push(JitKind::Dictionary);
+        } else if let Some(length) = token.strip_prefix("tupnew") {
+            length.parse::<u16>().ok()?;
+            stack.push(JitKind::Array);
+        } else if let Some(encoded) = token.strip_prefix("tupset") {
+            let (kind, index) = encoded.split_at(1);
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::Array
+                || index.parse::<u16>().is_err()
+                || !match kind {
+                    "n" => matches!(value, JitKind::Number | JitKind::Boolean),
+                    "b" => matches!(value, JitKind::Number | JitKind::Boolean),
+                    "s" => value == JitKind::String,
+                    _ => return None,
+                }
+            {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if let Some(encoded) = token.strip_prefix("objset") {
             let (kind, offset) = encoded.split_at(1);
             let value = stack.pop()?;
@@ -13431,6 +13520,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             ("objrb", JitKind::Array),
             ("objrs", JitKind::Array),
             ("objo", JitKind::Dictionary),
+            ("objt", JitKind::Array),
             ("objdn", JitKind::Dictionary),
             ("objdb", JitKind::Dictionary),
             ("objds", JitKind::Dictionary),
