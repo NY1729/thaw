@@ -1690,6 +1690,104 @@ jit_reduce_captured_fn!(number_array_jit_reduce_right_initial_captured, true, tr
 jit_reduce_captured_fn!(number_array_jit_reduce_right_last_captured, true, false);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_jit_reduce(
+    value: f64,
+    initial: f64,
+    callback: f64,
+    from_right: bool,
+    captures: Option<f64>,
+) -> f64 {
+    let Some(array) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let (kind, element_tag) = match array.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => (0, DYNAMIC_NUMBER_TAG),
+        DYNAMIC_BOOLEAN_ARRAY_TAG => (1, DYNAMIC_BOOLEAN_TAG),
+        DYNAMIC_STRING_ARRAY_TAG => (2, DYNAMIC_STRING_TAG),
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    let Some((callback, required)) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
+    let captures = if let Some(captures) = captures {
+        let Some(captures) = capture_arguments(captures, 6, required) else {
+            return 0.0;
+        };
+        captures
+    } else {
+        if required > 6 {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return 0.0;
+        }
+        Vec::new()
+    };
+    let Some((data, length)) = (unsafe { array_data(f64::from_bits(array.payload)) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let mut accumulator = initial;
+    let mut apply = |index| {
+        let element = unsafe { array_element(data, index, kind) };
+        accumulator = call_jit_callback(
+            callback,
+            &[
+                accumulator,
+                element_tag as f64,
+                element,
+                index as f64,
+                array.tag as f64,
+                f64::from_bits(array.payload),
+            ],
+            &captures,
+        );
+    };
+    if from_right {
+        for index in (0..length).rev() {
+            apply(index);
+        }
+    } else {
+        for index in 0..length {
+            apply(index);
+        }
+    }
+    accumulator
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_jit_reduce_left(value: f64, initial: f64, callback: f64) -> f64 {
+    dynamic_array_jit_reduce(value, initial, callback, false, None)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_jit_reduce_right(value: f64, initial: f64, callback: f64) -> f64 {
+    dynamic_array_jit_reduce(value, initial, callback, true, None)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_jit_reduce_left_captured(
+    value: f64,
+    initial: f64,
+    callback: f64,
+    captures: f64,
+) -> f64 {
+    dynamic_array_jit_reduce(value, initial, callback, false, Some(captures))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_jit_reduce_right_captured(
+    value: f64,
+    initial: f64,
+    callback: f64,
+    captures: f64,
+) -> f64 {
+    dynamic_array_jit_reduce(value, initial, callback, true, Some(captures))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_index_map(value: f64, encoded: f64) -> f64 {
     let encoded = encoded as u8;
     let reverse = encoded >= 8;
@@ -4903,6 +5001,7 @@ enum NumericValue {
     DynamicArrayMapIdentity,
     DynamicArrayJitMap(u8, bool),
     DynamicArrayJitScan(u8, bool),
+    DynamicArrayJitReduce(bool, bool),
     NumberArrayMap(NumericReduceOp, bool),
     PrimitiveArrayJitMap(u8, u8, bool),
     PrimitiveArrayJitScan(u8, u8, bool),
@@ -5281,6 +5380,14 @@ impl NumericProgram {
                             _ => return None,
                         };
                         Some(NumericValue::DynamicArrayJitMap(target, captured))
+                    }
+                    "dynarrayreducejit" => Some(NumericValue::DynamicArrayJitReduce(false, false)),
+                    "dynarrayreducerightjit" => {
+                        Some(NumericValue::DynamicArrayJitReduce(true, false))
+                    }
+                    "dynarrayreducejitc" => Some(NumericValue::DynamicArrayJitReduce(false, true)),
+                    "dynarrayreducerightjitc" => {
+                        Some(NumericValue::DynamicArrayJitReduce(true, true))
                     }
                     _ if token.starts_with("dynarray") && token.contains("jit") => {
                         let suffix = token.strip_prefix("dynarray")?;
@@ -6704,6 +6811,37 @@ impl NumericProgram {
                             depth - 2,
                         );
                         depth -= 1;
+                    }
+                }
+                NumericValue::DynamicArrayJitReduce(from_right, captured) => {
+                    if *captured {
+                        if depth < 4 {
+                            return None;
+                        }
+                        emit_quaternary_call(
+                            &mut code,
+                            if *from_right {
+                                dynamic_array_jit_reduce_right_captured
+                            } else {
+                                dynamic_array_jit_reduce_left_captured
+                            } as *const () as u64,
+                            depth - 4,
+                        );
+                        depth -= 3;
+                    } else {
+                        if depth < 3 {
+                            return None;
+                        }
+                        emit_ternary_call(
+                            &mut code,
+                            if *from_right {
+                                dynamic_array_jit_reduce_right
+                            } else {
+                                dynamic_array_jit_reduce_left
+                            } as *const () as u64,
+                            depth - 3,
+                        );
+                        depth -= 2;
                     }
                 }
                 NumericValue::NumberArrayMap(operation, reverse) => {
