@@ -445,12 +445,16 @@ struct GenericInterfaces<'a> {
 /// another-interface use, no `extends` on the generic interface itself).
 fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInterfaces<'_>) {
     let mut raw: HashMap<String, &TsInterfaceDecl> = HashMap::new();
+    let mut names = Vec::new();
     let mut generic = GenericInterfaces::default();
     for iface in module.body.iter().filter_map(extract_interface_decl) {
         let name = iface.id.sym.to_string();
         if iface.type_params.is_some() {
             generic.interfaces.insert(name, iface);
         } else {
+            if !raw.contains_key(&name) {
+                names.push(name.clone());
+            }
             raw.insert(name, iface);
         }
     }
@@ -464,8 +468,8 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
     }
 
     let mut resolved = HashMap::new();
-    for name in raw.keys().cloned().collect::<Vec<_>>() {
-        resolve_interface(&name, &raw, &generic, &mut resolved, &mut Vec::new());
+    for name in &names {
+        resolve_interface(name, &raw, &generic, &mut resolved, &mut Vec::new());
     }
     let aliases = module
         .body
@@ -474,10 +478,12 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
         .filter(|alias| alias.type_params.is_none())
         .collect::<Vec<_>>();
     for _ in 0..raw.len() + aliases.len() {
-        for name in raw.keys() {
-            resolved.remove(name);
+        for name in &names {
+            if matches!(resolved.get(name), Some(DtsType::Unsupported(_))) {
+                resolved.remove(name);
+            }
         }
-        for name in raw.keys() {
+        for name in &names {
             resolve_interface(name, &raw, &generic, &mut resolved, &mut Vec::new());
         }
         for alias in &aliases {
