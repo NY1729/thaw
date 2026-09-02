@@ -4200,6 +4200,22 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &set_value,
     )
     .is_some());
+    for method in ["splice", "toSpliced"] {
+        let splice = thaw_bridge::DtsFunction {
+            name: method.into(),
+            params: vec![
+                function.params[0].clone(),
+                ("replacement".into(), needle.clone()),
+            ],
+            required_params: 2,
+            ret: function.params[0].1.clone(),
+            ..function.clone()
+        };
+        let source = format!(
+            "function {method}(value, replacement) {{ if (Array.isArray(value)) return value.{method}(1, 1, replacement); return value; }} module.exports = {{ {method} }};"
+        );
+        assert!(jit_numeric_export(&source, method, false, &splice).is_some());
+    }
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],

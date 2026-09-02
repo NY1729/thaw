@@ -2849,6 +2849,8 @@ fn jit_export(
                             | "unshift"
                             | "pop"
                             | "shift"
+                            | "splice"
+                            | "toSpliced"
                     )
                 {
                     return None;
@@ -3195,6 +3197,7 @@ fn jit_export(
                         "rn" => JitKind::Number,
                         "rs" => JitKind::String,
                         "rb" => JitKind::Boolean,
+                        "dynamic" => JitKind::Dynamic,
                         _ => return None,
                     };
                     match call.args.as_slice() {
@@ -3232,7 +3235,11 @@ fn jit_export(
                     output.extend(encoded_receiver.iter().cloned());
                     output.push("c0000000000000000".into());
                     output.push("c0000000000000000".into());
-                    output.push("arrayslice".into());
+                    output.push(if dynamic_array {
+                        "dynarrayslice".into()
+                    } else {
+                        "arrayslice".into()
+                    });
                     for argument in call.args.iter().skip(2) {
                         let mut encoded_value = Vec::new();
                         encode_expression(
@@ -3246,10 +3253,20 @@ fn jit_export(
                             return None;
                         }
                         output.extend(encoded_value);
-                        output.push(format!("{prefix}append"));
+                        output.push(if dynamic_array {
+                            "dynarrayappend".into()
+                        } else {
+                            format!("{prefix}append")
+                        });
                     }
                     output.push(
-                        if method == "splice" {
+                        if dynamic_array {
+                            if method == "splice" {
+                                "dynarraysplice"
+                            } else {
+                                "dynarraytospliced"
+                            }
+                        } else if method == "splice" {
                             "arraysplice"
                         } else {
                             "arraytospliced"
@@ -4810,6 +4827,9 @@ fn jit_export(
                     | "arraycopywithin"
                     | "arraysplice"
                     | "arraytospliced"
+                    | "dynarraysplice"
+                    | "dynarraytospliced"
+                    | "dynarrayappend"
                     | "rnpush"
                     | "rspush"
                     | "rbpush"
@@ -11991,15 +12011,23 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             } else {
                 JitKind::Array
             });
-        } else if matches!(token.as_str(), "arraysplice" | "arraytospliced") {
-            if stack.pop()? != JitKind::Array
+        } else if matches!(
+            token.as_str(),
+            "arraysplice" | "arraytospliced" | "dynarraysplice" | "dynarraytospliced"
+        ) {
+            let expected = if token.starts_with("dynarray") {
+                JitKind::Dynamic
+            } else {
+                JitKind::Array
+            };
+            if stack.pop()? != expected
                 || stack.pop()? != JitKind::Number
                 || stack.pop()? != JitKind::Number
-                || stack.pop()? != JitKind::Array
+                || stack.pop()? != expected
             {
                 return None;
             }
-            stack.push(JitKind::Array);
+            stack.push(expected);
         } else if matches!(
             token.as_str(),
             "rnpush" | "rspush" | "rbpush" | "rnunshift" | "rsunshift" | "rbunshift"
@@ -12393,9 +12421,17 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
-        } else if matches!(token.as_str(), "rnappend" | "rsappend" | "rbappend") {
+        } else if matches!(
+            token.as_str(),
+            "rnappend" | "rsappend" | "rbappend" | "dynarrayappend"
+        ) {
             let value = stack.pop()?;
-            if stack.pop()? != JitKind::Array
+            if token == "dynarrayappend" {
+                if value != JitKind::Dynamic || stack.pop()? != JitKind::Dynamic {
+                    return None;
+                }
+                stack.push(JitKind::Dynamic);
+            } else if stack.pop()? != JitKind::Array
                 || value
                     != match &token[..2] {
                         "rn" => JitKind::Number,
@@ -12405,8 +12441,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                     }
             {
                 return None;
+            } else {
+                stack.push(JitKind::Array);
             }
-            stack.push(JitKind::Array);
         } else if matches!(
             token.as_str(),
             "arrayreversed"
