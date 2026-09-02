@@ -8431,7 +8431,7 @@ fn jit_export(
     }
 
     fn encode_loop_expression(
-        expression: &Expr,
+        mut expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
         mutable: &std::collections::HashSet<String>,
@@ -8439,11 +8439,123 @@ fn jit_export(
         context: &mut InlineContext<'_>,
         output: &mut Vec<String>,
     ) -> Option<()> {
+        while let Expr::Paren(parenthesized) = expression {
+            expression = parenthesized.expr.as_ref();
+        }
         if encode_callable_table_update(expression, parameters, locals, context, output).is_some() {
             return Some(());
         }
         match expression {
             Expr::Assign(assignment) => {
+                if let AssignTarget::Pat(thaw_parser::ast::AssignTargetPat::Array(pattern)) =
+                    &assignment.left
+                {
+                    if assignment.op != AssignOp::Assign {
+                        return None;
+                    }
+                    let mut source = Vec::new();
+                    encode_expression(
+                        assignment.right.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut source,
+                    )?;
+                    if source.len() == 1 {
+                        if let Some(untag) = jit_typed_array_union_untag(&source[0]) {
+                            source.push(untag.into());
+                        }
+                    }
+                    if jit_expression_kind(&source)?.0 != JitKind::Array {
+                        return None;
+                    }
+                    let prefix = array_prefix(&source)?;
+                    let element_kind = match prefix {
+                        "rn" => JitKind::Number,
+                        "rb" => JitKind::Boolean,
+                        "rs" => JitKind::String,
+                        _ => return None,
+                    };
+                    output.extend(source);
+                    for (index, element) in pattern.elems.iter().enumerate() {
+                        let Some(element) = element else {
+                            continue;
+                        };
+                        if let Pat::Rest(rest) = element {
+                            let Pat::Ident(name) = rest.arg.as_ref() else {
+                                return None;
+                            };
+                            if index + 1 != pattern.elems.len()
+                                || !mutable.contains(name.id.sym.as_ref())
+                                || kinds.get(name.id.sym.as_ref())? != &JitKind::Array
+                            {
+                                return None;
+                            }
+                            let local = locals.get(name.id.sym.as_ref())?.first()?;
+                            if local.get(..2)? != prefix {
+                                return None;
+                            }
+                            output.extend([
+                                "dup".into(),
+                                format!("c{:016x}", (index as f64).to_bits()),
+                                format!("c{:016x}", f64::INFINITY.to_bits()),
+                                "arrayslice".into(),
+                                "arrayhandle".into(),
+                                format!("setl{}", loop_local_index(local)?),
+                            ]);
+                            continue;
+                        }
+                        let (name, default) = match element {
+                            Pat::Ident(name) => (&name.id, None),
+                            Pat::Assign(default) => {
+                                let Pat::Ident(name) = default.left.as_ref() else {
+                                    return None;
+                                };
+                                (&name.id, Some(default.right.as_ref()))
+                            }
+                            _ => return None,
+                        };
+                        if !mutable.contains(name.sym.as_ref()) {
+                            return None;
+                        }
+                        let target_kind = *kinds.get(name.sym.as_ref())?;
+                        if target_kind != element_kind {
+                            return None;
+                        }
+                        let local = locals.get(name.sym.as_ref())?.first()?;
+                        let mut value = vec![
+                            "dup".into(),
+                            format!("c{:016x}", (index as f64).to_bits()),
+                            format!("{prefix}get"),
+                        ];
+                        if let Some(default) = default {
+                            let mut fallback = Vec::new();
+                            encode_expression(
+                                default,
+                                parameters,
+                                locals,
+                                context,
+                                &mut fallback,
+                            )?;
+                            if target_kind == JitKind::Boolean {
+                                let mut boolean = Vec::new();
+                                append_boolean(fallback, &mut boolean)?;
+                                fallback = boolean;
+                            }
+                            if jit_expression_kind(&fallback)?.0 != target_kind {
+                                return None;
+                            }
+                            value.push("ifpresent".into());
+                            value.push("else".into());
+                            value.extend(fallback);
+                            value.push("end".into());
+                        }
+                        output.extend(value);
+                        output.push(format!("setl{}", loop_local_index(local)?));
+                    }
+                    output.push("drop".into());
+                    return Some(());
+                }
                 let AssignTarget::Simple(SimpleAssignTarget::Ident(name)) = &assignment.left else {
                     encode_expression(expression, parameters, locals, context, output)?;
                     output.push("drop".into());
