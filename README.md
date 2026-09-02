@@ -2603,6 +2603,10 @@ their selected-branch side effects are produced by one condition evaluation.
 `while` and classic `for` loops, `switch`, and `try`/`finally` blocks may update the
 same helper-local slots before a final fixed aggregate return; their existing
 native control-flow instructions compose directly with aggregate materialization.
+Return-only `switch` cases with a final `default` can return fixed aggregates
+directly. The discriminant is materialized once, each case test uses typed strict
+comparison in source order, and matching case leaves join through the same
+multi-result JIT conditional ABI.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
