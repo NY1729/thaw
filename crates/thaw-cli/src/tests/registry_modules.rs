@@ -1656,6 +1656,52 @@ fn nullable_and_nullish_collections_round_trip_without_quickjs() {
 }
 
 #[test]
+fn nullable_and_nullish_aggregates_use_jit_without_quickjs() {
+    let declarations = thaw_bridge::parse_dts(
+        "export interface Item { label: string; score: number; }\nexport declare function object(value: Item | null): string;\nexport declare function tuple(value: [number, string] | null | undefined): string;\n",
+    )
+    .unwrap();
+    let source = "module.exports.object = value => value?.label.toUpperCase() ?? 'missing'; module.exports.tuple = value => value?.[1] ?? 'missing';";
+    assert!(jit_numeric_export(source, "object", false, &declarations[0]).is_some());
+    assert!(jit_numeric_export(source, "tuple", false, &declarations[1]).is_some());
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-nullish-aggregates-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-nullish-aggregates");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Item { label: string; score: number; }\nexport declare function object(value: Item | null): string;\nexport declare function tuple(value: [number, string] | null | undefined): string;\n",
+    )
+    .unwrap();
+    std::fs::write(package.join("bundle.js"), format!("{source}\n")).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { object, tuple } from 'jit-nullish-aggregates';\nfunction main(): void { console.log(object({ label: 'ready', score: 7 })); console.log(object(null)); console.log(tuple([8, 'pair'])); console.log(tuple(null)); console.log(tuple(undefined)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "READY\nmissing\npair\nmissing\nmissing\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_tuple_elements_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-tuple-element-{}",
