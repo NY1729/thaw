@@ -1285,16 +1285,19 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
 #[test]
 fn finite_computed_object_keys_use_jit_without_quickjs() {
     let declarations = thaw_bridge::parse_dts(
-        "export interface Pair { left: number; right: number; }\nexport declare function pick(value: Pair | string, right: boolean): number;\nexport declare function pickRuntime(value: Pair | string, key: string): number;\nexport declare function set(value: Pair | string, right: boolean, next: number): number;\n",
+        "export interface Pair { left: number; right: number; }\nexport declare function pick(value: Pair | string, right: boolean): number;\nexport declare function pickRuntime(value: Pair | string, key: string): number;\nexport declare function set(value: Pair | string, right: boolean, next: number): number;\nexport declare function add(value: Pair | string, right: boolean, amount: number): number;\nexport declare function postIncrement(value: Pair | string, right: boolean): number;\nexport declare function preDecrement(value: Pair | string, right: boolean): number;\n",
     )
     .unwrap();
-    let source = "module.exports.pick = (value, right) => typeof value === 'object' ? value[right ? 'right' : 'left'] : -1; module.exports.pickRuntime = (value, key) => typeof value === 'object' ? value[key] ?? 0 : -1; module.exports.set = (value, right, next) => typeof value === 'object' ? value[right ? 'right' : 'left'] = next : -1;";
+    let source = "module.exports.pick = (value, right) => typeof value === 'object' ? value[right ? 'right' : 'left'] : -1; module.exports.pickRuntime = (value, key) => typeof value === 'object' ? value[key] ?? 0 : -1; module.exports.set = (value, right, next) => typeof value === 'object' ? value[right ? 'right' : 'left'] = next : -1; module.exports.add = (value, right, amount) => typeof value === 'object' ? value[right ? 'right' : 'left'] += amount : -1; module.exports.postIncrement = (value, right) => typeof value === 'object' ? value[right ? 'right' : 'left']++ : -1; module.exports.preDecrement = (value, right) => typeof value === 'object' ? --value[right ? 'right' : 'left'] : -1;";
     assert!(jit_numeric_export(source, "pick", false, &declarations[0]).is_some());
     assert!(
         jit_numeric_export(source, "pickRuntime", false, &declarations[1]).is_some(),
         "runtime key did not specialize"
     );
     assert!(jit_numeric_export(source, "set", false, &declarations[2]).is_some());
+    assert!(jit_numeric_export(source, "add", false, &declarations[3]).is_some());
+    assert!(jit_numeric_export(source, "postIncrement", false, &declarations[4]).is_some());
+    assert!(jit_numeric_export(source, "preDecrement", false, &declarations[5]).is_some());
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-finite-object-key-{}",
         std::process::id()
@@ -1304,18 +1307,18 @@ fn finite_computed_object_keys_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Pair { left: number; right: number; }\nexport declare function pick(value: Pair | string, right: boolean): number;\nexport declare function pickRuntime(value: Pair | string, key: string): number;\nexport declare function set(value: Pair | string, right: boolean, next: number): number;\n",
+        "export interface Pair { left: number; right: number; }\nexport declare function pick(value: Pair | string, right: boolean): number;\nexport declare function pickRuntime(value: Pair | string, key: string): number;\nexport declare function set(value: Pair | string, right: boolean, next: number): number;\nexport declare function add(value: Pair | string, right: boolean, amount: number): number;\nexport declare function postIncrement(value: Pair | string, right: boolean): number;\nexport declare function preDecrement(value: Pair | string, right: boolean): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.pick = (value, right) => typeof value === 'object' ? value[right ? 'right' : 'left'] : -1; module.exports.pickRuntime = (value, key) => typeof value === 'object' ? value[key] ?? 0 : -1; module.exports.set = (value, right, next) => typeof value === 'object' ? value[right ? 'right' : 'left'] = next : -1;\n",
+        "module.exports.pick = (value, right) => typeof value === 'object' ? value[right ? 'right' : 'left'] : -1; module.exports.pickRuntime = (value, key) => typeof value === 'object' ? value[key] ?? 0 : -1; module.exports.set = (value, right, next) => typeof value === 'object' ? value[right ? 'right' : 'left'] = next : -1; module.exports.add = (value, right, amount) => typeof value === 'object' ? value[right ? 'right' : 'left'] += amount : -1; module.exports.postIncrement = (value, right) => typeof value === 'object' ? value[right ? 'right' : 'left']++ : -1; module.exports.preDecrement = (value, right) => typeof value === 'object' ? --value[right ? 'right' : 'left'] : -1;\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { pick, pickRuntime, set } from 'jit-finite-object-key';\nfunction main(): void { const pair = { left: 3, right: 7 }; console.log(pick(pair, false)); console.log(pick(pair, true)); console.log(pick('none', true)); console.log(pickRuntime(pair, 'left')); console.log(pickRuntime(pair, 'right')); console.log(pickRuntime(pair, 'missing')); console.log(set(pair, false, 11)); console.log(set(pair, true, 13)); console.log(pick(pair, false)); console.log(pick(pair, true)); }\n",
+        "import { add, pick, pickRuntime, postIncrement, preDecrement, set } from 'jit-finite-object-key';\nfunction main(): void { const pair = { left: 3, right: 7 }; console.log(pick(pair, false)); console.log(pick(pair, true)); console.log(pick('none', true)); console.log(pickRuntime(pair, 'left')); console.log(pickRuntime(pair, 'right')); console.log(pickRuntime(pair, 'missing')); console.log(set(pair, false, 11)); console.log(set(pair, true, 13)); console.log(pick(pair, false)); console.log(pick(pair, true)); console.log(add(pair, false, 4)); console.log(postIncrement(pair, true)); console.log(preDecrement(pair, false)); console.log(pick(pair, false)); console.log(pick(pair, true)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1331,7 +1334,7 @@ fn finite_computed_object_keys_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "3\n7\n-1\n3\n7\n0\n11\n13\n11\n13\n"
+        "3\n7\n-1\n3\n7\n0\n11\n13\n11\n13\n15\n13\n14\n14\n14\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

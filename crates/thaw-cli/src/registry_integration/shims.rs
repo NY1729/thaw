@@ -2996,6 +2996,7 @@ fn jit_export(
             path: &str,
             key: &Expr,
             value: &Expr,
+            assignment: AssignOp,
             parameters: &std::collections::HashMap<String, String>,
             locals: &std::collections::HashMap<String, Vec<String>>,
             context: &mut InlineContext<'_>,
@@ -3005,6 +3006,7 @@ fn jit_export(
                     path,
                     parenthesized.expr.as_ref(),
                     value,
+                    assignment,
                     parameters,
                     locals,
                     context,
@@ -3022,6 +3024,7 @@ fn jit_export(
                         path,
                         conditional.cons.as_ref(),
                         value,
+                        assignment,
                         parameters,
                         locals,
                         context,
@@ -3030,6 +3033,7 @@ fn jit_export(
                         path,
                         conditional.alt.as_ref(),
                         value,
+                        assignment,
                         parameters,
                         locals,
                         context,
@@ -3071,14 +3075,140 @@ fn jit_export(
                     let offset = &getter[getter.len() - offset..];
                     let mut encoded = Vec::new();
                     encode_expression(value, parameters, locals, context, &mut encoded)?;
-                    if !jit_kind_compatible(jit_expression_kind(&encoded)?.0, expected) {
-                        return None;
-                    }
                     let mut output = receiver.to_vec();
-                    output.extend(encoded);
+                    if assignment == AssignOp::Assign {
+                        if !jit_kind_compatible(jit_expression_kind(&encoded)?.0, expected) {
+                            return None;
+                        }
+                        output.extend(encoded);
+                    } else if assignment == AssignOp::AddAssign && expected == JitKind::String {
+                        output.push("dup".into());
+                        output.push(getter.clone());
+                        append_string(encoded, &mut output)?;
+                        output.push("concat".into());
+                    } else {
+                        if expected != JitKind::Number
+                            || jit_expression_kind(&encoded)?.0 == JitKind::Array
+                        {
+                            return None;
+                        }
+                        output.push("dup".into());
+                        output.push(getter.clone());
+                        append_number(encoded, &mut output)?;
+                        output.push(
+                            match assignment {
+                                AssignOp::AddAssign => "+",
+                                AssignOp::SubAssign => "-",
+                                AssignOp::MulAssign => "*",
+                                AssignOp::DivAssign => "/",
+                                AssignOp::ModAssign => "%",
+                                AssignOp::LShiftAssign => "shl",
+                                AssignOp::RShiftAssign => "shr",
+                                AssignOp::ZeroFillRShiftAssign => "ushr",
+                                AssignOp::BitOrAssign => "bor",
+                                AssignOp::BitXorAssign => "bxor",
+                                AssignOp::BitAndAssign => "band",
+                                AssignOp::ExpAssign => "pow",
+                                AssignOp::Assign
+                                | AssignOp::AndAssign
+                                | AssignOp::OrAssign
+                                | AssignOp::NullishAssign => return None,
+                            }
+                            .into(),
+                        );
+                    }
                     output.extend([
                         "dup2".into(),
                         format!("{prefix}{offset}"),
+                        "drop".into(),
+                        "nip".into(),
+                    ]);
+                    Some(output)
+                }
+                _ => None,
+            }
+        }
+
+        fn encode_fixed_field_update(
+            path: &str,
+            key: &Expr,
+            update: UpdateOp,
+            prefix: bool,
+            parameters: &std::collections::HashMap<String, String>,
+            locals: &std::collections::HashMap<String, Vec<String>>,
+            context: &mut InlineContext<'_>,
+        ) -> Option<Vec<String>> {
+            match key {
+                Expr::Paren(parenthesized) => encode_fixed_field_update(
+                    path,
+                    parenthesized.expr.as_ref(),
+                    update,
+                    prefix,
+                    parameters,
+                    locals,
+                    context,
+                ),
+                Expr::Cond(conditional) => {
+                    let mut output = Vec::new();
+                    encode_condition(
+                        conditional.test.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut output,
+                    )?;
+                    let mut consequent = encode_fixed_field_update(
+                        path,
+                        conditional.cons.as_ref(),
+                        update,
+                        prefix,
+                        parameters,
+                        locals,
+                        context,
+                    )?;
+                    let mut alternate = encode_fixed_field_update(
+                        path,
+                        conditional.alt.as_ref(),
+                        update,
+                        prefix,
+                        parameters,
+                        locals,
+                        context,
+                    )?;
+                    normalize_callable_branches([&mut consequent, &mut alternate])?;
+                    output.push("if".into());
+                    output.extend(consequent);
+                    output.push("else".into());
+                    output.extend(alternate);
+                    output.push("end".into());
+                    Some(output)
+                }
+                Expr::Lit(Lit::Str(property)) => {
+                    let field = format!("{path}.{}", property.value.to_string_lossy());
+                    let operation = locals
+                        .get(&field)
+                        .cloned()
+                        .or_else(|| parameters.get(&field).map(|value| vec![value.clone()]))?;
+                    let (getter, receiver) = operation.split_last()?;
+                    let offset = getter.strip_prefix("objn")?.parse::<u16>().ok()?;
+                    let mut output = receiver.to_vec();
+                    output.extend(["dup".into(), getter.clone()]);
+                    if !prefix {
+                        output.push("dup2".into());
+                    }
+                    output.push(format!("c{:016x}", 1.0f64.to_bits()));
+                    output.push(
+                        match update {
+                            UpdateOp::PlusPlus => "+",
+                            UpdateOp::MinusMinus => "-",
+                        }
+                        .into(),
+                    );
+                    if prefix {
+                        output.push("dup2".into());
+                    }
+                    output.extend([
+                        format!("objsetn{offset}"),
                         "drop".into(),
                         "nip".into(),
                     ]);
@@ -3336,26 +3466,25 @@ fn jit_export(
                 else {
                     return None;
                 };
-                if assignment.op == AssignOp::Assign {
-                    let key = match &target.prop {
-                        MemberProp::Ident(property) => {
-                            Expr::Lit(Lit::Str(property.sym.to_string().into()))
-                        }
-                        MemberProp::Computed(property) => property.expr.as_ref().clone(),
-                        MemberProp::PrivateName(_) => return None,
-                    };
-                    if let Some(path) = member_path(target.obj.as_ref()) {
-                        if let Some(encoded) = encode_fixed_field_assignment(
-                            &path,
-                            &key,
-                            assignment.right.as_ref(),
-                            parameters,
-                            locals,
-                            context,
-                        ) {
-                            output.extend(encoded);
-                            return (output.len() <= 256).then_some(());
-                        }
+                let key = match &target.prop {
+                    MemberProp::Ident(property) => {
+                        Expr::Lit(Lit::Str(property.sym.to_string().into()))
+                    }
+                    MemberProp::Computed(property) => property.expr.as_ref().clone(),
+                    MemberProp::PrivateName(_) => return None,
+                };
+                if let Some(path) = member_path(target.obj.as_ref()) {
+                    if let Some(encoded) = encode_fixed_field_assignment(
+                        &path,
+                        &key,
+                        assignment.right.as_ref(),
+                        assignment.op,
+                        parameters,
+                        locals,
+                        context,
+                    ) {
+                        output.extend(encoded);
+                        return (output.len() <= 256).then_some(());
                     }
                 }
                 let mut receiver = Vec::new();
@@ -3481,6 +3610,27 @@ fn jit_export(
                 let Expr::Member(target) = update.arg.as_ref() else {
                     return None;
                 };
+                let key = match &target.prop {
+                    MemberProp::Ident(property) => {
+                        Expr::Lit(Lit::Str(property.sym.to_string().into()))
+                    }
+                    MemberProp::Computed(property) => property.expr.as_ref().clone(),
+                    MemberProp::PrivateName(_) => return None,
+                };
+                if let Some(path) = member_path(target.obj.as_ref()) {
+                    if let Some(encoded) = encode_fixed_field_update(
+                        &path,
+                        &key,
+                        update.op,
+                        update.prefix,
+                        parameters,
+                        locals,
+                        context,
+                    ) {
+                        output.extend(encoded);
+                        return (output.len() <= 256).then_some(());
+                    }
+                }
                 let mut receiver = Vec::new();
                 encode_expression(
                     target.obj.as_ref(),
