@@ -49,7 +49,12 @@ fn jit_argument_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
             .all(|(index, element)| !elements[..index].contains(element))
         && elements
             .iter()
-            .filter(|element| matches!(element, thaw_hir::HirType::Object(_)))
+            .filter(|element| {
+                matches!(
+                    element,
+                    thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
+                )
+            })
             .count()
             <= 1
         && (elements.contains(&thaw_hir::HirType::Str)
@@ -59,6 +64,7 @@ fn jit_argument_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
                     thaw_hir::HirType::Array(_)
                         | thaw_hir::HirType::Dictionary(_)
                         | thaw_hir::HirType::Object(_)
+                        | thaw_hir::HirType::Tuple(_)
                 )
             }))
 }
@@ -80,7 +86,7 @@ fn jit_union_member_code(ty: &thaw_hir::HirType) -> Option<char> {
             thaw_hir::HirType::Str => Some('F'),
             _ => None,
         },
-        thaw_hir::HirType::Object(_) => Some('O'),
+        thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_) => Some('O'),
         _ => None,
     }
 }
@@ -270,10 +276,12 @@ fn jit_export(
         source: &[String],
         locals: &mut std::collections::HashMap<String, Vec<String>>,
     ) -> Option<()> {
-        let Some(thaw_hir::HirType::Object(fields)) = elements
-            .iter()
-            .find(|element| matches!(element, thaw_hir::HirType::Object(_)))
-        else {
+        let Some(aggregate) = elements.iter().find(|element| {
+            matches!(
+                element,
+                thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
+            )
+        }) else {
             return Some(());
         };
         fn bind_fields(
@@ -510,8 +518,17 @@ fn jit_export(
             Some(())
         }
         let mut object = source.to_vec();
-        object.push("untagobject".into());
-        bind_fields(path, fields, &object, locals)
+        match aggregate {
+            thaw_hir::HirType::Object(fields) => {
+                object.push("untagobject".into());
+                bind_fields(path, fields, &object, locals)
+            }
+            thaw_hir::HirType::Tuple(types) => {
+                object.push("untagtuple".into());
+                bind_tuple(path, types, &object, locals)
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn member_path(expression: &Expr) -> Option<String> {
@@ -1608,7 +1625,7 @@ fn jit_export(
                 return encode_return_expression(expression, payload, parameters, locals, context);
             }
         }
-        if matches!(ty, thaw_hir::HirType::Union(elements) if elements.iter().any(|element| matches!(element, thaw_hir::HirType::Object(_))))
+        if matches!(ty, thaw_hir::HirType::Union(elements) if elements.iter().any(|element| matches!(element, thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_))))
         {
             if let Expr::Cond(conditional) = expression {
                 let mut output = Vec::new();
@@ -1705,6 +1722,29 @@ fn jit_export(
     ) -> Option<JitExport> {
         match ty {
             thaw_hir::HirType::Union(elements)
+                if matches!(expression, Expr::Array(_))
+                    && elements
+                        .iter()
+                        .any(|element| matches!(element, thaw_hir::HirType::Tuple(_))) =>
+            {
+                let types = elements.iter().find_map(|element| match element {
+                    thaw_hir::HirType::Tuple(types) => Some(types.as_slice()),
+                    _ => None,
+                })?;
+                let mut output = encode_fixed_tuple_value(
+                    expression,
+                    types,
+                    parameters,
+                    locals,
+                    context,
+                )?;
+                output.push("tagtuple".into());
+                Some(JitExport::Value(validated_jit_expression(
+                    output,
+                    JitKind::Dynamic,
+                )?))
+            }
+            thaw_hir::HirType::Union(elements)
                 if object_literal(expression).is_some()
                     && elements
                         .iter()
@@ -1772,7 +1812,7 @@ fn jit_export(
             _ => {
                 let mut encoded = Vec::new();
                 encode_expression(expression, parameters, locals, context, &mut encoded)?;
-                if matches!(ty, thaw_hir::HirType::Union(elements) if elements.iter().any(|element| matches!(element, thaw_hir::HirType::Object(_))))
+                if matches!(ty, thaw_hir::HirType::Union(elements) if elements.iter().any(|element| matches!(element, thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_))))
                     && encoded
                         .iter()
                         .any(|token| matches!(token.as_str(), "tagdn" | "tagdb" | "tagds"))
@@ -8313,6 +8353,7 @@ fn jit_export(
                         "tagstr" => Some(JitKind::String),
                         "tagrn" | "tagrb" | "tagrs" => Some(JitKind::Array),
                         "tagdn" | "tagdb" | "tagds" => Some(JitKind::Dictionary),
+                        "tagtuple" => Some(JitKind::Array),
                         _ => None,
                     })
                     .collect()
@@ -15051,6 +15092,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Dynamic);
+        } else if token == "tagtuple" {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Dynamic);
         } else if let Some(size) = token.strip_prefix("objnew") {
             size.parse::<u16>().ok().filter(|size| *size > 0)?;
             stack.push(JitKind::Dictionary);
@@ -15156,6 +15202,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "untagds"
                 | "untagdictionary"
                 | "untagobject"
+                | "untagtuple"
         ) {
             if stack.pop()? != JitKind::Dynamic {
                 return None;
@@ -15164,7 +15211,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "untagnum" => JitKind::Number,
                 "untagbool" => JitKind::Boolean,
                 "untagstr" => JitKind::String,
-                "untagrn" | "untagrb" | "untagrs" | "untagarray" => JitKind::Array,
+                "untagrn" | "untagrb" | "untagrs" | "untagarray" | "untagtuple" => {
+                    JitKind::Array
+                }
                 _ => JitKind::Dictionary,
             });
         } else if let Some((kind, offset)) = [
@@ -15341,6 +15390,7 @@ fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> O
                             | "tagdb"
                             | "tagds"
                             | "tagobject"
+                            | "tagtuple"
                     )
                         || jit_dynamic_argument(token).is_some()
                 }))
