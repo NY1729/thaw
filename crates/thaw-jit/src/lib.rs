@@ -2564,6 +2564,33 @@ array_set_fn!(string_array_set, 1);
 array_set_fn!(bool_array_set, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_set(array: f64, index: f64, value: f64) -> f64 {
+    let (Some(array), Some(dynamic_value)) = (
+        dynamic_primitive(array, None),
+        dynamic_primitive(value, None),
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let operation = match (array.tag, dynamic_value.tag) {
+        (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG) => 0,
+        (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG) => 1,
+        (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG) => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    array_set(
+        operation,
+        f64::from_bits(array.payload),
+        index,
+        f64::from_bits(dynamic_value.payload),
+    );
+    value
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_source(source: &'static std::thread::LocalKey<Cell<Option<NumberSource>>>) -> f64 {
     let Some(source) = source.with(Cell::get) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
@@ -4434,6 +4461,7 @@ enum NumericValue {
     NumberArrayPostSet,
     StringArraySet,
     BoolArraySet,
+    DynamicArraySet,
     AggregateLocalSet(u8, u8),
     AggregateLocalArrayInsert(u8, u8, bool),
     ArrayValue,
@@ -4801,6 +4829,7 @@ impl NumericProgram {
                     "rnpostset" => Some(NumericValue::NumberArrayPostSet),
                     "rsset" => Some(NumericValue::StringArraySet),
                     "rbset" => Some(NumericValue::BoolArraySet),
+                    "dynarrayset" => Some(NumericValue::DynamicArraySet),
                     "arrayvalue" => Some(NumericValue::ArrayValue),
                     "arrayhandle" => Some(NumericValue::MutableArrayHandle),
                     "arrayempty" => Some(NumericValue::EmptyArray),
@@ -6441,7 +6470,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArraySet
                 | NumericValue::StringArraySet
-                | NumericValue::BoolArraySet => {
+                | NumericValue::BoolArraySet
+                | NumericValue::DynamicArraySet => {
                     if depth < 3 {
                         return None;
                     }
@@ -6449,6 +6479,7 @@ impl NumericProgram {
                         NumericValue::NumberArraySet => number_array_set,
                         NumericValue::StringArraySet => string_array_set,
                         NumericValue::BoolArraySet => bool_array_set,
+                        NumericValue::DynamicArraySet => dynamic_array_set,
                         _ => unreachable!(),
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
