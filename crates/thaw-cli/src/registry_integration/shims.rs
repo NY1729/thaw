@@ -7012,7 +7012,7 @@ fn jit_export(
         };
         let callable = resolve_callable(callee.as_ref(), context.helpers)?;
         let (helper_parameters, steps, body) = callable_parts(callable)?;
-        if !steps.is_empty() || helper_parameters.len() != call.args.len() {
+        if helper_parameters.len() != call.args.len() {
             return None;
         }
         let mut helper_locals = context.module_locals.clone();
@@ -7039,11 +7039,6 @@ fn jit_export(
                 argument_values.remove(&path)?,
             );
         }
-        let returned = match body {
-            NumericBody::Expression(expression) => expression,
-            NumericBody::Statements([Stmt::Return(returned)]) => returned.arg.as_deref()?,
-            _ => return None,
-        };
         let active = match callee.as_ref() {
             Expr::Ident(name) => Some(name.sym.to_string()),
             _ => None,
@@ -7054,17 +7049,48 @@ fn jit_export(
             }
             context.active.push(name.clone());
         }
-        let result = materialize_fixed_literal(
-            returned,
-            "",
-            requested,
-            parameters,
-            &helper_locals,
-            context,
-            kinds,
-            materialized,
-            output,
-        );
+        let result = (|| {
+            let no_parameters = std::collections::HashMap::new();
+            for (index, step) in steps.into_iter().enumerate() {
+                let LocalStep::Declare {
+                    name, initializer, ..
+                } = step
+                else {
+                    return None;
+                };
+                let path = format!(".local{index}");
+                let local_paths = std::collections::HashSet::from([path.clone()]);
+                let mut local_values = std::collections::HashMap::new();
+                materialize_fixed_literal(
+                    initializer,
+                    &path,
+                    &local_paths,
+                    &no_parameters,
+                    &helper_locals,
+                    context,
+                    kinds,
+                    &mut local_values,
+                    output,
+                )?;
+                helper_locals.insert(name.sym.to_string(), local_values.remove(&path)?);
+            }
+            let returned = match body {
+                NumericBody::Expression(expression) => expression,
+                NumericBody::Statements([Stmt::Return(returned)]) => returned.arg.as_deref()?,
+                _ => return None,
+            };
+            materialize_fixed_literal(
+                returned,
+                "",
+                requested,
+                &no_parameters,
+                &helper_locals,
+                context,
+                kinds,
+                materialized,
+                output,
+            )
+        })();
         if active.is_some() {
             context.active.pop();
         }
