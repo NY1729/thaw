@@ -2556,8 +2556,9 @@ and mutating array methods.
 Fixed-position array destructuring declarations over homogeneous array/tuple
 union sources materialize the initializer once in a typed JIT local before
 lowering each binding to an index read. Number, boolean, and string bindings,
-skipped positions, later reassignment of `let` bindings, and array-returning
-calls with side effects remain in the extracted JIT function without QuickJS.
+skipped positions, lazy `undefined`-only defaults (including references to an
+earlier binding), later reassignment of `let` bindings, and array-returning calls
+with side effects remain in the extracted JIT function without QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
