@@ -1242,15 +1242,18 @@ fn fixed_object_union_result_builds_native_storage() {
 #[test]
 fn fixed_tuple_unions_use_jit_without_quickjs() {
     let declarations = thaw_bridge::parse_dts(
-        "export interface Item { label: string; }\nexport declare function describe(value: [number, string] | string): string;\nexport declare function make(value: boolean): [number, string] | string;\nexport declare function mixed(value: Item | [number, string]): string;\nexport declare function makeMixed(value: boolean): Item | [number, string];\nexport declare function size(value: number[] | [number, string] | Item): number;\n",
+        "export interface Item { label: string; }\nexport declare function describe(value: [number, string] | string): string;\nexport declare function make(value: boolean): [number, string] | string;\nexport declare function mixed(value: Item | [number, string]): string;\nexport declare function makeMixed(value: boolean): Item | [number, string];\nexport declare function size(value: number[] | [number, string] | Item): number;\nexport declare function firstNumber(value: number[] | [number, number] | Item): number;\nexport declare function firstBoolean(value: boolean[] | [boolean, boolean] | Item): boolean;\nexport declare function firstString(value: string[] | [string, string] | Item): string;\n",
     )
     .unwrap();
-    let source = "module.exports.describe = value => typeof value === 'object' ? value[1] : value; module.exports.make = value => value ? [7, 'pair'] : 'plain'; module.exports.mixed = value => Array.isArray(value) ? value[1] : value.label; module.exports.makeMixed = value => value ? { label: 'object' } : [9, 'tuple']; module.exports.size = value => Array.isArray(value) ? value.length : value.label.length;";
+    let source = "module.exports.describe = value => typeof value === 'object' ? value[1] : value; module.exports.make = value => value ? [7, 'pair'] : 'plain'; module.exports.mixed = value => Array.isArray(value) ? value[1] : value.label; module.exports.makeMixed = value => value ? { label: 'object' } : [9, 'tuple']; module.exports.size = value => Array.isArray(value) ? value.length : value.label.length; module.exports.firstNumber = value => Array.isArray(value) ? value[0] : value.label.length; module.exports.firstBoolean = value => Array.isArray(value) ? value[0] : value.label.length > 0; module.exports.firstString = value => Array.isArray(value) ? value[0] : value.label;";
     assert!(jit_numeric_export(source, "describe", false, &declarations[0]).is_some());
     assert!(jit_numeric_export(source, "make", false, &declarations[1]).is_some());
     assert!(jit_numeric_export(source, "mixed", false, &declarations[2]).is_some());
     assert!(jit_numeric_export(source, "makeMixed", false, &declarations[3]).is_some());
     assert!(jit_numeric_export(source, "size", false, &declarations[4]).is_some());
+    assert!(jit_numeric_export(source, "firstNumber", false, &declarations[5]).is_some());
+    assert!(jit_numeric_export(source, "firstBoolean", false, &declarations[6]).is_some());
+    assert!(jit_numeric_export(source, "firstString", false, &declarations[7]).is_some());
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-tuple-union-{}",
         std::process::id()
@@ -1260,14 +1263,14 @@ fn fixed_tuple_unions_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Item { label: string; }\nexport declare function describe(value: [number, string] | string): string;\nexport declare function make(value: boolean): [number, string] | string;\nexport declare function mixed(value: Item | [number, string]): string;\nexport declare function makeMixed(value: boolean): Item | [number, string];\nexport declare function size(value: number[] | [number, string] | Item): number;\n",
+        "export interface Item { label: string; }\nexport declare function describe(value: [number, string] | string): string;\nexport declare function make(value: boolean): [number, string] | string;\nexport declare function mixed(value: Item | [number, string]): string;\nexport declare function makeMixed(value: boolean): Item | [number, string];\nexport declare function size(value: number[] | [number, string] | Item): number;\nexport declare function firstNumber(value: number[] | [number, number] | Item): number;\nexport declare function firstBoolean(value: boolean[] | [boolean, boolean] | Item): boolean;\nexport declare function firstString(value: string[] | [string, string] | Item): string;\n",
     )
     .unwrap();
     std::fs::write(package.join("bundle.js"), format!("{source}\n")).unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { describe, make, makeMixed, mixed, size } from 'jit-tuple-union';\nfunction main(): void { const numbers: number[] = [1, 2, 3]; const pair: [number, string] = [4, 'x']; console.log(describe([3, 'local'])); console.log(describe('direct')); console.log(describe(make(true))); console.log(describe(make(false))); console.log(mixed({ label: 'local-object' })); console.log(mixed([4, 'local-tuple'])); console.log(mixed(makeMixed(true))); console.log(mixed(makeMixed(false))); console.log(size(numbers)); console.log(size(pair)); console.log(size({ label: 'four' })); }\n",
+        "import { describe, firstBoolean, firstNumber, firstString, make, makeMixed, mixed, size } from 'jit-tuple-union';\nfunction main(): void { const numbers: number[] = [1, 2, 3]; const pair: [number, string] = [4, 'x']; const numberPair: [number, number] = [5, 6]; const booleans: boolean[] = [true]; const booleanPair: [boolean, boolean] = [false, true]; const strings: string[] = ['array']; const stringPair: [string, string] = ['tuple', 'other']; console.log(describe([3, 'local'])); console.log(describe('direct')); console.log(describe(make(true))); console.log(describe(make(false))); console.log(mixed({ label: 'local-object' })); console.log(mixed([4, 'local-tuple'])); console.log(mixed(makeMixed(true))); console.log(mixed(makeMixed(false))); console.log(size(numbers)); console.log(size(pair)); console.log(size({ label: 'four' })); console.log(firstNumber(numbers)); console.log(firstNumber(numberPair)); console.log(firstNumber({ label: 'four' })); console.log(firstBoolean(booleans)); console.log(firstBoolean(booleanPair)); console.log(firstBoolean({ label: 'x' })); console.log(firstString(strings)); console.log(firstString(stringPair)); console.log(firstString({ label: 'object' })); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1283,7 +1286,7 @@ fn fixed_tuple_unions_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "local\ndirect\npair\nplain\nlocal-object\nlocal-tuple\nobject\ntuple\n3\n2\n4\n"
+        "local\ndirect\npair\nplain\nlocal-object\nlocal-tuple\nobject\ntuple\n3\n2\n4\n1\n5\n4\ntrue\nfalse\ntrue\narray\ntuple\nobject\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
