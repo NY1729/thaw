@@ -1441,6 +1441,12 @@ fn jit_export(
 
     fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
         expression.iter().find_map(|token| {
+            match token.as_str() {
+                "untagdn" => return Some("dn"),
+                "untagdb" => return Some("db"),
+                "untagds" => return Some("ds"),
+                _ => {}
+            }
             ["dn", "db", "ds"]
                 .into_iter()
                 .find(|prefix| token.starts_with(prefix))
@@ -4234,6 +4240,97 @@ fn jit_export(
     }
 
     #[allow(clippy::type_complexity)]
+    fn narrowed_object_locals(
+        expression: &Expr,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<(
+        std::collections::HashMap<String, Vec<String>>,
+        std::collections::HashMap<String, Vec<String>>,
+    )> {
+        let expression = match expression {
+            Expr::Paren(expression) => expression.expr.as_ref(),
+            expression => expression,
+        };
+        let Expr::Bin(binary) = expression else {
+            return None;
+        };
+        let equal = match binary.op {
+            BinaryOp::EqEq | BinaryOp::EqEqEq => true,
+            BinaryOp::NotEq | BinaryOp::NotEqEq => false,
+            _ => return None,
+        };
+        let probe = |typeof_expression: &Expr, type_expression: &Expr| {
+            let Expr::Unary(typeof_expression) = typeof_expression else {
+                return None;
+            };
+            if typeof_expression.op != UnaryOp::TypeOf {
+                return None;
+            }
+            let Expr::Ident(name) = typeof_expression.arg.as_ref() else {
+                return None;
+            };
+            let Expr::Lit(Lit::Str(ty)) = type_expression else {
+                return None;
+            };
+            (ty.value == *"object").then(|| name.sym.to_string())
+        };
+        let identifier = probe(binary.left.as_ref(), binary.right.as_ref())
+            .or_else(|| probe(binary.right.as_ref(), binary.left.as_ref()))?;
+        let source = locals.get(&identifier)?;
+        let kinds = source
+            .iter()
+            .find_map(|token| jit_dynamic_argument(token).map(|(_, kinds)| kinds))?;
+        let aggregates = kinds
+            .bytes()
+            .filter(|kind| matches!(kind, b'D' | b'E' | b'F'))
+            .collect::<Vec<_>>();
+        if aggregates.len() != 1
+            || kinds
+                .bytes()
+                .any(|kind| matches!(kind, b'N' | b'B' | b'S'))
+        {
+            return None;
+        }
+        let mut object_value = source.clone();
+        object_value.push(
+            match aggregates[0] {
+                b'D' => "untagdn",
+                b'E' => "untagdb",
+                b'F' => "untagds",
+                _ => unreachable!(),
+            }
+            .into(),
+        );
+        let remaining = kinds
+            .bytes()
+            .filter(|kind| !matches!(kind, b'D' | b'E' | b'F'))
+            .collect::<Vec<_>>();
+        let mut other_value = source.clone();
+        if remaining.len() == 1 {
+            other_value.push(
+                match remaining[0] {
+                    b'n' => "untagnum",
+                    b'b' => "untagbool",
+                    b's' => "untagstr",
+                    _ => return None,
+                }
+                .into(),
+            );
+        }
+        let narrowed = |value: Vec<String>| {
+            let mut narrowed = locals.clone();
+            narrowed.insert(identifier.clone(), value);
+            narrowed
+        };
+        let branches = (narrowed(object_value), narrowed(other_value));
+        Some(if equal {
+            branches
+        } else {
+            (branches.1, branches.0)
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
     fn narrowed_locals(
         expression: &Expr,
         parameters: &std::collections::HashMap<String, String>,
@@ -4245,6 +4342,7 @@ fn jit_export(
     )> {
         narrowed_primitive_locals(expression, locals)
             .or_else(|| narrowed_array_locals(expression, parameters, locals, helpers))
+            .or_else(|| narrowed_object_locals(expression, locals))
     }
 
     fn encode_switch_case_return(
@@ -12319,7 +12417,15 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Number);
         } else if matches!(
             token.as_str(),
-            "untagnum" | "untagstr" | "untagbool" | "untagrn" | "untagrb" | "untagrs"
+            "untagnum"
+                | "untagstr"
+                | "untagbool"
+                | "untagrn"
+                | "untagrb"
+                | "untagrs"
+                | "untagdn"
+                | "untagdb"
+                | "untagds"
         ) {
             if stack.pop()? != JitKind::Dynamic {
                 return None;
@@ -12328,7 +12434,8 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "untagnum" => JitKind::Number,
                 "untagbool" => JitKind::Boolean,
                 "untagstr" => JitKind::String,
-                _ => JitKind::Array,
+                "untagrn" | "untagrb" | "untagrs" => JitKind::Array,
+                _ => JitKind::Dictionary,
             });
         } else if matches!(
             token.as_str(),

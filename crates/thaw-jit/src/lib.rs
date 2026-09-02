@@ -26,6 +26,7 @@ const DYNAMIC_NUMBER_ARRAY_TAG: u64 = 4;
 const DYNAMIC_BOOLEAN_ARRAY_TAG: u64 = 5;
 const DYNAMIC_STRING_ARRAY_TAG: u64 = 6;
 const DYNAMIC_NUMBER_DICTIONARY_TAG: u64 = 7;
+const DYNAMIC_BOOLEAN_DICTIONARY_TAG: u64 = 8;
 const DYNAMIC_STRING_DICTIONARY_TAG: u64 = 9;
 #[cfg(not(all(target_arch = "x86_64", target_family = "unix")))]
 static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
@@ -2906,6 +2907,21 @@ extern "C" fn untag_string_array(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_number_dictionary(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_NUMBER_DICTIONARY_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_boolean_dictionary(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_BOOLEAN_DICTIONARY_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_string_dictionary(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_STRING_DICTIONARY_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn untag_dynamic(value: f64, expected: u64) -> f64 {
     dynamic_primitive(value, Some(expected)).map_or_else(
         || {
@@ -3873,6 +3889,9 @@ enum NumericValue {
     UntagNumberArray,
     UntagBooleanArray,
     UntagStringArray,
+    UntagNumberDictionary,
+    UntagBooleanDictionary,
+    UntagStringDictionary,
     ExcludeNumber,
     ExcludeString,
     ExcludeBoolean,
@@ -4210,6 +4229,9 @@ impl NumericProgram {
                     "untagrn" => Some(NumericValue::UntagNumberArray),
                     "untagrb" => Some(NumericValue::UntagBooleanArray),
                     "untagrs" => Some(NumericValue::UntagStringArray),
+                    "untagdn" => Some(NumericValue::UntagNumberDictionary),
+                    "untagdb" => Some(NumericValue::UntagBooleanDictionary),
+                    "untagds" => Some(NumericValue::UntagStringDictionary),
                     "notnum" => Some(NumericValue::ExcludeNumber),
                     "notstr" => Some(NumericValue::ExcludeString),
                     "notbool" => Some(NumericValue::ExcludeBoolean),
@@ -5144,6 +5166,9 @@ impl NumericProgram {
                 | NumericValue::UntagNumberArray
                 | NumericValue::UntagBooleanArray
                 | NumericValue::UntagStringArray
+                | NumericValue::UntagNumberDictionary
+                | NumericValue::UntagBooleanDictionary
+                | NumericValue::UntagStringDictionary
                 | NumericValue::ParseFloat
                 | NumericValue::NumberToExponentialShortest => {
                     if depth == 0 {
@@ -5165,6 +5190,9 @@ impl NumericProgram {
                         NumericValue::UntagNumberArray => untag_number_array,
                         NumericValue::UntagBooleanArray => untag_boolean_array,
                         NumericValue::UntagStringArray => untag_string_array,
+                        NumericValue::UntagNumberDictionary => untag_number_dictionary,
+                        NumericValue::UntagBooleanDictionary => untag_boolean_dictionary,
+                        NumericValue::UntagStringDictionary => untag_string_dictionary,
                         NumericValue::ParseFloat => parse_float,
                         NumericValue::NumberToExponentialShortest => number_to_exponential_shortest,
                         _ => unreachable!(),
