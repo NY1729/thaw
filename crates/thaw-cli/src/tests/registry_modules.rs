@@ -1801,6 +1801,74 @@ fn tuple_union_callback_context_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn tuple_union_reducers_without_initial_use_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function foldLeft(value: number[] | [number, number]): number;\n",
+        "export declare function foldRight(value: number[] | [number, number]): number;\n",
+        "export declare function foldContext(value: number[] | [number, number], factor: number, offset: number): number;\n",
+    );
+    let source = concat!(
+        "module.exports.foldLeft = value => Array.isArray(value) ? value.reduce((total, item) => total * 10 + item) : 0; ",
+        "module.exports.foldRight = value => Array.isArray(value) ? value.reduceRight((total, item) => total * 10 + item) : 0; ",
+        "module.exports.foldContext = (value, factor, offset) => Array.isArray(value) ? value.reduce((total, item, index, source) => total * factor + item + index + source.length + offset) : 0;",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in ["foldLeft", "foldRight", "foldContext"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-reduce-no-initial-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union-reduce-no-initial");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { foldContext, foldLeft, foldRight } from 'jit-tuple-union-reduce-no-initial';\n",
+            "function main(): void {\n",
+            "  console.log(foldLeft([1, 2, 3]));\n",
+            "  console.log(foldLeft([5, 6] as [number, number]));\n",
+            "  console.log(foldRight([1, 2, 3]));\n",
+            "  console.log(foldRight([5, 6] as [number, number]));\n",
+            "  console.log(foldContext([1, 2, 3], 2, 1));\n",
+            "  console.log(foldContext([5, 6] as [number, number], 3, 2));\n",
+            "  try { foldLeft([]); } catch { console.log('empty-left'); }\n",
+            "  try { foldRight([]); } catch { console.log('empty-right'); }\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "123\n56\n321\n65\n27\n26\nempty-left\nempty-right\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
