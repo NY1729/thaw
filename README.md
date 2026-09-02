@@ -2550,7 +2550,9 @@ ordinary array raises the standard reduction error through the JIT path.
 Homogeneous array/tuple unions can also enter array literals through spread
 and synchronous `for...of` loops directly. Both constructs reuse the typed
 untag operation, so callers do not need a redundant `Array.isArray` guard;
-loop elements retain their number, boolean, or string JIT type.
+loop elements retain their number, boolean, or string JIT type. The same
+guard-free receiver handling applies to supported read-only, copying, callback,
+and mutating array methods.
 Fixed-position array destructuring declarations over homogeneous array/tuple
 union sources materialize the initializer once in a typed JIT local before
 lowering each binding to an index read. Number, boolean, and string bindings,
