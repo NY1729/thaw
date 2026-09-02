@@ -2437,6 +2437,9 @@ fixed-object fields, primitive arrays, and homogeneous primitive dictionaries
 plus fixed primitive tuples are loaded directly from the native object layout;
 supported nested string, array, dictionary, and tuple-index operations remain
 available to ordinary JIT operations;
+optional primitive object fields use their native presence/payload layout, so
+direct reads, `??`, and optional string-method chains preserve absence without
+loading QuickJS;
 the same tagged value can also return through LLVM without changing object
 identity or layout. Object literals with an exact fixed shape and recursively
 nested fixed objects, primitive arrays, homogeneous primitive dictionaries, or

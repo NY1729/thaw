@@ -4089,6 +4089,36 @@ extern "C" fn object_string_field(object: f64, offset: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn object_optional_field(object: f64, offset: f64, kind: u8) -> f64 {
+    if object_boolean_field(object, offset) == 0.0 {
+        CALL_PRESENT.with(|present| present.set(false));
+        return 0.0;
+    }
+    match kind {
+        0 => object_number_field(object, offset + 8.0),
+        1 => object_boolean_field(object, offset + 1.0),
+        2 => object_string_field(object, offset + 8.0),
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! optional_object_getter {
+    ($name:ident, $kind:expr) => {
+        extern "C" fn $name(object: f64, offset: f64) -> f64 {
+            object_optional_field(object, offset, $kind)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+optional_object_getter!(object_optional_number_field, 0);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+optional_object_getter!(object_optional_boolean_field, 1);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+optional_object_getter!(object_optional_pointer_field, 2);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn fixed_object_new(size: f64) -> f64 {
     if !size.is_finite() || size <= 0.0 || size.fract() != 0.0 {
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
@@ -5189,6 +5219,7 @@ enum NumericValue {
     UntagDictionary,
     UntagObject,
     ObjectField(u8, u16),
+    OptionalObjectField(u8, u16),
     FixedObjectNew(u16),
     FixedObjectSet(u8, u16),
     FixedTupleNew(u16),
@@ -6313,6 +6344,20 @@ impl NumericProgram {
                                 .map(|offset| NumericValue::FixedObjectSet(kind, offset))
                         })
                         .or_else(|| {
+                            let encoded = value.strip_prefix("objopt")?;
+                            let (kind, offset) = encoded.split_at(1);
+                            let kind = match kind {
+                                "n" => 0,
+                                "b" => 1,
+                                "s" | "a" | "o" | "t" | "d" => 2,
+                                _ => return None,
+                            };
+                            offset
+                                .parse::<u16>()
+                                .ok()
+                                .map(|offset| NumericValue::OptionalObjectField(kind, offset))
+                        })
+                        .or_else(|| {
                             let encoded = value.strip_prefix("obj")?;
                             let (kind, offset) = if let Some(offset) = encoded.strip_prefix("rn") {
                                 (2, offset)
@@ -6786,6 +6831,21 @@ impl NumericProgram {
                         object_number_field,
                         object_boolean_field,
                         object_string_field,
+                    ][usize::from(*kind)];
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::OptionalObjectField(kind, offset) => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    let offset = f64::from(*offset);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&offset.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    let function = [
+                        object_optional_number_field,
+                        object_optional_boolean_field,
+                        object_optional_pointer_field,
                     ][usize::from(*kind)];
                     emit_binary_call(&mut code, function as *const () as u64, depth - 1);
                 }

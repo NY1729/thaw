@@ -1369,6 +1369,60 @@ fn nested_tuple_fields_use_jit_without_quickjs() {
 }
 
 #[test]
+fn optional_object_fields_use_jit_without_quickjs() {
+    let functions = thaw_bridge::parse_dts(
+        "export interface Item { name?: string; score?: number; enabled?: boolean; }\nexport declare function make(full: boolean): Item | string;\n",
+    )
+    .unwrap();
+    assert!(jit_numeric_export(
+        "module.exports.make = full => full ? { name: 'made', score: 8, enabled: true } : { name: 'empty', score: 0, enabled: false };",
+        "make",
+        false,
+        &functions[0],
+    )
+    .is_some());
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-optional-object-field-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-optional-object-field");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Item { name?: string; score?: number; enabled?: boolean; }\nexport declare function name(value: Item | string): string;\nexport declare function upper(value: Item | string): string;\nexport declare function score(value: Item | string): number;\nexport declare function enabled(value: Item | string): boolean;\nexport declare function make(full: boolean): Item | string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.name = value => typeof value === 'object' ? value.name ?? 'missing' : value; module.exports.upper = value => typeof value === 'object' ? value.name?.toUpperCase() ?? 'missing' : value; module.exports.score = value => typeof value === 'object' ? value.score ?? 0 : -1; module.exports.enabled = value => typeof value === 'object' ? value.enabled ?? false : true; module.exports.make = full => full ? { name: 'made', score: 8, enabled: true } : { name: 'empty', score: 0, enabled: false };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { enabled, make, name, score, upper } from 'jit-optional-object-field';\ntype Item = { name?: string; score?: number; enabled?: boolean };\nfunction main(): void { const present: Item = { name: 'thaw', score: 7, enabled: true }; const absent: Item = {}; console.log(name(present)); console.log(upper(present)); console.log(score(present)); console.log(enabled(present)); console.log(name(absent)); console.log(upper(absent)); console.log(score(absent)); console.log(enabled(absent)); console.log(name('plain')); console.log(name(make(true))); console.log(score(make(true))); console.log(enabled(make(true))); console.log(name(make(false))); console.log(score(make(false))); console.log(enabled(make(false))); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "thaw\nTHAW\n7\ntrue\nmissing\nmissing\n0\nfalse\nplain\nmade\n8\ntrue\nempty\n0\nfalse\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_dictionary_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-dictionary-union-{}",
