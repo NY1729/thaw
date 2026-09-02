@@ -7167,6 +7167,15 @@ fn jit_export(
                 .iter()
                 .flat_map(|case| &case.cons)
                 .any(contains_aggregate_return),
+            Stmt::Try(statement) => {
+                statement.block.stmts.iter().any(contains_aggregate_return)
+                    || statement.handler.as_ref().is_some_and(|handler| {
+                        handler.body.stmts.iter().any(contains_aggregate_return)
+                    })
+                    || statement.finalizer.as_ref().is_some_and(|finalizer| {
+                        finalizer.stmts.iter().any(contains_aggregate_return)
+                    })
+            }
             _ => false,
         }
     }
@@ -7757,6 +7766,54 @@ fn jit_export(
                     }
                 }
                 output.push("switchend".into());
+                Some(())
+            }
+            Stmt::Try(try_statement)
+                if try_statement.handler.is_none()
+                    && try_statement.finalizer.as_ref().is_some_and(|finalizer| {
+                        finalizer
+                            .stmts
+                            .iter()
+                            .all(|statement| matches!(statement, Stmt::Expr(_)))
+                    })
+                    && try_statement
+                        .block
+                        .stmts
+                        .iter()
+                        .any(contains_aggregate_return) =>
+            {
+                let finalizer = try_statement.finalizer.as_ref()?;
+                let mut finalizer_output = Vec::new();
+                encode_loop_effects(
+                    &Stmt::Block(finalizer.clone()),
+                    parameters,
+                    locals,
+                    mutable,
+                    (control_kinds, root_loop_control(), &[]),
+                    context,
+                    &mut finalizer_output,
+                )?;
+                let mut body_output = Vec::new();
+                encode_aggregate_return_effects(
+                    &Stmt::Block(try_statement.block.clone()),
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    control_kinds,
+                    result_base_kinds,
+                    context,
+                    expected_kinds,
+                    expected_values,
+                    &mut body_output,
+                )?;
+                for token in body_output {
+                    if token.starts_with("resultreturn") {
+                        output.extend(finalizer_output.iter().cloned());
+                    }
+                    output.push(token);
+                }
+                output.extend(finalizer_output);
                 Some(())
             }
             Stmt::For(_)

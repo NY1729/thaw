@@ -2629,6 +2629,10 @@ Nested `switch` statements share that result region as well. Their discriminant
 is evaluated once, case tests retain source-order fallthrough, and ordinary
 `break` exits only the switch while a matching aggregate `return` bypasses the
 surrounding loop without loading QuickJS.
+Nested `try/finally` statements can return through that result region too. The
+aggregate leaves are fixed before the straight-line finalizer runs, every
+return edge executes the finalizer exactly once, and normal fallthrough runs it
+before the surrounding loop continues.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
