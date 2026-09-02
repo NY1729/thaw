@@ -2436,7 +2436,9 @@ After a `typeof value === "object"` check, primitive fields, recursively nested
 fixed-object fields, primitive arrays, and homogeneous primitive dictionaries
 plus fixed primitive tuples are loaded directly from the native object layout;
 supported nested string, array, dictionary, and tuple-index operations remain
-available to ordinary JIT operations;
+available to ordinary JIT operations; fixed object fields can use either dot
+syntax or constant string computed-property syntax without changing the native
+access path;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
