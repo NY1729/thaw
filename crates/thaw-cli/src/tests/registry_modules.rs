@@ -1950,6 +1950,8 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "export declare function numberRest(value: number[] | [number, number]): number;\n",
         "export declare function stringRest(value: string[] | [string, string]): string;\n",
         "export declare function restCopy(value: number[]): number;\n",
+        "export declare function chainedCopy(value: number[] | [number, number]): string;\n",
+        "export declare function chainedSplice(value: number[] | [number, number]): string;\n",
     );
     let source = concat!(
         "module.exports.numberPair = value => { const [first, second] = value; return first * 10 + second; }; ",
@@ -1964,7 +1966,9 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "module.exports.lazyDefault = value => { const [first = value.pop()] = value; return first * 10 + value.join('-').length; }; ",
         "module.exports.numberRest = value => { const [first, ...rest] = value; rest.push(9); return first * 100 + rest.length * 10 + rest.at(-1); }; ",
         "module.exports.stringRest = value => { const [first, ...rest] = value; rest.push('z'); return first + rest.join(''); }; ",
-        "module.exports.restCopy = value => { const [...copy] = value; copy.push(9); return copy.length * 10 + value.length; };",
+        "module.exports.restCopy = value => { const [...copy] = value; copy.push(9); return copy.length * 10 + value.length; }; ",
+        "module.exports.chainedCopy = value => value.toReversed().slice(0, 2).join('-'); ",
+        "module.exports.chainedSplice = value => value.splice(0, 2).join('-') + ':' + value.join('-');",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -1981,6 +1985,8 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "numberRest",
         "stringRest",
         "restCopy",
+        "chainedCopy",
+        "chainedSplice",
     ]
     .into_iter()
     .enumerate()
@@ -2004,7 +2010,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     std::fs::write(
         &entry,
         concat!(
-            "import { booleanDefaults, booleanPair, joined, lazyDefault, numberDefaults, numberPair, numberRest, restCopy, reversedPair, splicePair, stringDefaults, stringEnds, stringRest } from 'jit-tuple-union-destructuring';\n",
+            "import { booleanDefaults, booleanPair, chainedCopy, chainedSplice, joined, lazyDefault, numberDefaults, numberPair, numberRest, restCopy, reversedPair, splicePair, stringDefaults, stringEnds, stringRest } from 'jit-tuple-union-destructuring';\n",
             "function main(): void {\n",
             "  console.log(numberPair([1, 2, 3]));\n",
             "  console.log(numberPair([5, 6] as [number, number]));\n",
@@ -2029,6 +2035,10 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
             "  console.log(stringRest(['a', 'b', 'c']));\n",
             "  console.log(stringRest(['x', 'y'] as [string, string]));\n",
             "  console.log(restCopy([1, 2]));\n",
+            "  console.log(chainedCopy([1, 2, 3]));\n",
+            "  console.log(chainedCopy([5, 6] as [number, number]));\n",
+            "  console.log(chainedSplice([1, 2, 3]));\n",
+            "  console.log(chainedSplice([5, 6] as [number, number]));\n",
             "}\n",
         ),
     )
@@ -2046,7 +2056,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "12\n56\nac\nxz\ntrue\nfalse\n120\n560\n32\n65\n1-2-3\n5-6\n78\n34\nay\ntrue\nfalse\n43\n139\n529\nabcz\nxyz\n32\n"
+        "12\n56\nac\nxz\ntrue\nfalse\n120\n560\n32\n65\n1-2-3\n5-6\n78\n34\nay\ntrue\nfalse\n43\n139\n529\nabcz\nxyz\n32\n3-2\n6-5\n1-2:3\n5-6:\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
