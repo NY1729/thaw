@@ -2318,7 +2318,7 @@ extern "C" fn array_length(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_value(value: f64) -> f64 {
     match unsafe { array_data(value) } {
-        Some((data, _)) => array_result(data.cast_mut()),
+        Some((data, _)) => f64::from_bits(data as usize as u64),
         None => {
             CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
             0.0
@@ -5754,7 +5754,9 @@ impl NumericProgram {
                     "ifpresent" => Some(NumericValue::PresentConditionalStart),
                     "else" => Some(NumericValue::ConditionalAlternate),
                     "end" => Some(NumericValue::ShortCircuitEnd),
-                    "absentn" | "absentb" | "absents" => Some(NumericValue::Absent),
+                    "absentn" | "absentb" | "absents" | "absenta" | "absentd" => {
+                        Some(NumericValue::Absent)
+                    }
                     "asbool" => Some(NumericValue::AsBoolean),
                     "boolnot" => Some(NumericValue::BooleanNot),
                     "strictfalse" => Some(NumericValue::StrictMismatch(false)),
