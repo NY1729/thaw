@@ -4012,6 +4012,31 @@ fn recognizes_tagged_statement_returns_for_jit() {
 }
 
 #[test]
+fn jit_slices_a_narrowed_mixed_array_union() {
+    let union = thaw_hir::HirType::Union(vec![
+        thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)),
+        thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str)),
+        thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Bool)),
+        thaw_hir::HirType::Str,
+    ]);
+    let function = thaw_bridge::DtsFunction {
+        name: "slice".into(),
+        generic: None,
+        params: vec![("value".into(), thaw_bridge::DtsType::Native(union.clone()))],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(union),
+    };
+    assert!(jit_numeric_export(
+        "function slice(value) { if (Array.isArray(value)) return value.slice(1); return value.slice(1); } module.exports = { slice };",
+        "slice",
+        false,
+        &function,
+    )
+    .is_some());
+}
+
+#[test]
 fn rewrite_qualified_calls_is_a_no_op_with_no_rewrites() {
     let source = "function main(): void { console.log(qs.stringify(x)); }";
     assert_eq!(rewrite_qualified_calls(source, &[]).unwrap(), source);
