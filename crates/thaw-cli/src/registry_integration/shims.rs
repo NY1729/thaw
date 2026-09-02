@@ -2502,7 +2502,7 @@ fn jit_export(
                         JitKind::Number => "absentn",
                         JitKind::Boolean => "absentb",
                         JitKind::String => "absents",
-                        JitKind::Dynamic => return None,
+                        JitKind::Dynamic => "absentdyn",
                         JitKind::Array => "absenta",
                         JitKind::Dictionary => "absentd",
                     }
@@ -10489,6 +10489,7 @@ fn jit_export(
                         thaw_hir::HirType::F64
                             | thaw_hir::HirType::Bool
                             | thaw_hir::HirType::Str
+                            | thaw_hir::HirType::Union(_)
                             | thaw_hir::HirType::Array(_)
                             | thaw_hir::HirType::Dictionary(_)
                     )
@@ -11308,6 +11309,8 @@ fn jit_export(
             if matches!(payload.as_ref(), thaw_hir::HirType::Array(_)) => JitKind::Array,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
             if matches!(payload.as_ref(), thaw_hir::HirType::Dictionary(_)) => JitKind::Dictionary,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if matches!(payload.as_ref(), thaw_hir::HirType::Union(elements) if jit_tagged_union(elements)) => JitKind::Dynamic,
         _ => JitKind::Number,
     };
     validated_jit_expression(expression, expected).map(JitExport::Value)
@@ -13051,12 +13054,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             maximum_depth = maximum_depth.max(stack.len());
         } else if matches!(
             token.as_str(),
-            "absentn" | "absentb" | "absents" | "absenta" | "absentd"
+            "absentn" | "absentb" | "absents" | "absentdyn" | "absenta" | "absentd"
         ) {
             stack.push(match token.as_str() {
                 "absentn" => JitKind::Number,
                 "absentb" => JitKind::Boolean,
                 "absents" => JitKind::String,
+                "absentdyn" => JitKind::Dynamic,
                 "absenta" => JitKind::Array,
                 "absentd" => JitKind::Dictionary,
                 _ => unreachable!(),
@@ -13472,6 +13476,17 @@ fn jit_numeric_declaration(
         }
         _ => None,
     };
+    let optional_union_ret = match &function.ret {
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
+            match payload.as_ref() {
+                thaw_hir::HirType::Union(elements) if jit_tagged_union(elements) => {
+                    render_dynamic_type(payload).map(|ty| format!("({ty}) | undefined"))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     let ret = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "string",
@@ -13523,6 +13538,11 @@ fn jit_numeric_declaration(
             if **payload == thaw_hir::HirType::Bool =>
         {
             "boolean | undefined"
+        }
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if matches!(payload.as_ref(), thaw_hir::HirType::Union(elements) if jit_tagged_union(elements)) =>
+        {
+            optional_union_ret.as_deref().unwrap()
         }
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
             match payload.as_ref() {
