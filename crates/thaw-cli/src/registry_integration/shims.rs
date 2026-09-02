@@ -11009,13 +11009,36 @@ fn jit_export(
         };
         let optional = *optional_parameter || optional_type;
         if let thaw_hir::HirType::Union(elements) = ty {
-            if default.is_some() || !jit_tagged_union(elements) {
+            if !jit_tagged_union(elements) {
                 return None;
             }
             let kinds = elements
                 .iter()
                 .map(jit_union_member_code)
                 .collect::<Option<String>>()?;
+            if let Some(default) = default {
+                if !optional {
+                    return None;
+                }
+                let mut present = vec![format!("u{}{kinds}", slot + 1)];
+                let mut fallback = Vec::new();
+                encode_expression(
+                    default,
+                    &parameters,
+                    &locals,
+                    &mut context,
+                    &mut fallback,
+                )?;
+                normalize_callable_branches([&mut present, &mut fallback])?;
+                let mut selected = vec![format!("a{slot}"), "asbool".into(), "if".into()];
+                selected.extend(present);
+                selected.push("else".into());
+                selected.extend(fallback);
+                selected.push("end".into());
+                locals.insert(parameter.clone(), selected);
+                slot += 3;
+                continue;
+            }
             if optional {
                 parameters.insert(
                     parameter.clone(),
