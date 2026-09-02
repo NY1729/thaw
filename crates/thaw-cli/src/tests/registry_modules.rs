@@ -1231,7 +1231,7 @@ fn fixed_object_union_result_builds_native_storage() {
     )
     .is_some(), "array field join");
     assert!(jit_numeric_export(
-        "module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label.toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) + ':' + String(value.pair[0]) + ':' + value.pair[1] + ':' + String(value.pair[2]) : value.toUpperCase();",
+        "module.exports.describe = value => typeof value === 'object' ? String(value['count']) + ':' + value['meta']['label'].toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) + ':' + String(value.pair[0]) + ':' + value.pair[1] + ':' + String(value.pair[2]) : value.toUpperCase();",
         "describe",
         false,
         &functions[1],
@@ -1255,7 +1255,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label.toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) + ':' + String(value.pair[0]) + ':' + value.pair[1] + ':' + String(value.pair[2]) : value.toUpperCase(); module.exports.identity = value => value; module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4], scores: { primary: 7 }, pair: [8, 'tuple', true] } : 'none'; module.exports.wrap = values => ({ count: values.length, meta: { label: 'wrapped', enabled: true }, values, scores: { primary: values.length }, pair: [values.length, 'shared', false] });\n",
+        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value['count']) + ':' + value['meta']['label'].toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) + ':' + String(value.pair[0]) + ':' + value.pair[1] + ':' + String(value.pair[2]) : value.toUpperCase(); module.exports.identity = value => value; module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4], scores: { primary: 7 }, pair: [8, 'tuple', true] } : 'none'; module.exports.wrap = values => ({ count: values.length, meta: { label: 'wrapped', enabled: true }, values, scores: { primary: values.length }, pair: [values.length, 'shared', false] });\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");

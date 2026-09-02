@@ -498,13 +498,17 @@ fn jit_export(
                 let property = match &member.prop {
                     MemberProp::Ident(property) => property.sym.to_string(),
                     MemberProp::Computed(computed) => {
-                        let Expr::Lit(Lit::Num(index)) = computed.expr.as_ref() else {
-                            return None;
-                        };
-                        if index.value < 0.0 || index.value.fract() != 0.0 {
-                            return None;
+                        match computed.expr.as_ref() {
+                            Expr::Lit(Lit::Num(index))
+                                if index.value >= 0.0 && index.value.fract() == 0.0 =>
+                            {
+                                (index.value as usize).to_string()
+                            }
+                            Expr::Lit(Lit::Str(property)) => {
+                                property.value.to_string_lossy().into_owned()
+                            }
+                            _ => return None,
                         }
-                        (index.value as usize).to_string()
                     }
                     _ => return None,
                 };
