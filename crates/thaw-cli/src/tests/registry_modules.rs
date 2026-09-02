@@ -2280,17 +2280,23 @@ fn aggregate_catch_uses_collection_throw_values_without_quickjs() {
     let dts = concat!(
         "export declare function arrayCatch(values: number[], fail: boolean): string;\n",
         "export declare function dictionaryCatch(values: Record<string, number>, fail: boolean): string;\n",
+        "export declare function mixedCatch(mode: number, values: number[]): string;\n",
     );
     let source = concat!(
         "function arrayResult(values, fail) { try { if (fail) throw values; return { count: 0, label: 'ok' }; } catch (error) { return { count: error.length, label: 'array' }; } } ",
         "function dictionaryResult(values, fail) { try { if (fail) throw values; return { count: 0, label: 'ok' }; } catch (error) { return { count: error.value, label: 'dictionary' }; } } ",
+        "function mixedResult(mode, values) { try { if (mode === 1) throw 'text'; if (mode === 2) throw values; return { count: 0, label: 'ok' }; } catch (error) { if (Array.isArray(error)) return { count: error.length, label: 'array' }; return { count: 0, label: error }; } } ",
         "module.exports.arrayCatch = (values, fail) => { const { count, label } = arrayResult(values, fail); return label + ':' + String(count); }; ",
         "module.exports.dictionaryCatch = (values, fail) => { const { count, label } = dictionaryResult(values, fail); return label + ':' + String(count); };",
+        "module.exports.mixedCatch = (mode, values) => { const { count, label } = mixedResult(mode, values); return label + ':' + String(count); };",
     );
     std::fs::write(package.join("package.d.ts"), dts).unwrap();
     std::fs::write(package.join("bundle.js"), source).unwrap();
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
-    for (index, name) in ["arrayCatch", "dictionaryCatch"].into_iter().enumerate() {
+    for (index, name) in ["arrayCatch", "dictionaryCatch", "mixedCatch"]
+        .into_iter()
+        .enumerate()
+    {
         let expression = jit_numeric_export(source, name, false, &declarations[index])
             .unwrap_or_else(|| panic!("{name}"));
         assert!(expression.contains("trystart"));
@@ -2299,7 +2305,7 @@ fn aggregate_catch_uses_collection_throw_values_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { arrayCatch, dictionaryCatch } from 'jit-aggregate-collection-catch';\nfunction main(): void { console.log(arrayCatch([1, 2, 3], false)); console.log(arrayCatch([1, 2, 3], true)); const values: Record<string, number> = { value: 42 }; console.log(dictionaryCatch(values, false)); console.log(dictionaryCatch(values, true)); }\n",
+        "import { arrayCatch, dictionaryCatch, mixedCatch } from 'jit-aggregate-collection-catch';\nfunction main(): void { console.log(arrayCatch([1, 2, 3], false)); console.log(arrayCatch([1, 2, 3], true)); const values: Record<string, number> = { value: 42 }; console.log(dictionaryCatch(values, false)); console.log(dictionaryCatch(values, true)); console.log(mixedCatch(0, [1, 2])); console.log(mixedCatch(1, [1, 2])); console.log(mixedCatch(2, [1, 2])); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2315,7 +2321,7 @@ fn aggregate_catch_uses_collection_throw_values_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "ok:0\narray:3\nok:0\ndictionary:42\n"
+        "ok:0\narray:3\nok:0\ndictionary:42\nok:0\ntext:0\narray:2\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
