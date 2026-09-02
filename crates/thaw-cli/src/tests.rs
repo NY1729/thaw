@@ -4081,6 +4081,35 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         thaw_hir::HirType::Str,
         thaw_hir::HirType::Bool,
     ]));
+    let fill = thaw_bridge::DtsFunction {
+        name: "fill".into(),
+        params: vec![
+            function.params[0].clone(),
+            ("replacement".into(), needle.clone()),
+        ],
+        required_params: 2,
+        ret: function.params[0].1.clone(),
+        ..function.clone()
+    };
+    assert!(jit_numeric_export(
+        "function fill(value, replacement) { if (Array.isArray(value)) return value.fill(replacement, 1); return value; } module.exports = { fill };",
+        "fill",
+        false,
+        &fill,
+    )
+    .is_some());
+    let copy_within = thaw_bridge::DtsFunction {
+        name: "copyWithin".into(),
+        ret: function.params[0].1.clone(),
+        ..function.clone()
+    };
+    assert!(jit_numeric_export(
+        "function copyWithin(value) { if (Array.isArray(value)) return value.copyWithin(0, 1); return value; } module.exports = { copyWithin };",
+        "copyWithin",
+        false,
+        &copy_within,
+    )
+    .is_some());
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],
