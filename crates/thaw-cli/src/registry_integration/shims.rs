@@ -1308,6 +1308,7 @@ fn jit_export(
     fn number_format_method<'a>(
         call: &'a CallExpr,
         parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
     ) -> Option<(&'static str, &'a Expr)> {
         if call.args.iter().any(|argument| argument.spread.is_some()) {
             return None;
@@ -1324,7 +1325,11 @@ fn jit_export(
         if property.sym == "toString"
             && matches!(member.obj.as_ref(), Expr::Ident(receiver) if parameters
                 .get(receiver.sym.as_ref())
-                .is_some_and(|token| token.starts_with('r')))
+                .is_some_and(|token| token.starts_with('r'))
+                || locals
+                    .get(receiver.sym.as_ref())
+                    .and_then(|tokens| jit_expression_kind(tokens))
+                    .is_some_and(|(kind, _)| kind == JitKind::Array))
         {
             return None;
         }
@@ -1377,8 +1382,8 @@ fn jit_export(
             .is_some_and(|token| token.starts_with('r'))
             && locals
                 .get(receiver.sym.as_ref())
-                .and_then(|tokens| array_prefix(tokens))
-                .is_none()
+                .and_then(|tokens| jit_expression_kind(tokens))
+                .is_none_or(|(kind, _)| kind != JitKind::Array)
         {
             return None;
         }
@@ -2558,8 +2563,8 @@ fn jit_export(
             {
                 encode_condition(expression, parameters, locals, context, output)?;
             }
-            Expr::Call(call) if number_format_method(call, parameters).is_some() => {
-                let (operation, receiver) = number_format_method(call, parameters)?;
+            Expr::Call(call) if number_format_method(call, parameters, locals).is_some() => {
+                let (operation, receiver) = number_format_method(call, parameters, locals)?;
                 let mut encoded = Vec::new();
                 encode_expression(receiver, parameters, locals, context, &mut encoded)?;
                 let receiver_kind = jit_expression_kind(&encoded)?.0;
@@ -2802,7 +2807,15 @@ fn jit_export(
                 if jit_expression_kind(&encoded)?.0 != JitKind::Array {
                     return None;
                 }
-                let prefix = array_prefix(&encoded)?;
+                let dynamic_array = encoded.last().is_some_and(|token| token == "untagarray");
+                if dynamic_array {
+                    encoded.pop();
+                }
+                let prefix = array_prefix(&encoded)
+                    .or_else(|| dynamic_array.then_some("dynamic"))?;
+                if dynamic_array && !matches!(method, "join" | "toString") {
+                    return None;
+                }
                 let encoded_receiver = encoded.clone();
                 let local_insert = matches!(method, "push" | "unshift")
                     .then(|| match receiver {
@@ -3082,7 +3095,11 @@ fn jit_export(
                         }
                         _ => return None,
                     }
-                    output.push(format!("{prefix}join"));
+                    output.push(if dynamic_array {
+                        "dynarrayjoin".into()
+                    } else {
+                        format!("{prefix}join")
+                    });
                 } else if matches!(method, "push" | "unshift") {
                     if call.args.is_empty() {
                         output.push("arraylen".into());
@@ -12336,8 +12353,18 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "rsat" | "rsget" => JitKind::String,
                 _ => unreachable!(),
             });
-        } else if matches!(token.as_str(), "rnjoin" | "rbjoin" | "rsjoin") {
-            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Array {
+        } else if matches!(
+            token.as_str(),
+            "rnjoin" | "rbjoin" | "rsjoin" | "dynarrayjoin"
+        ) {
+            if stack.pop()? != JitKind::String
+                || stack.pop()?
+                    != if token == "dynarrayjoin" {
+                        JitKind::Dynamic
+                    } else {
+                        JitKind::Array
+                    }
+            {
                 return None;
             }
             stack.push(JitKind::String);
