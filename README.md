@@ -2600,6 +2600,9 @@ Early fixed-aggregate returns and fall-through returns can join as well, includi
 nested `if` blocks. The JIT conditional instruction carries any positive number
 of same-layout typed results across the branch edge, so all requested leaves and
 their selected-branch side effects are produced by one condition evaluation.
+`while` and classic `for` loops, `switch`, and `try`/`finally` blocks may update the
+same helper-local slots before a final fixed aggregate return; their existing
+native control-flow instructions compose directly with aggregate materialization.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
