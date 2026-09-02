@@ -2524,7 +2524,9 @@ operation while the non-array fixed-object branch remains separately narrowed.
 If every array and tuple alternative has the same number, boolean, or string
 element type, computed index reads also reuse the corresponding typed JIT array
 operation; the tuple schema remains compile-time metadata rather than a wider
-runtime value.
+runtime value. The same narrowing now feeds `.at()`, `.includes()`, `.join()`,
+and `.slice()` into their existing typed array instructions, so both ordinary
+arrays and fixed tuples use those methods without loading QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
