@@ -2425,7 +2425,9 @@ Optional chaining may return primitive arrays and dictionaries directly; both
 the present value and `undefined` now cross the native JIT boundary without
 loading QuickJS. The same presence channel composes with tagged primitive
 unions such as `(number | string) | undefined` without dereferencing an absent
-payload.
+payload. Optional parameters whose payload is a tagged union use three JIT
+slots for presence, runtime tag, and payload; `??` normalizes its selected
+fallback to the same tagged representation.
 Mutable dynamic locals may be reassigned between these representable shapes;
 array results are converted to stable native handles before tagging. Other
 heterogeneous result mixtures still remain on the QuickJS path. Tagged

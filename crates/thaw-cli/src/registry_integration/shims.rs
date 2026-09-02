@@ -2420,13 +2420,16 @@ fn jit_export(
                 while let Some(operand) = operands.pop() {
                     let fallback = selected;
                     if let Some((presence, value)) = optional_tokens(operand, parameters) {
+                        let mut present = vec![value.into()];
+                        let mut fallback = fallback;
+                        normalize_callable_branches([&mut present, &mut fallback])?;
                         selected = vec![
                             presence.into(),
                             "asbool".into(),
                             "if".into(),
-                            value.into(),
-                            "else".into(),
                         ];
+                        selected.extend(present);
+                        selected.push("else".into());
                         selected.extend(fallback);
                         selected.push("end".into());
                     } else if let Expr::OptChain(chain) = operand {
@@ -11006,13 +11009,21 @@ fn jit_export(
         };
         let optional = *optional_parameter || optional_type;
         if let thaw_hir::HirType::Union(elements) = ty {
-            if optional || default.is_some() || !jit_tagged_union(elements) {
+            if default.is_some() || !jit_tagged_union(elements) {
                 return None;
             }
             let kinds = elements
                 .iter()
                 .map(jit_union_member_code)
                 .collect::<Option<String>>()?;
+            if optional {
+                parameters.insert(
+                    parameter.clone(),
+                    format!("optional:a{slot}:u{}{kinds}", slot + 1),
+                );
+                slot += 3;
+                continue;
+            }
             locals.insert(parameter.clone(), vec![format!("u{slot}{kinds}")]);
             slot += 2;
             continue;
@@ -13377,10 +13388,11 @@ fn jit_numeric_declaration(
     let direct_params = params
         .iter()
         .map(|(name, ty, optional)| {
-            format!(
-                "{name}: {ty}{}",
-                if *optional { " | undefined" } else { "" }
-            )
+            if *optional {
+                format!("{name}: ({ty}) | undefined")
+            } else {
+                format!("{name}: {ty}")
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
