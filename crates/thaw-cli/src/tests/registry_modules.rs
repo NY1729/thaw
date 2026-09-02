@@ -1935,6 +1935,72 @@ fn tuple_union_iteration_and_spread_use_jit_without_quickjs() {
 }
 
 #[test]
+fn tuple_union_destructuring_uses_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function numberPair(value: number[] | [number, number]): number;\n",
+        "export declare function stringEnds(value: string[] | [string, string, string]): string;\n",
+        "export declare function booleanPair(value: boolean[] | [boolean, boolean]): boolean;\n",
+    );
+    let source = concat!(
+        "module.exports.numberPair = value => { const [first, second] = value; return first * 10 + second; }; ",
+        "module.exports.stringEnds = value => { const [first, , third] = value; return first + third; }; ",
+        "module.exports.booleanPair = value => { let [first, second] = value; first = !first; return first && second; };",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in ["numberPair", "stringEnds", "booleanPair"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-destructuring-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union-destructuring");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { booleanPair, numberPair, stringEnds } from 'jit-tuple-union-destructuring';\n",
+            "function main(): void {\n",
+            "  console.log(numberPair([1, 2, 3]));\n",
+            "  console.log(numberPair([5, 6] as [number, number]));\n",
+            "  console.log(stringEnds(['a', 'b', 'c', 'd']));\n",
+            "  console.log(stringEnds(['x', 'y', 'z'] as [string, string, string]));\n",
+            "  console.log(booleanPair([false, true, false]));\n",
+            "  console.log(booleanPair([true, true] as [boolean, boolean]));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "12\n56\nac\nxz\ntrue\nfalse\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
