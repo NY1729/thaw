@@ -1988,6 +1988,31 @@ extern "C" fn dynamic_array_join(value: f64, separator: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_slice(value: f64, start: f64, end: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| {
+            if !matches!(
+                dynamic.tag,
+                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+            ) {
+                CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+                return 0.0;
+            }
+            let result = array_slice(f64::from_bits(dynamic.payload), start, end);
+            if result == 0.0 {
+                0.0
+            } else {
+                dynamic_from_parts(dynamic.tag as f64, result)
+            }
+        },
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_slice(value: f64, start: f64, end: f64) -> f64 {
     let (Some(slice), Some((data, _))) =
         (ARRAY_SLICE.with(Cell::get), unsafe { array_data(value) })
@@ -4035,6 +4060,7 @@ enum NumericValue {
     BoolArrayJoin,
     StringArrayJoin,
     DynamicArrayJoin,
+    DynamicArraySlice,
     ArraySlice,
     ArrayConcat,
     NumberArrayAppend,
@@ -4380,6 +4406,7 @@ impl NumericProgram {
                     "rbjoin" => Some(NumericValue::BoolArrayJoin),
                     "rsjoin" => Some(NumericValue::StringArrayJoin),
                     "dynarrayjoin" => Some(NumericValue::DynamicArrayJoin),
+                    "dynarrayslice" => Some(NumericValue::DynamicArraySlice),
                     "arrayslice" => Some(NumericValue::ArraySlice),
                     "arrayconcat" => Some(NumericValue::ArrayConcat),
                     "rnappend" => Some(NumericValue::NumberArrayAppend),
@@ -5838,6 +5865,17 @@ impl NumericProgram {
                         return None;
                     }
                     emit_ternary_call(&mut code, array_slice as *const () as u64, depth - 3);
+                    depth -= 2;
+                }
+                NumericValue::DynamicArraySlice => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    emit_ternary_call(
+                        &mut code,
+                        dynamic_array_slice as *const () as u64,
+                        depth - 3,
+                    );
                     depth -= 2;
                 }
                 NumericValue::ArrayConcat => {

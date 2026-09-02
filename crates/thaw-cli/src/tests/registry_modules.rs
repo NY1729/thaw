@@ -1681,18 +1681,18 @@ fn aggregate_union_narrows_array_then_dictionary_in_jit() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function describe(value: number[] | Record<string, number> | string): string;\nexport declare function multiSize(value: number[] | string[] | boolean[] | string): number;\nexport declare function multiJoin(value: number[] | string[] | boolean[] | string): string;\nexport declare function multiText(value: number[] | string[] | boolean[] | string): string;\n",
+        "export declare function describe(value: number[] | Record<string, number> | string): string;\nexport declare function multiSize(value: number[] | string[] | boolean[] | string): number;\nexport declare function multiJoin(value: number[] | string[] | boolean[] | string): string;\nexport declare function multiText(value: number[] | string[] | boolean[] | string): string;\nexport declare function multiSlice(value: number[] | string[] | boolean[] | string): number[] | string[] | boolean[] | string;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function describe(value) { if (Array.isArray(value)) return String(value.length); if (typeof value === 'object') return String(value.count); return value.toUpperCase(); } function multiSize(value) { if (Array.isArray(value)) return value.length; return value.length; } function multiJoin(value) { if (Array.isArray(value)) return value.join('|'); return value.toUpperCase(); } function multiText(value) { if (Array.isArray(value)) return value.toString(); return value.toUpperCase(); } module.exports = { describe, multiSize, multiJoin, multiText };\n",
+        "function describe(value) { if (Array.isArray(value)) return String(value.length); if (typeof value === 'object') return String(value.count); return value.toUpperCase(); } function multiSize(value) { if (Array.isArray(value)) return value.length; return value.length; } function multiJoin(value) { if (Array.isArray(value)) return value.join('|'); return value.toUpperCase(); } function multiText(value) { if (Array.isArray(value)) return value.toString(); return value.toUpperCase(); } function multiSlice(value) { if (Array.isArray(value)) return value.slice(1); return value.slice(1); } module.exports = { describe, multiSize, multiJoin, multiText, multiSlice };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { describe, multiSize, multiJoin, multiText } from 'jit-staged-aggregate-narrowing'; function main(): void { const record: Record<string, number> = { count: 42 }; console.log(describe([1, 2, 3])); console.log(describe(record)); console.log(describe('word')); console.log(multiSize([1, 2])); console.log(multiSize(['a', 'b', 'c'])); console.log(multiSize([true])); console.log(multiSize('word')); console.log(multiJoin([1, 2])); console.log(multiJoin(['a', 'b'])); console.log(multiJoin([true, false])); console.log(multiJoin('word')); console.log(multiText([1, 2])); console.log(multiText(['a', 'b'])); console.log(multiText([true, false])); }\n",
+        "import { describe, multiSize, multiJoin, multiText, multiSlice } from 'jit-staged-aggregate-narrowing'; function main(): void { const record: Record<string, number> = { count: 42 }; console.log(describe([1, 2, 3])); console.log(describe(record)); console.log(describe('word')); console.log(multiSize([1, 2])); console.log(multiSize(['a', 'b', 'c'])); console.log(multiSize([true])); console.log(multiSize('word')); console.log(multiJoin([1, 2])); console.log(multiJoin(['a', 'b'])); console.log(multiJoin([true, false])); console.log(multiJoin('word')); console.log(multiText([1, 2])); console.log(multiText(['a', 'b'])); console.log(multiText([true, false])); console.log(multiSize(multiSlice([1, 2, 3]))); console.log(multiSize(multiSlice(['a', 'b', 'c']))); console.log(multiSize(multiSlice([true, false]))); console.log(multiSize(multiSlice('word'))); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1708,7 +1708,7 @@ fn aggregate_union_narrows_array_then_dictionary_in_jit() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "3\n42\nWORD\n2\n3\n1\n4\n1|2\na|b\ntrue|false\nWORD\n1,2\na,b\ntrue,false\n"
+        "3\n42\nWORD\n2\n3\n1\n4\n1|2\na|b\ntrue|false\nWORD\n1,2\na,b\ntrue,false\n2\n2\n1\n3\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
