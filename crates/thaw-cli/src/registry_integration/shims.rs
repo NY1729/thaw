@@ -3072,6 +3072,69 @@ fn jit_export(
                         .cloned()
                         .or_else(|| parameters.get(&field).map(|value| vec![value.clone()]))?;
                     let (getter, receiver) = operation.split_last()?;
+                    if matches!(assignment, AssignOp::AndAssign | AssignOp::OrAssign) {
+                        let kind = jit_expression_kind(&operation)?.0;
+                        if !matches!(kind, JitKind::Number | JitKind::Boolean | JitKind::String)
+                            || getter.starts_with("objopt")
+                            || getter.starts_with("objnullable")
+                            || getter.starts_with("objnull")
+                        {
+                            return None;
+                        }
+                        let mut assigned = encode_fixed_field_assignment(
+                            path,
+                            key,
+                            value,
+                            AssignOp::Assign,
+                            parameters,
+                            locals,
+                            context,
+                        )?;
+                        let mut current = operation;
+                        normalize_callable_branches([&mut current, &mut assigned])?;
+                        current.push("dup".into());
+                        match kind {
+                            JitKind::Number => current.push("asbool".into()),
+                            JitKind::String => current.push("strbool".into()),
+                            JitKind::Boolean => {}
+                            _ => unreachable!(),
+                        }
+                        current.push(
+                            if assignment == AssignOp::AndAssign {
+                                "&&"
+                            } else {
+                                "||"
+                            }
+                            .into(),
+                        );
+                        current.extend(assigned);
+                        current.push("end".into());
+                        return Some(current);
+                    }
+                    if assignment == AssignOp::NullishAssign {
+                        let tagged = getter.starts_with("objopt")
+                            || getter.starts_with("objnullable")
+                            || getter.starts_with("objnull");
+                        if !tagged {
+                            return Some(operation);
+                        }
+                        let mut assigned = encode_fixed_field_assignment(
+                            path,
+                            key,
+                            value,
+                            AssignOp::Assign,
+                            parameters,
+                            locals,
+                            context,
+                        )?;
+                        let mut present = operation;
+                        normalize_callable_branches([&mut present, &mut assigned])?;
+                        present.push("ifpresent".into());
+                        present.push("else".into());
+                        present.extend(assigned);
+                        present.push("end".into());
+                        return Some(present);
+                    }
                     if assignment != AssignOp::Assign {
                         if let Some((semantic, offset)) = getter
                             .strip_prefix("objoptn")
