@@ -7161,6 +7161,7 @@ fn jit_export(
             Stmt::DoWhile(statement) => contains_aggregate_return(statement.body.as_ref()),
             Stmt::For(statement) => contains_aggregate_return(statement.body.as_ref()),
             Stmt::ForOf(statement) => contains_aggregate_return(statement.body.as_ref()),
+            Stmt::ForIn(statement) => contains_aggregate_return(statement.body.as_ref()),
             _ => false,
         }
     }
@@ -7530,6 +7531,120 @@ fn jit_export(
                     index_local.clone(),
                     format!("{array}get"),
                     format!("setl{element_index}"),
+                ]);
+                let nested_control_kinds = helper_control_kinds(&nested_kinds, &nested_locals)?;
+                encode_aggregate_return_effects(
+                    loop_statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    &nested_locals,
+                    &nested_mutable,
+                    &nested_control_kinds,
+                    result_base_kinds,
+                    context,
+                    expected_kinds,
+                    expected_values,
+                    output,
+                )?;
+                output.extend([
+                    "looptail".into(),
+                    index_local,
+                    format!("c{:016x}", 1.0f64.to_bits()),
+                    "+".into(),
+                    format!("setl{index}"),
+                    "loopend".into(),
+                ]);
+                output.extend(std::iter::repeat_n(
+                    "drop".into(),
+                    nested_kinds.len().checked_sub(control_kinds.len())?,
+                ));
+                Some(())
+            }
+            Stmt::ForIn(loop_statement)
+                if contains_aggregate_return(loop_statement.body.as_ref()) =>
+            {
+                let mut nested_locals = locals.clone();
+                let mut nested_mutable = mutable.clone();
+                let mut nested_kinds = control_kinds.clone();
+                let mut source = Vec::new();
+                encode_expression(
+                    loop_statement.right.as_ref(),
+                    parameters,
+                    &nested_locals,
+                    context,
+                    &mut source,
+                )?;
+                if jit_expression_kind(&source)?.0 != JitKind::Dictionary {
+                    return None;
+                }
+                let dictionary = dictionary_prefix(&source)?;
+                let local_prefix = format!("{dictionary}l");
+                let source_local = if let [source] = source.as_slice() {
+                    source.starts_with(&local_prefix).then(|| source.clone())
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| {
+                    let source_index = nested_kinds.len();
+                    output.extend(source);
+                    nested_kinds.insert(
+                        format!("\0forin-source-{source_index}"),
+                        JitKind::Dictionary,
+                    );
+                    format!("{dictionary}l{source_index}")
+                });
+                let index = nested_kinds.len();
+                output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                nested_kinds.insert(format!("\0forin-index-{index}"), JitKind::Number);
+                let index_local = format!("ln{index}");
+                let key_index = match &loop_statement.left {
+                    ForHead::VarDecl(declaration) => {
+                        let [declarator] = declaration.decls.as_slice() else {
+                            return None;
+                        };
+                        let Pat::Ident(name) = &declarator.name else {
+                            return None;
+                        };
+                        if declarator.init.is_some()
+                            || parameters.contains_key(name.id.sym.as_ref())
+                            || nested_locals.contains_key(name.id.sym.as_ref())
+                        {
+                            return None;
+                        }
+                        encode_string("", output)?;
+                        let key_index = nested_kinds.len();
+                        nested_locals
+                            .insert(name.id.sym.to_string(), vec![format!("ls{key_index}")]);
+                        nested_kinds.insert(name.id.sym.to_string(), JitKind::String);
+                        if declaration.kind != VarDeclKind::Const {
+                            nested_mutable.insert(name.id.sym.to_string());
+                        }
+                        key_index
+                    }
+                    ForHead::Pat(pattern) => {
+                        let Pat::Ident(name) = pattern.as_ref() else {
+                            return None;
+                        };
+                        if !nested_mutable.contains(name.id.sym.as_ref())
+                            || nested_kinds.get(name.id.sym.as_ref())? != &JitKind::String
+                        {
+                            return None;
+                        }
+                        loop_local_index(nested_locals.get(name.id.sym.as_ref())?.first()?)?
+                    }
+                    ForHead::UsingDecl(_) => return None,
+                };
+                output.extend([
+                    "loop".into(),
+                    index_local.clone(),
+                    source_local.clone(),
+                    "dlen".into(),
+                    "<".into(),
+                    "while".into(),
+                    source_local,
+                    index_local.clone(),
+                    "dkeyat".into(),
+                    format!("setl{key_index}"),
                 ]);
                 let nested_control_kinds = helper_control_kinds(&nested_kinds, &nested_locals)?;
                 encode_aggregate_return_effects(
