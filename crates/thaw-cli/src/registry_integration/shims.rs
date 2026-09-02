@@ -273,33 +273,57 @@ fn jit_export(
         else {
             return Some(());
         };
-        let mut offset = 0u16;
-        for (field, ty) in fields {
-            let operation = match ty {
-                thaw_hir::HirType::F64 => "objn",
-                thaw_hir::HirType::Bool => "objb",
-                thaw_hir::HirType::Str => "objs",
-                _ => {
-                    offset = offset.checked_add(if matches!(
-                        ty,
-                        thaw_hir::HirType::Optional(_)
-                            | thaw_hir::HirType::Nullable(_)
-                            | thaw_hir::HirType::Nullish(_)
-                            | thaw_hir::HirType::Union(_)
-                    ) {
-                        16
-                    } else {
-                        8
-                    })?;
-                    continue;
+        fn bind_fields(
+            path: &str,
+            fields: &[(String, thaw_hir::HirType)],
+            source: &[String],
+            locals: &mut std::collections::HashMap<String, Vec<String>>,
+        ) -> Option<()> {
+            let mut offset = 0u16;
+            for (field, ty) in fields {
+                let operation = match ty {
+                    thaw_hir::HirType::F64 => Some("objn"),
+                    thaw_hir::HirType::Bool => Some("objb"),
+                    thaw_hir::HirType::Str => Some("objs"),
+                    thaw_hir::HirType::Array(element)
+                        if jit_array_result_element_supported(element) =>
+                    {
+                        Some(match element.as_ref() {
+                            thaw_hir::HirType::F64 => "objrn",
+                            thaw_hir::HirType::Bool => "objrb",
+                            thaw_hir::HirType::Str => "objrs",
+                            _ => unreachable!(),
+                        })
+                    }
+                    thaw_hir::HirType::Object(_) => Some("objo"),
+                    _ => None,
+                };
+                if let Some(operation) = operation {
+                    let field_path = format!("{path}.{field}");
+                    let mut value = source.to_vec();
+                    value.push(format!("{operation}{offset}"));
+                    locals.insert(field_path.clone(), value.clone());
+                    if let thaw_hir::HirType::Object(nested) = ty {
+                        bind_fields(&field_path, nested, &value, locals)?;
+                    }
                 }
-            };
-            let mut value = source.to_vec();
-            value.extend(["untagobject".into(), format!("{operation}{offset}")]);
-            locals.insert(format!("{path}.{field}"), value);
-            offset = offset.checked_add(8)?;
+                offset = offset.checked_add(if matches!(
+                    ty,
+                    thaw_hir::HirType::Optional(_)
+                        | thaw_hir::HirType::Nullable(_)
+                        | thaw_hir::HirType::Nullish(_)
+                        | thaw_hir::HirType::Union(_)
+                ) {
+                    16
+                } else {
+                    8
+                })?;
+            }
+            Some(())
         }
-        Some(())
+        let mut object = source.to_vec();
+        object.push("untagobject".into());
+        bind_fields(path, fields, &object, locals)
     }
 
     fn member_path(expression: &Expr) -> Option<String> {
@@ -11735,6 +11759,11 @@ fn array_prefix(expression: &[String]) -> Option<&'static str> {
             "dsvalues" => return Some("rs"),
             _ => {}
         }
+        for (field, prefix) in [("objrn", "rn"), ("objrb", "rb"), ("objrs", "rs")] {
+            if token.starts_with(field) {
+                return Some(prefix);
+            }
+        }
         ["rn", "rb", "rs"]
             .into_iter()
             .find(|prefix| token.starts_with(prefix))
@@ -13363,21 +13392,22 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "untagrn" | "untagrb" | "untagrs" | "untagarray" => JitKind::Array,
                 _ => JitKind::Dictionary,
             });
-        } else if token.starts_with("objn")
-            || token.starts_with("objb")
-            || token.starts_with("objs")
+        } else if let Some((kind, offset)) = [
+            ("objn", JitKind::Number),
+            ("objb", JitKind::Boolean),
+            ("objs", JitKind::String),
+            ("objrn", JitKind::Array),
+            ("objrb", JitKind::Array),
+            ("objrs", JitKind::Array),
+            ("objo", JitKind::Dictionary),
+        ]
+        .into_iter()
+        .find_map(|(prefix, kind)| token.strip_prefix(prefix).map(|offset| (kind, offset)))
         {
-            if stack.pop()? != JitKind::Dictionary
-                || token.get(4..)?.parse::<u16>().is_err()
-            {
+            if stack.pop()? != JitKind::Dictionary || offset.parse::<u16>().is_err() {
                 return None;
             }
-            stack.push(match token.as_bytes().get(3)? {
-                b'n' => JitKind::Number,
-                b'b' => JitKind::Boolean,
-                b's' => JitKind::String,
-                _ => return None,
-            });
+            stack.push(kind);
         } else if matches!(
             token.as_str(),
             "missingcalln"
