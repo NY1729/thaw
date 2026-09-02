@@ -36,9 +36,12 @@ struct JitLocal {
 
 fn jit_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
     jit_argument_tagged_union(elements)
-        && !elements
+        && !(elements
             .iter()
             .any(|element| matches!(element, thaw_hir::HirType::Object(_)))
+            && elements
+                .iter()
+                .any(|element| matches!(element, thaw_hir::HirType::Dictionary(_))))
 }
 
 fn jit_argument_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
@@ -749,6 +752,13 @@ fn jit_export(
             _ => {
                 let mut encoded = Vec::new();
                 encode_expression(expression, parameters, locals, context, &mut encoded)?;
+                if matches!(ty, thaw_hir::HirType::Union(elements) if elements.iter().any(|element| matches!(element, thaw_hir::HirType::Object(_))))
+                    && encoded
+                        .iter()
+                        .any(|token| matches!(token.as_str(), "tagdn" | "tagdb" | "tagds"))
+                {
+                    return None;
+                }
                 Some(JitExport::Value(validated_jit_expression(
                     encoded,
                     jit_return_kind(ty)?,

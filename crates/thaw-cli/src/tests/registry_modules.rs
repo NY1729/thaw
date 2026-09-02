@@ -1183,6 +1183,21 @@ fn optional_aggregates_use_jit_without_quickjs() {
 }
 
 #[test]
+fn fixed_object_union_result_rejects_dictionary_storage() {
+    let functions = thaw_bridge::parse_dts(
+        "export interface Item { count: number; }\nexport declare function make(flag: boolean): Item | string;\n",
+    )
+    .unwrap();
+    assert!(jit_numeric_export(
+        "module.exports.make = flag => flag ? { count: 1 } : 'text';",
+        "make",
+        false,
+        &functions[0],
+    )
+    .is_none());
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
@@ -1193,18 +1208,18 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Item { count: number; label: string; enabled: boolean; }\nexport declare function valueOr(value?: Item | string): string;\nexport declare function describe(value: Item | string): string;\n",
+        "export interface Item { count: number; label: string; enabled: boolean; }\nexport declare function valueOr(value?: Item | string): string;\nexport declare function describe(value: Item | string): string;\nexport declare function identity(value: Item | string): Item | string;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.label + ':' + String(value.enabled) : value.toUpperCase();\n",
+        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.label + ':' + String(value.enabled) : value.toUpperCase(); module.exports.identity = value => value;\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { valueOr, describe } from 'jit-optional-object-union';\nfunction main(): void { const item = { count: 1, label: 'one', enabled: true }; console.log(valueOr(item)); console.log(valueOr('text')); console.log(valueOr()); console.log(describe(item)); console.log(describe('text')); }\n",
+        "import { valueOr, describe, identity } from 'jit-optional-object-union';\nfunction show(value: { count: number; label: string; enabled: boolean } | string): void { if (typeof value === 'object') console.log(value.label); else console.log(value); }\nfunction main(): void { const item = { count: 1, label: 'one', enabled: true }; console.log(valueOr(item)); console.log(valueOr('text')); console.log(valueOr()); console.log(describe(item)); console.log(describe('text')); show(identity(item)); show(identity('result')); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1220,7 +1235,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[object Object]\ntext\nmissing\n1:one:true\nTEXT\n"
+        "[object Object]\ntext\nmissing\n1:one:true\nTEXT\none\nresult\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
