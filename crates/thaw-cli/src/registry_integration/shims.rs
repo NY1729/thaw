@@ -188,6 +188,7 @@ fn jit_export(
                 fields.iter().all(|(_, ty)| jit_result_supported(ty))
             }
             thaw_hir::HirType::Tuple(elements) => elements.iter().all(jit_result_supported),
+            thaw_hir::HirType::Optional(payload) => jit_result_supported(payload),
             _ => false,
         }
     }
@@ -297,6 +298,12 @@ fn jit_export(
                         _ => return None,
                     }),
                     thaw_hir::HirType::Tuple(_) => Some("objt"),
+                    thaw_hir::HirType::Optional(payload) => Some(match payload.as_ref() {
+                        thaw_hir::HirType::F64 => "objoptn",
+                        thaw_hir::HirType::Bool => "objoptb",
+                        thaw_hir::HirType::Str => "objopts",
+                        _ => return None,
+                    }),
                     _ => None,
                 };
                 if let Some(operation) = operation {
@@ -715,9 +722,29 @@ fn jit_export(
                 return None;
             }
         }
-        let size = u16::try_from(fields.len().checked_mul(8)?).ok()?;
+        if properties
+            .keys()
+            .any(|property| !fields.iter().any(|(field, _)| field == property))
+        {
+            return None;
+        }
+        let field_size = |ty: &thaw_hir::HirType| {
+            if matches!(
+                ty,
+                thaw_hir::HirType::Optional(_)
+                    | thaw_hir::HirType::Nullable(_)
+                    | thaw_hir::HirType::Nullish(_)
+                    | thaw_hir::HirType::Union(_)
+            ) {
+                16usize
+            } else {
+                8
+            }
+        };
+        let size = u16::try_from(fields.iter().map(|(_, ty)| field_size(ty)).sum::<usize>()).ok()?;
         let mut output = vec![format!("objnew{size}")];
-        for (index, (field, ty)) in fields.iter().enumerate() {
+        let mut offset = 0usize;
+        for (field, ty) in fields {
             let (value, operation) = match properties.get(field)? {
                 ObjectReturnValue::Expression(expression) => match ty {
                     thaw_hir::HirType::Object(nested) => (
@@ -766,6 +793,23 @@ fn jit_export(
                         )?,
                         'a',
                     ),
+                    thaw_hir::HirType::Optional(payload) => {
+                        let mut value = Vec::new();
+                        encode_expression(expression, parameters, locals, context, &mut value)?;
+                        let expected = jit_return_kind(payload)?;
+                        if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                            return None;
+                        }
+                        (
+                            value,
+                            match payload.as_ref() {
+                                thaw_hir::HirType::F64 => 'n',
+                                thaw_hir::HirType::Bool => 'b',
+                                thaw_hir::HirType::Str => 's',
+                                _ => return None,
+                            },
+                        )
+                    }
                     _ => {
                         let mut value = Vec::new();
                         encode_expression(expression, parameters, locals, context, &mut value)?;
@@ -830,7 +874,20 @@ fn jit_export(
                 }
             };
             output.extend(value);
-            output.push(format!("objset{operation}{offset}", offset = index * 8));
+            if let thaw_hir::HirType::Optional(payload) = ty {
+                let payload_offset = offset
+                    + if matches!(payload.as_ref(), thaw_hir::HirType::Bool) {
+                        1
+                    } else {
+                        8
+                    };
+                output.push(format!("objset{operation}{payload_offset}"));
+                output.push(format!("c{:016x}", 1.0f64.to_bits()));
+                output.push(format!("objsetb{offset}"));
+            } else {
+                output.push(format!("objset{operation}{offset}"));
+            }
+            offset += field_size(ty);
         }
         Some(output)
     }
@@ -11786,7 +11843,9 @@ fn jit_export(
     }
     if local_steps.is_empty() && !starts_loop {
         if let thaw_bridge::DtsType::Native(ty) = &function.ret {
-            if jit_result_supported(ty) {
+            if jit_result_supported(ty)
+                && !matches!(ty, thaw_hir::HirType::Optional(_))
+            {
                 return encode_aggregate_body(body, ty, &parameters, &locals, &mut context);
             }
         }
@@ -12052,6 +12111,9 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
     let Some(token) = operation.last().map(String::as_str) else {
         return false;
     };
+    if token.starts_with("objopt") {
+        return true;
+    }
     matches!(
         token,
         "at"
@@ -13641,6 +13703,18 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "untagrn" | "untagrb" | "untagrs" | "untagarray" => JitKind::Array,
                 _ => JitKind::Dictionary,
             });
+        } else if let Some((kind, offset)) = [
+            ("objoptn", JitKind::Number),
+            ("objoptb", JitKind::Boolean),
+            ("objopts", JitKind::String),
+        ]
+        .into_iter()
+        .find_map(|(prefix, kind)| token.strip_prefix(prefix).map(|offset| (kind, offset)))
+        {
+            if stack.pop()? != JitKind::Dictionary || offset.parse::<u16>().is_err() {
+                return None;
+            }
+            stack.push(kind);
         } else if let Some((kind, offset)) = [
             ("objn", JitKind::Number),
             ("objb", JitKind::Boolean),
