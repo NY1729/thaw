@@ -2308,15 +2308,76 @@ QuickJS. Initializers that actually
 cross a `let`/`const` temporal dead zone remain unsupported. Local and
 module-level function aliases whose final target
 is statically known reuse the same helper inliner, including straight-line
-mutable alias reassignment. A direct `(condition ? left : right)(args)` call
+mutable alias reassignment. Leading `if` statements may also select and
+re-select between finite helper aliases before a shared return-time call,
+including assignments wrapped in nested single-effect blocks, without
+materializing a JavaScript function object. The same finite selector now spans
+general leading `switch` and `try`/`catch`/`finally` control flow, including
+boolean switch cases and finalizer reassignment. A local initialized from a
+static helper may later take a function captured from a dynamic table: the
+table-local selector is remapped into the unified finite helper set while
+preserving a missing-entry selector until call time. Conversely, a local
+initialized from a dynamic table may later select a supported static helper
+outside that table; the extra helper extends the local candidate set without
+renumbering the table's existing selectors. Fixed-key mutable tables backed by
+atomic per-property selectors participate in the same union, so a local may
+move between an unrelated static helper and a captured `table.run` value
+without promoting that table to the heavier arbitrary-key registry. Mutable aliases selected inside
+typed `while`, `do...while`, classic `for`, `for...of`, and `for...in` loops use
+a numeric JIT local and dispatch the final finite helper after the loop. Updates
+survive reached `break` and `continue` paths, including their `finally` blocks.
+Both initialization and later assignment may use a finite conditional helper
+expression; only its numeric candidate index is stored. A direct
+`(condition ? left : right)(args)` call
 lowers to lazy typed JIT branches when both targets are supported helpers.
 Immutable module-level function tables such as `{ add, double: twice }` also
 lower computed string-key calls to lazy JIT comparisons when every target has a
 common supported result type: number, boolean, string, primitive array, or
 primitive dictionary. The key is evaluated once, and a missing entry reports
 `value is not a function` directly from the JIT. Straight-line module
+function bodies may store an immutable table element, using either a computed
+scalar key or a named property, in a local alias and call it later; the
+specialization preserves the known table plus the key
+expression and performs the same typed JIT dispatch without materializing a
+JavaScript function object. Tables updated by exported functions require a
+get-time selector snapshot: named properties and computed string-literal keys
+store that selector in a numeric JIT local, so later table updates do not change
+the already obtained function. Runtime-computed keys use the same snapshot when
+the table has a dynamic-key registry; the key is evaluated once, and newly
+created entries work without QuickJS. A mutable local alias may be reassigned
+from another dynamic table lookup; the existing numeric JIT local is updated
+with the new get-time selector and remains independent of later table changes.
+Typed `if` branches may update that same selector from different table keys and
+join before a shared call, without duplicating the call-time helper dispatch.
+This includes nested blocks, multiple statements, and `else if` chains; block
+locals are discarded at their scope boundary while the outer selector update
+survives.
+Typed loops may likewise carry the selector as a numeric loop local and replace
+it from a dynamic table lookup on reached iterations; the zero-iteration path
+retains the pre-loop snapshot. Loops may follow an earlier typed branch or
+another supported control-flow statement while reusing that same selector,
+rather than requiring the loop to be the first statement after local setup.
+Mutable scalar and aggregate declarations used by such control-flow sequences
+are materialized in the same typed JIT local slots as loop counters, so their
+updates remain visible to later conditions and the shared return path.
+Straight-line assignments, supported compound assignments, and numeric
+increments/decrements between declaration and the first control-flow statement
+update those slots directly rather than reverting to expression substitution.
+Reached updates also survive `continue` and
+`break` control paths, including the required `finally` execution before the
+loop resumes or exits. Dynamic selector updates inside loop `switch` cases,
+nested blocks, and `try`/`catch` handlers use the same local and join with the
+unselected path before the final call. A leading `switch` or
+`try`/`catch`/`finally` outside a loop can update the same selector before a
+shared return-time call. Case `break`, caught throws, and finalizer effects use
+the existing native JIT control-flow path, while later table mutations preserve
+the function value captured at lookup time.
+Tables represented only by separate
+finite per-key selectors still retain the fallback for a runtime-computed alias
+key. Straight-line module
 initialization may replace a mutable table or assign identifier/string-literal
-properties; specialization uses the final state visible after initialization.
+properties; computed properties may also use a module-local constant string,
+and specialization uses the final state visible after initialization.
 Exported functions may also assign a known helper to an existing
 identifier/string-literal table key: an atomic module-scoped selector preserves
 the choice across calls and exports, and both static and computed-key calls use
@@ -2327,17 +2388,34 @@ atomic selector update. These updates also compose with the typed `if`, loop,
 and `try`/`finally` control-flow lowering, so only reached assignments change
 the persistent selector. Assignment values may likewise be a finite conditional
 helper expression such as `flag ? twice : increment`; key and helper conditions
-are each evaluated once on the selected update path. Function values obtained
-from arbitrary external runtime data, unbounded computed-key mutation, new keys
-created during an exported call, or mixed-result tables remain on the QuickJS
-path. Calls to side-effect-free function
+are each evaluated once on the selected update path. A computed key may also be
+any JIT-supported runtime string: a module-scoped dynamic table stores its finite
+helper selection by string, including new keys created during exported calls,
+and shares those updates across exports. Function values obtained from arbitrary
+external runtime data remain on the QuickJS path. Mixed number/boolean result
+tables use their shared JIT slot ABI, including computed calls and captured
+local aliases. Both atomic fixed-key updates and arbitrary runtime-key updates
+retain that mixed candidate set across calls, and captured values keep their
+get-time selection after the table is reset. Primitive result unions containing
+a string (`number | string`, `boolean | string`, or all three primitive types)
+use an arena-allocated tagged value with a one-word JIT handle; LLVM translates
+its semantic tag and payload into the existing native union layout, including
+computed table calls, conditional expressions, mutable locals, statement-level
+`if`/`switch` returns, cross-type local assignments in control flow and loops,
+and chained `typeof` inspection/narrowing inside JIT expressions and loop branches,
+without embedding QuickJS. Other heterogeneous result mixtures still remain on
+the QuickJS path. Calls
+to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
 including nested calls and forward function declarations; dynamic, shadowed, or
 indirect cycles that do not return to the exported root deliberately fall back
 instead. Named primitive exports can call themselves with up to eight flattened
 JIT argument slots and return a number, boolean, or string through a relative
 call to the same compiled JIT stub. Arguments may be number, boolean, string,
-primitive arrays, or fixed-shape objects and tuples composed from those leaves.
+tagged unions of those primitives, primitive arrays, or fixed-shape objects and
+tuples composed from those leaves. Tagged union arguments use two JIT slots for
+their semantic tag and payload, so results can flow directly into another
+specialized export without QuickJS.
 Array handles keep their native identity across recursive frames, including
 bounds-checked indexed reads and in-place mutation. A cycle that returns to that
 root can inline its intervening pure helpers, covering static mutual recursion
@@ -2353,7 +2431,7 @@ negation use the same IR, including ECMAScript's falsey `NaN` behavior.
 Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
 to use QuickJS for now.
 Fixed-shape object and tuple parameters whose leaves are number, boolean,
-string, or primitive arrays can now enter extracted JIT exports as well,
+string, tagged primitive unions, or primitive arrays can now enter extracted JIT exports as well,
 including mutually nested objects and tuples. LLVM recursively expands the
 native aggregate layout directly into typed JIT argument slots, so property
 reads, tuple and array indexing, and composed expressions avoid JSON conversion

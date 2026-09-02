@@ -1193,16 +1193,34 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function add(left: number, right: number): number;\nexport declare function accumulate(left: number, right: number): number;\nexport declare function choose(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\nexport declare function double(value: number): number;\nexport declare function negate(value: number): number;\nexport declare function mask(value: number): number;\nexport declare function fallbackOr(value: number, fallback: number): number;\nexport declare function guard(value: number, result: number): number;\nexport declare function magnitude(value: number): number;\nexport declare function roundedRoot(value: number): number;\nexport declare function logarithm(value: number): number;\nexport declare function integerMath(left: number, right: number): number;\nexport declare function numericPredicates(value: number): boolean;\nexport declare function stringPredicate(value: string): boolean;\nexport declare function stringLength(value: string): number;\nexport declare function stringLess(left: string, right: string): boolean;\nexport declare function greet(value: string): string;\nexport declare function matches(value: string): boolean;\nexport declare function find(value: string): number;\nexport declare function transform(value: string): string;\nexport declare function clean(value: string): string;\nexport declare function first(value: string, index: number): string;\nexport declare function code(value: string, index: number): number;\nexport declare function power(base: number, exponent: number): number;\nexport declare function less(left: number, right: number): boolean;\nexport declare function negateFlag(value: boolean): boolean;\nexport declare function remainder(left: number, right: number): number;\nexport declare function minimum(a: number, b: number, c: number): number;\nexport declare function maximum(a: number, b: number, c: number): number;\nexport declare function sum3(a: number, b: number, c: number): number;\nexport declare function answer(): number;\nexport declare function scaled(value: number): number;\nexport declare function localAlias(value: number): number;\nexport declare function chooseAlias(flag: boolean, value: number): number;\nexport declare function moduleAlias(value: number): number;\n",
+        "export declare function add(left: number, right: number): number;\nexport declare function accumulate(left: number, right: number): number;\nexport declare function choose(left: number, right: number): number;\nexport declare function sub(left: number, right: number): number;\nexport declare function double(value: number): number;\nexport declare function negate(value: number): number;\nexport declare function mask(value: number): number;\nexport declare function fallbackOr(value: number, fallback: number): number;\nexport declare function guard(value: number, result: number): number;\nexport declare function magnitude(value: number): number;\nexport declare function roundedRoot(value: number): number;\nexport declare function logarithm(value: number): number;\nexport declare function integerMath(left: number, right: number): number;\nexport declare function numericPredicates(value: number): boolean;\nexport declare function stringPredicate(value: string): boolean;\nexport declare function stringLength(value: string): number;\nexport declare function stringLess(left: string, right: string): boolean;\nexport declare function greet(value: string): string;\nexport declare function matches(value: string): boolean;\nexport declare function find(value: string): number;\nexport declare function transform(value: string): string;\nexport declare function clean(value: string): string;\nexport declare function first(value: string, index: number): string;\nexport declare function code(value: string, index: number): number;\nexport declare function power(base: number, exponent: number): number;\nexport declare function less(left: number, right: number): boolean;\nexport declare function negateFlag(value: boolean): boolean;\nexport declare function remainder(left: number, right: number): number;\nexport declare function minimum(a: number, b: number, c: number): number;\nexport declare function maximum(a: number, b: number, c: number): number;\nexport declare function sum3(a: number, b: number, c: number): number;\nexport declare function answer(): number;\nexport declare function scaled(value: number): number;\nexport declare function localAlias(value: number): number;\nexport declare function chooseAlias(flag: boolean, value: number): number;\nexport declare function moduleAlias(value: number): number;\nexport declare function branchAlias(flag: boolean, value: number): number;\n",
     )
     .unwrap();
     let dts_path = package.join("package.d.ts");
     let mut declarations = std::fs::read_to_string(&dts_path).unwrap();
     declarations.push_str(
-        "export declare function tableAlias(name: string, value: number): number;\nexport declare function tableReassigned(name: string, value: number): number;\nexport declare function tableFlag(name: string, value: number): boolean;\nexport declare function tableText(name: string, value: number): string;\nexport declare function tableArray(name: string, value: number): number[];\nexport declare function tableRecord(name: string, value: number): Record<string, number>;\nexport declare function nextCounter(delta: number): number;\nexport declare function readCounter(): number;\nexport declare function useIncrement(): number;\nexport declare function useTwice(): number;\nexport declare function statefulTable(value: number): number;\n",
+        "export declare function tableAlias(name: string, value: number): number;\nexport declare function pickedAlias(name: string, value: number): number;\nexport declare function namedAlias(value: number): number;\nexport declare function tableReassigned(name: string, value: number): number;\nexport declare function tableFlag(name: string, value: number): boolean;\nexport declare function tableText(name: string, value: number): string;\nexport declare function tableArray(name: string, value: number): number[];\nexport declare function tableRecord(name: string, value: number): Record<string, number>;\nexport declare function nextCounter(delta: number): number;\nexport declare function readCounter(): number;\nexport declare function useIncrement(): number;\nexport declare function useTwice(): number;\nexport declare function statefulTable(value: number): number;\n",
     );
     declarations.push_str(
-        "export declare function useTwiceAt(flag: boolean): number;\nexport declare function statefulAt(name: string, value: number): number;\nexport declare function nestedSelect(flag: boolean, value: number): number;\nexport declare function trySelect(flag: boolean, value: number): number;\nexport declare function chooseHelper(flag: boolean): number;\nexport declare function chooseAt(keyFlag: boolean, helperFlag: boolean): number;\n",
+        "export declare function useTwiceAt(flag: boolean): number;\nexport declare function statefulAt(name: string, value: number): number;\nexport declare function nestedSelect(flag: boolean, value: number): number;\nexport declare function trySelect(flag: boolean, value: number): number;\nexport declare function chooseHelper(flag: boolean): number;\nexport declare function chooseAt(keyFlag: boolean, helperFlag: boolean): number;\nexport declare function setDynamic(name: string, helperFlag: boolean): number;\nexport declare function stagedAlias(select: boolean, reset: boolean, value: number): number;\nexport declare function loopAlias(flag: boolean, value: number): number;\nexport declare function forAlias(flag: boolean, value: number): number;\nexport declare function doAlias(flag: boolean, value: number): number;\nexport declare function forOfAlias(flag: boolean, value: number): number;\nexport declare function forInAlias(flag: boolean, value: number): number;\nexport declare function controlledAlias(flag: boolean, value: number): number;\nexport declare function conditionalLoopAlias(flag: boolean, value: number): number;\n",
+    );
+    declarations.push_str(
+        "export declare function snapshotAlias(name: string, value: number): number;\n",
+    );
+    declarations.push_str(
+        "export declare function reassignAlias(first: string, second: string, value: number): number;\n",
+    );
+    declarations.push_str(
+        "export declare function branchSnapshot(flag: boolean, first: string, second: string, value: number): number;\n",
+    );
+    declarations.push_str(
+        "export declare function loopSnapshot(flag: boolean, first: string, second: string, value: number): number;\n",
+    );
+    declarations.push_str(
+        "export declare function controlledSnapshot(flag: boolean, first: string, second: string, value: number): number;\n",
+    );
+    declarations.push_str(
+        "export declare function structuredSnapshot(mode: number, first: string, second: string, value: number): number;\nexport declare function catchSnapshot(flag: boolean, first: string, second: string, value: number): number;\nexport declare function switchSnapshot(mode: number, first: string, second: string, value: number): number;\nexport declare function finallySnapshot(flag: boolean, first: string, second: string, value: number): number;\nexport declare function fixedAlias(flag: boolean, value: number): number;\n",
     );
     std::fs::write(dts_path, declarations).unwrap();
     std::fs::write(
@@ -1213,18 +1231,54 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     let bundle_path = package.join("bundle.js");
     let bundle = std::fs::read_to_string(&bundle_path).unwrap().replace(
         "module.exports = {",
-        "function scaled(value) { return value * factor; } let factor = 2; factor += 1; function increment(value) { return value + 1; } function twice(value) { return value * 2; } function localAlias(value) { const operation = twice; return operation(value); } function chooseAlias(flag, value) { return (flag ? increment : twice)(value); } let moduleOperation = increment; moduleOperation = twice; function moduleAlias(value) { return moduleOperation(value); } const operations = { increment, double: increment }; operations.double = twice; operations['plus'] = increment; function tableAlias(name, value) { return operations[name](value); } let reassigned = { increment: twice }; reassigned = { increment, double: twice }; function tableReassigned(name, value) { return reassigned[name](value); } function positive(value) { return value > 0; } function zero(value) { return value === 0; } const predicates = { positive, zero }; function tableFlag(name, value) { return predicates[name](value); } function prefix(value) { return 'x' + value; } function suffix(value) { return value + 'x'; } const texts = { prefix, suffix }; function tableText(name, value) { return texts[name](value); } function one(value) { return [value]; } function two(value) { return [value, value]; } const arrays = { one, two }; function tableArray(name, value) { return arrays[name](value); } function single(value) { return { value }; } function doubled(value) { return { value: value * 2 }; } const records = { single, doubled }; function tableRecord(name, value) { return records[name](value); } let counter = 5; function nextCounter(delta) { counter += delta; return counter; } function readCounter() { return counter; } const mutableOperations = { run: increment }; function useIncrement() { mutableOperations.run = increment; return 0; } function useTwice() { mutableOperations.run = twice; return 0; } function statefulTable(value) { return mutableOperations.run(value); } module.exports = { scaled, localAlias, chooseAlias, moduleAlias, tableAlias, tableReassigned, tableFlag, tableText, tableArray, tableRecord, nextCounter, readCounter, useIncrement, useTwice, statefulTable,",
+        "function scaled(value) { return value * factor; } let factor = 2; factor += 1; function increment(value) { return value + 1; } function twice(value) { return value * 2; } function localAlias(value) { const operation = twice; return operation(value); } function chooseAlias(flag, value) { return (flag ? increment : twice)(value); } let moduleOperation = increment; moduleOperation = twice; function moduleAlias(value) { return moduleOperation(value); } const operations = { increment, double: increment }; operations.double = twice; operations['plus'] = increment; const plusKey = 'plus'; operations[plusKey] = increment; function tableAlias(name, value) { return operations[name](value); } let reassigned = { increment: twice }; reassigned = { increment, double: twice }; function tableReassigned(name, value) { return reassigned[name](value); } function positive(value) { return value > 0; } function zero(value) { return value === 0; } const predicates = { positive, zero }; function tableFlag(name, value) { return predicates[name](value); } function prefix(value) { return 'x' + value; } function suffix(value) { return value + 'x'; } const texts = { prefix, suffix }; function tableText(name, value) { return texts[name](value); } function one(value) { return [value]; } function two(value) { return [value, value]; } const arrays = { one, two }; function tableArray(name, value) { return arrays[name](value); } function single(value) { return { value }; } function doubled(value) { return { value: value * 2 }; } const records = { single, doubled }; function tableRecord(name, value) { return records[name](value); } let counter = 5; function nextCounter(delta) { counter += delta; return counter; } function readCounter() { return counter; } const mutableOperations = { run: increment }; function useIncrement() { mutableOperations.run = increment; return 0; } function useTwice() { mutableOperations.run = twice; return 0; } function statefulTable(value) { return mutableOperations.run(value); } module.exports = { scaled, localAlias, chooseAlias, moduleAlias, tableAlias, tableReassigned, tableFlag, tableText, tableArray, tableRecord, nextCounter, readCounter, useIncrement, useTwice, statefulTable,",
     );
     let bundle = bundle.replace(
         "const operation = twice;",
         "let operation = increment; operation = twice;",
     );
+    let bundle = bundle
+        .replace(
+            "function moduleAlias(value) { return moduleOperation(value); }",
+            "function moduleAlias(value) { return moduleOperation(value); } function branchAlias(flag, value) { let operation = twice; switch (flag) { case true: operation = twice; break; default: operation = increment; } return operation(value); } function stagedAlias(select, reset, value) { let operation = increment; try { if (select) throw 'select'; } catch { operation = twice; } finally { if (reset) operation = increment; } return operation(value); } function loopAlias(flag, value) { let operation = increment; let index = 0; while (index < 2) { if (flag && index === 1) { operation = twice; } index++; } return operation(value); } function forAlias(flag, value) { let operation = increment; for (let index = 0; index < 2; index++) { if (flag && index === 1) operation = twice; } return operation(value); } function doAlias(flag, value) { let operation = increment; let index = 0; do { if (flag) operation = twice; index++; } while (index < 1); return operation(value); } function forOfAlias(flag, value) { let operation = increment; for (const item of [0, 1]) { if (flag && item === 1) operation = twice; } return operation(value); } function forInAlias(flag, value) { let operation = increment; for (const key in { left: 1, right: 2 }) { if (flag && key === 'right') operation = twice; } return operation(value); } function controlledAlias(flag, value) { let operation = increment; let index = 0; while (index < 2) { try { if (flag && index === 0) { operation = twice; continue; } if (index === 1) break; } finally { index++; } } return operation(value); } function conditionalLoopAlias(flag, value) { let operation = flag ? twice : increment; let index = 0; while (index < 1) { operation = flag ? increment : twice; index++; } return operation(value); }",
+        )
+        .replace(
+            "scaled, localAlias, chooseAlias, moduleAlias,",
+            "scaled, localAlias, chooseAlias, moduleAlias, branchAlias, stagedAlias, loopAlias, forAlias, doAlias, forOfAlias, forInAlias, controlledAlias, conditionalLoopAlias,",
+        );
+    let bundle = bundle
+        .replace(
+            "function tableAlias(name, value) { return operations[name](value); }",
+            "function tableAlias(name, value) { return operations[name](value); } function pickedAlias(name, value) { const selected = operations[name]; return selected(value); } function namedAlias(value) { const selected = (operations.increment); return selected(value); }",
+        )
+        .replace("tableAlias, tableReassigned,", "tableAlias, pickedAlias, namedAlias, tableReassigned,");
     let bundle = bundle.replace(
         "const mutableOperations = { run: increment };",
-        "const mutableOperations = { run: increment, left: increment, right: increment }; function useTwiceAt(flag) { mutableOperations[flag ? 'left' : 'right'] = twice; return 0; } function statefulAt(name, value) { return mutableOperations[name](value); } function nestedSelect(flag, value) { let index = 0; while (index < 1) { if (flag) { mutableOperations.run = twice; } index++; } return mutableOperations.run(value); } function trySelect(flag, value) { let index = 0; while (index < 1) { try { if (flag) { mutableOperations.run = increment; } } finally { index++; } } return mutableOperations.run(value); } function chooseHelper(flag) { mutableOperations.run = flag ? twice : increment; return 0; } function chooseAt(keyFlag, helperFlag) { mutableOperations[keyFlag ? 'left' : 'right'] = helperFlag ? twice : increment; return 0; }",
+        "const mutableOperations = { run: increment, left: increment, right: increment }; function useTwiceAt(flag) { mutableOperations[flag ? 'left' : 'right'] = twice; return 0; } function statefulAt(name, value) { return mutableOperations[name](value); } function nestedSelect(flag, value) { let index = 0; while (index < 1) { if (flag) { mutableOperations.run = twice; } index++; } return mutableOperations.run(value); } function trySelect(flag, value) { let index = 0; while (index < 1) { try { if (flag) { mutableOperations.run = increment; } } finally { index++; } } return mutableOperations.run(value); } function chooseHelper(flag) { mutableOperations.run = flag ? twice : increment; return 0; } function chooseAt(keyFlag, helperFlag) { mutableOperations[keyFlag ? 'left' : 'right'] = helperFlag ? twice : increment; return 0; } function setDynamic(name, helperFlag) { mutableOperations[name] = helperFlag ? twice : increment; return 0; } function snapshotAlias(name, value) { setDynamic(name, false); const selected = mutableOperations[name]; setDynamic(name, true); return selected(value); } function reassignAlias(first, second, value) { setDynamic(first, false); setDynamic(second, true); let selected = mutableOperations[first]; selected = mutableOperations[second]; setDynamic(second, false); return selected(value); } function branchSnapshot(flag, first, second, value) { setDynamic(first, false); setDynamic(second, true); let selected = mutableOperations[first]; if (flag) { const reached = 1; { selected = mutableOperations[second]; } } else if (first === second) { selected = mutableOperations[second]; } else { const reached = 0; { selected = mutableOperations[first]; } } return setDynamic(second, false) + selected(value); } function loopSnapshot(flag, first, second, value) { let selected = increment; let index = 0; index++; index -= 1; if (!flag) { selected = increment; } while (flag && index < 1) { selected = mutableOperations[second]; index++; } return setDynamic(second, false) + selected(value); } function controlledSnapshot(flag, first, second, value) { let selected = mutableOperations[first]; let index = 0; while (index < 2) { try { if (flag && index === 0) { selected = mutableOperations[second]; continue; } if (index === 1) break; } finally { index++; } } return setDynamic(second, false) + selected(value); }",
     ).replace(
         "useIncrement, useTwice, statefulTable,",
-        "useIncrement, useTwice, statefulTable, useTwiceAt, statefulAt, nestedSelect, trySelect, chooseHelper, chooseAt,",
+        "useIncrement, useTwice, statefulTable, snapshotAlias, reassignAlias, branchSnapshot, loopSnapshot, controlledSnapshot, structuredSnapshot, catchSnapshot, switchSnapshot, finallySnapshot, fixedAlias, useTwiceAt, statefulAt, nestedSelect, trySelect, chooseHelper, chooseAt, setDynamic,",
+    );
+    let bundle = bundle
+        .replace(
+            "function setDynamic(name, helperFlag)",
+            "function fallbackIncrement(value) { return value + 1; } const fixedOperations = { run: increment }; function setFixed(flag) { fixedOperations.run = flag ? twice : increment; return 0; } function fixedAlias(flag, value) { let selected = fallbackIncrement; setFixed(true); if (flag) { selected = fixedOperations.run; } return setFixed(false) + selected(value); } function setDynamic(name, helperFlag)",
+        )
+        .replace(
+            "else { const reached = 0; { selected = mutableOperations[first]; } } return setDynamic(second, false) + selected(value);",
+            "else { const reached = 0; { selected = fallbackIncrement; } } return setDynamic(second, false) + selected(value);",
+        )
+        .replace(
+            "function loopSnapshot(flag, first, second, value) { let selected = increment;",
+            "function loopSnapshot(flag, first, second, value) { let selected = fallbackIncrement;",
+        )
+        .replace(
+            "if (!flag) { selected = increment; } while (flag && index < 1)",
+            "if (!flag) { selected = fallbackIncrement; } while (flag && index < 1)",
+        );
+    let bundle = bundle.replace(
+        "function controlledSnapshot(flag, first, second, value) { let selected = mutableOperations[first]; let index = 0; while (index < 2) { try { if (flag && index === 0) { selected = mutableOperations[second]; continue; } if (index === 1) break; } finally { index++; } } return setDynamic(second, false) + selected(value); }",
+        "function controlledSnapshot(flag, first, second, value) { let selected = mutableOperations[first]; let index = 0; while (index < 2) { try { if (flag && index === 0) { selected = mutableOperations[second]; continue; } if (index === 1) break; } finally { index++; } } return setDynamic(second, false) + selected(value); } function structuredSnapshot(mode, first, second, value) { let selected = mutableOperations[first]; let index = 0; while (index < 1) { switch (mode) { case 1: { selected = mutableOperations[second]; break; } default: { { selected = mutableOperations[first]; } } } index++; } return setDynamic(second, false) + selected(value); } function catchSnapshot(flag, first, second, value) { let selected = mutableOperations[first]; let index = 0; while (index < 1) { try { if (flag) throw 'pick'; } catch { selected = mutableOperations[second]; } index++; } return setDynamic(second, false) + selected(value); } function switchSnapshot(mode, first, second, value) { let selected = mutableOperations[first]; switch (mode) { case 1: { selected = mutableOperations[second]; break; } default: { selected = mutableOperations[first]; } } return setDynamic(second, false) + selected(value); } function finallySnapshot(flag, first, second, value) { let selected = mutableOperations[first]; try { if (flag) throw 'pick'; } catch { selected = mutableOperations[second]; } finally { setDynamic(second, false); } return selected(value); }",
     );
     std::fs::write(&bundle_path, bundle).unwrap();
     let entry = dir.join("main.ts");
@@ -1237,15 +1291,23 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
         .unwrap()
         .replace(
             "moduleAlias }",
-            "moduleAlias, tableAlias, tableReassigned, tableFlag, tableText, tableArray, tableRecord, nextCounter, readCounter, useIncrement, useTwice, statefulTable, useTwiceAt, statefulAt, nestedSelect, trySelect, chooseHelper, chooseAt }",
+            "moduleAlias, branchAlias, stagedAlias, loopAlias, forAlias, doAlias, forOfAlias, forInAlias, controlledAlias, conditionalLoopAlias, tableAlias, pickedAlias, namedAlias, tableReassigned, tableFlag, tableText, tableArray, tableRecord, nextCounter, readCounter, useIncrement, useTwice, statefulTable, snapshotAlias, reassignAlias, branchSnapshot, loopSnapshot, controlledSnapshot, structuredSnapshot, catchSnapshot, switchSnapshot, finallySnapshot, fixedAlias, useTwiceAt, statefulAt, nestedSelect, trySelect, chooseHelper, chooseAt, setDynamic }",
         )
         .replace(
             "console.log(moduleAlias(4)); }",
             "console.log(moduleAlias(4)); console.log(tableAlias('increment', 4)); console.log(tableAlias('double', 4)); console.log(tableAlias('plus', 4)); console.log(tableReassigned('increment', 4)); console.log(tableReassigned('double', 4)); console.log(tableFlag('positive', 4)); console.log(tableText('prefix', 4)); console.log(tableArray('two', 4).length); console.log(tableRecord('doubled', 4).value); console.log(nextCounter(2)); console.log(readCounter()); console.log(nextCounter(3)); console.log(readCounter()); console.log(statefulTable(4)); useTwice(); console.log(statefulTable(4)); useIncrement(); console.log(statefulTable(4)); try { tableAlias('missing', 4); } catch { console.log('missing'); } }",
         )
         .replace(
+            "console.log(moduleAlias(4)); console.log(tableAlias",
+            "console.log(moduleAlias(4)); console.log(branchAlias(false, 4)); console.log(branchAlias(true, 4)); console.log(stagedAlias(false, false, 4)); console.log(stagedAlias(true, false, 4)); console.log(stagedAlias(true, true, 4)); console.log(loopAlias(false, 4)); console.log(loopAlias(true, 4)); console.log(forAlias(false, 4)); console.log(forAlias(true, 4)); console.log(doAlias(false, 4)); console.log(doAlias(true, 4)); console.log(forOfAlias(false, 4)); console.log(forOfAlias(true, 4)); console.log(forInAlias(false, 4)); console.log(forInAlias(true, 4)); console.log(controlledAlias(false, 4)); console.log(controlledAlias(true, 4)); console.log(conditionalLoopAlias(false, 4)); console.log(conditionalLoopAlias(true, 4)); console.log(pickedAlias('increment', 4)); console.log(pickedAlias('double', 4)); console.log(namedAlias(4)); console.log(tableAlias",
+        )
+        .replace(
             "try { tableAlias('missing', 4); }",
-            "console.log(statefulAt('left', 4)); console.log(statefulAt('right', 4)); useTwiceAt(true); console.log(statefulAt('left', 4)); console.log(statefulAt('right', 4)); useTwiceAt(false); console.log(statefulAt('right', 4)); useIncrement(); console.log(nestedSelect(false, 4)); console.log(nestedSelect(true, 4)); useTwice(); console.log(trySelect(false, 4)); console.log(trySelect(true, 4)); chooseHelper(true); console.log(statefulTable(4)); chooseHelper(false); console.log(statefulTable(4)); chooseAt(true, false); chooseAt(false, true); console.log(statefulAt('left', 4)); console.log(statefulAt('right', 4)); try { tableAlias('missing', 4); }",
+            "console.log(statefulAt('left', 4)); console.log(statefulAt('right', 4)); useTwiceAt(true); console.log(statefulAt('left', 4)); console.log(statefulAt('right', 4)); useTwiceAt(false); console.log(statefulAt('right', 4)); useIncrement(); console.log(nestedSelect(false, 4)); console.log(nestedSelect(true, 4)); useTwice(); console.log(trySelect(false, 4)); console.log(trySelect(true, 4)); chooseHelper(true); console.log(statefulTable(4)); chooseHelper(false); console.log(statefulTable(4)); chooseAt(true, false); chooseAt(false, true); console.log(statefulAt('left', 4)); console.log(statefulAt('right', 4)); setDynamic('created', true); console.log(statefulAt('created', 4)); setDynamic('created', false); console.log(statefulAt('created', 4)); setDynamic('run', true); console.log(statefulTable(4)); useIncrement(); console.log(statefulTable(4)); try { tableAlias('missing', 4); }",
+        )
+        .replace(
+            "try { tableAlias('missing', 4); }",
+            "console.log(snapshotAlias('snapshot', 4)); console.log(reassignAlias('first', 'second', 4)); console.log(branchSnapshot(true, 'branchFirst', 'branchSecond', 4)); console.log(branchSnapshot(false, 'branchFirst', 'branchSecond', 4)); setDynamic('loopFirst', false); setDynamic('loopSecond', true); console.log(loopSnapshot(true, 'loopFirst', 'loopSecond', 4)); setDynamic('loopSecond', true); console.log(loopSnapshot(false, 'loopFirst', 'loopSecond', 4)); setDynamic('controlledFirst', false); setDynamic('controlledSecond', true); console.log(controlledSnapshot(true, 'controlledFirst', 'controlledSecond', 4)); setDynamic('controlledSecond', true); console.log(controlledSnapshot(false, 'controlledFirst', 'controlledSecond', 4)); setDynamic('structuredFirst', false); setDynamic('structuredSecond', true); console.log(structuredSnapshot(1, 'structuredFirst', 'structuredSecond', 4)); setDynamic('structuredSecond', true); console.log(structuredSnapshot(0, 'structuredFirst', 'structuredSecond', 4)); setDynamic('catchFirst', false); setDynamic('catchSecond', true); console.log(catchSnapshot(true, 'catchFirst', 'catchSecond', 4)); setDynamic('catchSecond', true); console.log(catchSnapshot(false, 'catchFirst', 'catchSecond', 4)); setDynamic('switchFirst', false); setDynamic('switchSecond', true); console.log(switchSnapshot(1, 'switchFirst', 'switchSecond', 4)); setDynamic('switchSecond', true); console.log(switchSnapshot(0, 'switchFirst', 'switchSecond', 4)); setDynamic('finallyFirst', false); setDynamic('finallySecond', true); console.log(finallySnapshot(true, 'finallyFirst', 'finallySecond', 4)); setDynamic('finallySecond', true); console.log(finallySnapshot(false, 'finallyFirst', 'finallySecond', 4)); console.log(fixedAlias(false, 4)); console.log(fixedAlias(true, 4)); useIncrement(); try { tableAlias('missing', 4); }",
         );
     std::fs::write(&entry, source).unwrap();
     let output = dir.join("app");
@@ -1262,8 +1324,177 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\n6\n8\n5\n8\n8\n5\n8\n5\n5\n8\ntrue\nx4\n2\n8\n7\n7\n10\n10\n5\n8\n5\n5\n5\n8\n5\n8\n5\n8\n8\n5\n8\n5\n5\n8\nmissing\n"
+        "42\n6\n8\n5\n8\n8\n5\n8\n5\n8\n5\n5\n8\n5\n8\n5\n8\n5\n8\n5\n8\n5\n8\n8\n5\n5\n8\n5\n5\n8\n5\n5\n8\ntrue\nx4\n2\n8\n7\n7\n10\n10\n5\n8\n5\n5\n5\n8\n5\n8\n5\n8\n8\n5\n8\n5\n5\n8\n8\n5\n8\n5\n5\n8\n8\n5\n8\n5\n8\n5\n8\n5\n8\n5\n8\n5\n8\n5\n5\n8\nmissing\n"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mixed_number_boolean_callable_tables_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-mixed-callables-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-mixed-callables");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function mixed(name: string, value: number): number;\nexport declare function aliased(name: string, value: number): number;\nexport declare function fixedMixed(flag: boolean, value: number): number;\nexport declare function dynamicMixed(name: string, flag: boolean, value: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function increment(value) { return value + 1; } function positive(value) { return value > 0; } const operations = { increment, positive }; const fixed = { run: increment }; const dynamic = { run: increment }; function mixed(name, value) { return operations[name](value); } function aliased(name, value) { const selected = operations[name]; return selected(value); } function setFixed(flag) { fixed.run = flag ? positive : increment; return 0; } function fixedMixed(flag, value) { setFixed(flag); const selected = fixed.run; setFixed(false); return selected(value); } function setDynamic(name, flag) { dynamic[name] = flag ? positive : increment; return 0; } function dynamicMixed(name, flag, value) { setDynamic(name, flag); const selected = dynamic[name]; setDynamic(name, false); return selected(value); } module.exports = { mixed, aliased, fixedMixed, dynamicMixed };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { mixed, aliased, fixedMixed, dynamicMixed } from 'jit-mixed-callables';\nfunction main(): void { console.log(mixed('increment', 4)); console.log(mixed('positive', -1)); console.log(mixed('positive', 4)); console.log(aliased('positive', 4)); console.log(fixedMixed(false, 4)); console.log(fixedMixed(true, 4)); console.log(dynamicMixed('created', false, 4)); console.log(dynamicMixed('created', true, 4)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "5\n0\n1\n1\n5\n1\n5\n1\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mixed_number_string_callable_tables_use_tagged_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tagged-callables-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tagged-callables");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function mixed(name: string, value: number): number | string;\nexport declare function aliased(name: string, value: number): number | string;\nexport declare function fixedMixed(useLabel: boolean, value: number): number | string;\nexport declare function dynamicMixed(name: string, useLabel: boolean, value: number): number | string;\nexport declare function choose(useLabel: boolean, value: number): number | string;\nexport declare function chooseLocal(useLabel: boolean, value: number): number | string;\nexport declare function localControl(useLabel: boolean, replace: boolean, value: number): number | string;\nexport declare function crossTypeLocal(replace: boolean, value: number): number | string;\nexport declare function crossTypeLoop(replace: boolean, value: number): number | string;\nexport declare function typeOfLocal(replace: boolean, value: number): string;\nexport declare function narrowLocal(replace: boolean, value: number): number | string;\nexport declare function chooseStatement(useLabel: boolean, value: number): number | string;\nexport declare function chooseSwitch(mode: number, value: number): number | string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function increment(value) { return value + 1; } function label(value) { return 'value=' + value; } const operations = { increment, label }; const fixed = { run: increment }; const dynamic = { run: increment }; function mixed(name, value) { return operations[name](value); } function aliased(name, value) { const selected = operations[name]; return selected(value); } function setFixed(useLabel) { fixed.run = useLabel ? label : increment; return 0; } function fixedMixed(useLabel, value) { setFixed(useLabel); const selected = fixed.run; setFixed(false); return selected(value); } function setDynamic(name, useLabel) { dynamic[name] = useLabel ? label : increment; return 0; } function dynamicMixed(name, useLabel, value) { setDynamic(name, useLabel); const selected = dynamic[name]; setDynamic(name, false); return selected(value); } function choose(useLabel, value) { return useLabel ? 'value=' + value : value + 1; } function chooseLocal(useLabel, value) { const result = useLabel ? 'value=' + value : value + 1; return result; } function localControl(useLabel, replace, value) { let result = useLabel ? 'value=' + value : value + 1; if (replace) result = useLabel ? value + 2 : 'next'; return result; } function crossTypeLocal(replace, value) { let result = value + 1; if (replace) result = 'next'; return result; } function crossTypeLoop(replace, value) { let result = value + 1; let index = 0; while (index < 1) { if (replace) result = 'loop'; index++; } return result; } function typeOfLocal(replace, value) { let result = value + 1; if (replace) result = 'next'; return typeof result; } function narrowLocal(replace, value) { let result = value + 1; if (replace) result = 'next'; return typeof result === 'number' ? result + 1 : result + '!'; } function chooseStatement(useLabel, value) { if (useLabel) return 'value=' + value; return value + 1; } function chooseSwitch(mode, value) { switch (mode) { case 0: return value + 1; case 1: return 'value=' + value; default: return 'other'; } } module.exports = { mixed, aliased, fixedMixed, dynamicMixed, choose, chooseLocal, localControl, crossTypeLocal, crossTypeLoop, typeOfLocal, narrowLocal, chooseStatement, chooseSwitch };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { mixed, aliased, fixedMixed, dynamicMixed, choose, chooseLocal, localControl, crossTypeLocal, crossTypeLoop, typeOfLocal, narrowLocal, chooseStatement, chooseSwitch } from 'jit-tagged-callables'; function show(value: number | string): void { if (typeof value === 'number') console.log(value); else console.log(value.toUpperCase()); } function main(): void { show(mixed('increment', 4)); show(mixed('label', 4)); show(aliased('label', 4)); show(fixedMixed(false, 4)); show(fixedMixed(true, 4)); show(dynamicMixed('created', false, 4)); show(dynamicMixed('created', true, 4)); show(choose(false, 4)); show(choose(true, 4)); show(chooseLocal(false, 4)); show(chooseLocal(true, 4)); show(localControl(false, false, 4)); show(localControl(true, false, 4)); show(localControl(false, true, 4)); show(localControl(true, true, 4)); show(crossTypeLocal(false, 4)); show(crossTypeLocal(true, 4)); show(crossTypeLoop(false, 4)); show(crossTypeLoop(true, 4)); console.log(typeOfLocal(false, 4)); console.log(typeOfLocal(true, 4)); show(narrowLocal(false, 4)); show(narrowLocal(true, 4)); show(chooseStatement(false, 4)); show(chooseStatement(true, 4)); show(chooseSwitch(0, 4)); show(chooseSwitch(1, 4)); show(chooseSwitch(2, 4)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "5\nVALUE=4\nVALUE=4\n5\nVALUE=4\n5\nVALUE=4\n5\nVALUE=4\n5\nVALUE=4\n5\nVALUE=4\nNEXT\n6\n5\nNEXT\n5\nLOOP\nnumber\nstring\n6\nNEXT!\n5\nVALUE=4\n5\nVALUE=4\nOTHER\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn boolean_primitive_unions_use_tagged_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tagged-booleans-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tagged-booleans");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function chooseBool(flag: boolean): boolean | string;\nexport declare function chooseThree(mode: number, value: number): number | boolean | string;\nexport declare function describe(value: number | boolean | string): string;\nexport declare function describeBox(input: { value: number | boolean | string }): string;\nexport declare function describeTuple(input: [number | boolean | string, string]): string;\nexport declare function narrowBool(flag: boolean): boolean | string;\nexport declare function narrowNot(flag: boolean): boolean | string;\nexport declare function narrowThree(mode: number, value: number): number | boolean | string;\nexport declare function narrowStatements(mode: number, value: number): number | boolean | string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function chooseBool(flag) { return flag ? true : 'no'; } function chooseThree(mode, value) { switch (mode) { case 0: return value + 1; case 1: return true; default: return 'three'; } } function describe(value) { if (typeof value === 'boolean') return value ? 'yes' : 'no'; if (typeof value === 'number') return 'n=' + value; return value.toUpperCase(); } function describeBox(input) { const value = input.value; if (typeof value === 'boolean') return value ? 'box-yes' : 'box-no'; if (typeof value === 'number') return 'box=' + value; return value.toUpperCase(); } function describeTuple(input) { const value = input[0]; if (typeof value === 'boolean') return value ? 'tuple-yes' : 'tuple-no'; if (typeof value === 'number') return input[1] + '=' + value; return value.toUpperCase(); } function narrowBool(flag) { const result = flag ? true : 'no'; return typeof result === 'boolean' ? !result : result + '!'; } function narrowNot(flag) { const result = flag ? true : 'no'; return typeof result !== 'boolean' ? result + '!' : !result; } function narrowThree(mode, value) { const result = mode === 0 ? value + 1 : mode === 1 ? true : 'three'; return typeof result === 'boolean' ? !result : typeof result === 'number' ? result + 10 : result + '!'; } function narrowStatements(mode, value) { const result = mode === 0 ? value + 1 : mode === 1 ? true : 'three'; if (typeof result === 'boolean') return !result; if (typeof result === 'number') return result + 20; return result + '?'; } module.exports = { chooseBool, chooseThree, describe, describeBox, describeTuple, narrowBool, narrowNot, narrowThree, narrowStatements };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { chooseBool, chooseThree, describe, describeBox, describeTuple, narrowBool, narrowNot, narrowThree, narrowStatements } from 'jit-tagged-booleans'; function showBool(value: boolean | string): void { if (typeof value === 'boolean') console.log(value); else console.log(value.toUpperCase()); } function showThree(value: number | boolean | string): void { if (typeof value === 'number') console.log(value); else if (typeof value === 'boolean') console.log(value); else console.log(value.toUpperCase()); } function main(): void { showBool(chooseBool(true)); showBool(chooseBool(false)); showThree(chooseThree(0, 4)); showThree(chooseThree(1, 4)); showThree(chooseThree(2, 4)); console.log(describe(chooseThree(0, 4))); console.log(describe(chooseThree(1, 4))); console.log(describe(chooseThree(2, 4))); console.log(describeBox({ value: chooseThree(0, 4) })); console.log(describeBox({ value: chooseThree(1, 4) })); console.log(describeBox({ value: chooseThree(2, 4) })); console.log(describeTuple([chooseThree(0, 4), 'item'])); console.log(describeTuple([chooseThree(1, 4), 'item'])); console.log(describeTuple([chooseThree(2, 4), 'item'])); showBool(narrowBool(true)); showBool(narrowBool(false)); showBool(narrowNot(true)); showBool(narrowNot(false)); showThree(narrowThree(1, 4)); showThree(narrowThree(0, 4)); showThree(narrowThree(2, 4)); showThree(narrowStatements(1, 4)); showThree(narrowStatements(0, 4)); showThree(narrowStatements(2, 4)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nNO\n5\ntrue\nTHREE\nn=5\nyes\nTHREE\nbox=5\nbox-yes\nTHREE\nitem=5\ntuple-yes\nTHREE\nfalse\nNO!\nfalse\nNO!\nfalse\n15\nTHREE!\nfalse\n25\nTHREE?\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_primitive_loop_locals_narrow_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-dynamic-loop-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-dynamic-loop");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function loopNarrow(mode: number, value: number): number | boolean | string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function loopNarrow(mode, value) { let result = mode === 0 ? value + 1 : mode === 1 ? true : 'three'; let index = 0; while (index < 1) { if (typeof result === 'boolean') result = !result; else if (typeof result === 'number') result = result + 30; else result = result + '!'; index++; } return result; } module.exports = { loopNarrow };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { loopNarrow } from 'jit-dynamic-loop'; function show(value: number | boolean | string): void { if (typeof value === 'number') console.log(value); else if (typeof value === 'boolean') console.log(value); else console.log(value.toUpperCase()); } function main(): void { show(loopNarrow(0, 4)); show(loopNarrow(1, 4)); show(loopNarrow(2, 4)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "35\nfalse\nTHREE!\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

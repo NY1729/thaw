@@ -3636,23 +3636,251 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         &dispatcher,
     )
     .is_some());
-    assert_eq!(
+    let mut picked_alias = dispatcher.clone();
+    picked_alias.name = "pickedAlias".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { increment, double: twice }; function pickedAlias(name, value) { const selected = operations[name]; return selected(value); } module.exports = { pickedAlias };",
+        "pickedAlias",
+        false,
+        &picked_alias,
+    )
+    .is_some());
+    let mut named_alias = dispatcher.clone();
+    named_alias.name = "namedAlias".into();
+    named_alias.params.remove(0);
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } const operations = { increment }; function namedAlias(value) { const selected = (operations.increment); return selected(value); } module.exports = { namedAlias };",
+        "namedAlias",
+        false,
+        &named_alias,
+    )
+    .is_some());
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setTwice() { operations.run = twice; return 0; } function unsafeSnapshot(value) { const selected = operations.run; setTwice(); return selected(value); } module.exports = { setTwice, unsafeSnapshot };",
+        "unsafeSnapshot",
+        false,
+        &named_alias,
+    )
+    .is_some());
+    let mut computed_snapshot = named_alias.clone();
+    computed_snapshot.name = "computedSnapshot".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setTwice() { operations.run = twice; return 0; } function computedSnapshot(value) { const selected = operations['run']; setTwice(); return selected(value); } module.exports = { setTwice, computedSnapshot };",
+        "computedSnapshot",
+        false,
+        &computed_snapshot,
+    )
+    .is_some());
+    let mut dynamic_snapshot = named_alias.clone();
+    dynamic_snapshot.name = "dynamicSnapshot".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function dynamicSnapshot(value) { operations.run = increment; const selected = operations.run; operations.run = twice; return selected(value); } module.exports = { setDynamic, dynamicSnapshot };",
+        "dynamicSnapshot",
+        false,
+        &dynamic_snapshot,
+    )
+    .is_some());
+    let mut runtime_snapshot = dispatcher.clone();
+    runtime_snapshot.name = "runtimeSnapshot".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function runtimeSnapshot(name, value) { setDynamic(name, false); const selected = operations[name]; setDynamic(name, true); return selected(value); } module.exports = { setDynamic, runtimeSnapshot };",
+        "runtimeSnapshot",
+        false,
+        &runtime_snapshot,
+    )
+    .is_some());
+    let mut reassigned_snapshot = dispatcher.clone();
+    reassigned_snapshot.name = "reassignedSnapshot".into();
+    reassigned_snapshot.params.insert(
+        1,
+        (
+            "second".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+        ),
+    );
+    reassigned_snapshot.required_params = 3;
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function reassignedSnapshot(first, second, value) { setDynamic(first, false); setDynamic(second, true); let selected = operations[first]; selected = operations[second]; setDynamic(second, false); return selected(value); } module.exports = { setDynamic, reassignedSnapshot };",
+        "reassignedSnapshot",
+        false,
+        &reassigned_snapshot,
+    )
+    .is_some());
+    let mut branch_snapshot = reassigned_snapshot.clone();
+    branch_snapshot.name = "branchSnapshot".into();
+    branch_snapshot.params.insert(
+        0,
+        (
+            "flag".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ),
+    );
+    branch_snapshot.required_params = 4;
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } function fallbackIncrement(value) { return value + 1; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function branchSnapshot(flag, first, second, value) { setDynamic(first, false); setDynamic(second, true); let selected = operations[first]; if (flag) { const reached = 1; { selected = operations[second]; } } else if (first === second) { selected = operations[second]; } else { const reached = 0; { selected = fallbackIncrement; } } return setDynamic(second, false) + selected(value); } module.exports = { setDynamic, branchSnapshot };",
+        "branchSnapshot",
+        false,
+        &branch_snapshot,
+    )
+    .is_some());
+    let mut loop_snapshot = branch_snapshot.clone();
+    loop_snapshot.name = "loopSnapshot".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } function fallbackIncrement(value) { return value + 1; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function loopSnapshot(flag, first, second, value) { let selected = fallbackIncrement; let index = 0; index++; index -= 1; if (!flag) { selected = fallbackIncrement; } while (flag && index < 1) { selected = operations[second]; index++; } return setDynamic(second, false) + selected(value); } module.exports = { setDynamic, loopSnapshot };",
+        "loopSnapshot",
+        false,
+        &loop_snapshot,
+    )
+    .is_some());
+    let mut controlled_snapshot = branch_snapshot.clone();
+    controlled_snapshot.name = "controlledSnapshot".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function controlledSnapshot(flag, first, second, value) { let selected = operations[first]; let index = 0; while (index < 2) { try { if (flag && index === 0) { selected = operations[second]; continue; } if (index === 1) break; } finally { index++; } } return setDynamic(second, false) + selected(value); } module.exports = { setDynamic, controlledSnapshot };",
+        "controlledSnapshot",
+        false,
+        &controlled_snapshot,
+    )
+    .is_some());
+    let mut structured_snapshot = reassigned_snapshot.clone();
+    structured_snapshot.name = "structuredSnapshot".into();
+    structured_snapshot.params.insert(
+        0,
+        (
+            "mode".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+        ),
+    );
+    structured_snapshot.required_params = 4;
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function structuredSnapshot(mode, first, second, value) { let selected = operations[first]; let index = 0; while (index < 1) { switch (mode) { case 1: { selected = operations[second]; break; } default: { { selected = operations[first]; } } } index++; } return setDynamic(second, false) + selected(value); } module.exports = { setDynamic, structuredSnapshot };",
+        "structuredSnapshot",
+        false,
+        &structured_snapshot,
+    )
+    .is_some());
+    let mut catch_snapshot = branch_snapshot.clone();
+    catch_snapshot.name = "catchSnapshot".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function catchSnapshot(flag, first, second, value) { let selected = operations[first]; let index = 0; while (index < 1) { try { if (flag) throw 'pick'; } catch { selected = operations[second]; } index++; } return setDynamic(second, false) + selected(value); } module.exports = { setDynamic, catchSnapshot };",
+        "catchSnapshot",
+        false,
+        &catch_snapshot,
+    )
+    .is_some());
+    let mut switch_snapshot = structured_snapshot.clone();
+    switch_snapshot.name = "switchSnapshot".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function switchSnapshot(mode, first, second, value) { let selected = operations[first]; switch (mode) { case 1: { selected = operations[second]; break; } default: { selected = operations[first]; } } return setDynamic(second, false) + selected(value); } module.exports = { setDynamic, switchSnapshot };",
+        "switchSnapshot",
+        false,
+        &switch_snapshot,
+    )
+    .is_some());
+    let mut finally_snapshot = catch_snapshot.clone();
+    finally_snapshot.name = "finallySnapshot".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { run: increment }; function setDynamic(name, flag) { operations[name] = flag ? twice : increment; return 0; } function finallySnapshot(flag, first, second, value) { let selected = operations[first]; try { if (flag) throw 'pick'; } catch { selected = operations[second]; } finally { setDynamic(second, false); } return selected(value); } module.exports = { setDynamic, finallySnapshot };",
+        "finallySnapshot",
+        false,
+        &finally_snapshot,
+    )
+    .is_some());
+    let mut branch_alias = dispatcher.clone();
+    branch_alias.name = "branchAlias".into();
+    branch_alias.params[0].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool);
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } function branchAlias(flag, value) { let operation = twice; switch (flag) { case true: operation = twice; break; default: operation = increment; } return operation(value); } module.exports = { branchAlias };",
+        "branchAlias",
+        false,
+        &branch_alias,
+    )
+    .is_some());
+    let mut fixed_alias = branch_alias.clone();
+    fixed_alias.name = "fixedAlias".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } function fallbackIncrement(value) { return value + 1; } const fixed = { run: increment }; function setFixed(flag) { fixed.run = flag ? twice : increment; return 0; } function fixedAlias(flag, value) { let selected = fallbackIncrement; setFixed(true); if (flag) { selected = fixed.run; } return setFixed(false) + selected(value); } module.exports = { setFixed, fixedAlias };",
+        "fixedAlias",
+        false,
+        &fixed_alias,
+    )
+    .is_some());
+    let mut loop_alias = branch_alias.clone();
+    loop_alias.name = "loopAlias".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } function loopAlias(flag, value) { let operation = increment; let index = 0; while (index < 2) { if (flag && index === 1) { operation = twice; } index++; } return operation(value); } module.exports = { loopAlias };",
+        "loopAlias",
+        false,
+        &loop_alias,
+    )
+    .is_some());
+    for (name, source) in [
+        ("forAlias", "function forAlias(flag, value) { let operation = increment; for (let index = 0; index < 2; index++) { if (flag && index === 1) operation = twice; } return operation(value); }"),
+        ("doAlias", "function doAlias(flag, value) { let operation = increment; let index = 0; do { if (flag) operation = twice; index++; } while (index < 1); return operation(value); }"),
+        ("forOfAlias", "function forOfAlias(flag, value) { let operation = increment; for (const item of [0, 1]) { if (flag && item === 1) operation = twice; } return operation(value); }"),
+        ("forInAlias", "function forInAlias(flag, value) { let operation = increment; for (const key in { left: 1, right: 2 }) { if (flag && key === 'right') operation = twice; } return operation(value); }"),
+    ] {
+        let mut function = loop_alias.clone();
+        function.name = name.into();
+        assert!(jit_numeric_export(
+            &format!("function increment(value) {{ return value + 1; }} function twice(value) {{ return value * 2; }} {source} module.exports = {{ {name} }};"),
+            name,
+            false,
+            &function,
+        )
+        .is_some());
+    }
+    let mut controlled_alias = loop_alias.clone();
+    controlled_alias.name = "controlledAlias".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } function controlledAlias(flag, value) { let operation = increment; let index = 0; while (index < 2) { try { if (flag && index === 0) { operation = twice; continue; } if (index === 1) break; } finally { index++; } } return operation(value); } module.exports = { controlledAlias };",
+        "controlledAlias",
+        false,
+        &controlled_alias,
+    )
+    .is_some());
+    let mut conditional_alias = loop_alias.clone();
+    conditional_alias.name = "conditionalLoopAlias".into();
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } function conditionalLoopAlias(flag, value) { let operation = flag ? twice : increment; let index = 0; while (index < 1) { operation = flag ? increment : twice; index++; } return operation(value); } module.exports = { conditionalLoopAlias };",
+        "conditionalLoopAlias",
+        false,
+        &conditional_alias,
+    )
+    .is_some());
+    let mut staged_alias = branch_alias.clone();
+    staged_alias.name = "stagedAlias".into();
+    staged_alias.params.insert(
+        1,
+        (
+            "reset".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ),
+    );
+    staged_alias.required_params = 3;
+    assert!(jit_numeric_export(
+        "function increment(value) { return value + 1; } function twice(value) { return value * 2; } function stagedAlias(select, reset, value) { let operation = increment; try { if (select) throw 'select'; } catch { operation = twice; } finally { if (reset) operation = increment; } return operation(value); } module.exports = { stagedAlias };",
+        "stagedAlias",
+        false,
+        &staged_alias,
+    )
+    .is_some());
+    assert!(
         jit_numeric_export(
             "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const operations = { increment }; function tableAlias(name, value) { operations[name] = twice; return operations[name](value); } module.exports = { tableAlias };",
             "tableAlias",
             false,
             &dispatcher,
-        ),
-        None
+        )
+        .is_some()
     );
-    assert_eq!(
+    assert!(
         jit_numeric_export(
             "function increment(value) { return value + 1; } function twice(value) { return value * 2; } const key = 'increment'; const operations = { increment }; operations[key] = twice; function tableAlias(name, value) { return operations[name](value); } module.exports = { tableAlias };",
             "tableAlias",
             false,
             &dispatcher,
-        ),
-        None
+        )
+        .is_some()
     );
 }
 
@@ -3708,6 +3936,77 @@ fn recognizes_primitive_and_mutual_recursion_for_jit() {
             )],
             thaw_hir::HirType::F64,
         ),
+    )
+    .is_some());
+}
+
+#[test]
+fn recognizes_tagged_statement_returns_for_jit() {
+    let function = thaw_bridge::DtsFunction {
+        name: "choose".into(),
+        generic: None,
+        params: vec![
+            (
+                "useLabel".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+            ),
+            (
+                "value".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
+            thaw_hir::HirType::F64,
+            thaw_hir::HirType::Str,
+        ])),
+    };
+    assert!(jit_numeric_export(
+        "function choose(useLabel, value) { if (useLabel) return 'value=' + value; return value + 1; } module.exports = { choose };",
+        "choose",
+        false,
+        &function,
+    )
+    .is_some());
+    let switch = thaw_bridge::DtsFunction {
+        name: "chooseSwitch".into(),
+        params: vec![
+            (
+                "mode".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+            function.params[1].clone(),
+        ],
+        ..function
+    };
+    assert!(jit_numeric_export(
+        "function chooseSwitch(mode, value) { switch (mode) { case 0: return value + 1; case 1: return 'value=' + value; default: return 'other'; } } module.exports = { chooseSwitch };",
+        "chooseSwitch",
+        false,
+        &switch,
+    )
+    .is_some());
+    let narrow = thaw_bridge::DtsFunction {
+        name: "narrow".into(),
+        ..switch.clone()
+    };
+    assert!(jit_numeric_export(
+        "function narrow(mode, value) { let result = value + 1; if (mode) result = 'next'; return typeof result === 'number' ? result + 1 : result + '!'; } module.exports = { narrow };",
+        "narrow",
+        false,
+        &narrow,
+    )
+    .is_some());
+    let narrow_loop = thaw_bridge::DtsFunction {
+        name: "narrowLoop".into(),
+        ..narrow
+    };
+    assert!(jit_numeric_export(
+        "function narrowLoop(mode, value) { let result = value + 1; let index = 0; while (index < 1) { if (typeof result === 'number') result = result + 1; else result = result + '!'; index++; } return result; } module.exports = { narrowLoop };",
+        "narrowLoop",
+        false,
+        &narrow_loop,
     )
     .is_some());
 }

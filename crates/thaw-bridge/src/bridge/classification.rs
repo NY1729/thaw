@@ -6,6 +6,14 @@ pub fn classify(func: &DtsFunction) -> Classification {
     let mut params = Vec::with_capacity(func.params.len());
     for (name, ty) in &func.params {
         match ty {
+            DtsType::Native(HirType::Union(_)) => {
+                return Classification::Fallback {
+                    function: func.name.clone(),
+                    reason: format!(
+                        "parameter `{name}` uses a tagged union without an explicit C ABI"
+                    ),
+                }
+            }
             DtsType::Native(hir_ty) if supports_direct_ffi_collections(hir_ty) => {
                 params.push(hir_ty.clone())
             }
@@ -27,6 +35,12 @@ pub fn classify(func: &DtsFunction) -> Classification {
     }
 
     let ret = match &func.ret {
+        DtsType::Native(HirType::Union(_)) => {
+            return Classification::Fallback {
+                function: func.name.clone(),
+                reason: "return type uses a tagged union without an explicit C ABI".into(),
+            }
+        }
         DtsType::Native(hir_ty) if supports_direct_ffi_collections(hir_ty) => hir_ty.clone(),
         DtsType::Native(hir_ty) => {
             return Classification::Fallback {
@@ -80,6 +94,9 @@ pub fn classify(func: &DtsFunction) -> Classification {
 
 fn supports_direct_ffi_collections(ty: &HirType) -> bool {
     match ty {
+        // A source union has an internal tagged layout, but an arbitrary C
+        // symbol has no matching discriminator ABI unless one is declared.
+        HirType::Union(_) => false,
         HirType::Array(element) => matches!(
             element.as_ref(),
             HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue

@@ -3,8 +3,8 @@
 //! This intentionally is not a JavaScript engine. It accepts a compact numeric
 //! expression IR and emits one W^X-protected native code stub per symbol.
 
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -13,11 +13,15 @@ use std::sync::{Mutex, OnceLock};
 
 struct JitGlobals {
     slots: [OnceLock<AtomicU64>; 16],
+    callable_entries: Mutex<HashMap<(u8, String), u64>>,
 }
 
 static INVALID_SYMBOL: &[u8] = b"invalid JIT symbol\0";
 const ABSENT_STATUS: *const c_char = ptr::dangling();
 const ARRAY_RESULT_TAG: u64 = 1;
+const DYNAMIC_NUMBER_TAG: u64 = 1;
+const DYNAMIC_STRING_TAG: u64 = 2;
+const DYNAMIC_BOOLEAN_TAG: u64 = 3;
 #[cfg(not(all(target_arch = "x86_64", target_family = "unix")))]
 static UNSUPPORTED_TARGET: &[u8] = b"JIT target is not supported\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -38,6 +42,8 @@ static INVALID_CODE_POINT: &[u8] = b"Invalid code point\0";
 static EMPTY_REDUCE: &[u8] = b"Reduce of empty array with no initial value\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 static VALUE_NOT_CALLABLE: &[u8] = b"value is not a function\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static INVALID_DYNAMIC_VALUE: &[u8] = b"invalid dynamic JIT value\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 static TRUE_THROW: &[u8] = b"true\0";
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -117,6 +123,7 @@ thread_local! {
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
     static JIT_GLOBALS: Cell<*const JitGlobals> = const { Cell::new(ptr::null()) };
+    static DYNAMIC_VALUES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -172,6 +179,58 @@ extern "C" fn global_init(index: f64, initial: f64) -> f64 {
             .get_or_init(|| AtomicU64::new(initial.to_bits()))
             .load(Ordering::Relaxed),
     )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn callable_entry_get(key: f64, table: f64) -> f64 {
+    if !table.is_finite() || table.fract() != 0.0 || !(0.0..=u8::MAX as f64).contains(&table) {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return -1.0;
+    }
+    let key = key.to_bits() as usize as *const c_char;
+    let globals = JIT_GLOBALS.with(Cell::get);
+    if key.is_null() || globals.is_null() {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return -1.0;
+    }
+    let key = unsafe { CStr::from_ptr(key) }.to_string_lossy();
+    unsafe { &*globals }
+        .callable_entries
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&(table as u8, key.into_owned()))
+        .map_or(-1.0, |selection| *selection as f64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn callable_entry_set(key: f64, table: f64, selection: f64) -> f64 {
+    if !selection.is_finite()
+        || selection.fract() != 0.0
+        || !(0.0..=u64::MAX as f64).contains(&selection)
+    {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let globals = JIT_GLOBALS.with(Cell::get);
+    let key = key.to_bits() as usize as *const c_char;
+    if globals.is_null()
+        || key.is_null()
+        || !table.is_finite()
+        || table.fract() != 0.0
+        || !(0.0..=u8::MAX as f64).contains(&table)
+    {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let key = unsafe { CStr::from_ptr(key) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { &*globals }
+        .callable_entries
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((table as u8, key), selection as u64);
+    selection
 }
 
 extern "C" fn dictionary_get(value: f64, key: f64, kind: u8) -> f64 {
@@ -2667,6 +2726,140 @@ fn arena_string(value: String) -> f64 {
     f64::from_bits(output as usize as u64)
 }
 
+#[repr(C)]
+struct DynamicPrimitive {
+    tag: u64,
+    payload: u64,
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn arena_dynamic(tag: u64, payload: u64) -> f64 {
+    let Some(output) = ARENA_ALLOC.with(|allocator| {
+        allocator.get().map(|alloc| unsafe {
+            alloc(
+                std::mem::size_of::<DynamicPrimitive>(),
+                std::mem::align_of::<DynamicPrimitive>(),
+            )
+        })
+    }) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let Some(output) = (!output.is_null()).then(|| output.cast::<DynamicPrimitive>()) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    unsafe { output.write(DynamicPrimitive { tag, payload }) };
+    DYNAMIC_VALUES.with(|values| {
+        values.borrow_mut().insert(output as usize);
+    });
+    f64::from_bits(output as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn tag_number(value: f64) -> f64 {
+    arena_dynamic(DYNAMIC_NUMBER_TAG, value.to_bits())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn tag_string(value: f64) -> f64 {
+    arena_dynamic(DYNAMIC_STRING_TAG, value.to_bits())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn tag_boolean(value: f64) -> f64 {
+    arena_dynamic(DYNAMIC_BOOLEAN_TAG, u64::from(value != 0.0))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_from_parts(tag: f64, payload: f64) -> f64 {
+    let tag = tag as u64;
+    if !matches!(
+        tag,
+        DYNAMIC_NUMBER_TAG | DYNAMIC_STRING_TAG | DYNAMIC_BOOLEAN_TAG
+    ) {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    arena_dynamic(tag, payload.to_bits())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_primitive(value: f64, expected: Option<u64>) -> Option<&'static DynamicPrimitive> {
+    let pointer = value.to_bits() as usize as *const DynamicPrimitive;
+    if !DYNAMIC_VALUES.with(|values| values.borrow().contains(&(pointer as usize))) {
+        return None;
+    }
+    let dynamic = unsafe { pointer.as_ref() }?;
+    matches!(
+        dynamic.tag,
+        DYNAMIC_NUMBER_TAG | DYNAMIC_STRING_TAG | DYNAMIC_BOOLEAN_TAG
+    )
+    .then_some(dynamic)
+    .filter(|dynamic| expected.is_none_or(|tag| dynamic.tag == tag))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_tag(value: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| dynamic.tag as f64,
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn type_of_dynamic(value: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| {
+            f64::from_bits(match dynamic.tag {
+                DYNAMIC_NUMBER_TAG => c"number".as_ptr(),
+                DYNAMIC_STRING_TAG => c"string".as_ptr(),
+                DYNAMIC_BOOLEAN_TAG => c"boolean".as_ptr(),
+                _ => unreachable!(),
+            } as usize as u64)
+        },
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_number(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_NUMBER_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_string(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_STRING_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_boolean(value: f64) -> f64 {
+    dynamic_primitive(value, Some(DYNAMIC_BOOLEAN_TAG)).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| dynamic.payload as f64,
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn untag_dynamic(value: f64, expected: u64) -> f64 {
+    dynamic_primitive(value, Some(expected)).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| f64::from_bits(dynamic.payload),
+    )
+}
+
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn number_to_string(value: f64) -> f64 {
     let Some(format) = NUMBER_TO_STRING.with(Cell::get) else {
@@ -3410,6 +3603,7 @@ impl NumericReduceOp {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum NumericValue {
     Argument(u8),
+    DynamicArgument(u8),
     Constant(f64),
     Operation(NumericOp),
     Compare(CompareOp),
@@ -3433,6 +3627,7 @@ enum NumericValue {
     TypeOfBoolean,
     TypeOfString,
     TypeOfObject,
+    TypeOfDynamic,
     StringCompare,
     StringCharAt,
     StringCharCodeAt,
@@ -3442,9 +3637,21 @@ enum NumericValue {
     NumberToString,
     BooleanToString,
     StringToNumber,
+    TagNumber,
+    TagString,
+    TagBoolean,
+    DynamicTag,
+    UntagNumber,
+    UntagString,
+    UntagBoolean,
+    ExcludeNumber,
+    ExcludeString,
+    ExcludeBoolean,
     GlobalGet,
     GlobalInit,
     GlobalSet,
+    CallableEntryGet,
+    CallableEntrySet,
     ParseFloat,
     ParseInt,
     NumberToFixed,
@@ -3741,6 +3948,7 @@ impl NumericProgram {
                     "typeofboolean" => Some(NumericValue::TypeOfBoolean),
                     "typeofstring" => Some(NumericValue::TypeOfString),
                     "typeofobject" => Some(NumericValue::TypeOfObject),
+                    "typeofdynamic" => Some(NumericValue::TypeOfDynamic),
                     "strcmp" => Some(NumericValue::StringCompare),
                     "charat" => Some(NumericValue::StringCharAt),
                     "charcodeat" => Some(NumericValue::StringCharCodeAt),
@@ -3750,9 +3958,21 @@ impl NumericProgram {
                     "numstr" => Some(NumericValue::NumberToString),
                     "boolstr" => Some(NumericValue::BooleanToString),
                     "strnum" => Some(NumericValue::StringToNumber),
+                    "tagnum" => Some(NumericValue::TagNumber),
+                    "tagstr" => Some(NumericValue::TagString),
+                    "tagbool" => Some(NumericValue::TagBoolean),
+                    "tagkind" => Some(NumericValue::DynamicTag),
+                    "untagnum" => Some(NumericValue::UntagNumber),
+                    "untagstr" => Some(NumericValue::UntagString),
+                    "untagbool" => Some(NumericValue::UntagBoolean),
+                    "notnum" => Some(NumericValue::ExcludeNumber),
+                    "notstr" => Some(NumericValue::ExcludeString),
+                    "notbool" => Some(NumericValue::ExcludeBoolean),
                     "globalget" => Some(NumericValue::GlobalGet),
                     "globalinit" => Some(NumericValue::GlobalInit),
                     "globalset" => Some(NumericValue::GlobalSet),
+                    "callableget" => Some(NumericValue::CallableEntryGet),
+                    "callableset" => Some(NumericValue::CallableEntrySet),
                     "parsefloat" => Some(NumericValue::ParseFloat),
                     "parseint" => Some(NumericValue::ParseInt),
                     "tofixed" => Some(NumericValue::NumberToFixed),
@@ -3926,8 +4146,8 @@ impl NumericProgram {
                     "performancenow" => Some(NumericValue::PerformanceNow),
                     "processpid" => Some(NumericValue::ProcessPid),
                     "processppid" => Some(NumericValue::ProcessPpid),
-                    "missingcalln" | "missingcallb" | "missingcalls" | "missingcalla"
-                    | "missingcalld" => Some(NumericValue::MissingCallable),
+                    "missingcalln" | "missingcallb" | "missingcalls" | "missingcalldyn"
+                    | "missingcalla" | "missingcalld" => Some(NumericValue::MissingCallable),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -4273,6 +4493,18 @@ impl NumericProgram {
                                 .map(NumericValue::Recur)
                         })
                         .or_else(|| {
+                            let encoded = value.strip_prefix('u')?;
+                            let digits = encoded.bytes().take_while(u8::is_ascii_digit).count();
+                            let (index, kinds) = encoded.split_at(digits);
+                            (!kinds.is_empty()
+                                && kinds.bytes().all(|kind| matches!(kind, b'n' | b'b' | b's')))
+                            .then_some(index)?
+                            .parse::<u8>()
+                            .ok()
+                            .filter(|index| *index < 15)
+                            .map(NumericValue::DynamicArgument)
+                        })
+                        .or_else(|| {
                             value
                                 .strip_prefix('a')
                                 .or_else(|| value.strip_prefix('b'))
@@ -4355,6 +4587,7 @@ impl NumericProgram {
                                 .or_else(|| value.strip_prefix("ln"))
                                 .or_else(|| value.strip_prefix("lb"))
                                 .or_else(|| value.strip_prefix("ls"))
+                                .or_else(|| value.strip_prefix("ld"))
                                 .or_else(|| value.strip_prefix('l'))
                                 .and_then(|index| index.parse::<u8>().ok())
                                 .filter(|index| *index < 8)
@@ -4375,7 +4608,7 @@ impl NumericProgram {
                         }),
                 })
                 .collect::<Option<Vec<_>>>()?;
-            (!values.is_empty() && values.len() <= 128).then_some(Self(values))
+            (!values.is_empty() && values.len() <= 256).then_some(Self(values))
         } else {
             let operation = symbol.split_once(':').map_or(symbol, |pair| pair.0);
             Some(Self(vec![
@@ -4403,6 +4636,21 @@ impl NumericProgram {
                         return None;
                     }
                     code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x47 | (depth << 3), index * 8]);
+                    depth += 1;
+                }
+                NumericValue::DynamicArgument(index) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x47 | (depth << 3), index * 8]);
+                    code.extend_from_slice(&[
+                        0xf2,
+                        0x0f,
+                        0x10,
+                        0x47 | ((depth + 1) << 3),
+                        (index + 1) * 8,
+                    ]);
+                    emit_binary_call(&mut code, dynamic_from_parts as *const () as u64, depth);
                     depth += 1;
                 }
                 NumericValue::Constant(value) => {
@@ -4557,7 +4805,8 @@ impl NumericProgram {
                 NumericValue::TypeOfNumber
                 | NumericValue::TypeOfBoolean
                 | NumericValue::TypeOfString
-                | NumericValue::TypeOfObject => {
+                | NumericValue::TypeOfObject
+                | NumericValue::TypeOfDynamic => {
                     if depth == 0 {
                         return None;
                     }
@@ -4566,6 +4815,7 @@ impl NumericProgram {
                         NumericValue::TypeOfBoolean => type_of_boolean,
                         NumericValue::TypeOfString => type_of_string,
                         NumericValue::TypeOfObject => type_of_object,
+                        NumericValue::TypeOfDynamic => type_of_dynamic,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
@@ -4597,6 +4847,13 @@ impl NumericProgram {
                 NumericValue::NumberToString
                 | NumericValue::BooleanToString
                 | NumericValue::StringToNumber
+                | NumericValue::TagNumber
+                | NumericValue::TagString
+                | NumericValue::TagBoolean
+                | NumericValue::DynamicTag
+                | NumericValue::UntagNumber
+                | NumericValue::UntagString
+                | NumericValue::UntagBoolean
                 | NumericValue::ParseFloat
                 | NumericValue::NumberToExponentialShortest => {
                     if depth == 0 {
@@ -4606,12 +4863,22 @@ impl NumericProgram {
                         NumericValue::NumberToString => number_to_string,
                         NumericValue::BooleanToString => boolean_to_string,
                         NumericValue::StringToNumber => string_to_number,
+                        NumericValue::TagNumber => tag_number,
+                        NumericValue::TagString => tag_string,
+                        NumericValue::TagBoolean => tag_boolean,
+                        NumericValue::DynamicTag => dynamic_tag,
+                        NumericValue::UntagNumber => untag_number,
+                        NumericValue::UntagString => untag_string,
+                        NumericValue::UntagBoolean => untag_boolean,
                         NumericValue::ParseFloat => parse_float,
                         NumericValue::NumberToExponentialShortest => number_to_exponential_shortest,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
+                NumericValue::ExcludeNumber
+                | NumericValue::ExcludeString
+                | NumericValue::ExcludeBoolean => {}
                 NumericValue::GlobalGet => {
                     if depth == 0 {
                         return None;
@@ -4631,6 +4898,20 @@ impl NumericProgram {
                     }
                     emit_binary_call(&mut code, global_init as *const () as u64, depth - 2);
                     depth -= 1;
+                }
+                NumericValue::CallableEntryGet => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(&mut code, callable_entry_get as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::CallableEntrySet => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    emit_ternary_call(&mut code, callable_entry_set as *const () as u64, depth - 3);
+                    depth -= 2;
                 }
                 NumericValue::ParseInt
                 | NumericValue::NumberToFixed
@@ -6382,6 +6663,7 @@ impl NumericProgram {
             .iter()
             .filter_map(|value| match value {
                 NumericValue::Argument(index) => Some(*index as usize + 1),
+                NumericValue::DynamicArgument(index) => Some(*index as usize + 2),
                 _ => None,
             })
             .max()
@@ -6770,6 +7052,7 @@ fn compile(
             .or_insert_with(|| {
                 Box::new(JitGlobals {
                     slots: std::array::from_fn(|_| OnceLock::new()),
+                    callable_entries: Mutex::new(HashMap::new()),
                 })
             })
             .as_ref() as *const JitGlobals
@@ -6916,6 +7199,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
     let previous_globals = JIT_GLOBALS.with(|slot| slot.replace(globals));
+    let previous_dynamic_values =
+        DYNAMIC_VALUES.with(|values| std::mem::take(&mut *values.borrow_mut()));
     let mut value = function(args);
     if program.returns_tagged_array() && value.to_bits() & ARRAY_RESULT_TAG != 0 {
         value = f64::from_bits(value.to_bits() & !ARRAY_RESULT_TAG);
@@ -6923,6 +7208,7 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let error = CALL_ERROR.with(|error| error.replace(previous_error));
     let present = CALL_PRESENT.with(|state| state.replace(previous_present));
     JIT_GLOBALS.with(|slot| slot.set(previous_globals));
+    DYNAMIC_VALUES.with(|values| *values.borrow_mut() = previous_dynamic_values);
     ARENA_ALLOC.with(|allocator| allocator.set(previous_allocator));
     NUMBER_TO_STRING.with(|formatter| formatter.set(previous_formatter));
     STRING_TO_NUMBER.with(|parser| parser.set(previous_parser));
@@ -7301,6 +7587,70 @@ mod tests {
                 None,
             )
         }
+    }
+
+    #[test]
+    fn carries_tagged_number_and_string_primitives_in_one_jit_slot() {
+        let boxed_number = CString::new("expr:a0,tagnum:boxed-number").unwrap();
+        let boxed = call(&boxed_number, &[20.0]);
+        assert!(boxed.error.is_null());
+        let boxed = unsafe { &*(boxed.value.to_bits() as usize as *const DynamicPrimitive) };
+        assert_eq!(
+            (boxed.tag, f64::from_bits(boxed.payload)),
+            (DYNAMIC_NUMBER_TAG, 20.0)
+        );
+
+        let number_tag = CString::new("expr:a0,tagnum,tagkind:number-tag").unwrap();
+        let result = call(&number_tag, &[20.0]);
+        assert!(
+            result.error.is_null(),
+            "{}",
+            unsafe { CStr::from_ptr(result.error) }.to_string_lossy()
+        );
+        assert_eq!(result.value, DYNAMIC_NUMBER_TAG as f64);
+
+        for (symbol, expected) in [
+            ("expr:a0,tagnum,typeofdynamic:number-type", "number"),
+            ("expr:t78,tagstr,typeofdynamic:string-type", "string"),
+            ("expr:b0,tagbool,typeofdynamic:boolean-type", "boolean"),
+        ] {
+            let result = call(&CString::new(symbol).unwrap(), &[20.0]);
+            assert!(result.error.is_null());
+            assert_eq!(
+                unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }
+                    .to_str()
+                    .unwrap(),
+                expected
+            );
+        }
+
+        let number = CString::new("expr:a0,tagnum,untagnum:number").unwrap();
+        let result = call(&number, &[20.0]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 20.0);
+
+        let string = CString::new("expr:t68656c6c6f,tagstr,untagstr:string").unwrap();
+        let result = call(&string, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char).to_bytes() },
+            b"hello"
+        );
+        let boolean = CString::new("expr:b0,tagbool,notnum,notstr,untagbool:boolean").unwrap();
+        let result = call(&boolean, &[1.0]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 1.0);
+
+        let dynamic_argument = CString::new("expr:u0nbs,untagbool:dynamic-argument").unwrap();
+        let result = call(&dynamic_argument, &[3.0, f64::from_bits(1)]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 1.0);
+
+        let mismatch = CString::new("expr:t68656c6c6f,tagstr,untagnum:mismatch").unwrap();
+        assert!(!call(&mismatch, &[]).error.is_null());
+
+        let malformed = CString::new("expr:a0,untagnum:malformed").unwrap();
+        assert!(!call(&malformed, &[42.0]).error.is_null());
     }
 
     #[test]
@@ -8496,6 +8846,65 @@ mod tests {
                 .unwrap();
         assert_eq!(call(&writer, &[]).value, 6.0);
         assert_eq!(call(&reader, &[]).value, 6.0);
+    }
+
+    #[test]
+    fn persists_dynamic_callable_entries_per_module() {
+        let writer = CString::new(
+            "expr:t72756e,c0000000000000000,c4008000000000000,callableset:callable-table::write",
+        )
+        .unwrap();
+        let reader =
+            CString::new("expr:t72756e,c0000000000000000,callableget:callable-table::read")
+                .unwrap();
+        let missing = CString::new(
+            "expr:t6d697373696e67,c0000000000000000,callableget:callable-table::missing",
+        )
+        .unwrap();
+        assert_eq!(call(&writer, &[]).value, 3.0);
+        assert_eq!(call(&reader, &[]).value, 3.0);
+        assert_eq!(call(&missing, &[]).value, -1.0);
+    }
+
+    #[test]
+    fn snapshots_and_reassigns_dynamic_callable_entries_in_locals() {
+        let symbol = CString::new(
+            "expr:t6669727374,c0000000000000000,c0000000000000000,callableset,drop,t7365636f6e64,c0000000000000000,c3ff0000000000000,callableset,drop,t6669727374,c0000000000000000,callableget,t7365636f6e64,c0000000000000000,callableget,setl0,t7365636f6e64,c0000000000000000,c0000000000000000,callableset,drop,ln0,nip:callable-snapshot",
+        )
+        .unwrap();
+        let result = call(&symbol, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 1.0);
+
+        let full = CString::new(
+            "expr:t6669727374,c0000000000000000,c0000000000000000,asbool,if,c3ff0000000000000,else,c0000000000000000,end,callableset,drop,c0000000000000000,drop,t7365636f6e64,c0000000000000000,c3ff0000000000000,asbool,if,c3ff0000000000000,else,c0000000000000000,end,callableset,drop,c0000000000000000,drop,t6669727374,dup,c0000000000000000,callableget,dup,cbff0000000000000,!=,if,dup,else,dup2,drop,dup,t72756e,strcmp,c0000000000000000,==,if,c0000000000000000,else,cbff0000000000000,end,nip,end,nip,nip,t7365636f6e64,dup,c0000000000000000,callableget,dup,cbff0000000000000,!=,if,dup,else,dup2,drop,dup,t72756e,strcmp,c0000000000000000,==,if,c0000000000000000,else,cbff0000000000000,end,nip,end,nip,nip,setl0,t7365636f6e64,c0000000000000000,c0000000000000000,asbool,if,c3ff0000000000000,else,c0000000000000000,end,callableset,drop,c0000000000000000,drop,ln0,c0000000000000000,==,if,c4010000000000000,c3ff0000000000000,+,else,ln0,c3ff0000000000000,==,if,c4010000000000000,c4000000000000000,*,else,missingcalln,end,end,nip:callable-full-snapshot",
+        )
+        .unwrap();
+        let result = call(&full, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 8.0);
+
+        let arguments = CString::new(
+            full.to_str()
+                .unwrap()
+                .replace("t6669727374", "s0")
+                .replace("t7365636f6e64", "s1")
+                .replace("c4010000000000000", "a2")
+                .replace("callable-full-snapshot", "callable-argument-snapshot"),
+        )
+        .unwrap();
+        let first = CString::new("first").unwrap();
+        let second = CString::new("second").unwrap();
+        let result = call(
+            &arguments,
+            &[
+                f64::from_bits(first.as_ptr() as usize as u64),
+                f64::from_bits(second.as_ptr() as usize as u64),
+                4.0,
+            ],
+        );
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 8.0);
     }
 
     #[test]

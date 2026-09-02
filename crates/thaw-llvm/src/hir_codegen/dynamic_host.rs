@@ -27,6 +27,7 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
 fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str => Some(1),
+        HirType::Union(elements) if jit_tagged_primitive_union(elements) => Some(2),
         HirType::Array(element)
             if jit_array_result_element_supported(element) =>
         {
@@ -57,6 +58,18 @@ fn jit_array_result_element_supported(ty: &HirType) -> bool {
         )
 }
 
+fn jit_tagged_primitive_union(elements: &[HirType]) -> bool {
+    (2..=3).contains(&elements.len())
+        && elements
+            .iter()
+            .all(|element| matches!(element, HirType::F64 | HirType::Bool | HirType::Str))
+        && elements.contains(&HirType::Str)
+        && elements.len()
+            == usize::from(elements.contains(&HirType::F64))
+                + usize::from(elements.contains(&HirType::Bool))
+                + usize::from(elements.contains(&HirType::Str))
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_jit_argument_slots(
         &mut self,
@@ -65,6 +78,70 @@ impl<'ctx> HirCompiler<'ctx> {
         path: &str,
         output: &mut Vec<BasicValueEnum<'ctx>>,
     ) -> Result<(), String> {
+        if let HirType::Union(elements) = ty {
+            if !jit_tagged_primitive_union(elements) {
+                return Err(format!("unsupported JIT union argument {ty:?}"));
+            }
+            let union = value.into_struct_value();
+            let tag = self
+                .builder
+                .build_extract_value(union, 0, &format!("{path}_tag"))
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            let payload = self
+                .builder
+                .build_extract_value(union, 1, &format!("{path}_payload"))
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            let mut runtime_tag = self.context.i8_type().const_zero();
+            for (index, member) in elements.iter().enumerate() {
+                let semantic = match member {
+                    HirType::F64 => 1,
+                    HirType::Str => 2,
+                    HirType::Bool => 3,
+                    _ => unreachable!(),
+                };
+                let selected = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        tag,
+                        self.context.i8_type().const_int(index as u64, false),
+                        &format!("{path}_is_{index}"),
+                    )
+                    .map_err(|error| error.to_string())?;
+                runtime_tag = self
+                    .builder
+                    .build_select(
+                        selected,
+                        self.context.i8_type().const_int(semantic, false),
+                        runtime_tag,
+                        &format!("{path}_runtime_tag"),
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+            }
+            output.push(
+                self.builder
+                    .build_unsigned_int_to_float(
+                        runtime_tag,
+                        self.context.f64_type(),
+                        &format!("{path}_tag_slot"),
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into(),
+            );
+            output.push(
+                self.builder
+                    .build_bit_cast(
+                        payload,
+                        self.context.f64_type(),
+                        &format!("{path}_payload_slot"),
+                    )
+                    .map_err(|error| error.to_string())?,
+            );
+            return Ok(());
+        }
         if let HirType::Object(fields) = ty {
             let object = value.into_pointer_value();
             let mut offset = 0u64;
@@ -1103,13 +1180,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     payload.as_ref()
                 }
                 ty @ (HirType::F64 | HirType::Bool | HirType::Str) => ty,
+                ty @ HirType::Union(elements)
+                    if jit_tagged_primitive_union(elements) => ty,
                 ty @ HirType::Array(element)
                     if jit_array_result_element_supported(element) => ty,
                 ty @ HirType::Dictionary(element)
                     if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 _ => {
                     return Err(
-                        "JIT calls currently return primitives, supported arrays, dictionaries, or optional primitives"
+                        "JIT calls currently return primitives, tagged primitive unions containing string, supported arrays, dictionaries, or optional primitives"
                             .into(),
                     )
                 }
@@ -1119,14 +1198,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 .iter()
                 .map(jit_parameter_slots)
                 .collect::<Option<Vec<_>>>()
-                .ok_or("JIT calls require primitive, primitive-array, object, or tuple arguments")?
+                .ok_or("JIT calls require primitive, tagged primitive union, primitive-array, object, or tuple arguments")?
                 .into_iter()
                 .sum::<usize>();
             if argument_slots > 16
                 || args.len() != signature.params.len()
             {
                 return Err(
-                    "JIT calls currently require primitive or array arguments fitting 16 ABI slots"
+                    "JIT calls currently require supported arguments fitting 16 ABI slots"
                         .into(),
                 );
             }
@@ -1546,6 +1625,99 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map(BasicValueEnum::from)
                     .map_err(|error| error.to_string())?
+            } else if let HirType::Union(elements) = return_type {
+                let number = elements.iter().position(|member| *member == HirType::F64);
+                let boolean = elements.iter().position(|member| *member == HirType::Bool);
+                let string = elements.iter().position(|member| *member == HirType::Str);
+                let Some(string) = string else {
+                    return Err(format!(
+                        "JIT tagged result requires a string member, found {return_type:?}"
+                    ));
+                };
+                if !jit_tagged_primitive_union(elements) {
+                    return Err(format!(
+                        "JIT tagged result only supports distinct number/boolean/string members, found {return_type:?}"
+                    ));
+                }
+                let bits = self
+                    .builder
+                    .build_bit_cast(
+                        value.into_float_value(),
+                        self.context.i64_type(),
+                        "jit_dynamic_bits",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let pointer = self
+                    .builder
+                    .build_int_to_ptr(
+                        bits,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "jit_dynamic_value",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let payload_pointer = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i64_type(),
+                            pointer,
+                            &[self.context.i64_type().const_int(1, false)],
+                            "jit_dynamic_payload_pointer",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                let runtime_tag = self
+                    .builder
+                    .build_load(self.context.i64_type(), pointer, "jit_dynamic_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let mut tag = self.context.i8_type().const_int(string as u64, false);
+                for (runtime, member, name) in [
+                    (3, boolean, "jit_dynamic_is_boolean"),
+                    (1, number, "jit_dynamic_is_number"),
+                ] {
+                    let Some(member) = member else {
+                        continue;
+                    };
+                    let selected = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            runtime_tag,
+                            self.context.i64_type().const_int(runtime, false),
+                            name,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    tag = self
+                        .builder
+                        .build_select(
+                            selected,
+                            self.context.i8_type().const_int(member as u64, false),
+                            tag,
+                            "jit_union_tag",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .into_int_value();
+                }
+                let payload = self
+                    .builder
+                    .build_load(
+                        self.context.i64_type(),
+                        payload_pointer,
+                        "jit_union_payload",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let union_type = self.basic_type(return_type)?.into_struct_type();
+                let union = self
+                    .builder
+                    .build_insert_value(union_type.get_undef(), tag, 0, "jit_union_with_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_struct_value();
+                self.builder
+                    .build_insert_value(union, payload, 1, "jit_union_with_payload")
+                    .map_err(|error| error.to_string())?
+                    .into_struct_value()
+                    .into()
             } else if matches!(
                 return_type,
                 HirType::Str | HirType::Array(_) | HirType::Dictionary(_)
