@@ -2814,7 +2814,17 @@ fn jit_export(
                 let prefix = array_prefix(&encoded)
                     .or_else(|| dynamic_array.then_some("dynamic"))?;
                 if dynamic_array
-                    && !matches!(method, "join" | "toString" | "slice" | "concat" | "at")
+                    && !matches!(
+                        method,
+                        "join"
+                            | "toString"
+                            | "slice"
+                            | "concat"
+                            | "at"
+                            | "includes"
+                            | "indexOf"
+                            | "lastIndexOf"
+                    )
                 {
                     return None;
                 }
@@ -3442,6 +3452,7 @@ fn jit_export(
                         "rn" => JitKind::Number,
                         "rb" => JitKind::Boolean,
                         "rs" => JitKind::String,
+                        "dynamic" => JitKind::Dynamic,
                         _ => return None,
                     };
                     if jit_expression_kind(&needle)?.0 != expected {
@@ -3469,15 +3480,17 @@ fn jit_export(
                     if call.args.len() > 2 {
                         return None;
                     }
-                    output.push(format!(
-                        "{prefix}{}",
-                        match method {
-                            "includes" => "includes",
-                            "indexOf" => "indexof",
-                            "lastIndexOf" => "lastindexof",
-                            _ => return None,
-                        }
-                    ));
+                    let operation = match method {
+                        "includes" => "includes",
+                        "indexOf" => "indexof",
+                        "lastIndexOf" => "lastindexof",
+                        _ => return None,
+                    };
+                    output.push(if dynamic_array {
+                        format!("dynarray{operation}")
+                    } else {
+                        format!("{prefix}{operation}")
+                    });
                 }
             }
             Expr::Call(call) if primitive_value_of(call).is_some() => {
@@ -12435,27 +12448,36 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             "rnincludes"
                 | "rbincludes"
                 | "rsincludes"
+                | "dynarrayincludes"
                 | "rnindexof"
                 | "rbindexof"
                 | "rsindexof"
+                | "dynarrayindexof"
                 | "rnlastindexof"
                 | "rblastindexof"
                 | "rslastindexof"
+                | "dynarraylastindexof"
         ) {
             if stack.pop()? != JitKind::Number {
                 return None;
             }
-            let needle = stack.pop()?;
-            if stack.pop()? != JitKind::Array
-                || needle
-                    != match &token[..2] {
-                        "rn" => JitKind::Number,
-                        "rb" => JitKind::Boolean,
-                        "rs" => JitKind::String,
-                        _ => return None,
-                    }
-            {
-                return None;
+            if token.starts_with("dynarray") {
+                if stack.pop()? != JitKind::Dynamic || stack.pop()? != JitKind::Dynamic {
+                    return None;
+                }
+            } else {
+                let needle = stack.pop()?;
+                if stack.pop()? != JitKind::Array
+                    || needle
+                        != match &token[..2] {
+                            "rn" => JitKind::Number,
+                            "rb" => JitKind::Boolean,
+                            "rs" => JitKind::String,
+                            _ => return None,
+                        }
+                {
+                    return None;
+                }
             }
             stack.push(if token.ends_with("includes") {
                 JitKind::Boolean

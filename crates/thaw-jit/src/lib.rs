@@ -2566,6 +2566,48 @@ array_search_fn!(string_array_last_index_of, 7);
 array_search_fn!(bool_array_last_index_of, 8);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_search(operation: u8, value: f64, needle: f64, from_index: f64) -> f64 {
+    let (Some(value), Some(needle)) = (
+        dynamic_primitive(value, None),
+        dynamic_primitive(needle, None),
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let search = match (value.tag, needle.tag, operation) {
+        (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG, 0..=1) => operation,
+        (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG, 0..=1) => operation + 2,
+        (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG, 0..=1) => operation + 4,
+        (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG, 2) => 6,
+        (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG, 2) => 7,
+        (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG, 2) => 8,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    array_search(
+        search,
+        f64::from_bits(value.payload),
+        f64::from_bits(needle.payload),
+        from_index,
+    )
+}
+
+macro_rules! dynamic_array_search_fn {
+    ($name:ident, $operation:expr) => {
+        #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+        extern "C" fn $name(value: f64, needle: f64, from_index: f64) -> f64 {
+            dynamic_array_search($operation, value, needle, from_index)
+        }
+    };
+}
+
+dynamic_array_search_fn!(dynamic_array_index_of, 0);
+dynamic_array_search_fn!(dynamic_array_includes, 1);
+dynamic_array_search_fn!(dynamic_array_last_index_of, 2);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_truthy(value: f64) -> f64 {
     let value = value.to_bits() as usize as *const c_char;
     unsafe { (!value.is_null() && !CStr::from_ptr(value).to_bytes().is_empty()) as u8 as f64 }
@@ -4100,12 +4142,15 @@ enum NumericValue {
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
+    DynamicArrayIncludes,
     NumberArrayIndexOf,
     BoolArrayIndexOf,
     StringArrayIndexOf,
+    DynamicArrayIndexOf,
     NumberArrayLastIndexOf,
     BoolArrayLastIndexOf,
     StringArrayLastIndexOf,
+    DynamicArrayLastIndexOf,
     NumberArrayJoin,
     BoolArrayJoin,
     StringArrayJoin,
@@ -4448,12 +4493,15 @@ impl NumericProgram {
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
+                    "dynarrayincludes" => Some(NumericValue::DynamicArrayIncludes),
                     "rnindexof" => Some(NumericValue::NumberArrayIndexOf),
                     "rbindexof" => Some(NumericValue::BoolArrayIndexOf),
                     "rsindexof" => Some(NumericValue::StringArrayIndexOf),
+                    "dynarrayindexof" => Some(NumericValue::DynamicArrayIndexOf),
                     "rnlastindexof" => Some(NumericValue::NumberArrayLastIndexOf),
                     "rblastindexof" => Some(NumericValue::BoolArrayLastIndexOf),
                     "rslastindexof" => Some(NumericValue::StringArrayLastIndexOf),
+                    "dynarraylastindexof" => Some(NumericValue::DynamicArrayLastIndexOf),
                     "rnjoin" => Some(NumericValue::NumberArrayJoin),
                     "rbjoin" => Some(NumericValue::BoolArrayJoin),
                     "rsjoin" => Some(NumericValue::StringArrayJoin),
@@ -6916,12 +6964,15 @@ impl NumericProgram {
                 NumericValue::NumberArrayIncludes
                 | NumericValue::BoolArrayIncludes
                 | NumericValue::StringArrayIncludes
+                | NumericValue::DynamicArrayIncludes
                 | NumericValue::NumberArrayIndexOf
                 | NumericValue::BoolArrayIndexOf
                 | NumericValue::StringArrayIndexOf
+                | NumericValue::DynamicArrayIndexOf
                 | NumericValue::NumberArrayLastIndexOf
                 | NumericValue::BoolArrayLastIndexOf
-                | NumericValue::StringArrayLastIndexOf => {
+                | NumericValue::StringArrayLastIndexOf
+                | NumericValue::DynamicArrayLastIndexOf => {
                     if depth < 3 {
                         return None;
                     }
@@ -6929,12 +6980,15 @@ impl NumericProgram {
                         NumericValue::NumberArrayIncludes => number_array_includes,
                         NumericValue::BoolArrayIncludes => bool_array_includes,
                         NumericValue::StringArrayIncludes => string_array_includes,
+                        NumericValue::DynamicArrayIncludes => dynamic_array_includes,
                         NumericValue::NumberArrayIndexOf => number_array_index_of,
                         NumericValue::BoolArrayIndexOf => bool_array_index_of,
                         NumericValue::StringArrayIndexOf => string_array_index_of,
+                        NumericValue::DynamicArrayIndexOf => dynamic_array_index_of,
                         NumericValue::NumberArrayLastIndexOf => number_array_last_index_of,
                         NumericValue::BoolArrayLastIndexOf => bool_array_last_index_of,
                         NumericValue::StringArrayLastIndexOf => string_array_last_index_of,
+                        NumericValue::DynamicArrayLastIndexOf => dynamic_array_last_index_of,
                         _ => unreachable!(),
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
