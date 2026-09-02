@@ -2435,8 +2435,10 @@ object/string unions can be tested, coerced and forwarded without QuickJS.
 After a `typeof value === "object"` check, primitive fields are loaded directly
 from the native object layout and remain available to ordinary JIT operations;
 the same tagged value can also return through LLVM without changing object
-identity or layout. Constructing a new fixed object inside a tagged JIT result
-remains outside this path until its concrete layout can be allocated safely.
+identity or layout. Object literals with an exact fixed shape and primitive
+number, boolean, or string fields are allocated in the runtime arena using that
+same native layout, so conditional object/string results can be constructed and
+returned without QuickJS.
 Mutable dynamic locals may be reassigned between these representable shapes;
 array results are converted to stable native handles before tagging. Other
 heterogeneous result mixtures still remain on the QuickJS path. Tagged

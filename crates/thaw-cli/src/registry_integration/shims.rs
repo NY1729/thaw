@@ -518,6 +518,94 @@ fn jit_export(
             .map(JitExport::Object)
     }
 
+    fn encode_fixed_object_union_return(
+        object: &thaw_parser::ast::ObjectLit,
+        fields: &[(String, thaw_hir::HirType)],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<JitExport> {
+        if object.props.len() != fields.len() {
+            return None;
+        }
+        let mut properties = std::collections::HashMap::new();
+        for property in &object.props {
+            let (name, value) = object_property(property)?;
+            if properties.insert(name, value).is_some() {
+                return None;
+            }
+        }
+        let size = u16::try_from(fields.len().checked_mul(8)?).ok()?;
+        let mut output = vec![format!("objnew{size}")];
+        for (index, (field, ty)) in fields.iter().enumerate() {
+            let expression = match properties.get(field)? {
+                ObjectReturnValue::Expression(expression) => *expression,
+                ObjectReturnValue::Shorthand(identifier) => {
+                    let value = locals
+                        .get(identifier.sym.as_ref())
+                        .cloned()
+                        .or_else(|| {
+                            parameters
+                                .get(identifier.sym.as_ref())
+                                .map(|value| vec![value.clone()])
+                        })?;
+                    let expected = jit_return_kind(ty)?;
+                    let actual = jit_expression_kind(&value)?.0;
+                    if actual != expected
+                        && !matches!(
+                            (actual, expected),
+                            (JitKind::Number, JitKind::Boolean)
+                                | (JitKind::Boolean, JitKind::Number)
+                        )
+                    {
+                        return None;
+                    }
+                    output.extend(value);
+                    output.push(format!(
+                        "objset{}{offset}",
+                        match ty {
+                            thaw_hir::HirType::F64 => 'n',
+                            thaw_hir::HirType::Bool => 'b',
+                            thaw_hir::HirType::Str => 's',
+                            _ => return None,
+                        },
+                        offset = index * 8
+                    ));
+                    continue;
+                }
+            };
+            let mut value = Vec::new();
+            encode_expression(expression, parameters, locals, context, &mut value)?;
+            let expected = jit_return_kind(ty)?;
+            let actual = jit_expression_kind(&value)?.0;
+            if actual != expected
+                && !matches!(
+                    (actual, expected),
+                    (JitKind::Number, JitKind::Boolean)
+                        | (JitKind::Boolean, JitKind::Number)
+                )
+            {
+                return None;
+            }
+            output.extend(value);
+            output.push(format!(
+                "objset{}{offset}",
+                match ty {
+                    thaw_hir::HirType::F64 => 'n',
+                    thaw_hir::HirType::Bool => 'b',
+                    thaw_hir::HirType::Str => 's',
+                    _ => return None,
+                },
+                offset = index * 8
+            ));
+        }
+        output.push("tagobject".into());
+        Some(JitExport::Value(validated_jit_expression(
+            output,
+            JitKind::Dynamic,
+        )?))
+    }
+
     fn encode_dictionary_return(
         object: &thaw_parser::ast::ObjectLit,
         element: &thaw_hir::HirType,
@@ -648,6 +736,48 @@ fn jit_export(
                 context,
             );
         }
+        if matches!(ty, thaw_hir::HirType::Union(elements) if elements.iter().any(|element| matches!(element, thaw_hir::HirType::Object(_))))
+        {
+            if let Expr::Cond(conditional) = expression {
+                let mut output = Vec::new();
+                encode_condition(
+                    conditional.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut output,
+                )?;
+                let JitExport::Value(consequent) = encode_return_expression(
+                    conditional.cons.as_ref(),
+                    ty,
+                    parameters,
+                    locals,
+                    context,
+                )?
+                else {
+                    return None;
+                };
+                let JitExport::Value(alternate) = encode_return_expression(
+                    conditional.alt.as_ref(),
+                    ty,
+                    parameters,
+                    locals,
+                    context,
+                )?
+                else {
+                    return None;
+                };
+                output.push("if".into());
+                output.extend(consequent.strip_prefix("expr:")?.split(',').map(str::to_owned));
+                output.push("else".into());
+                output.extend(alternate.strip_prefix("expr:")?.split(',').map(str::to_owned));
+                output.push("end".into());
+                return Some(JitExport::Value(validated_jit_expression(
+                    output,
+                    JitKind::Dynamic,
+                )?));
+            }
+        }
         if matches!(
             ty,
             thaw_hir::HirType::Object(_)
@@ -702,6 +832,24 @@ fn jit_export(
         context: &mut InlineContext<'_>,
     ) -> Option<JitExport> {
         match ty {
+            thaw_hir::HirType::Union(elements)
+                if object_literal(expression).is_some()
+                    && elements
+                        .iter()
+                        .any(|element| matches!(element, thaw_hir::HirType::Object(_))) =>
+            {
+                let fields = elements.iter().find_map(|element| match element {
+                    thaw_hir::HirType::Object(fields) => Some(fields.as_slice()),
+                    _ => None,
+                })?;
+                encode_fixed_object_union_return(
+                    object_literal(expression)?,
+                    fields,
+                    parameters,
+                    locals,
+                    context,
+                )
+            }
             thaw_hir::HirType::Object(fields) => encode_object_return(
                 object_literal(expression)?,
                 fields,
@@ -13121,11 +13269,32 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Dynamic);
-        } else if matches!(token.as_str(), "tagdn" | "tagdb" | "tagds") {
+        } else if matches!(
+            token.as_str(),
+            "tagdn" | "tagdb" | "tagds" | "tagobject"
+        ) {
             if stack.pop()? != JitKind::Dictionary {
                 return None;
             }
             stack.push(JitKind::Dynamic);
+        } else if let Some(size) = token.strip_prefix("objnew") {
+            size.parse::<u16>().ok().filter(|size| *size > 0)?;
+            stack.push(JitKind::Dictionary);
+        } else if let Some(encoded) = token.strip_prefix("objset") {
+            let (kind, offset) = encoded.split_at(1);
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::Dictionary
+                || offset.parse::<u16>().is_err()
+                || !match kind {
+                    "n" => matches!(value, JitKind::Number | JitKind::Boolean),
+                    "b" => matches!(value, JitKind::Number | JitKind::Boolean),
+                    "s" => value == JitKind::String,
+                    _ => return None,
+                }
+            {
+                return None;
+            }
+            stack.push(JitKind::Dictionary);
         } else if token == "tagkind" {
             if stack.pop()? != JitKind::Dynamic {
                 return None;
@@ -13269,6 +13438,7 @@ fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> O
                             | "tagdn"
                             | "tagdb"
                             | "tagds"
+                            | "tagobject"
                     )
                         || jit_dynamic_argument(token).is_some()
                 }))
