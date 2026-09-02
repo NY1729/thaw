@@ -2129,6 +2129,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "export declare function callHelperFinally(value: number): number;\n",
         "export declare function callHelperSwitch(value: number): string;\n",
         "export declare function callHelperSwitchReturn(values: number[]): string;\n",
+        "export declare function callHelperFinallyReturn(value: number): string;\n",
     );
     let source = concat!(
         "function makeLiteral(value) { return { unused: Math.random(), first: value, second: value, label: 'helper' }; } ",
@@ -2146,6 +2147,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "function makeHelperFinally(value) { let count = value; try { count += 2; } finally { count += 3; } return { count }; } ",
         "function makeHelperSwitch(value) { let label = 'other'; switch (value) { case 1: label = 'one'; break; case 2: label = 'two'; break; } return { label }; } ",
         "function makeHelperSwitchReturn(values) { switch (values.pop()) { case 1: return { count: values.length, label: 'one' }; case 2: return { count: values.length, label: 'two' }; default: return { count: values.length, label: 'other' }; } } ",
+        "function makeHelperFinallyReturn(value) { let count = value; const values = [value]; try { count += 1; return { count, values }; } finally { count += 10; values.push(9); } } ",
         "module.exports.unpack = value => { const { count: amount, meta: { label, enabled }, pair: [index, text], values } = value; values.push(index); return label + ':' + String(amount) + ':' + String(enabled) + ':' + String(index) + ':' + text + ':' + values.join(','); }; ",
         "module.exports.reassign = value => { let count = 0; let label = ''; let index = 0; let text = ''; ({ count, meta: { label }, pair: [index, text] } = value); return String(count) + ':' + label + ':' + String(index) + ':' + text; }; ",
         "module.exports.reassignControl = (value, flag) => { let count = 0; let label = ''; ({ count, meta: { label } } = value); if (flag) count += 1; return String(count) + ':' + label; }; ",
@@ -2170,6 +2172,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "module.exports.callHelperFinally = value => { const { count } = makeHelperFinally(value); return count; }; ",
         "module.exports.callHelperSwitch = value => { const { label } = makeHelperSwitch(value); return label; };",
         "module.exports.callHelperSwitchReturn = values => { const { count, label } = makeHelperSwitchReturn(values); return label + ':' + String(count); };",
+        "module.exports.callHelperFinallyReturn = value => { const { count, values } = makeHelperFinallyReturn(value); return String(count) + ':' + values.join(','); };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -2197,6 +2200,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "callHelperFinally",
         "callHelperSwitch",
         "callHelperSwitchReturn",
+        "callHelperFinallyReturn",
     ]
         .into_iter()
         .enumerate()
@@ -2217,6 +2221,8 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
             assert_eq!(expression.unwrap().matches("random").count(), 2);
         } else if name == "callHelperSwitchReturn" {
             assert_eq!(expression.unwrap().matches("rnpop").count(), 1);
+        } else if name == "callHelperFinallyReturn" {
+            assert_eq!(expression.unwrap().matches("push").count(), 1);
         }
     }
 
@@ -2232,7 +2238,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { callArrayAssign, callArrayParts, callControl, callEarly, callHelperFinally, callHelperFor, callHelperLoop, callHelperSwitch, callHelperSwitchReturn, callLiteral, callLocals, callNestedEarly, callObjectDefault, callObjectParts, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); console.log(callArrayParts(3)); console.log(callArrayAssign(3)); console.log(callObjectParts(3)); console.log(callObjectDefault()); console.log(callControl(3, true)); console.log(callControl(3, false)); console.log(callEarly(3, true)); console.log(callEarly(3, false)); console.log(callNestedEarly(3, true)); console.log(callNestedEarly(3, false)); console.log(callNestedEarly(0, true)); console.log(callHelperLoop(4)); console.log(callHelperFor(4)); console.log(callHelperFinally(5)); console.log(callHelperSwitch(1)); console.log(callHelperSwitch(2)); console.log(callHelperSwitch(3)); console.log(callHelperSwitchReturn([7, 2])); console.log(callHelperSwitchReturn([7, 9])); }\n",
+        "import { callArrayAssign, callArrayParts, callControl, callEarly, callHelperFinally, callHelperFinallyReturn, callHelperFor, callHelperLoop, callHelperSwitch, callHelperSwitchReturn, callLiteral, callLocals, callNestedEarly, callObjectDefault, callObjectParts, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); console.log(callArrayParts(3)); console.log(callArrayAssign(3)); console.log(callObjectParts(3)); console.log(callObjectDefault()); console.log(callControl(3, true)); console.log(callControl(3, false)); console.log(callEarly(3, true)); console.log(callEarly(3, false)); console.log(callNestedEarly(3, true)); console.log(callNestedEarly(3, false)); console.log(callNestedEarly(0, true)); console.log(callHelperLoop(4)); console.log(callHelperFor(4)); console.log(callHelperFinally(5)); console.log(callHelperSwitch(1)); console.log(callHelperSwitch(2)); console.log(callHelperSwitch(3)); console.log(callHelperSwitchReturn([7, 2])); console.log(callHelperSwitchReturn([7, 9])); console.log(callHelperFinallyReturn(3)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2248,7 +2254,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n39\n31\nbox:4\nfallback\nyes:5\nsmall:2\nyes:4\nno:2\nhigh:13\nlow:4\nzero:0\n4\n6\n10\none\ntwo\nother\ntwo:1\nother:1\n"
+        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n39\n31\nbox:4\nfallback\nyes:5\nsmall:2\nyes:4\nno:2\nhigh:13\nlow:4\nzero:0\n4\n6\n10\none\ntwo\nother\ntwo:1\nother:1\n4:3,9\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
