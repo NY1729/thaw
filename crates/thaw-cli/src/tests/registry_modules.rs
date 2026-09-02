@@ -1336,18 +1336,18 @@ fn nested_tuple_fields_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Item { pair: [boolean, [number, string]]; }\nexport declare function numberValue(value: Item | string): number;\nexport declare function stringValue(value: Item | string): string;\nexport declare function make(flag: boolean): Item | string;\n",
+        "export interface Meta { score: number; label: string; }\nexport interface Item { pair: [boolean, [number, string], Meta, number[], Record<string, number>]; }\nexport declare function numberValue(value: Item | string): number;\nexport declare function stringValue(value: Item | string): string;\nexport declare function objectNumber(value: Item | string): number;\nexport declare function objectString(value: Item | string): string;\nexport declare function arrayValue(value: Item | string): string;\nexport declare function dictionaryValue(value: Item | string): number;\nexport declare function make(flag: boolean): Item | string;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.numberValue = value => typeof value === 'object' ? value.pair[1][0] : 0; module.exports.stringValue = value => typeof value === 'object' ? value.pair[1][1] : value; module.exports.make = flag => flag ? { pair: [false, [7, 'made']] } : 'none';\n",
+        "module.exports.numberValue = value => typeof value === 'object' ? value.pair[1][0] : 0; module.exports.stringValue = value => typeof value === 'object' ? value.pair[1][1] : value; module.exports.objectNumber = value => typeof value === 'object' ? value.pair[2].score : 0; module.exports.objectString = value => typeof value === 'object' ? value.pair[2].label : value; module.exports.arrayValue = value => typeof value === 'object' ? value.pair[3].join(',') : value; module.exports.dictionaryValue = value => typeof value === 'object' ? value.pair[4].score : 0; module.exports.make = flag => flag ? { pair: [false, [7, 'made'], { score: 8, label: 'object' }, [10, 11], { score: 12 }] } : 'none';\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { make, numberValue, stringValue } from 'jit-nested-tuple-field';\nfunction main(): void { const value = { pair: [true, [42, 'nested']] as [boolean, [number, string]] }; console.log(numberValue(value)); console.log(stringValue(value)); console.log(numberValue('none')); console.log(stringValue('plain')); console.log(numberValue(make(true))); console.log(stringValue(make(true))); console.log(stringValue(make(false))); }\n",
+        "import { arrayValue, dictionaryValue, make, numberValue, objectNumber, objectString, stringValue } from 'jit-nested-tuple-field';\nfunction main(): void { const record: Record<string, number> = { score: 3 }; const value = { pair: [true, [42, 'nested'], { score: 9, label: 'local' }, [1, 2], record] as [boolean, [number, string], { score: number; label: string }, number[], Record<string, number>] }; console.log(numberValue(value)); console.log(stringValue(value)); console.log(objectNumber(value)); console.log(objectString(value)); console.log(arrayValue(value)); console.log(dictionaryValue(value)); console.log(numberValue('none')); console.log(stringValue('plain')); const made = make(true); console.log(numberValue(made)); console.log(stringValue(made)); console.log(objectNumber(made)); console.log(objectString(made)); console.log(arrayValue(made)); console.log(dictionaryValue(made)); console.log(stringValue(make(false))); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1363,7 +1363,7 @@ fn nested_tuple_fields_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\nnested\n0\nplain\n7\nmade\nnone\n"
+        "42\nnested\n9\nlocal\n1,2\n3\n0\nplain\n7\nmade\n8\nobject\n10,11\n12\nnone\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
