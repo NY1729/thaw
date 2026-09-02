@@ -13109,7 +13109,18 @@ fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> O
             && !expression
                 .iter()
                 .any(|token| {
-                    matches!(token.as_str(), "tagnum" | "tagbool" | "tagstr")
+                    matches!(
+                        token.as_str(),
+                        "tagnum"
+                            | "tagbool"
+                            | "tagstr"
+                            | "tagrn"
+                            | "tagrb"
+                            | "tagrs"
+                            | "tagdn"
+                            | "tagdb"
+                            | "tagds"
+                    )
                         || jit_dynamic_argument(token).is_some()
                 }))
     {
