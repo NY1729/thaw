@@ -2637,6 +2637,10 @@ Nested `try/catch/finally` can join normal and caught fixed aggregates before
 that same early exit. The internal exception placeholder is excluded from the
 counted result, catch values retain their typed native representation, and the
 shared finalizer runs once on either path.
+Labels that wrap an aggregate-returning statement or loop are transparent to
+the same JIT extraction, so the label itself no longer forces QuickJS when no
+labeled jump targets it. Multi-level labeled `break` and `continue` still need
+dedicated JIT loop-depth operands.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
