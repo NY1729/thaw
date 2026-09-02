@@ -2907,6 +2907,27 @@ extern "C" fn untag_string_array(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_array(value: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| {
+            if matches!(
+                dynamic.tag,
+                DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+            ) {
+                f64::from_bits(dynamic.payload)
+            } else {
+                CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+                0.0
+            }
+        },
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn untag_number_dictionary(value: f64) -> f64 {
     untag_dynamic(value, DYNAMIC_NUMBER_DICTIONARY_TAG)
 }
@@ -3889,6 +3910,7 @@ enum NumericValue {
     UntagNumberArray,
     UntagBooleanArray,
     UntagStringArray,
+    UntagArray,
     UntagNumberDictionary,
     UntagBooleanDictionary,
     UntagStringDictionary,
@@ -4231,6 +4253,7 @@ impl NumericProgram {
                     "untagrn" => Some(NumericValue::UntagNumberArray),
                     "untagrb" => Some(NumericValue::UntagBooleanArray),
                     "untagrs" => Some(NumericValue::UntagStringArray),
+                    "untagarray" => Some(NumericValue::UntagArray),
                     "untagdn" => Some(NumericValue::UntagNumberDictionary),
                     "untagdb" => Some(NumericValue::UntagBooleanDictionary),
                     "untagds" => Some(NumericValue::UntagStringDictionary),
@@ -5170,6 +5193,7 @@ impl NumericProgram {
                 | NumericValue::UntagNumberArray
                 | NumericValue::UntagBooleanArray
                 | NumericValue::UntagStringArray
+                | NumericValue::UntagArray
                 | NumericValue::UntagNumberDictionary
                 | NumericValue::UntagBooleanDictionary
                 | NumericValue::UntagStringDictionary
@@ -5194,6 +5218,7 @@ impl NumericProgram {
                         NumericValue::UntagNumberArray => untag_number_array,
                         NumericValue::UntagBooleanArray => untag_boolean_array,
                         NumericValue::UntagStringArray => untag_string_array,
+                        NumericValue::UntagArray => untag_array,
                         NumericValue::UntagNumberDictionary => untag_number_dictionary,
                         NumericValue::UntagBooleanDictionary => untag_boolean_dictionary,
                         NumericValue::UntagStringDictionary => untag_string_dictionary,
