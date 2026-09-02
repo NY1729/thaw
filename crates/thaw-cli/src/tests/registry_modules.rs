@@ -2269,6 +2269,58 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
 }
 
 #[test]
+fn aggregate_catch_uses_collection_throw_values_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-aggregate-collection-catch-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-aggregate-collection-catch");
+    std::fs::create_dir_all(&package).unwrap();
+    let dts = concat!(
+        "export declare function arrayCatch(values: number[], fail: boolean): string;\n",
+        "export declare function dictionaryCatch(values: Record<string, number>, fail: boolean): string;\n",
+    );
+    let source = concat!(
+        "function arrayResult(values, fail) { try { if (fail) throw values; return { count: 0, label: 'ok' }; } catch (error) { return { count: error.length, label: 'array' }; } } ",
+        "function dictionaryResult(values, fail) { try { if (fail) throw values; return { count: 0, label: 'ok' }; } catch (error) { return { count: error.value, label: 'dictionary' }; } } ",
+        "module.exports.arrayCatch = (values, fail) => { const { count, label } = arrayResult(values, fail); return label + ':' + String(count); }; ",
+        "module.exports.dictionaryCatch = (values, fail) => { const { count, label } = dictionaryResult(values, fail); return label + ':' + String(count); };",
+    );
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in ["arrayCatch", "dictionaryCatch"].into_iter().enumerate() {
+        let expression = jit_numeric_export(source, name, false, &declarations[index])
+            .unwrap_or_else(|| panic!("{name}"));
+        assert!(expression.contains("trystart"));
+        assert!(expression.contains("catch"));
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { arrayCatch, dictionaryCatch } from 'jit-aggregate-collection-catch';\nfunction main(): void { console.log(arrayCatch([1, 2, 3], false)); console.log(arrayCatch([1, 2, 3], true)); const values: Record<string, number> = { value: 42 }; console.log(dictionaryCatch(values, false)); console.log(dictionaryCatch(values, true)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "ok:0\narray:3\nok:0\ndictionary:42\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
