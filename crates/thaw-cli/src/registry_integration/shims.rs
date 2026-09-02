@@ -5339,6 +5339,7 @@ fn jit_export(
                     let ([needle] | [needle, ..]) = call.args.as_slice() else {
                         return None;
                     };
+                    let boolean_literal = matches!(needle.expr.as_ref(), Expr::Lit(Lit::Bool(_)));
                     let mut needle = {
                         let mut value = Vec::new();
                         encode_expression(
@@ -5357,6 +5358,9 @@ fn jit_export(
                         "dynamic" => JitKind::Dynamic,
                         _ => return None,
                     };
+                    if expected == JitKind::Boolean && boolean_literal {
+                        needle.push("asbool".into());
+                    }
                     if jit_expression_kind(&needle)?.0 != expected {
                         return None;
                     }
