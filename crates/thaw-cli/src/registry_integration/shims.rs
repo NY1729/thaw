@@ -2527,6 +2527,10 @@ fn jit_export(
             .and_then(|path| locals.get(&path))
             .is_some_and(|tokens| {
                 jit_expression_kind(tokens).is_some_and(|(kind, _)| kind == JitKind::Array)
+                    || tokens
+                        .first()
+                        .and_then(|token| runtime_local_kind(token))
+                        .is_some_and(|kind| kind == JitKind::Array)
                     || matches!(tokens.as_slice(), [token] if jit_dynamic_array_argument(token)
                         || jit_typed_array_union_untag(token).is_some())
             });
@@ -6578,6 +6582,7 @@ fn jit_export(
         },
         DestructureArray {
             bindings: Vec<(usize, &'a Ident, Option<&'a Expr>)>,
+            rest: Option<(usize, &'a Ident)>,
             initializer: &'a Expr,
             mutable: bool,
         },
@@ -6791,33 +6796,43 @@ fn jit_export(
                                 mutable: declaration.kind != VarDeclKind::Const,
                             }),
                             Pat::Array(pattern) => {
-                                let bindings = pattern
-                                    .elems
-                                    .iter()
-                                    .enumerate()
-                                    .filter_map(|(index, element)| {
-                                        element.as_ref().map(|element| match element {
-                                            Pat::Ident(name) => Some((index, &name.id, None)),
-                                            Pat::Assign(assignment) => {
-                                                let Pat::Ident(name) = assignment.left.as_ref()
-                                                else {
-                                                    return None;
-                                                };
-                                                Some((
-                                                    index,
-                                                    &name.id,
-                                                    Some(assignment.right.as_ref()),
-                                                ))
+                                let mut bindings = Vec::new();
+                                let mut rest = None;
+                                for (index, element) in pattern.elems.iter().enumerate() {
+                                    let Some(element) = element else {
+                                        continue;
+                                    };
+                                    match element {
+                                        Pat::Ident(name) => bindings.push((index, &name.id, None)),
+                                        Pat::Assign(assignment) => {
+                                            let Pat::Ident(name) = assignment.left.as_ref() else {
+                                                return None;
+                                            };
+                                            bindings.push((
+                                                index,
+                                                &name.id,
+                                                Some(assignment.right.as_ref()),
+                                            ));
+                                        }
+                                        Pat::Rest(element) => {
+                                            let Pat::Ident(name) = element.arg.as_ref() else {
+                                                return None;
+                                            };
+                                            if rest.replace((index, &name.id)).is_some()
+                                                || index + 1 != pattern.elems.len()
+                                            {
+                                                return None;
                                             }
-                                            _ => None,
-                                        })
-                                    })
-                                    .collect::<Option<Vec<_>>>()?;
-                                if bindings.is_empty() {
+                                        }
+                                        _ => return None,
+                                    }
+                                }
+                                if bindings.is_empty() && rest.is_none() {
                                     return None;
                                 }
                                 steps.push(LocalStep::DestructureArray {
                                     bindings,
+                                    rest,
                                     initializer: declarator.init.as_deref()?,
                                     mutable: declaration.kind != VarDeclKind::Const,
                                 });
@@ -9479,6 +9494,7 @@ fn jit_export(
                 }
                 LocalStep::DestructureArray {
                     bindings,
+                    rest,
                     initializer,
                     mutable: is_mutable,
                 } => {
@@ -9500,6 +9516,9 @@ fn jit_export(
                         _ => return None,
                     };
                     if bindings.iter().any(|(_, name, _)| {
+                        parameters.contains_key(name.sym.as_ref())
+                            || locals.contains_key(name.sym.as_ref())
+                    }) || rest.is_some_and(|(_, name)| {
                         parameters.contains_key(name.sym.as_ref())
                             || locals.contains_key(name.sym.as_ref())
                     }) {
@@ -9542,6 +9561,20 @@ fn jit_export(
                             value.push("end".into());
                         }
                         locals.insert(name.sym.to_string(), value);
+                        if is_mutable {
+                            mutable.insert(name.sym.to_string());
+                        }
+                    }
+                    if let Some((index, name)) = rest {
+                        let rest_index = runtime_kinds.len();
+                        output.push(source_local);
+                        output.push(format!("c{:016x}", (index as f64).to_bits()));
+                        output.push(format!("c{:016x}", f64::INFINITY.to_bits()));
+                        output.push("arrayslice".into());
+                        output.push("arrayhandle".into());
+                        locals.insert(name.sym.to_string(), vec![format!("{local_prefix}{rest_index}")]);
+                        runtime_kinds.insert(name.sym.to_string(), JitKind::Array);
+                        runtime_locals = runtime_kinds.len();
                         if is_mutable {
                             mutable.insert(name.sym.to_string());
                         }

@@ -2558,7 +2558,9 @@ union sources materialize the initializer once in a typed JIT local before
 lowering each binding to an index read. Number, boolean, and string bindings,
 skipped positions, lazy `undefined`-only defaults (including references to an
 earlier binding), later reassignment of `let` bindings, and array-returning calls
-with side effects remain in the extracted JIT function without QuickJS.
+with side effects remain in the extracted JIT function without QuickJS. A final
+rest binding is copied once into its own typed mutable array handle, preserving
+rest-array identity and keeping later mutations separate from the source.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
