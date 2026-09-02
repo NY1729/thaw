@@ -36,12 +36,6 @@ struct JitLocal {
 
 fn jit_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
     jit_argument_tagged_union(elements)
-        && !(elements
-            .iter()
-            .any(|element| matches!(element, thaw_hir::HirType::Object(_)))
-            && elements
-                .iter()
-                .any(|element| matches!(element, thaw_hir::HirType::Dictionary(_))))
 }
 
 fn jit_argument_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
