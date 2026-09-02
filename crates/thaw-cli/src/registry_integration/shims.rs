@@ -149,8 +149,8 @@ fn jit_export(
     use thaw_parser::ast::{
         ArrowExpr, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr,
         ExprOrSpread, ForHead, Function, Ident, Lit, MemberProp, ModuleItem, OptChainBase, Pat,
-        Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp, UpdateOp, VarDeclKind,
-        VarDeclOrExpr,
+        ObjectPatProp, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryOp, UpdateOp,
+        VarDeclKind, VarDeclOrExpr,
     };
 
     fn jit_parameter_slots(ty: &thaw_hir::HirType) -> Option<usize> {
@@ -4683,6 +4683,7 @@ fn jit_export(
                         Expr::Ident(identifier) => locals
                             .get(identifier.sym.as_ref())
                             .and_then(|tokens| tokens.first())
+                            .filter(|token| runtime_local_kind(token) == Some(JitKind::Array))
                             .and_then(|token| loop_local_index(token)),
                         _ => None,
                     })
@@ -6609,6 +6610,11 @@ fn jit_export(
             initializer: &'a Expr,
             mutable: bool,
         },
+        DestructureObject {
+            bindings: Vec<(String, &'a Ident, Option<&'a Expr>)>,
+            initializer: &'a Expr,
+            mutable: bool,
+        },
         Assign {
             name: &'a Ident,
             operation: AssignOp,
@@ -6806,6 +6812,72 @@ fn jit_export(
     }
 
     fn split_numeric_body(statements: &[Stmt]) -> Option<(Vec<LocalStep<'_>>, NumericBody<'_>)> {
+        fn property_name(property: &PropName) -> Option<String> {
+            match property {
+                PropName::Ident(name) => Some(name.sym.to_string()),
+                PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
+                PropName::Computed(name) => match name.expr.as_ref() {
+                    Expr::Lit(Lit::Str(name)) => Some(name.value.to_string_lossy().into_owned()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+
+        fn collect_object_bindings<'a>(
+            pattern: &'a Pat,
+            path: &str,
+            bindings: &mut Vec<(String, &'a Ident, Option<&'a Expr>)>,
+        ) -> Option<()> {
+            match pattern {
+                Pat::Ident(name) => bindings.push((path.into(), &name.id, None)),
+                Pat::Assign(assignment) => {
+                    let Pat::Ident(name) = assignment.left.as_ref() else {
+                        return None;
+                    };
+                    bindings.push((
+                        path.into(),
+                        &name.id,
+                        Some(assignment.right.as_ref()),
+                    ));
+                }
+                Pat::Object(pattern) => {
+                    for property in &pattern.props {
+                        match property {
+                            ObjectPatProp::Assign(property) => bindings.push((
+                                format!("{path}.{}", property.key.sym),
+                                &property.key.id,
+                                property.value.as_deref(),
+                            )),
+                            ObjectPatProp::KeyValue(property) => collect_object_bindings(
+                                property.value.as_ref(),
+                                &format!("{path}.{}", property_name(&property.key)?),
+                                bindings,
+                            )?,
+                            ObjectPatProp::Rest(_) => return None,
+                        }
+                    }
+                }
+                Pat::Array(pattern) => {
+                    for (index, element) in pattern.elems.iter().enumerate() {
+                        let Some(element) = element else {
+                            continue;
+                        };
+                        if matches!(element, Pat::Rest(_)) {
+                            return None;
+                        }
+                        collect_object_bindings(
+                            element,
+                            &format!("{path}.{index}"),
+                            bindings,
+                        )?;
+                    }
+                }
+                _ => return None,
+            }
+            Some(())
+        }
+
         let mut steps = Vec::new();
         let mut offset = 0;
         loop {
@@ -6856,6 +6928,22 @@ fn jit_export(
                                 steps.push(LocalStep::DestructureArray {
                                     bindings,
                                     rest,
+                                    initializer: declarator.init.as_deref()?,
+                                    mutable: declaration.kind != VarDeclKind::Const,
+                                });
+                            }
+                            Pat::Object(_) => {
+                                let mut bindings = Vec::new();
+                                collect_object_bindings(
+                                    &declarator.name,
+                                    "",
+                                    &mut bindings,
+                                )?;
+                                if bindings.is_empty() {
+                                    return None;
+                                }
+                                steps.push(LocalStep::DestructureObject {
+                                    bindings,
                                     initializer: declarator.init.as_deref()?,
                                     mutable: declaration.kind != VarDeclKind::Const,
                                 });
@@ -9598,6 +9686,53 @@ fn jit_export(
                         locals.insert(name.sym.to_string(), vec![format!("{local_prefix}{rest_index}")]);
                         runtime_kinds.insert(name.sym.to_string(), JitKind::Array);
                         runtime_locals = runtime_kinds.len();
+                        if is_mutable {
+                            mutable.insert(name.sym.to_string());
+                        }
+                    }
+                }
+                LocalStep::DestructureObject {
+                    bindings,
+                    initializer,
+                    mutable: is_mutable,
+                } => {
+                    let base = member_path(initializer)?;
+                    if bindings.iter().any(|(_, name, _)| {
+                        parameters.contains_key(name.sym.as_ref())
+                            || locals.contains_key(name.sym.as_ref())
+                    }) {
+                        return None;
+                    }
+                    for (path, name, default) in bindings {
+                        let path = format!("{base}{path}");
+                        let mut value = locals
+                            .get(&path)
+                            .cloned()
+                            .or_else(|| parameters.get(&path).map(|value| vec![value.clone()]))?;
+                        if let Some(default) = default {
+                            let value_kind = jit_expression_kind(&value)?.0;
+                            let mut fallback = Vec::new();
+                            encode_expression(
+                                default,
+                                parameters,
+                                &locals,
+                                context,
+                                &mut fallback,
+                            )?;
+                            if value_kind == JitKind::Boolean {
+                                let mut boolean = Vec::new();
+                                append_boolean(fallback, &mut boolean)?;
+                                fallback = boolean;
+                            }
+                            if jit_expression_kind(&fallback)?.0 != value_kind {
+                                return None;
+                            }
+                            value.push("ifpresent".into());
+                            value.push("else".into());
+                            value.extend(fallback);
+                            value.push("end".into());
+                        }
+                        locals.insert(name.sym.to_string(), value);
                         if is_mutable {
                             mutable.insert(name.sym.to_string());
                         }
@@ -13344,7 +13479,9 @@ fn jit_export(
                     );
                     Some(name)
                 }
-                LocalStep::DestructureArray { .. } => return None,
+                LocalStep::DestructureArray { .. } | LocalStep::DestructureObject { .. } => {
+                    return None;
+                }
                 LocalStep::Effect(expression) => {
                     encode_expression(
                         expression,
