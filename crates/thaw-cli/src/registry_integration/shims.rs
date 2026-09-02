@@ -7315,7 +7315,17 @@ fn jit_export(
                         output.extend(["c0000000000000000".into(), "asbool".into()]);
                     }
                     JitKind::String => output.push("t".into()),
-                    _ => return None,
+                    JitKind::Array => output.push("arrayempty".into()),
+                    JitKind::Dictionary => output.push(
+                        match caught.prefix {
+                            "dnl" => "dnempty",
+                            "dbl" => "dbempty",
+                            "dsl" => "dsempty",
+                            _ => return None,
+                        }
+                        .into(),
+                    ),
+                    JitKind::Dynamic => return None,
                 }
                 let mut normal_kinds = kinds.clone();
                 normal_kinds.insert(format!("\0catch-placeholder-{placeholder}"), caught.kind);
