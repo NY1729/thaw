@@ -2603,9 +2603,9 @@ their selected-branch side effects are produced by one condition evaluation.
 `while` and classic `for` loops, `switch`, and `try`/`finally` blocks may update the
 same helper-local slots before a final fixed aggregate return; their existing
 native control-flow instructions compose directly with aggregate materialization.
-`while` and classic `for (; test; update)` bodies may also return a fixed
-aggregate early. A structured JIT result region carries every leaf out of the
-loop and joins it with the post-loop fallback return without exiting the
+`while`, `do...while`, and classic `for (; test; update)` bodies may also return
+a fixed aggregate early. A structured JIT result region carries every leaf out
+of the loop and joins it with the post-loop fallback return without exiting the
 surrounding specialized export or loading QuickJS.
 Classic `for` initializer declarations stay in that result region as hidden
 typed slots, so an early aggregate may include the loop-scoped index while the
