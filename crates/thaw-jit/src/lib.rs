@@ -5754,7 +5754,7 @@ impl NumericProgram {
                     "ifpresent" => Some(NumericValue::PresentConditionalStart),
                     "else" => Some(NumericValue::ConditionalAlternate),
                     "end" => Some(NumericValue::ShortCircuitEnd),
-                    "absentn" | "absentb" | "absents" | "absenta" | "absentd" => {
+                    "absentn" | "absentb" | "absents" | "absentdyn" | "absenta" | "absentd" => {
                         Some(NumericValue::Absent)
                     }
                     "asbool" => Some(NumericValue::AsBoolean),
