@@ -2438,7 +2438,9 @@ plus fixed primitive tuples are loaded directly from the native object layout;
 supported nested string, array, dictionary, and tuple-index operations remain
 available to ordinary JIT operations; fixed object fields can use either dot
 syntax or constant string computed-property syntax without changing the native
-access path;
+access path. A conditional computed key with a finite set of string literals,
+such as `value[flag ? "left" : "right"]`, is evaluated once and lowered to a
+typed JIT branch over those fixed field reads;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
