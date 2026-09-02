@@ -2329,6 +2329,9 @@ extern "C" fn array_value(value: f64) -> f64 {
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn mutable_array_handle(value: f64) -> f64 {
+    if value.to_bits() & ARRAY_RESULT_TAG == 0 {
+        return value;
+    }
     let (Some(allocate), Some((data, _))) =
         (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
     else {
@@ -6205,7 +6208,7 @@ impl NumericProgram {
                             let kind = match kind {
                                 "n" => 0,
                                 "b" => 1,
-                                "s" => 2,
+                                "s" | "a" | "o" => 2,
                                 _ => return None,
                             };
                             offset
