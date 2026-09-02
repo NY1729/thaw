@@ -6571,6 +6571,11 @@ fn jit_export(
             initializer: &'a Expr,
             mutable: bool,
         },
+        DestructureArray {
+            bindings: Vec<(usize, &'a Ident)>,
+            initializer: &'a Expr,
+            mutable: bool,
+        },
         Assign {
             name: &'a Ident,
             operation: AssignOp,
@@ -6774,14 +6779,35 @@ fn jit_export(
             match statements.get(offset) {
                 Some(Stmt::Decl(Decl::Var(declaration))) => {
                     for declarator in &declaration.decls {
-                        let Pat::Ident(name) = &declarator.name else {
-                            return None;
-                        };
-                        steps.push(LocalStep::Declare {
-                            name: &name.id,
-                            initializer: declarator.init.as_deref()?,
-                            mutable: declaration.kind != VarDeclKind::Const,
-                        });
+                        match &declarator.name {
+                            Pat::Ident(name) => steps.push(LocalStep::Declare {
+                                name: &name.id,
+                                initializer: declarator.init.as_deref()?,
+                                mutable: declaration.kind != VarDeclKind::Const,
+                            }),
+                            Pat::Array(pattern) => {
+                                let bindings = pattern
+                                    .elems
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(index, element)| {
+                                        element.as_ref().map(|element| match element {
+                                            Pat::Ident(name) => Some((index, &name.id)),
+                                            _ => None,
+                                        })
+                                    })
+                                    .collect::<Option<Vec<_>>>()?;
+                                if bindings.is_empty() {
+                                    return None;
+                                }
+                                steps.push(LocalStep::DestructureArray {
+                                    bindings,
+                                    initializer: declarator.init.as_deref()?,
+                                    mutable: declaration.kind != VarDeclKind::Const,
+                                });
+                            }
+                            _ => return None,
+                        }
                     }
                 }
                 Some(Stmt::Expr(statement)) => match statement.expr.as_ref() {
@@ -9433,6 +9459,39 @@ fn jit_export(
                     locals.insert(name.sym.to_string(), encoded);
                     if is_mutable {
                         mutable.insert(name.sym.to_string());
+                    }
+                }
+                LocalStep::DestructureArray {
+                    bindings,
+                    initializer,
+                    mutable: is_mutable,
+                } => {
+                    let mut source = Vec::new();
+                    encode_expression(initializer, parameters, &locals, context, &mut source)?;
+                    if source.len() == 1 {
+                        if let Some(untag) = jit_typed_array_union_untag(&source[0]) {
+                            source.push(untag.into());
+                        }
+                    }
+                    if jit_expression_kind(&source)?.0 != JitKind::Array
+                        || !stable_jit_tokens(&source)
+                    {
+                        return None;
+                    }
+                    let prefix = array_prefix(&source)?;
+                    for (index, name) in bindings {
+                        if parameters.contains_key(name.sym.as_ref())
+                            || locals.contains_key(name.sym.as_ref())
+                        {
+                            return None;
+                        }
+                        let mut value = source.clone();
+                        value.push(format!("c{:016x}", (index as f64).to_bits()));
+                        value.push(format!("{prefix}get"));
+                        locals.insert(name.sym.to_string(), value);
+                        if is_mutable {
+                            mutable.insert(name.sym.to_string());
+                        }
                     }
                 }
                 LocalStep::Assign {
@@ -13176,6 +13235,7 @@ fn jit_export(
                     );
                     Some(name)
                 }
+                LocalStep::DestructureArray { .. } => return None,
                 LocalStep::Effect(expression) => {
                     encode_expression(
                         expression,
