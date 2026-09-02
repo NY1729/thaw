@@ -6908,6 +6908,27 @@ fn jit_export(
         Some(vec![format!("{prefix}{index}")])
     }
 
+    fn helper_control_kinds(
+        kinds: &std::collections::HashMap<String, JitKind>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Option<std::collections::HashMap<String, JitKind>> {
+        let mut control = kinds.clone();
+        for (name, value) in locals {
+            let Some(token) = value.first() else {
+                continue;
+            };
+            let Some(kind) = runtime_local_kind(token) else {
+                continue;
+            };
+            let index = loop_local_index(token)?;
+            if control.remove(&format!("\0literal-{index}")).is_none() {
+                control.remove(&format!("\0helper-{index}"));
+            }
+            control.insert(name.clone(), kind);
+        }
+        (control.len() == kinds.len()).then_some(control)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn materialize_fixed_literal(
         expression: &Expr,
@@ -7392,8 +7413,26 @@ fn jit_export(
             }
             let returned = match body {
                 NumericBody::Expression(expression) => expression,
-                NumericBody::Statements([Stmt::Return(returned)]) => returned.arg.as_deref()?,
-                _ => return None,
+                NumericBody::Statements(statements) => {
+                    let (Stmt::Return(returned), control) = statements.split_last()? else {
+                        return None;
+                    };
+                    if !control.is_empty() {
+                        let control_kinds = helper_control_kinds(kinds, &helper_locals)?;
+                        for statement in control {
+                            encode_loop_effects(
+                                statement,
+                                &no_parameters,
+                                &helper_locals,
+                                &helper_mutable,
+                                (&control_kinds, root_loop_control(), &[]),
+                                context,
+                                output,
+                            )?;
+                        }
+                    }
+                    returned.arg.as_deref()?
+                }
             };
             materialize_fixed_literal(
                 returned,
