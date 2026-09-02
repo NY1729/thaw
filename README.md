@@ -2456,7 +2456,9 @@ support lazy `??=` while updating both payload and presence tag. Tagged scalar
 `||=` assigns on either nullish absence, while optional and nullable scalar
 `&&=` preserves an absent result without evaluating its right-hand side. The
 JIT result ABI distinguishes present, `null`, and `undefined`, so three-way
-nullish `&&=` and direct nullable/nullish scalar returns retain their exact tag;
+nullish `&&=` and direct nullable/nullish scalar returns retain their exact tag.
+Nullable and nullish scalar parameters use a tag-plus-payload JIT ABI as well,
+so present, `null`, and `undefined` values round-trip without QuickJS;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without

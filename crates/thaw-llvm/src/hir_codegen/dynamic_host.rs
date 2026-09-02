@@ -44,7 +44,9 @@ fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
         HirType::Tuple(elements) => elements.iter().try_fold(0usize, |slots, ty| {
             jit_parameter_slots(ty).map(|count| slots + count)
         }),
-        HirType::Optional(payload) => jit_parameter_slots(payload).map(|slots| slots + 1),
+        HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+            jit_parameter_slots(payload).map(|slots| slots + 1)
+        }
         _ => None,
     }
 }
@@ -1257,26 +1259,41 @@ impl<'ctx> HirCompiler<'ctx> {
             let mut argument_values = Vec::with_capacity(argument_slots);
             for (index, argument) in args.iter().enumerate() {
                 let value = self.compile_expr(argument)?;
-                if let HirType::Optional(payload) = &signature.params[index] {
+                if let HirType::Optional(payload)
+                | HirType::Nullable(payload)
+                | HirType::Nullish(payload) = &signature.params[index]
+                {
                     let value = value.into_struct_value();
-                    let present = self
+                    let tag = self
                         .builder
-                        .build_extract_value(value, 0, "jit_optional_argument_present")
+                        .build_extract_value(value, 0, "jit_tagged_argument_tag")
                         .map_err(|error| error.to_string())?
                         .into_int_value();
+                    let present = if matches!(&signature.params[index], HirType::Nullish(_)) {
+                        self.builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                tag,
+                                tag.get_type().const_zero(),
+                                "jit_nullish_argument_present",
+                            )
+                            .map_err(|error| error.to_string())?
+                    } else {
+                        tag
+                    };
                     argument_values.push(
                         self.builder
                             .build_unsigned_int_to_float(
-                                present,
+                                tag,
                                 self.context.f64_type(),
-                                "jit_optional_presence_slot",
+                                "jit_tagged_argument_tag_slot",
                             )
                             .map_err(|error| error.to_string())?
                             .into(),
                     );
                     let payload_value = self
                         .builder
-                        .build_extract_value(value, 1, "jit_optional_argument_payload")
+                        .build_extract_value(value, 1, "jit_tagged_argument_payload")
                         .map_err(|error| error.to_string())?;
                     if matches!(payload.as_ref(), HirType::Object(_) | HirType::Tuple(_)) {
                         let function = self.current_function();
