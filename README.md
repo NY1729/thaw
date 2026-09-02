@@ -2607,6 +2607,10 @@ Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
 multi-result JIT conditional ABI.
+An aggregate returned from a `try` block is materialized before a straight-line
+`finally` body runs. Primitive leaves therefore preserve the already selected
+return value, while returned primitive arrays retain identity and observe
+in-place mutations performed by `finally`.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
