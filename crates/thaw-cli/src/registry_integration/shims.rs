@@ -13378,6 +13378,34 @@ fn array_prefix(expression: &[String]) -> Option<&'static str> {
         if matches!(token.as_str(), "strarray" | "dkeys") {
             return Some("rs");
         }
+        if token == "rsmaplength" {
+            return Some("rn");
+        }
+        for (operation, prefix) in [
+            ("maptonumber", "rn"),
+            ("maptoboolean", "rb"),
+            ("maptostring", "rs"),
+        ] {
+            if token
+                .get(2..)
+                .is_some_and(|suffix| suffix == operation)
+                && matches!(token.get(..2), Some("rn" | "rb" | "rs"))
+            {
+                return Some(prefix);
+            }
+        }
+        if let Some(target) = token
+            .get(2..)
+            .and_then(|suffix| suffix.strip_prefix("mapjit"))
+            .filter(|_| matches!(token.get(..2), Some("rb" | "rs")))
+        {
+            return match target.as_bytes().first() {
+                Some(b'n') => Some("rn"),
+                Some(b'b') => Some("rb"),
+                Some(b's') => Some("rs"),
+                _ => None,
+            };
+        }
         match token.as_str() {
             "untagrn" => return Some("rn"),
             "untagrb" => return Some("rb"),
