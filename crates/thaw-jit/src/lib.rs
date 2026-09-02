@@ -1917,6 +1917,29 @@ extern "C" fn string_array_at(value: f64, index: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_at(value: f64, index: f64) -> f64 {
+    let Some(dynamic) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let (kind, tag) = match dynamic.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => (0, DYNAMIC_NUMBER_TAG),
+        DYNAMIC_BOOLEAN_ARRAY_TAG => (1, DYNAMIC_BOOLEAN_TAG),
+        DYNAMIC_STRING_ARRAY_TAG => (2, DYNAMIC_STRING_TAG),
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    let value = unsafe { array_at(f64::from_bits(dynamic.payload), index, kind) };
+    if !CALL_PRESENT.with(Cell::get) {
+        0.0
+    } else {
+        dynamic_from_parts(tag as f64, value)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn number_array_get(value: f64, index: f64) -> f64 {
     unsafe { array_get(value, index, 0) }
 }
@@ -4044,6 +4067,7 @@ enum NumericValue {
     NumberArrayAt,
     BoolArrayAt,
     StringArrayAt,
+    DynamicArrayAt,
     NumberArrayGet,
     BoolArrayGet,
     StringArrayGet,
@@ -4390,6 +4414,7 @@ impl NumericProgram {
                     "rnat" => Some(NumericValue::NumberArrayAt),
                     "rbat" => Some(NumericValue::BoolArrayAt),
                     "rsat" => Some(NumericValue::StringArrayAt),
+                    "dynarrayat" => Some(NumericValue::DynamicArrayAt),
                     "rnget" => Some(NumericValue::NumberArrayGet),
                     "rbget" => Some(NumericValue::BoolArrayGet),
                     "rsget" => Some(NumericValue::StringArrayGet),
@@ -6698,6 +6723,7 @@ impl NumericProgram {
                 NumericValue::NumberArrayAt
                 | NumericValue::BoolArrayAt
                 | NumericValue::StringArrayAt
+                | NumericValue::DynamicArrayAt
                 | NumericValue::NumberArrayGet
                 | NumericValue::BoolArrayGet
                 | NumericValue::StringArrayGet => {
@@ -6708,6 +6734,7 @@ impl NumericProgram {
                         NumericValue::NumberArrayAt => number_array_at,
                         NumericValue::BoolArrayAt => bool_array_at,
                         NumericValue::StringArrayAt => string_array_at,
+                        NumericValue::DynamicArrayAt => dynamic_array_at,
                         NumericValue::NumberArrayGet => number_array_get,
                         NumericValue::BoolArrayGet => bool_array_get,
                         NumericValue::StringArrayGet => string_array_get,
