@@ -2563,6 +2563,9 @@ earlier binding), later reassignment of `let` bindings, and array-returning call
 with side effects remain in the extracted JIT function without QuickJS. A final
 rest binding is copied once into its own typed mutable array handle, preserving
 rest-array identity and keeping later mutations separate from the source.
+The same one-evaluation lowering handles array assignment patterns targeting
+existing straight-line mutable locals, including holes, lazy defaults, repeated
+targets, and side-effecting array-returning right-hand sides.
 Fixed object parameters also support nested object and tuple declaration
 patterns, shorthand or renamed leaves, skipped tuple positions, and direct
 aliases to contained primitive arrays on the same JIT path.
