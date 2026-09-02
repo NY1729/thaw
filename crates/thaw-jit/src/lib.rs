@@ -2951,6 +2951,110 @@ extern "C" fn dynamic_to_number(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_add(left: f64, right: f64) -> f64 {
+    let Some((left_value, right_value)) =
+        dynamic_primitive(left, None).zip(dynamic_primitive(right, None))
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if left_value.tag == DYNAMIC_STRING_TAG || right_value.tag == DYNAMIC_STRING_TAG {
+        let value = string_concat(dynamic_to_string(left), dynamic_to_string(right));
+        arena_dynamic(DYNAMIC_STRING_TAG, value.to_bits())
+    } else {
+        let value = dynamic_to_number(left) + dynamic_to_number(right);
+        arena_dynamic(DYNAMIC_NUMBER_TAG, value.to_bits())
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_compare(left: f64, right: f64, operation: u8) -> f64 {
+    let Some((left_value, right_value)) =
+        dynamic_primitive(left, None).zip(dynamic_primitive(right, None))
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let strict_equal = || {
+        if left_value.tag != right_value.tag {
+            return false;
+        }
+        match left_value.tag {
+            DYNAMIC_NUMBER_TAG => {
+                f64::from_bits(left_value.payload) == f64::from_bits(right_value.payload)
+            }
+            DYNAMIC_STRING_TAG => {
+                string_same_value(
+                    f64::from_bits(left_value.payload),
+                    f64::from_bits(right_value.payload),
+                ) != 0.0
+            }
+            DYNAMIC_BOOLEAN_TAG => left_value.payload == right_value.payload,
+            _ => unreachable!(),
+        }
+    };
+    let equal = || {
+        strict_equal()
+            || (left_value.tag != right_value.tag
+                && dynamic_to_number(left) == dynamic_to_number(right))
+    };
+    let result = match operation {
+        0..=3 => {
+            if left_value.tag == DYNAMIC_STRING_TAG && right_value.tag == DYNAMIC_STRING_TAG {
+                let ordering = string_compare(
+                    f64::from_bits(left_value.payload),
+                    f64::from_bits(right_value.payload),
+                );
+                match operation {
+                    0 => ordering < 0.0,
+                    1 => ordering <= 0.0,
+                    2 => ordering > 0.0,
+                    3 => ordering >= 0.0,
+                    _ => unreachable!(),
+                }
+            } else {
+                let left = dynamic_to_number(left);
+                let right = dynamic_to_number(right);
+                match operation {
+                    0 => left < right,
+                    1 => left <= right,
+                    2 => left > right,
+                    3 => left >= right,
+                    _ => unreachable!(),
+                }
+            }
+        }
+        4 => equal(),
+        5 => !equal(),
+        6 => strict_equal(),
+        7 => !strict_equal(),
+        _ => unreachable!(),
+    };
+    f64::from(result)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! dynamic_compare_functions {
+    ($($name:ident => $operation:literal),+ $(,)?) => {
+        $(extern "C" fn $name(left: f64, right: f64) -> f64 {
+            dynamic_compare(left, right, $operation)
+        })+
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+dynamic_compare_functions!(
+    dynamic_less => 0,
+    dynamic_less_equal => 1,
+    dynamic_greater => 2,
+    dynamic_greater_equal => 3,
+    dynamic_equal => 4,
+    dynamic_not_equal => 5,
+    dynamic_strict_equal => 6,
+    dynamic_strict_not_equal => 7,
+);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn parse_float(value: f64) -> f64 {
     let Some(parse) = PARSE_FLOAT.with(Cell::get) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
@@ -3695,6 +3799,8 @@ enum NumericValue {
     StringToNumber,
     DynamicToString,
     DynamicToNumber,
+    DynamicAdd,
+    DynamicCompare(u8),
     TagNumber,
     TagString,
     TagBoolean,
@@ -4019,6 +4125,15 @@ impl NumericProgram {
                     "strnum" => Some(NumericValue::StringToNumber),
                     "dynstr" => Some(NumericValue::DynamicToString),
                     "dynnum" => Some(NumericValue::DynamicToNumber),
+                    "dynadd" => Some(NumericValue::DynamicAdd),
+                    "dynlt" => Some(NumericValue::DynamicCompare(0)),
+                    "dynlte" => Some(NumericValue::DynamicCompare(1)),
+                    "dyngt" => Some(NumericValue::DynamicCompare(2)),
+                    "dyngte" => Some(NumericValue::DynamicCompare(3)),
+                    "dyneq" => Some(NumericValue::DynamicCompare(4)),
+                    "dynne" => Some(NumericValue::DynamicCompare(5)),
+                    "dynseq" => Some(NumericValue::DynamicCompare(6)),
+                    "dynsne" => Some(NumericValue::DynamicCompare(7)),
                     "tagnum" => Some(NumericValue::TagNumber),
                     "tagstr" => Some(NumericValue::TagString),
                     "tagbool" => Some(NumericValue::TagBoolean),
@@ -4886,6 +5001,27 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, dynamic_to_boolean as *const () as u64, depth - 1);
+                }
+                NumericValue::DynamicAdd | NumericValue::DynamicCompare(_) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::DynamicAdd => dynamic_add,
+                        NumericValue::DynamicCompare(operation) => [
+                            dynamic_less,
+                            dynamic_less_equal,
+                            dynamic_greater,
+                            dynamic_greater_equal,
+                            dynamic_equal,
+                            dynamic_not_equal,
+                            dynamic_strict_equal,
+                            dynamic_strict_not_equal,
+                        ][usize::from(*operation)],
+                        _ => unreachable!(),
+                    };
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
                 }
                 NumericValue::StringCharAt
                 | NumericValue::StringCharCodeAt
@@ -7748,6 +7884,57 @@ mod tests {
                 .unwrap(),
             "42"
         );
+
+        let result = call(
+            &CString::new("expr:t61,tagstr,t62,tagstr,dynadd,untagstr:dynamic-string-add").unwrap(),
+            &[],
+        );
+        assert!(result.error.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.value.to_bits() as usize as *const c_char) }
+                .to_str()
+                .unwrap(),
+            "ab"
+        );
+        for (symbol, expected) in [
+            (
+                "expr:c4045000000000000,tagnum,t3432,tagstr,dyneq:loose-equal",
+                1.0,
+            ),
+            (
+                "expr:c4045000000000000,tagnum,t3432,tagstr,dynlte:less-equal",
+                1.0,
+            ),
+            (
+                "expr:c4045000000000000,tagnum,t3432,tagstr,dyngt:greater",
+                0.0,
+            ),
+            (
+                "expr:c4045000000000000,tagnum,t3432,tagstr,dyngte:greater-equal",
+                1.0,
+            ),
+            (
+                "expr:c4045000000000000,tagnum,t3432,tagstr,dynne:not-equal",
+                0.0,
+            ),
+            (
+                "expr:c4000000000000000,tagnum,t32,tagstr,dynseq:strict-equal",
+                0.0,
+            ),
+            (
+                "expr:c4000000000000000,tagnum,t32,tagstr,dynsne:strict-not-equal",
+                1.0,
+            ),
+            ("expr:t61,tagstr,t62,tagstr,dynlt:string-less", 1.0),
+            (
+                "expr:c3ff0000000000000,tagbool,c3ff0000000000000,tagnum,dyneq:boolean-number",
+                1.0,
+            ),
+        ] {
+            let result = call(&CString::new(symbol).unwrap(), &[]);
+            assert!(result.error.is_null(), "{symbol}");
+            assert_eq!(result.value, expected, "{symbol}");
+        }
 
         let mismatch = CString::new("expr:t68656c6c6f,tagstr,untagnum:mismatch").unwrap();
         assert!(!call(&mismatch, &[]).error.is_null());
