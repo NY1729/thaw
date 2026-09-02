@@ -2596,6 +2596,10 @@ Fixed object destructuring declarations and assignments reuse the same leaf
 materializer, including missing-property defaults and unused side effects.
 Nested `if`/`else` blocks after those straight-line steps update the same typed
 helper-local slots, then flow into one fixed aggregate return without QuickJS.
+Early fixed-aggregate returns and fall-through returns can join as well, including
+nested `if` blocks. The JIT conditional instruction carries any positive number
+of same-layout typed results across the branch edge, so all requested leaves and
+their selected-branch side effects are produced by one condition evaluation.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,

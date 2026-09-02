@@ -7055,6 +7055,150 @@ fn jit_export(
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn materialize_helper_returns(
+        statements: &[&Stmt],
+        requested: &std::collections::HashSet<String>,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        mutable: &std::collections::HashSet<String>,
+        context: &mut InlineContext<'_>,
+        kinds: &mut std::collections::HashMap<String, JitKind>,
+        materialized: &mut std::collections::HashMap<String, Vec<String>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        let (statement, rest) = statements.split_first()?;
+        match statement {
+            Stmt::Block(block) => {
+                let nested = block.stmts.iter().chain(rest.iter().copied()).collect::<Vec<_>>();
+                materialize_helper_returns(
+                    &nested,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    kinds,
+                    materialized,
+                    output,
+                )
+            }
+            Stmt::Return(returned) if rest.is_empty() => materialize_fixed_literal(
+                returned.arg.as_deref()?,
+                "",
+                requested,
+                parameters,
+                locals,
+                context,
+                kinds,
+                materialized,
+                output,
+            ),
+            Stmt::If(branch) => {
+                if branch.alt.is_some() && !rest.is_empty() {
+                    let control_kinds = helper_control_kinds(kinds, locals)?;
+                    encode_loop_effects(
+                        statement,
+                        parameters,
+                        locals,
+                        mutable,
+                        (&control_kinds, root_loop_control(), &[]),
+                        context,
+                        output,
+                    )?;
+                    return materialize_helper_returns(
+                        rest,
+                        requested,
+                        parameters,
+                        locals,
+                        mutable,
+                        context,
+                        kinds,
+                        materialized,
+                        output,
+                    );
+                }
+                let consequent = match branch.cons.as_ref() {
+                    Stmt::Block(block) => block.stmts.iter().collect::<Vec<_>>(),
+                    statement => vec![statement],
+                };
+                let alternate = if let Some(alternate) = branch.alt.as_deref() {
+                    match alternate {
+                        Stmt::Block(block) => block.stmts.iter().collect::<Vec<_>>(),
+                        statement => vec![statement],
+                    }
+                } else {
+                    rest.to_vec()
+                };
+                let mut consequent_kinds = kinds.clone();
+                let mut consequent_values = std::collections::HashMap::new();
+                let mut consequent_output = Vec::new();
+                materialize_helper_returns(
+                    &consequent,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    &mut consequent_kinds,
+                    &mut consequent_values,
+                    &mut consequent_output,
+                )?;
+                let mut alternate_kinds = kinds.clone();
+                let mut alternate_values = std::collections::HashMap::new();
+                let mut alternate_output = Vec::new();
+                materialize_helper_returns(
+                    &alternate,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    &mut alternate_kinds,
+                    &mut alternate_values,
+                    &mut alternate_output,
+                )?;
+                if consequent_kinds != alternate_kinds
+                    || consequent_values != alternate_values
+                {
+                    return None;
+                }
+                encode_condition(branch.test.as_ref(), parameters, locals, context, output)?;
+                output.push("if".into());
+                output.extend(consequent_output);
+                output.push("else".into());
+                output.extend(alternate_output);
+                output.push("end".into());
+                *kinds = consequent_kinds;
+                *materialized = consequent_values;
+                Some(())
+            }
+            _ => {
+                let control_kinds = helper_control_kinds(kinds, locals)?;
+                encode_loop_effects(
+                    statement,
+                    parameters,
+                    locals,
+                    mutable,
+                    (&control_kinds, root_loop_control(), &[]),
+                    context,
+                    output,
+                )?;
+                materialize_helper_returns(
+                    rest,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    kinds,
+                    materialized,
+                    output,
+                )
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn materialize_fixed_call(
         call: &CallExpr,
         requested: &std::collections::HashSet<String>,
@@ -7411,40 +7555,33 @@ fn jit_export(
                     }
                 }
             }
-            let returned = match body {
-                NumericBody::Expression(expression) => expression,
+            match body {
+                NumericBody::Expression(expression) => materialize_fixed_literal(
+                    expression,
+                    "",
+                    requested,
+                    &no_parameters,
+                    &helper_locals,
+                    context,
+                    kinds,
+                    materialized,
+                    output,
+                ),
                 NumericBody::Statements(statements) => {
-                    let (Stmt::Return(returned), control) = statements.split_last()? else {
-                        return None;
-                    };
-                    if !control.is_empty() {
-                        let control_kinds = helper_control_kinds(kinds, &helper_locals)?;
-                        for statement in control {
-                            encode_loop_effects(
-                                statement,
-                                &no_parameters,
-                                &helper_locals,
-                                &helper_mutable,
-                                (&control_kinds, root_loop_control(), &[]),
-                                context,
-                                output,
-                            )?;
-                        }
-                    }
-                    returned.arg.as_deref()?
+                    let statements = statements.iter().collect::<Vec<_>>();
+                    materialize_helper_returns(
+                        &statements,
+                        requested,
+                        &no_parameters,
+                        &helper_locals,
+                        &helper_mutable,
+                        context,
+                        kinds,
+                        materialized,
+                        output,
+                    )
                 }
-            };
-            materialize_fixed_literal(
-                returned,
-                "",
-                requested,
-                &no_parameters,
-                &helper_locals,
-                context,
-                kinds,
-                materialized,
-                output,
-            )
+            }
         })();
         if active.is_some() {
             context.active.pop();
@@ -15366,7 +15503,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             let result = stack.pop()?;
-            branches.push((stack.len(), Some(result), false));
+            branches.push((stack.len(), Some(vec![result]), false));
         } else if token == "if" {
             if stack.pop()? != JitKind::Boolean {
                 return None;
@@ -15374,22 +15511,24 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             branches.push((stack.len(), None, true));
         } else if token == "ifpresent" {
             let result = *stack.last()?;
-            branches.push((stack.len() - 1, Some(result), true));
+            branches.push((stack.len() - 1, Some(vec![result]), true));
         } else if token == "else" {
             let (base, expected, awaits_alternate) = branches.last_mut()?;
-            if !*awaits_alternate || stack.len() != *base + 1 {
+            if !*awaits_alternate || stack.len() <= *base {
                 return None;
             }
-            *expected = stack.pop();
+            *expected = Some(stack.split_off(*base));
             *awaits_alternate = false;
         } else if token == "end" {
             let (base, expected, awaits_alternate) = branches.pop()?;
             let expected = expected?;
-            if awaits_alternate || stack.len() != base + 1 {
+            if awaits_alternate || stack.len() != base + expected.len() {
                 return None;
             }
-            let alternate = stack.pop()?;
-            stack.push(merge_jit_kinds(expected, alternate)?);
+            let alternate = stack.split_off(base);
+            for (expected, alternate) in expected.into_iter().zip(alternate) {
+                stack.push(merge_jit_kinds(expected, alternate)?);
+            }
         } else if token == "?" {
             let alternative = stack.pop()?;
             let consequent = stack.pop()?;

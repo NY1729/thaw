@@ -9457,7 +9457,7 @@ impl NumericProgram {
                         patch_near_jump(&mut code, parity)?;
                     }
                     depth -= 2;
-                    branches.push((depth, exits, false));
+                    branches.push((depth, exits, false, Some(1)));
                 }
                 NumericValue::ConditionalStart => {
                     if depth == 0 {
@@ -9486,7 +9486,7 @@ impl NumericProgram {
                     ]);
                     let zero = emit_near_jump(&mut code, 0x84);
                     depth -= 1;
-                    branches.push((depth, vec![parity, zero], true));
+                    branches.push((depth, vec![parity, zero], true, None));
                 }
                 NumericValue::PresentConditionalStart => {
                     if depth == 0 || depth == 8 {
@@ -9514,13 +9514,15 @@ impl NumericProgram {
                         0xc0,
                     ]);
                     let absent = emit_near_jump(&mut code, 0x84);
-                    branches.push((depth - 1, vec![parity, absent], true));
+                    branches.push((depth - 1, vec![parity, absent], true, None));
                 }
                 NumericValue::ConditionalAlternate => {
-                    let (base_depth, exits, awaits_alternate) = branches.last_mut()?;
-                    if !*awaits_alternate || depth != *base_depth + 1 {
+                    let (base_depth, exits, awaits_alternate, result_depth) =
+                        branches.last_mut()?;
+                    if !*awaits_alternate || depth <= *base_depth {
                         return None;
                     }
+                    *result_depth = Some(depth - *base_depth);
                     let end = emit_unconditional_jump(&mut code);
                     for exit in exits.drain(..) {
                         patch_near_jump(&mut code, exit)?;
@@ -9530,8 +9532,8 @@ impl NumericProgram {
                     depth = *base_depth;
                 }
                 NumericValue::ShortCircuitEnd => {
-                    let (base_depth, exits, awaits_alternate) = branches.pop()?;
-                    if awaits_alternate || depth != base_depth + 1 {
+                    let (base_depth, exits, awaits_alternate, result_depth) = branches.pop()?;
+                    if awaits_alternate || depth != base_depth + result_depth? {
                         return None;
                     }
                     for exit in exits {
@@ -10741,6 +10743,19 @@ mod tests {
         let result = call(&alternate, &[]);
         assert!(result.error.is_null());
         assert_eq!(result.value, 1.0);
+
+        let two = format!("c{:016x}", 2.0f64.to_bits());
+        let three = format!("c{:016x}", 3.0f64.to_bits());
+        let four = format!("c{:016x}", 4.0f64.to_bits());
+        for (condition, expected) in [(&one, 3.0), (&zero, 7.0)] {
+            let multiple = CString::new(format!(
+                "expr:{condition},if,{one},{two},else,{three},{four},end,+:conditional-multiple"
+            ))
+            .unwrap();
+            let result = call(&multiple, &[]);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
 
         let optional_present = CString::new(format!(
             "expr:{one},if,{one},else,absentn,end:optional-present"
