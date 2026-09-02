@@ -2049,6 +2049,32 @@ extern "C" fn array_concat(left: f64, right: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_concat(left: f64, right: f64) -> f64 {
+    let (Some(left), Some(right)) = (
+        dynamic_primitive(left, None),
+        dynamic_primitive(right, None),
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if left.tag != right.tag
+        || !matches!(
+            left.tag,
+            DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+        )
+    {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let result = array_concat(f64::from_bits(left.payload), f64::from_bits(right.payload));
+    if result == 0.0 {
+        0.0
+    } else {
+        dynamic_from_parts(left.tag as f64, result)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_append(operation: u8, array: f64, value: f64) -> f64 {
     let (Some(append), Some((array, _))) =
         (ARRAY_APPEND.with(Cell::get), unsafe { array_data(array) })
@@ -4062,6 +4088,7 @@ enum NumericValue {
     DynamicArrayJoin,
     DynamicArraySlice,
     ArraySlice,
+    DynamicArrayConcat,
     ArrayConcat,
     NumberArrayAppend,
     StringArrayAppend,
@@ -4408,6 +4435,7 @@ impl NumericProgram {
                     "dynarrayjoin" => Some(NumericValue::DynamicArrayJoin),
                     "dynarrayslice" => Some(NumericValue::DynamicArraySlice),
                     "arrayslice" => Some(NumericValue::ArraySlice),
+                    "dynarrayconcat" => Some(NumericValue::DynamicArrayConcat),
                     "arrayconcat" => Some(NumericValue::ArrayConcat),
                     "rnappend" => Some(NumericValue::NumberArrayAppend),
                     "rsappend" => Some(NumericValue::StringArrayAppend),
@@ -5883,6 +5911,17 @@ impl NumericProgram {
                         return None;
                     }
                     emit_binary_call(&mut code, array_concat as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::DynamicArrayConcat => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(
+                        &mut code,
+                        dynamic_array_concat as *const () as u64,
+                        depth - 2,
+                    );
                     depth -= 1;
                 }
                 NumericValue::NumberArrayAppend
