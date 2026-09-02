@@ -518,13 +518,19 @@ fn jit_export(
             .map(JitExport::Object)
     }
 
-    fn encode_fixed_object_union_return(
+    fn jit_kind_compatible(actual: JitKind, expected: JitKind) -> bool {
+        actual == expected
+            || (matches!(actual, JitKind::Number | JitKind::Boolean)
+                && matches!(expected, JitKind::Number | JitKind::Boolean))
+    }
+
+    fn encode_fixed_object_value(
         object: &thaw_parser::ast::ObjectLit,
         fields: &[(String, thaw_hir::HirType)],
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
-    ) -> Option<JitExport> {
+    ) -> Option<Vec<String>> {
         if object.props.len() != fields.len() {
             return None;
         }
@@ -538,8 +544,47 @@ fn jit_export(
         let size = u16::try_from(fields.len().checked_mul(8)?).ok()?;
         let mut output = vec![format!("objnew{size}")];
         for (index, (field, ty)) in fields.iter().enumerate() {
-            let expression = match properties.get(field)? {
-                ObjectReturnValue::Expression(expression) => *expression,
+            let (value, operation) = match properties.get(field)? {
+                ObjectReturnValue::Expression(expression) => match ty {
+                    thaw_hir::HirType::Object(nested) => (
+                        encode_fixed_object_value(
+                            object_literal(expression)?,
+                            nested,
+                            parameters,
+                            locals,
+                            context,
+                        )?,
+                        'o',
+                    ),
+                    thaw_hir::HirType::Array(element)
+                        if jit_array_result_element_supported(element) =>
+                    {
+                        let mut value = Vec::new();
+                        encode_expression(expression, parameters, locals, context, &mut value)?;
+                        if jit_expression_kind(&value)?.0 != JitKind::Array {
+                            return None;
+                        }
+                        value.push("arrayhandle".into());
+                        (value, 'a')
+                    }
+                    _ => {
+                        let mut value = Vec::new();
+                        encode_expression(expression, parameters, locals, context, &mut value)?;
+                        let expected = jit_return_kind(ty)?;
+                        if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                            return None;
+                        }
+                        (
+                            value,
+                            match ty {
+                                thaw_hir::HirType::F64 => 'n',
+                                thaw_hir::HirType::Bool => 'b',
+                                thaw_hir::HirType::Str => 's',
+                                _ => return None,
+                            },
+                        )
+                    }
+                },
                 ObjectReturnValue::Shorthand(identifier) => {
                     let value = locals
                         .get(identifier.sym.as_ref())
@@ -551,54 +596,45 @@ fn jit_export(
                         })?;
                     let expected = jit_return_kind(ty)?;
                     let actual = jit_expression_kind(&value)?.0;
-                    if actual != expected
-                        && !matches!(
-                            (actual, expected),
-                            (JitKind::Number, JitKind::Boolean)
-                                | (JitKind::Boolean, JitKind::Number)
-                        )
-                    {
+                    if !jit_kind_compatible(actual, expected) {
                         return None;
                     }
-                    output.extend(value);
-                    output.push(format!(
-                        "objset{}{offset}",
-                        match ty {
-                            thaw_hir::HirType::F64 => 'n',
-                            thaw_hir::HirType::Bool => 'b',
-                            thaw_hir::HirType::Str => 's',
-                            _ => return None,
-                        },
-                        offset = index * 8
-                    ));
-                    continue;
+                    let operation = match ty {
+                        thaw_hir::HirType::F64 => 'n',
+                        thaw_hir::HirType::Bool => 'b',
+                        thaw_hir::HirType::Str => 's',
+                        thaw_hir::HirType::Array(element)
+                            if jit_array_result_element_supported(element) =>
+                        {
+                            'a'
+                        }
+                        _ => return None,
+                    };
+                    let mut value = value;
+                    if operation == 'a' {
+                        value.push("arrayhandle".into());
+                    }
+                    (
+                        value,
+                        operation,
+                    )
                 }
             };
-            let mut value = Vec::new();
-            encode_expression(expression, parameters, locals, context, &mut value)?;
-            let expected = jit_return_kind(ty)?;
-            let actual = jit_expression_kind(&value)?.0;
-            if actual != expected
-                && !matches!(
-                    (actual, expected),
-                    (JitKind::Number, JitKind::Boolean)
-                        | (JitKind::Boolean, JitKind::Number)
-                )
-            {
-                return None;
-            }
             output.extend(value);
-            output.push(format!(
-                "objset{}{offset}",
-                match ty {
-                    thaw_hir::HirType::F64 => 'n',
-                    thaw_hir::HirType::Bool => 'b',
-                    thaw_hir::HirType::Str => 's',
-                    _ => return None,
-                },
-                offset = index * 8
-            ));
+            output.push(format!("objset{operation}{offset}", offset = index * 8));
         }
+        Some(output)
+    }
+
+    fn encode_fixed_object_union_return(
+        object: &thaw_parser::ast::ObjectLit,
+        fields: &[(String, thaw_hir::HirType)],
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+    ) -> Option<JitExport> {
+        let mut output =
+            encode_fixed_object_value(object, fields, parameters, locals, context)?;
         output.push("tagobject".into());
         Some(JitExport::Value(validated_jit_expression(
             output,
@@ -13289,6 +13325,8 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                     "n" => matches!(value, JitKind::Number | JitKind::Boolean),
                     "b" => matches!(value, JitKind::Number | JitKind::Boolean),
                     "s" => value == JitKind::String,
+                    "a" => value == JitKind::Array,
+                    "o" => value == JitKind::Dictionary,
                     _ => return None,
                 }
             {
