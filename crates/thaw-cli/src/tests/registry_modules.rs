@@ -1606,6 +1606,56 @@ fn nullable_and_nullish_parameters_round_trip_without_quickjs() {
 }
 
 #[test]
+fn nullable_and_nullish_collections_round_trip_without_quickjs() {
+    let declarations = thaw_bridge::parse_dts(
+        "export declare function nullable(value: number[] | null): number[] | null;\nexport declare function nullish(value: Record<string, number> | null | undefined): Record<string, number> | null | undefined;\n",
+    )
+    .unwrap();
+    let source = "module.exports.nullable = value => value; module.exports.nullish = value => value;";
+    assert!(jit_numeric_export(source, "nullable", false, &declarations[0]).is_some());
+    assert!(jit_numeric_export(source, "nullish", false, &declarations[1]).is_some());
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-nullish-collections-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-nullish-collections");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function nullable(value: number[] | null): number[] | null;\nexport declare function nullish(value: Record<string, number> | null | undefined): Record<string, number> | null | undefined;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.nullable = value => value; module.exports.nullish = value => value;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { nullable, nullish } from 'jit-nullish-collections';\nfunction main(): void { const arrayValue: number[] | null = nullable([1, 2]); const arrayNull: number[] | null = nullable(null); const dictionaryValue: Record<string, number> | null | undefined = nullish({ score: 7 }); const dictionaryNull: Record<string, number> | null | undefined = nullish(null); const dictionaryUndefined: Record<string, number> | null | undefined = nullish(undefined); console.log(arrayValue!.join(',')); console.log(arrayNull === null); console.log(dictionaryValue!.score); console.log(dictionaryNull === null); console.log(dictionaryUndefined === undefined); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1,2\ntrue\n7\ntrue\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_tuple_elements_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-tuple-element-{}",

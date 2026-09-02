@@ -12701,6 +12701,18 @@ fn jit_export(
                 thaw_hir::HirType::F64 => ("a", "nulln", "absentn"),
                 thaw_hir::HirType::Bool => ("b", "nullb", "absentb"),
                 thaw_hir::HirType::Str => ("s", "nulls", "absents"),
+                thaw_hir::HirType::Array(element) => match element.as_ref() {
+                    thaw_hir::HirType::F64 => ("rn", "nulla", "absenta"),
+                    thaw_hir::HirType::Bool => ("rb", "nulla", "absenta"),
+                    thaw_hir::HirType::Str => ("rs", "nulla", "absenta"),
+                    _ => return None,
+                },
+                thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                    thaw_hir::HirType::F64 => ("dn", "nulld", "absentd"),
+                    thaw_hir::HirType::Bool => ("db", "nulld", "absentd"),
+                    thaw_hir::HirType::Str => ("ds", "nulld", "absentd"),
+                    _ => return None,
+                },
                 _ => return None,
             };
             let tag = format!("a{slot}");
@@ -13385,9 +13397,12 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
                 | "keepabsentn"
                 | "keepabsentb"
                 | "keepabsents"
+                | "keepabsenta"
                 | "nulln"
                 | "nullb"
                 | "nulls"
+                | "nulla"
+                | "nulld"
         )
     }) {
         return true;
@@ -15155,9 +15170,12 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "keepabsentn"
                 | "keepabsentb"
                 | "keepabsents"
+                | "keepabsenta"
                 | "nulln"
                 | "nullb"
                 | "nulls"
+                | "nulla"
+                | "nulld"
         ) {
             stack.push(match token.as_str() {
                 "absentn" => JitKind::Number,
@@ -15169,6 +15187,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "absents" => JitKind::String,
                 "keepabsents" => JitKind::String,
                 "nulls" => JitKind::String,
+                "keepabsenta" => JitKind::Array,
+                "nulla" => JitKind::Array,
+                "nulld" => JitKind::Dictionary,
                 "absentdyn" => JitKind::Dynamic,
                 "absenta" => JitKind::Array,
                 "absentd" => JitKind::Dictionary,
@@ -15248,9 +15269,12 @@ fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> O
         return None;
     }
     if expected == JitKind::Array {
-        if expression.iter().any(|token| token == "absenta") {
+        if expression
+            .iter()
+            .any(|token| matches!(token.as_str(), "absenta" | "nulla"))
+        {
             expression.extend(
-                ["ifpresent", "arrayvalue", "else", "absenta", "end"]
+                ["ifpresent", "arrayvalue", "else", "keepabsenta", "end"]
                     .map(str::to_owned),
             );
         } else {
@@ -15692,6 +15716,18 @@ fn jit_numeric_declaration(
                 thaw_hir::HirType::F64 => "number | null",
                 thaw_hir::HirType::Bool => "boolean | null",
                 thaw_hir::HirType::Str => "string | null",
+                thaw_hir::HirType::Array(element) => match element.as_ref() {
+                    thaw_hir::HirType::F64 => "number[] | null",
+                    thaw_hir::HirType::Bool => "boolean[] | null",
+                    thaw_hir::HirType::Str => "string[] | null",
+                    _ => "never",
+                },
+                thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                    thaw_hir::HirType::F64 => "{ [key: string]: number } | null",
+                    thaw_hir::HirType::Bool => "{ [key: string]: boolean } | null",
+                    thaw_hir::HirType::Str => "{ [key: string]: string } | null",
+                    _ => "never",
+                },
                 _ => "never",
             }
         }
@@ -15700,6 +15736,24 @@ fn jit_numeric_declaration(
                 thaw_hir::HirType::F64 => "number | null | undefined",
                 thaw_hir::HirType::Bool => "boolean | null | undefined",
                 thaw_hir::HirType::Str => "string | null | undefined",
+                thaw_hir::HirType::Array(element) => match element.as_ref() {
+                    thaw_hir::HirType::F64 => "number[] | null | undefined",
+                    thaw_hir::HirType::Bool => "boolean[] | null | undefined",
+                    thaw_hir::HirType::Str => "string[] | null | undefined",
+                    _ => "never",
+                },
+                thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                    thaw_hir::HirType::F64 => {
+                        "{ [key: string]: number } | null | undefined"
+                    }
+                    thaw_hir::HirType::Bool => {
+                        "{ [key: string]: boolean } | null | undefined"
+                    }
+                    thaw_hir::HirType::Str => {
+                        "{ [key: string]: string } | null | undefined"
+                    }
+                    _ => "never",
+                },
                 _ => "never",
             }
         }
