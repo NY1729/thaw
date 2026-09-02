@@ -17028,8 +17028,26 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             if stack.as_slice() != loops.last()?.as_slice() {
                 return None;
             }
-        } else if matches!(token.as_str(), "break" | "continue") {
-            if !stack.starts_with(loops.last()?) {
+        } else if token == "break"
+            || token.starts_with("break")
+            || token == "continue"
+            || token.starts_with("continue")
+        {
+            let prefix = if token.starts_with("break") {
+                "break"
+            } else {
+                "continue"
+            };
+            let encoded_depth = token.strip_prefix(prefix)?;
+            let target_depth = if encoded_depth.is_empty() {
+                0
+            } else {
+                encoded_depth.parse::<usize>().ok()?
+            };
+            let target = loops
+                .len()
+                .checked_sub(target_depth.checked_add(1)?)?;
+            if !stack.starts_with(loops.get(target)?) {
                 return None;
             }
         } else if token == "loopend" {
