@@ -1806,6 +1806,52 @@ fn mixed_array_range_updates_use_jit_without_quickjs() {
 }
 
 #[test]
+fn mixed_array_truthy_scans_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-mixed-array-truthy-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-mixed-array-truthy");
+    std::fs::create_dir_all(&package).unwrap();
+    let union = "number[] | string[] | boolean[] | string";
+    std::fs::write(
+        package.join("package.d.ts"),
+        format!(
+            "export declare function some(value: {union}): boolean;\nexport declare function every(value: {union}): boolean;\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function some(value) { if (Array.isArray(value)) return value.some(item => item); return false; } function every(value) { if (Array.isArray(value)) return value.every(item => item); return false; } module.exports = { some, every };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { some, every } from 'jit-mixed-array-truthy'; function main(): void { console.log(some([0, 0, 2])); console.log(some(['', 'x'])); console.log(some([false, false])); console.log(every([1, 2])); console.log(every(['x', ''])); console.log(every([true, true])); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\ntrue\nfalse\ntrue\nfalse\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_number_sources_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",

@@ -4216,6 +4216,17 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         );
         assert!(jit_numeric_export(&source, method, false, &splice).is_some());
     }
+    for method in ["some", "every"] {
+        let predicate = thaw_bridge::DtsFunction {
+            name: method.into(),
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+            ..function.clone()
+        };
+        let source = format!(
+            "function {method}(value) {{ if (Array.isArray(value)) return value.{method}(item => item); return false; }} module.exports = {{ {method} }};"
+        );
+        assert!(jit_numeric_export(&source, method, false, &predicate).is_some());
+    }
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],

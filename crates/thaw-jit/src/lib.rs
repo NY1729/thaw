@@ -910,6 +910,34 @@ fn primitive_array_truthy(value: f64, encoded: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_truthy(value: f64, mode: u8) -> f64 {
+    let Some(array) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let kind = match array.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => 0,
+        DYNAMIC_BOOLEAN_ARRAY_TAG => 1,
+        DYNAMIC_STRING_ARRAY_TAG => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    primitive_array_truthy(f64::from_bits(array.payload), f64::from(kind * 8 + mode))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_some_truthy(value: f64) -> f64 {
+    dynamic_array_truthy(value, 0)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_every_truthy(value: f64) -> f64 {
+    dynamic_array_truthy(value, 1)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn primitive_array_compare(value: f64, operand: f64, encoded: f64) -> f64 {
     let encoded = encoded as u8;
     let kind = encoded / 64;
@@ -4561,6 +4589,8 @@ enum NumericValue {
     NumberArrayFind(CompareOp, u8),
     NumberArrayFilter(CompareOp),
     PrimitiveArrayTruthy(u8, u8),
+    DynamicArraySomeTruthy,
+    DynamicArrayEveryTruthy,
     PrimitiveArrayCompare(u8, CompareOp, u8),
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
@@ -4920,6 +4950,8 @@ impl NumericProgram {
                     "rsset" => Some(NumericValue::StringArraySet),
                     "rbset" => Some(NumericValue::BoolArraySet),
                     "dynarrayset" => Some(NumericValue::DynamicArraySet),
+                    "dynarraysometruthy" => Some(NumericValue::DynamicArraySomeTruthy),
+                    "dynarrayeverytruthy" => Some(NumericValue::DynamicArrayEveryTruthy),
                     "arrayvalue" => Some(NumericValue::ArrayValue),
                     "arrayhandle" => Some(NumericValue::MutableArrayHandle),
                     "arrayempty" => Some(NumericValue::EmptyArray),
@@ -6123,6 +6155,17 @@ impl NumericProgram {
                         primitive_array_truthy as *const () as u64,
                         depth - 1,
                     );
+                }
+                NumericValue::DynamicArraySomeTruthy | NumericValue::DynamicArrayEveryTruthy => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = if *value == NumericValue::DynamicArraySomeTruthy {
+                        dynamic_array_some_truthy
+                    } else {
+                        dynamic_array_every_truthy
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::PrimitiveArrayCompare(kind, operation, mode) => {
                     if depth < 2 || depth == 8 {
