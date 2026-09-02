@@ -2551,10 +2551,11 @@ Homogeneous array/tuple unions can also enter array literals through spread
 and synchronous `for...of` loops directly. Both constructs reuse the typed
 untag operation, so callers do not need a redundant `Array.isArray` guard;
 loop elements retain their number, boolean, or string JIT type.
-Fixed-position array destructuring declarations over stable homogeneous
-array/tuple union sources lower to those same typed index reads. Number,
-boolean, and string bindings, skipped positions, and later reassignment of
-`let` bindings remain in the extracted JIT function without QuickJS.
+Fixed-position array destructuring declarations over homogeneous array/tuple
+union sources materialize the initializer once in a typed JIT local before
+lowering each binding to an index read. Number, boolean, and string bindings,
+skipped positions, later reassignment of `let` bindings, and array-returning
+calls with side effects remain in the extracted JIT function without QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
