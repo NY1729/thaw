@@ -4049,6 +4049,41 @@ extern "C" fn untag_dictionary(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_object(value: f64) -> f64 {
+    untag_dynamic(value, DYNAMIC_OBJECT_TAG)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn object_number_field(object: f64, offset: f64) -> f64 {
+    let pointer = object.to_bits() as usize as *const u8;
+    if pointer.is_null() || !offset.is_finite() || offset < 0.0 {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { pointer.add(offset as usize).cast::<f64>().read() }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn object_boolean_field(object: f64, offset: f64) -> f64 {
+    let pointer = object.to_bits() as usize as *const u8;
+    if pointer.is_null() || !offset.is_finite() || offset < 0.0 {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    f64::from(unsafe { pointer.add(offset as usize).read() != 0 })
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn object_string_field(object: f64, offset: f64) -> f64 {
+    let pointer = object.to_bits() as usize as *const u8;
+    if pointer.is_null() || !offset.is_finite() || offset < 0.0 {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    f64::from_bits(unsafe { pointer.add(offset as usize).cast::<usize>().read() } as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn untag_dynamic(value: f64, expected: u64) -> f64 {
     dynamic_primitive(value, Some(expected)).map_or_else(
         || {
@@ -5022,6 +5057,8 @@ enum NumericValue {
     UntagBooleanDictionary,
     UntagStringDictionary,
     UntagDictionary,
+    UntagObject,
+    ObjectField(u8, u16),
     ExcludeNumber,
     ExcludeString,
     ExcludeBoolean,
@@ -5401,6 +5438,7 @@ impl NumericProgram {
                     "untagdb" => Some(NumericValue::UntagBooleanDictionary),
                     "untagds" => Some(NumericValue::UntagStringDictionary),
                     "untagdictionary" => Some(NumericValue::UntagDictionary),
+                    "untagobject" => Some(NumericValue::UntagObject),
                     "notnum" => Some(NumericValue::ExcludeNumber),
                     "notstr" => Some(NumericValue::ExcludeString),
                     "notbool" => Some(NumericValue::ExcludeBoolean),
@@ -6092,6 +6130,20 @@ impl NumericProgram {
                             .map(NumericValue::DynamicArgument)
                         })
                         .or_else(|| {
+                            let encoded = value.strip_prefix("obj")?;
+                            let (kind, offset) = encoded.split_at(1);
+                            let kind = match kind {
+                                "n" => 0,
+                                "b" => 1,
+                                "s" => 2,
+                                _ => return None,
+                            };
+                            offset
+                                .parse::<u16>()
+                                .ok()
+                                .map(|offset| NumericValue::ObjectField(kind, offset))
+                        })
+                        .or_else(|| {
                             value
                                 .strip_prefix('a')
                                 .or_else(|| value.strip_prefix('b'))
@@ -6479,6 +6531,7 @@ impl NumericProgram {
                 | NumericValue::UntagBooleanDictionary
                 | NumericValue::UntagStringDictionary
                 | NumericValue::UntagDictionary
+                | NumericValue::UntagObject
                 | NumericValue::ParseFloat
                 | NumericValue::NumberToExponentialShortest => {
                     if depth == 0 {
@@ -6513,11 +6566,27 @@ impl NumericProgram {
                         NumericValue::UntagBooleanDictionary => untag_boolean_dictionary,
                         NumericValue::UntagStringDictionary => untag_string_dictionary,
                         NumericValue::UntagDictionary => untag_dictionary,
+                        NumericValue::UntagObject => untag_object,
                         NumericValue::ParseFloat => parse_float,
                         NumericValue::NumberToExponentialShortest => number_to_exponential_shortest,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::ObjectField(kind, offset) => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    let offset = f64::from(*offset);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&offset.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    let function = [
+                        object_number_field,
+                        object_boolean_field,
+                        object_string_field,
+                    ][usize::from(*kind)];
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::ExcludeNumber
                 | NumericValue::ExcludeString
