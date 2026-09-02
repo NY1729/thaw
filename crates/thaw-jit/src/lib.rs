@@ -1372,6 +1372,105 @@ extern "C" fn primitive_array_jit_map_captured(
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_jit_map_impl(
+    value: f64,
+    callback: f64,
+    target: f64,
+    captures: Option<f64>,
+) -> f64 {
+    let target = target as u8;
+    let Some(array) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let (source, element_tag) = match array.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => (0, DYNAMIC_NUMBER_TAG),
+        DYNAMIC_BOOLEAN_ARRAY_TAG => (1, DYNAMIC_BOOLEAN_TAG),
+        DYNAMIC_STRING_ARRAY_TAG => (2, DYNAMIC_STRING_TAG),
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    if target > 2 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let Some((callback, required)) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
+    let captures = if let Some(captures) = captures {
+        let Some(captures) = capture_arguments(captures, 5, required) else {
+            return 0.0;
+        };
+        captures
+    } else {
+        if required > 5 {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return 0.0;
+        }
+        Vec::new()
+    };
+    let (Some(allocate), Some((data, length))) = (ARENA_ALLOC.with(Cell::get), unsafe {
+        array_data(f64::from_bits(array.payload))
+    }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let Some(size) = length.checked_mul(8).and_then(|size| size.checked_add(8)) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    let output = unsafe { allocate(size, 8) };
+    if output.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { output.cast::<u64>().write(length as u64) };
+    for index in 0..length {
+        let element = unsafe { array_element(data, index, source) };
+        let mapped = call_jit_callback(
+            callback,
+            &[
+                element_tag as f64,
+                element,
+                index as f64,
+                array.tag as f64,
+                f64::from_bits(array.payload),
+            ],
+            &captures,
+        );
+        let mapped = if target == 1 {
+            u64::from(mapped != 0.0 && !mapped.is_nan())
+        } else {
+            mapped.to_bits()
+        };
+        unsafe {
+            output
+                .add(8 + index * 8)
+                .cast::<u64>()
+                .write_unaligned(mapped)
+        };
+    }
+    array_result(output)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_jit_map(value: f64, callback: f64, target: f64) -> f64 {
+    dynamic_array_jit_map_impl(value, callback, target, None)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_jit_map_captured(
+    value: f64,
+    callback: f64,
+    captures: f64,
+    target: f64,
+) -> f64 {
+    dynamic_array_jit_map_impl(value, callback, target, Some(captures))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn primitive_array_jit_scan(value: f64, callback: f64, encoded: f64) -> f64 {
     let encoded = encoded as u8;
     let kind = encoded / 8;
@@ -4734,6 +4833,7 @@ enum NumericValue {
     PrimitiveArrayConvert(u8, u8),
     DynamicArrayConvert(u8),
     DynamicArrayMapIdentity,
+    DynamicArrayJitMap(u8, bool),
     NumberArrayMap(NumericReduceOp, bool),
     PrimitiveArrayJitMap(u8, u8, bool),
     PrimitiveArrayJitScan(u8, u8, bool),
@@ -5101,6 +5201,18 @@ impl NumericProgram {
                     "dynarraymaptoboolean" => Some(NumericValue::DynamicArrayConvert(1)),
                     "dynarraymaptostring" => Some(NumericValue::DynamicArrayConvert(2)),
                     "dynarraymapidentity" => Some(NumericValue::DynamicArrayMapIdentity),
+                    _ if token.starts_with("dynarraymapjit") => {
+                        let (target, captured) = match token.strip_prefix("dynarraymapjit")? {
+                            "n" => (0, false),
+                            "b" => (1, false),
+                            "s" => (2, false),
+                            "nc" => (0, true),
+                            "bc" => (1, true),
+                            "sc" => (2, true),
+                            _ => return None,
+                        };
+                        Some(NumericValue::DynamicArrayJitMap(target, captured))
+                    }
                     _ if token.strip_prefix("dynarray").is_some_and(|operation| {
                         [
                             "findlastindex",
@@ -6445,6 +6557,35 @@ impl NumericProgram {
                         dynamic_array_map_identity as *const () as u64,
                         depth - 1,
                     );
+                }
+                NumericValue::DynamicArrayJitMap(target, captured) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(*target).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    if *captured {
+                        if depth < 3 {
+                            return None;
+                        }
+                        emit_quaternary_call(
+                            &mut code,
+                            dynamic_array_jit_map_captured as *const () as u64,
+                            depth - 3,
+                        );
+                        depth -= 2;
+                    } else {
+                        if depth < 2 {
+                            return None;
+                        }
+                        emit_ternary_call(
+                            &mut code,
+                            dynamic_array_jit_map as *const () as u64,
+                            depth - 2,
+                        );
+                        depth -= 1;
+                    }
                 }
                 NumericValue::NumberArrayMap(operation, reverse) => {
                     if depth < 2 {
