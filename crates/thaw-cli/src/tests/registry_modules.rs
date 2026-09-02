@@ -1380,6 +1380,76 @@ fn tuple_union_array_updates_use_jit_without_quickjs() {
 }
 
 #[test]
+fn tuple_union_array_length_changes_use_jit_without_quickjs() {
+    let dts = concat!(
+        "export declare function append(value: number[] | [number, number], item: number): number;\n",
+        "export declare function prepend(value: number[] | [number, number], item: number): number;\n",
+        "export declare function dropLast(value: number[] | [number, number]): number;\n",
+        "export declare function dropFirst(value: number[] | [number, number]): number;\n",
+    );
+    let source = concat!(
+        "module.exports.append = (value, item) => Array.isArray(value) ? value.push(item) + value.at(-1) : 0; ",
+        "module.exports.prepend = (value, item) => Array.isArray(value) ? value.unshift(item) + value[0] : 0; ",
+        "module.exports.dropLast = value => Array.isArray(value) ? value.pop() ?? -1 : -1; ",
+        "module.exports.dropFirst = value => Array.isArray(value) ? value.shift() ?? -1 : -1;",
+    );
+    let declarations = thaw_bridge::parse_dts(dts).unwrap();
+    for (index, name) in ["append", "prepend", "dropLast", "dropFirst"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-length-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union-length");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.d.ts"), dts).unwrap();
+    std::fs::write(package.join("bundle.js"), source).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        concat!(
+            "import { append, dropFirst, dropLast, prepend } from 'jit-tuple-union-length';\n",
+            "function main(): void {\n",
+            "  console.log(append([1, 2, 3], 4));\n",
+            "  console.log(append([5, 6] as [number, number], 7));\n",
+            "  console.log(prepend([1, 2, 3], 0));\n",
+            "  console.log(prepend([5, 6] as [number, number], 4));\n",
+            "  console.log(dropLast([1, 2, 3]));\n",
+            "  console.log(dropLast([5, 6] as [number, number]));\n",
+            "  console.log(dropFirst([1, 2, 3]));\n",
+            "  console.log(dropFirst([5, 6] as [number, number]));\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "8\n10\n4\n7\n3\n6\n1\n5\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",

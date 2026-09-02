@@ -2531,7 +2531,9 @@ typed array instructions, so both ordinary arrays and fixed tuples use those
 methods without loading QuickJS. Typed narrowing also covers the updating
 `.fill()`, `.copyWithin()`, `.with()`, `.splice()`, and `.toSpliced()` paths;
 mutating operations keep the shared native handle while copying operations
-return a new typed array handle.
+return a new typed array handle. Length-changing `.push()`, `.unshift()`,
+`.pop()`, and `.shift()` operations use that same handle and preserve their
+JavaScript length or removed-element result for both arrays and fixed tuples.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
