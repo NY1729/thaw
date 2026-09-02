@@ -87,7 +87,21 @@ fn jit_union_member_code(ty: &thaw_hir::HirType) -> Option<char> {
             _ => None,
         },
         thaw_hir::HirType::Object(_) => Some('O'),
-        thaw_hir::HirType::Tuple(_) => Some('T'),
+        thaw_hir::HirType::Tuple(elements) => {
+            if !elements.is_empty() && elements.iter().all(|element| *element == thaw_hir::HirType::F64) {
+                Some('X')
+            } else if !elements.is_empty()
+                && elements.iter().all(|element| *element == thaw_hir::HirType::Bool)
+            {
+                Some('Y')
+            } else if !elements.is_empty()
+                && elements.iter().all(|element| *element == thaw_hir::HirType::Str)
+            {
+                Some('Z')
+            } else {
+                Some('T')
+            }
+        }
         _ => None,
     }
 }
@@ -3657,12 +3671,20 @@ fn jit_export(
                 }
             }
             Expr::Member(member) => {
-                let mut object_field = member_path(expression).and_then(|path| {
-                    locals
-                        .get(&path)
-                        .cloned()
-                        .or_else(|| parameters.get(&path).map(|field| vec![field.clone()]))
-                });
+                let common_array_receiver = matches!(&member.prop, MemberProp::Computed(_))
+                    && matches!(member.obj.as_ref(), Expr::Ident(identifier)
+                        if locals.get(identifier.sym.as_ref()).is_some_and(|value| {
+                            matches!(value.last().map(String::as_str), Some("untagarrayn" | "untagarrayb" | "untagarrays"))
+                        }));
+                let mut object_field = (!common_array_receiver)
+                    .then(|| member_path(expression))
+                    .flatten()
+                    .and_then(|path| {
+                        locals
+                            .get(&path)
+                            .cloned()
+                            .or_else(|| parameters.get(&path).map(|field| vec![field.clone()]))
+                    });
                 if object_field.is_none() {
                     if let MemberProp::Computed(computed) = &member.prop {
                         if let Some(path) = member_path(member.obj.as_ref()) {
@@ -6146,25 +6168,33 @@ fn jit_export(
         let not_array = source.iter().any(|token| token == "notarray");
         let arrays = kinds
             .bytes()
-            .filter(|kind| matches!(kind, b'N' | b'B' | b'S' | b'T'))
+            .filter(|kind| matches!(kind, b'N' | b'B' | b'S' | b'T' | b'X' | b'Y' | b'Z'))
             .collect::<Vec<_>>();
         if not_array || arrays.is_empty() {
             return None;
         }
         let mut array_value = source.clone();
         array_value.push(
-            match arrays.as_slice() {
+            if arrays.iter().all(|kind| matches!(kind, b'N' | b'X')) {
+                "untagarrayn"
+            } else if arrays.iter().all(|kind| matches!(kind, b'B' | b'Y')) {
+                "untagarrayb"
+            } else if arrays.iter().all(|kind| matches!(kind, b'S' | b'Z')) {
+                "untagarrays"
+            } else {
+                match arrays.as_slice() {
                 [b'N'] => "untagrn",
                 [b'B'] => "untagrb",
                 [b'S'] => "untagrs",
-                [b'T'] => "untagtuple",
+                    [b'T' | b'X' | b'Y' | b'Z'] => "untagtuple",
                 _ => "untagarray",
+                }
             }
             .into(),
         );
         let remaining = kinds
             .bytes()
-            .filter(|kind| !matches!(kind, b'N' | b'B' | b'S' | b'T'))
+            .filter(|kind| !matches!(kind, b'N' | b'B' | b'S' | b'T' | b'X' | b'Y' | b'Z'))
             .collect::<Vec<_>>();
         let mut other_value = source.clone();
         if remaining.len() == 1 {
@@ -6242,7 +6272,7 @@ fn jit_export(
         let not_object = source.iter().any(|token| token == "notobject");
         let aggregates = kinds
             .bytes()
-            .filter(|kind| matches!(kind, b'D' | b'E' | b'F' | b'O' | b'T'))
+            .filter(|kind| matches!(kind, b'D' | b'E' | b'F' | b'O' | b'T' | b'X' | b'Y' | b'Z'))
             .collect::<Vec<_>>();
         if not_object
             || aggregates.is_empty()
@@ -6260,7 +6290,7 @@ fn jit_export(
                 [b'E'] => "untagdb",
                 [b'F'] => "untagds",
                 [b'O'] => "untagobject",
-                [b'T'] => "untagtuple",
+                [b'T' | b'X' | b'Y' | b'Z'] => "untagtuple",
                 _ if aggregates
                     .iter()
                     .all(|kind| matches!(kind, b'D' | b'E' | b'F')) =>
@@ -6274,7 +6304,7 @@ fn jit_export(
         let remaining = kinds
             .bytes()
             .filter(|kind| {
-                !(matches!(kind, b'D' | b'E' | b'F' | b'O' | b'T')
+                !(matches!(kind, b'D' | b'E' | b'F' | b'O' | b'T' | b'X' | b'Y' | b'Z')
                     || not_array && matches!(kind, b'N' | b'B' | b'S'))
             })
             .collect::<Vec<_>>();
@@ -13298,7 +13328,7 @@ fn jit_dynamic_argument(token: &str) -> Option<(usize, &str)> {
     if kinds.is_empty()
         || !kinds
             .bytes()
-            .all(|kind| matches!(kind, b'n' | b'b' | b's' | b'N' | b'B' | b'S' | b'D' | b'E' | b'F' | b'O' | b'T'))
+            .all(|kind| matches!(kind, b'n' | b'b' | b's' | b'N' | b'B' | b'S' | b'D' | b'E' | b'F' | b'O' | b'T' | b'X' | b'Y' | b'Z'))
     {
         return None;
     }
@@ -13348,6 +13378,9 @@ fn array_prefix(expression: &[String]) -> Option<&'static str> {
             "untagrn" => return Some("rn"),
             "untagrb" => return Some("rb"),
             "untagrs" => return Some("rs"),
+            "untagarrayn" => return Some("rn"),
+            "untagarrayb" => return Some("rb"),
+            "untagarrays" => return Some("rs"),
             "dnvalues" => return Some("rn"),
             "dbvalues" => return Some("rb"),
             "dsvalues" => return Some("rs"),
@@ -15207,6 +15240,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "untagrb"
                 | "untagrs"
                 | "untagarray"
+                | "untagarrayn"
+                | "untagarrayb"
+                | "untagarrays"
                 | "untagdn"
                 | "untagdb"
                 | "untagds"
@@ -15221,9 +15257,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "untagnum" => JitKind::Number,
                 "untagbool" => JitKind::Boolean,
                 "untagstr" => JitKind::String,
-                "untagrn" | "untagrb" | "untagrs" | "untagarray" | "untagtuple" => {
-                    JitKind::Array
-                }
+                "untagrn"
+                | "untagrb"
+                | "untagrs"
+                | "untagarray"
+                | "untagarrayn"
+                | "untagarrayb"
+                | "untagarrays"
+                | "untagtuple" => JitKind::Array,
                 _ => JitKind::Dictionary,
             });
         } else if let Some((kind, offset)) = [

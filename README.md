@@ -2521,6 +2521,10 @@ narrows the tuple and object branches without loading QuickJS.
 When homogeneous primitive arrays and a fixed tuple share that array branch,
 their common native length header allows `.length` to use the same JIT
 operation while the non-array fixed-object branch remains separately narrowed.
+If every array and tuple alternative has the same number, boolean, or string
+element type, computed index reads also reuse the corresponding typed JIT array
+operation; the tuple schema remains compile-time metadata rather than a wider
+runtime value.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,

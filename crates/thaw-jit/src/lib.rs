@@ -5909,7 +5909,9 @@ impl NumericProgram {
                     "untagrn" => Some(NumericValue::UntagNumberArray),
                     "untagrb" => Some(NumericValue::UntagBooleanArray),
                     "untagrs" => Some(NumericValue::UntagStringArray),
-                    "untagarray" => Some(NumericValue::UntagArray),
+                    "untagarray" | "untagarrayn" | "untagarrayb" | "untagarrays" => {
+                        Some(NumericValue::UntagArray)
+                    }
                     "untagdn" => Some(NumericValue::UntagNumberDictionary),
                     "untagdb" => Some(NumericValue::UntagBooleanDictionary),
                     "untagds" => Some(NumericValue::UntagStringDictionary),
@@ -6608,6 +6610,9 @@ impl NumericProgram {
                                             | b'F'
                                             | b'O'
                                             | b'T'
+                                            | b'X'
+                                            | b'Y'
+                                            | b'Z'
                                     )
                                 }))
                             .then_some(index)?
