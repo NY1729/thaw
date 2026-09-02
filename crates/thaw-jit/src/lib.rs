@@ -2011,6 +2011,32 @@ extern "C" fn dynamic_array_join(value: f64, separator: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_result(tag: u64, result: f64) -> f64 {
+    let bits = result.to_bits();
+    if bits & ARRAY_RESULT_TAG == 0 {
+        return 0.0;
+    }
+    let Some(handle) = ARENA_ALLOC.with(|allocator| {
+        allocator.get().map(|alloc| unsafe {
+            alloc(std::mem::size_of::<usize>(), std::mem::align_of::<usize>())
+        })
+    }) else {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    };
+    if handle.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe {
+        handle
+            .cast::<usize>()
+            .write(bits as usize & !ARRAY_RESULT_TAG as usize)
+    };
+    dynamic_from_parts(tag as f64, f64::from_bits(handle as usize as u64))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn dynamic_array_slice(value: f64, start: f64, end: f64) -> f64 {
     dynamic_primitive(value, None).map_or_else(
         || {
@@ -2026,11 +2052,7 @@ extern "C" fn dynamic_array_slice(value: f64, start: f64, end: f64) -> f64 {
                 return 0.0;
             }
             let result = array_slice(f64::from_bits(dynamic.payload), start, end);
-            if result == 0.0 {
-                0.0
-            } else {
-                dynamic_from_parts(dynamic.tag as f64, result)
-            }
+            dynamic_array_result(dynamic.tag, result)
         },
     )
 }
@@ -2090,11 +2112,7 @@ extern "C" fn dynamic_array_concat(left: f64, right: f64) -> f64 {
         return 0.0;
     }
     let result = array_concat(f64::from_bits(left.payload), f64::from_bits(right.payload));
-    if result == 0.0 {
-        0.0
-    } else {
-        dynamic_from_parts(left.tag as f64, result)
-    }
+    dynamic_array_result(left.tag, result)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -2175,11 +2193,7 @@ fn dynamic_array_reverse(value: f64, reverse: extern "C" fn(f64) -> f64) -> f64 
         return 0.0;
     }
     let result = reverse(f64::from_bits(dynamic.payload));
-    if result == 0.0 {
-        0.0
-    } else {
-        dynamic_from_parts(dynamic.tag as f64, result)
-    }
+    dynamic_array_result(dynamic.tag, result)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -2270,6 +2284,40 @@ array_sort_fn!(bool_array_sort, 2);
 array_sort_fn!(number_array_sort_ascending, 3);
 array_sort_fn!(number_array_sort_descending, 4);
 array_sort_fn!(string_array_sort_descending, 5);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_sort(value: f64, in_place: bool) -> f64 {
+    let Some(dynamic) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let operation = match dynamic.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => 0,
+        DYNAMIC_STRING_ARRAY_TAG => 1,
+        DYNAMIC_BOOLEAN_ARRAY_TAG => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    let value = f64::from_bits(dynamic.payload);
+    let result = if in_place {
+        array_sort(operation, value)
+    } else {
+        array_to_sorted(operation, value)
+    };
+    dynamic_array_result(dynamic.tag, result)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_to_sorted(value: f64) -> f64 {
+    dynamic_array_sort(value, false)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_sort_in_place(value: f64) -> f64 {
+    dynamic_array_sort(value, true)
+}
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_fill(operation: u8, array: f64, value: f64, start: f64, end: f64) -> f64 {
@@ -4200,6 +4248,7 @@ enum NumericValue {
     NumberArrayToSorted,
     StringArrayToSorted,
     BoolArrayToSorted,
+    DynamicArrayToSorted,
     NumberArraySort,
     NumberArrayToSortedBy(bool),
     NumberArraySortBy(bool),
@@ -4207,6 +4256,7 @@ enum NumericValue {
     StringArraySortDescending,
     StringArraySort,
     BoolArraySort,
+    DynamicArraySort,
     NumberArrayFill,
     StringArrayFill,
     BoolArrayFill,
@@ -4554,6 +4604,7 @@ impl NumericProgram {
                     "rnsorted" => Some(NumericValue::NumberArrayToSorted),
                     "rssorted" => Some(NumericValue::StringArrayToSorted),
                     "rbsorted" => Some(NumericValue::BoolArrayToSorted),
+                    "dynarraysorted" => Some(NumericValue::DynamicArrayToSorted),
                     "rnsort" => Some(NumericValue::NumberArraySort),
                     "rnsortedasc" => Some(NumericValue::NumberArrayToSortedBy(false)),
                     "rnsorteddesc" => Some(NumericValue::NumberArrayToSortedBy(true)),
@@ -4563,6 +4614,7 @@ impl NumericProgram {
                     "rssortdesc" => Some(NumericValue::StringArraySortDescending),
                     "rssort" => Some(NumericValue::StringArraySort),
                     "rbsort" => Some(NumericValue::BoolArraySort),
+                    "dynarraysort" => Some(NumericValue::DynamicArraySort),
                     "rnfill" => Some(NumericValue::NumberArrayFill),
                     "rsfill" => Some(NumericValue::StringArrayFill),
                     "rbfill" => Some(NumericValue::BoolArrayFill),
@@ -6072,7 +6124,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArrayToSorted
                 | NumericValue::StringArrayToSorted
-                | NumericValue::BoolArrayToSorted => {
+                | NumericValue::BoolArrayToSorted
+                | NumericValue::DynamicArrayToSorted => {
                     if depth == 0 {
                         return None;
                     }
@@ -6080,13 +6133,15 @@ impl NumericProgram {
                         NumericValue::NumberArrayToSorted => number_array_to_sorted,
                         NumericValue::StringArrayToSorted => string_array_to_sorted,
                         NumericValue::BoolArrayToSorted => bool_array_to_sorted,
+                        NumericValue::DynamicArrayToSorted => dynamic_array_to_sorted,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
                 }
                 NumericValue::NumberArraySort
                 | NumericValue::StringArraySort
-                | NumericValue::BoolArraySort => {
+                | NumericValue::BoolArraySort
+                | NumericValue::DynamicArraySort => {
                     if depth == 0 {
                         return None;
                     }
@@ -6094,6 +6149,7 @@ impl NumericProgram {
                         NumericValue::NumberArraySort => number_array_sort,
                         NumericValue::StringArraySort => string_array_sort,
                         NumericValue::BoolArraySort => bool_array_sort,
+                        NumericValue::DynamicArraySort => dynamic_array_sort_in_place,
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
