@@ -6495,7 +6495,7 @@ impl NumericProgram {
                             let kind = match kind {
                                 "n" => 0,
                                 "b" => 1,
-                                "s" => 2,
+                                "s" | "o" | "t" => 2,
                                 _ => return None,
                             };
                             index
@@ -6509,7 +6509,7 @@ impl NumericProgram {
                             let kind = match kind {
                                 "n" => 0,
                                 "b" => 1,
-                                "s" => 2,
+                                "s" | "o" | "t" => 2,
                                 _ => return None,
                             };
                             index
@@ -6575,7 +6575,7 @@ impl NumericProgram {
                             let kind = match kind {
                                 "n" => 0,
                                 "b" => 1,
-                                "s" => 2,
+                                "s" | "o" | "t" => 2,
                                 _ => return None,
                             };
                             offset

@@ -307,12 +307,16 @@ fn jit_export(
                         thaw_hir::HirType::F64 => "objoptn",
                         thaw_hir::HirType::Bool => "objoptb",
                         thaw_hir::HirType::Str => "objopts",
+                        thaw_hir::HirType::Object(_) => "objopto",
+                        thaw_hir::HirType::Tuple(_) => "objoptt",
                         _ => return None,
                     }),
                     thaw_hir::HirType::Nullish(payload) => Some(match payload.as_ref() {
                         thaw_hir::HirType::F64 => "objnulln",
                         thaw_hir::HirType::Bool => "objnullb",
                         thaw_hir::HirType::Str => "objnulls",
+                        thaw_hir::HirType::Object(_) => "objnullo",
+                        thaw_hir::HirType::Tuple(_) => "objnullt",
                         _ => return None,
                     }),
                     _ => None,
@@ -326,6 +330,19 @@ fn jit_export(
                         bind_fields(&field_path, nested, &value, locals)?;
                     } else if let thaw_hir::HirType::Tuple(types) = ty {
                         bind_tuple(&field_path, types, &value, locals)?;
+                    } else if let thaw_hir::HirType::Optional(payload)
+                    | thaw_hir::HirType::Nullable(payload)
+                    | thaw_hir::HirType::Nullish(payload) = ty
+                    {
+                        match payload.as_ref() {
+                            thaw_hir::HirType::Object(nested) => {
+                                bind_fields(&field_path, nested, &value, locals)?
+                            }
+                            thaw_hir::HirType::Tuple(types) => {
+                                bind_tuple(&field_path, types, &value, locals)?
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 offset = offset.checked_add(if matches!(
@@ -372,12 +389,16 @@ fn jit_export(
                         thaw_hir::HirType::F64 => "tupoptn",
                         thaw_hir::HirType::Bool => "tupoptb",
                         thaw_hir::HirType::Str => "tupopts",
+                        thaw_hir::HirType::Object(_) => "tupopto",
+                        thaw_hir::HirType::Tuple(_) => "tupoptt",
                         _ => return None,
                     },
                     thaw_hir::HirType::Nullish(payload) => match payload.as_ref() {
                         thaw_hir::HirType::F64 => "tupnulln",
                         thaw_hir::HirType::Bool => "tupnullb",
                         thaw_hir::HirType::Str => "tupnulls",
+                        thaw_hir::HirType::Object(_) => "tupnullo",
+                        thaw_hir::HirType::Tuple(_) => "tupnullt",
                         _ => return None,
                     },
                     _ => return None,
@@ -400,6 +421,19 @@ fn jit_export(
                     bind_tuple(&element_path, types, &value, locals)?;
                 } else if let thaw_hir::HirType::Object(fields) = element {
                     bind_fields(&element_path, fields, &value, locals)?;
+                } else if let thaw_hir::HirType::Optional(payload)
+                | thaw_hir::HirType::Nullable(payload)
+                | thaw_hir::HirType::Nullish(payload) = element
+                {
+                    match payload.as_ref() {
+                        thaw_hir::HirType::Tuple(types) => {
+                            bind_tuple(&element_path, types, &value, locals)?
+                        }
+                        thaw_hir::HirType::Object(fields) => {
+                            bind_fields(&element_path, fields, &value, locals)?
+                        }
+                        _ => {}
+                    }
                 }
             }
             Some(())
@@ -674,23 +708,48 @@ fn jit_export(
                         output.push(format!("tupsetwu{index}"));
                         continue;
                     }
-                    let mut value = Vec::new();
-                    encode_expression(
-                        element.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        &mut value,
-                    )?;
-                    let expected = jit_return_kind(payload)?;
-                    if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
-                        return None;
-                    }
-                    let kind = match payload.as_ref() {
-                        thaw_hir::HirType::F64 => 'n',
-                        thaw_hir::HirType::Bool => 'b',
-                        thaw_hir::HirType::Str => 's',
-                        _ => return None,
+                    let (value, kind) = match payload.as_ref() {
+                        thaw_hir::HirType::Object(fields) => (
+                            encode_fixed_object_value(
+                                object_literal(element.expr.as_ref())?,
+                                fields,
+                                parameters,
+                                locals,
+                                context,
+                            )?,
+                            'o',
+                        ),
+                        thaw_hir::HirType::Tuple(types) => (
+                            encode_fixed_tuple_value(
+                                element.expr.as_ref(),
+                                types,
+                                parameters,
+                                locals,
+                                context,
+                            )?,
+                            'p',
+                        ),
+                        primitive => {
+                            let mut value = Vec::new();
+                            encode_expression(
+                                element.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut value,
+                            )?;
+                            let expected = jit_return_kind(primitive)?;
+                            if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                                return None;
+                            }
+                            let kind = match primitive {
+                                thaw_hir::HirType::F64 => 'n',
+                                thaw_hir::HirType::Bool => 'b',
+                                thaw_hir::HirType::Str => 's',
+                                _ => return None,
+                            };
+                            (value, kind)
+                        }
                     };
                     (value, kind, 2)
                 }
@@ -700,23 +759,48 @@ fn jit_export(
                     {
                         continue;
                     }
-                    let mut value = Vec::new();
-                    encode_expression(
-                        element.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        &mut value,
-                    )?;
-                    let expected = jit_return_kind(payload)?;
-                    if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
-                        return None;
-                    }
-                    let kind = match payload.as_ref() {
-                        thaw_hir::HirType::F64 => 'n',
-                        thaw_hir::HirType::Bool => 'b',
-                        thaw_hir::HirType::Str => 's',
-                        _ => return None,
+                    let (value, kind) = match payload.as_ref() {
+                        thaw_hir::HirType::Object(fields) => (
+                            encode_fixed_object_value(
+                                object_literal(element.expr.as_ref())?,
+                                fields,
+                                parameters,
+                                locals,
+                                context,
+                            )?,
+                            'o',
+                        ),
+                        thaw_hir::HirType::Tuple(types) => (
+                            encode_fixed_tuple_value(
+                                element.expr.as_ref(),
+                                types,
+                                parameters,
+                                locals,
+                                context,
+                            )?,
+                            'p',
+                        ),
+                        primitive => {
+                            let mut value = Vec::new();
+                            encode_expression(
+                                element.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                                &mut value,
+                            )?;
+                            let expected = jit_return_kind(primitive)?;
+                            if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                                return None;
+                            }
+                            let kind = match primitive {
+                                thaw_hir::HirType::F64 => 'n',
+                                thaw_hir::HirType::Bool => 'b',
+                                thaw_hir::HirType::Str => 's',
+                                _ => return None,
+                            };
+                            (value, kind)
+                        }
                     };
                     (value, kind, 1)
                 }
@@ -925,21 +1009,47 @@ fn jit_export(
                             offset += field_size(ty);
                             continue;
                         }
-                        let mut value = Vec::new();
-                        encode_expression(expression, parameters, locals, context, &mut value)?;
-                        let expected = jit_return_kind(payload)?;
-                        if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
-                            return None;
+                        match payload.as_ref() {
+                            thaw_hir::HirType::Object(fields) => (
+                                encode_fixed_object_value(
+                                    object_literal(expression)?,
+                                    fields,
+                                    parameters,
+                                    locals,
+                                    context,
+                                )?,
+                                'o',
+                            ),
+                            thaw_hir::HirType::Tuple(types) => (
+                                encode_fixed_tuple_value(
+                                    expression, types, parameters, locals, context,
+                                )?,
+                                'a',
+                            ),
+                            primitive => {
+                                let mut value = Vec::new();
+                                encode_expression(
+                                    expression,
+                                    parameters,
+                                    locals,
+                                    context,
+                                    &mut value,
+                                )?;
+                                let expected = jit_return_kind(primitive)?;
+                                if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                                    return None;
+                                }
+                                (
+                                    value,
+                                    match primitive {
+                                        thaw_hir::HirType::F64 => 'n',
+                                        thaw_hir::HirType::Bool => 'b',
+                                        thaw_hir::HirType::Str => 's',
+                                        _ => return None,
+                                    },
+                                )
+                            }
                         }
-                        (
-                            value,
-                            match payload.as_ref() {
-                                thaw_hir::HirType::F64 => 'n',
-                                thaw_hir::HirType::Bool => 'b',
-                                thaw_hir::HirType::Str => 's',
-                                _ => return None,
-                            },
-                        )
                     }
                     thaw_hir::HirType::Optional(payload)
                     | thaw_hir::HirType::Nullable(payload) => {
@@ -947,21 +1057,47 @@ fn jit_export(
                             offset += field_size(ty);
                             continue;
                         }
-                        let mut value = Vec::new();
-                        encode_expression(expression, parameters, locals, context, &mut value)?;
-                        let expected = jit_return_kind(payload)?;
-                        if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
-                            return None;
+                        match payload.as_ref() {
+                            thaw_hir::HirType::Object(fields) => (
+                                encode_fixed_object_value(
+                                    object_literal(expression)?,
+                                    fields,
+                                    parameters,
+                                    locals,
+                                    context,
+                                )?,
+                                'o',
+                            ),
+                            thaw_hir::HirType::Tuple(types) => (
+                                encode_fixed_tuple_value(
+                                    expression, types, parameters, locals, context,
+                                )?,
+                                'a',
+                            ),
+                            primitive => {
+                                let mut value = Vec::new();
+                                encode_expression(
+                                    expression,
+                                    parameters,
+                                    locals,
+                                    context,
+                                    &mut value,
+                                )?;
+                                let expected = jit_return_kind(primitive)?;
+                                if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                                    return None;
+                                }
+                                (
+                                    value,
+                                    match primitive {
+                                        thaw_hir::HirType::F64 => 'n',
+                                        thaw_hir::HirType::Bool => 'b',
+                                        thaw_hir::HirType::Str => 's',
+                                        _ => return None,
+                                    },
+                                )
+                            }
                         }
-                        (
-                            value,
-                            match payload.as_ref() {
-                                thaw_hir::HirType::F64 => 'n',
-                                thaw_hir::HirType::Bool => 'b',
-                                thaw_hir::HirType::Str => 's',
-                                _ => return None,
-                            },
-                        )
                     }
                     _ => {
                         let mut value = Vec::new();
@@ -2465,9 +2601,10 @@ fn jit_export(
 
             let mut source = None;
             let ordinary = split_chain(chain, &mut source)?;
+            let source = source?;
             let mut receiver = Vec::new();
             encode_expression(
-                &source?,
+                &source,
                 parameters,
                 locals,
                 context,
@@ -2488,11 +2625,25 @@ fn jit_export(
             };
             let mut continuation_parameters = parameters.clone();
             continuation_parameters.insert(RECEIVER.into(), receiver_token.clone());
+            let mut continuation_locals = locals.clone();
+            if let Some(source_path) = member_path(&source) {
+                for (path, operation) in locals {
+                    let Some(suffix) = path.strip_prefix(&format!("{source_path}.")) else {
+                        continue;
+                    };
+                    let Some(operation_suffix) = operation.strip_prefix(receiver.as_slice()) else {
+                        continue;
+                    };
+                    let mut translated = vec![receiver_token.clone()];
+                    translated.extend_from_slice(operation_suffix);
+                    continuation_locals.insert(format!("{RECEIVER}.{suffix}"), translated);
+                }
+            }
             let mut continuation = Vec::new();
             encode_expression(
                 &ordinary,
                 &continuation_parameters,
-                locals,
+                &continuation_locals,
                 context,
                 &mut continuation,
             )?;
@@ -12159,6 +12310,14 @@ fn array_prefix(expression: &[String]) -> Option<&'static str> {
             "dsvalues" => return Some("rs"),
             _ => {}
         }
+        if token.starts_with("objt")
+            || token.starts_with("objoptt")
+            || token.starts_with("objnullt")
+            || token.starts_with("tupoptt")
+            || token.starts_with("tupnullt")
+        {
+            return Some("rn");
+        }
         for (field, prefix) in [("objrn", "rn"), ("objrb", "rb"), ("objrs", "rs")] {
             if token.starts_with(field) {
                 return Some(prefix);
@@ -12186,6 +12345,14 @@ fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
             "untagdb" => return Some("db"),
             "untagds" => return Some("ds"),
             _ => {}
+        }
+        if token.starts_with("objo")
+            || token.starts_with("objopto")
+            || token.starts_with("objnullo")
+            || token.starts_with("tupopto")
+            || token.starts_with("tupnullo")
+        {
+            return Some("dn");
         }
         for (field, prefix) in [("objdn", "dn"), ("objdb", "db"), ("objds", "ds")] {
             if token.starts_with(field) {
@@ -13647,9 +13814,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             ("tupnulln", JitKind::Number),
             ("tupnullb", JitKind::Boolean),
             ("tupnulls", JitKind::String),
+            ("tupnullo", JitKind::Dictionary),
+            ("tupnullt", JitKind::Array),
             ("tupoptn", JitKind::Number),
             ("tupoptb", JitKind::Boolean),
             ("tupopts", JitKind::String),
+            ("tupopto", JitKind::Dictionary),
+            ("tupoptt", JitKind::Array),
         ]
         .into_iter()
         .find_map(|(prefix, kind)| token.strip_prefix(prefix).map(|index| (kind, index)))
@@ -13849,7 +14020,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                     "u" => matches!(value, JitKind::Number | JitKind::Boolean),
                     _ => return None,
                 }
-                || tagged && !matches!(kind, "n" | "b" | "s")
+                || tagged && !matches!(kind, "n" | "b" | "s" | "p" | "o")
             {
                 return None;
             }
@@ -13923,9 +14094,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             ("objnulln", JitKind::Number),
             ("objnullb", JitKind::Boolean),
             ("objnulls", JitKind::String),
+            ("objnullo", JitKind::Dictionary),
+            ("objnullt", JitKind::Array),
             ("objoptn", JitKind::Number),
             ("objoptb", JitKind::Boolean),
             ("objopts", JitKind::String),
+            ("objopto", JitKind::Dictionary),
+            ("objoptt", JitKind::Array),
         ]
         .into_iter()
         .find_map(|(prefix, kind)| token.strip_prefix(prefix).map(|offset| (kind, offset)))
