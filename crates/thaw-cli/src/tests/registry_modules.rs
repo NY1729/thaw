@@ -1240,6 +1240,52 @@ fn fixed_object_union_result_builds_native_storage() {
 }
 
 #[test]
+fn fixed_tuple_unions_use_jit_without_quickjs() {
+    let declarations = thaw_bridge::parse_dts(
+        "export declare function describe(value: [number, string] | string): string;\nexport declare function make(value: boolean): [number, string] | string;\n",
+    )
+    .unwrap();
+    let source = "module.exports.describe = value => typeof value === 'object' ? value[1] : value; module.exports.make = value => value ? [7, 'pair'] : 'plain';";
+    assert!(jit_numeric_export(source, "describe", false, &declarations[0]).is_some());
+    assert!(jit_numeric_export(source, "make", false, &declarations[1]).is_some());
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tuple-union-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tuple-union");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function describe(value: [number, string] | string): string;\nexport declare function make(value: boolean): [number, string] | string;\n",
+    )
+    .unwrap();
+    std::fs::write(package.join("bundle.js"), format!("{source}\n")).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { describe, make } from 'jit-tuple-union';\nfunction main(): void { console.log(describe([3, 'local'])); console.log(describe('direct')); console.log(describe(make(true))); console.log(describe(make(false))); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "local\ndirect\npair\nplain\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_fixed_object_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
