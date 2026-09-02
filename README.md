@@ -2204,6 +2204,12 @@ General `map` callbacks and the seven predicate scans above can therefore use
 the element, index, source array, and primitive captures without loading
 QuickJS; mapped results remain statically typed while element-returning scans
 preserve the selected runtime tag.
+`reduce` and `reduceRight` over the same runtime array union also stay in the
+JIT when given an explicit numeric initial value and a numeric result. Their
+callbacks receive the numeric accumulator plus the tagged element, index,
+source array, and typed primitive captures. Initial-value-free reductions,
+whose accumulator begins with the runtime element type, remain on the fallback
+path pending a tagged accumulator ABI.
 Unary negation and pure one-argument `Math.*` callbacks use that same map scan,
 including rounding, roots, logarithms, exponentials, and trigonometric functions.
 Their `join` and zero-argument `toString` calls reuse the native array
