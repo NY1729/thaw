@@ -4530,6 +4530,35 @@ fn jit_joins_aggregate_only_union_branches() {
 }
 
 #[test]
+fn jit_tags_fixed_aggregate_union_results() {
+    for (name, body, aggregate) in [
+        (
+            "fixedArray",
+            "function fixedArray() { return [1, 2]; } module.exports = { fixedArray };",
+            thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)),
+        ),
+        (
+            "fixedRecord",
+            "function fixedRecord() { return { count: 3 }; } module.exports = { fixedRecord };",
+            thaw_hir::HirType::Dictionary(Box::new(thaw_hir::HirType::F64)),
+        ),
+    ] {
+        let function = thaw_bridge::DtsFunction {
+            name: name.into(),
+            generic: None,
+            params: Vec::new(),
+            required_params: 0,
+            rest_param: None,
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
+                aggregate,
+                thaw_hir::HirType::Str,
+            ])),
+        };
+        assert!(jit_numeric_export(body, name, false, &function).is_some());
+    }
+}
+
+#[test]
 fn rewrite_qualified_calls_is_a_no_op_with_no_rewrites() {
     let source = "function main(): void { console.log(qs.stringify(x)); }";
     assert_eq!(rewrite_qualified_calls(source, &[]).unwrap(), source);

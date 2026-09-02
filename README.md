@@ -2419,6 +2419,8 @@ and chained `typeof` inspection/narrowing inside JIT expressions and loop branch
 without embedding QuickJS. Homogeneous primitive arrays and dictionaries can
 join those conditional results through the same tagged handle, including
 different array/dictionary element types and mixtures with primitive values.
+An export whose declared union is wider than its fixed array or dictionary
+implementation also adds the required aggregate tag at its JIT boundary.
 Mutable dynamic locals may be reassigned between these representable shapes;
 array results are converted to stable native handles before tagging. Other
 heterogeneous result mixtures still remain on the QuickJS path. Tagged
