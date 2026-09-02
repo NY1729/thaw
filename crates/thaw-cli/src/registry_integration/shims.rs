@@ -188,7 +188,9 @@ fn jit_export(
                 fields.iter().all(|(_, ty)| jit_result_supported(ty))
             }
             thaw_hir::HirType::Tuple(elements) => elements.iter().all(jit_result_supported),
-            thaw_hir::HirType::Optional(payload) => jit_result_supported(payload),
+            thaw_hir::HirType::Optional(payload) | thaw_hir::HirType::Nullable(payload) => {
+                jit_result_supported(payload)
+            }
             _ => false,
         }
     }
@@ -298,7 +300,8 @@ fn jit_export(
                         _ => return None,
                     }),
                     thaw_hir::HirType::Tuple(_) => Some("objt"),
-                    thaw_hir::HirType::Optional(payload) => Some(match payload.as_ref() {
+                    thaw_hir::HirType::Optional(payload)
+                    | thaw_hir::HirType::Nullable(payload) => Some(match payload.as_ref() {
                         thaw_hir::HirType::F64 => "objoptn",
                         thaw_hir::HirType::Bool => "objoptb",
                         thaw_hir::HirType::Str => "objopts",
@@ -356,7 +359,8 @@ fn jit_export(
                         thaw_hir::HirType::Str => "rogetds",
                         _ => return None,
                     },
-                    thaw_hir::HirType::Optional(payload) => match payload.as_ref() {
+                    thaw_hir::HirType::Optional(payload)
+                    | thaw_hir::HirType::Nullable(payload) => match payload.as_ref() {
                         thaw_hir::HirType::F64 => "tupoptn",
                         thaw_hir::HirType::Bool => "tupoptb",
                         thaw_hir::HirType::Str => "tupopts",
@@ -366,7 +370,10 @@ fn jit_export(
                 };
                 let element_path = format!("{path}.{index}");
                 let mut value = source.to_vec();
-                if matches!(element, thaw_hir::HirType::Optional(_)) {
+                if matches!(
+                    element,
+                    thaw_hir::HirType::Optional(_) | thaw_hir::HirType::Nullable(_)
+                ) {
                     value.push(format!("{operation}{index}"));
                 } else {
                     value.push(format!("c{:016x}", (index as f64).to_bits()));
@@ -638,8 +645,10 @@ fn jit_export(
                 return None;
             }
             let (value, kind, optional) = match ty {
-                thaw_hir::HirType::Optional(payload) => {
-                    if matches!(element.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == "undefined") {
+                thaw_hir::HirType::Optional(payload) | thaw_hir::HirType::Nullable(payload) => {
+                    if matches!(element.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == "undefined")
+                        || matches!(element.expr.as_ref(), Expr::Lit(Lit::Null(_)))
+                    {
                         continue;
                     }
                     let mut value = Vec::new();
@@ -851,7 +860,12 @@ fn jit_export(
                         )?,
                         'a',
                     ),
-                    thaw_hir::HirType::Optional(payload) => {
+                    thaw_hir::HirType::Optional(payload)
+                    | thaw_hir::HirType::Nullable(payload) => {
+                        if matches!(expression, Expr::Lit(Lit::Null(_))) {
+                            offset += field_size(ty);
+                            continue;
+                        }
                         let mut value = Vec::new();
                         encode_expression(expression, parameters, locals, context, &mut value)?;
                         let expected = jit_return_kind(payload)?;
@@ -932,7 +946,7 @@ fn jit_export(
                 }
             };
             output.extend(value);
-            if let thaw_hir::HirType::Optional(payload) = ty {
+            if let thaw_hir::HirType::Optional(payload) | thaw_hir::HirType::Nullable(payload) = ty {
                 let payload_offset = offset
                     + if matches!(payload.as_ref(), thaw_hir::HirType::Bool) {
                         1
