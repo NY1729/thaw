@@ -1426,40 +1426,6 @@ fn jit_export(
             .then_some((property.sym.as_ref(), member.obj.as_ref()))
     }
 
-    fn array_prefix(expression: &[String]) -> Option<&'static str> {
-        expression.iter().find_map(|token| {
-            if matches!(token.as_str(), "strarray" | "dkeys") {
-                return Some("rs");
-            }
-            match token.as_str() {
-                "untagrn" => return Some("rn"),
-                "untagrb" => return Some("rb"),
-                "untagrs" => return Some("rs"),
-                "dnvalues" => return Some("rn"),
-                "dbvalues" => return Some("rb"),
-                "dsvalues" => return Some("rs"),
-                _ => {}
-            }
-            ["rn", "rb", "rs"]
-                .into_iter()
-                .find(|prefix| token.starts_with(prefix))
-        })
-    }
-
-    fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
-        expression.iter().find_map(|token| {
-            match token.as_str() {
-                "untagdn" => return Some("dn"),
-                "untagdb" => return Some("db"),
-                "untagds" => return Some("ds"),
-                _ => {}
-            }
-            ["dn", "db", "ds"]
-                .into_iter()
-                .find(|prefix| token.starts_with(prefix))
-        })
-    }
-
     fn entry_prefix(expression: &[String]) -> Option<&'static str> {
         expression.iter().find_map(|token| match token.as_str() {
             token if token.starts_with("en") || token == "dnentries" => Some("dn"),
@@ -6500,13 +6466,10 @@ fn jit_export(
         encode_expression(value_expression, parameters, locals, context, &mut value)?;
         match kinds.get(name.sym.as_ref())? {
             JitKind::Boolean => value.push("asbool".into()),
-            JitKind::Dynamic => match jit_expression_kind(&value)?.0 {
-                JitKind::Number => value.push("tagnum".into()),
-                JitKind::Boolean => value.push("tagbool".into()),
-                JitKind::String => value.push("tagstr".into()),
-                JitKind::Dynamic => {}
-                _ => return None,
-            },
+            JitKind::Dynamic => {
+                let value_kind = jit_expression_kind(&value)?.0;
+                tag_jit_value(&mut value, value_kind)?;
+            }
             JitKind::Array if array_prefix(&value)? != local.get(..2)? => return None,
             JitKind::Dictionary if dictionary_prefix(&value)? != local.get(..2)? => return None,
             _ => {}
@@ -6610,6 +6573,8 @@ fn jit_export(
                         "tagnum" => Some(JitKind::Number),
                         "tagbool" => Some(JitKind::Boolean),
                         "tagstr" => Some(JitKind::String),
+                        "tagrn" | "tagrb" | "tagrs" => Some(JitKind::Array),
+                        "tagdn" | "tagdb" | "tagds" => Some(JitKind::Dictionary),
                         _ => None,
                     })
                     .collect()
@@ -6619,15 +6584,7 @@ fn jit_export(
             (value_kind, candidates)
         });
         if kind == JitKind::Dynamic && value_kind != JitKind::Dynamic {
-            encoded.push(
-                match value_kind {
-                    JitKind::Number => "tagnum",
-                    JitKind::Boolean => "tagbool",
-                    JitKind::String => "tagstr",
-                    _ => return None,
-                }
-                .into(),
-            );
+            tag_jit_value(&mut encoded, value_kind)?;
         } else if kind != value_kind {
             return None;
         }
@@ -11432,11 +11389,74 @@ fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
             | (JitKind::Boolean, JitKind::String)
             | (JitKind::Dynamic, JitKind::Number | JitKind::Boolean | JitKind::String)
             | (JitKind::Number | JitKind::Boolean | JitKind::String, JitKind::Dynamic)
+            | (JitKind::Dynamic, JitKind::Array | JitKind::Dictionary)
+            | (JitKind::Array | JitKind::Dictionary, JitKind::Dynamic)
+            | (JitKind::Array | JitKind::Dictionary, JitKind::Number | JitKind::Boolean | JitKind::String)
+            | (JitKind::Number | JitKind::Boolean | JitKind::String, JitKind::Array | JitKind::Dictionary)
+            | (JitKind::Array, JitKind::Dictionary)
+            | (JitKind::Dictionary, JitKind::Array)
     ) {
         Some(JitKind::Dynamic)
     } else {
         None
     }
+}
+
+fn array_prefix(expression: &[String]) -> Option<&'static str> {
+    expression.iter().find_map(|token| {
+        if matches!(token.as_str(), "strarray" | "dkeys") {
+            return Some("rs");
+        }
+        match token.as_str() {
+            "untagrn" => return Some("rn"),
+            "untagrb" => return Some("rb"),
+            "untagrs" => return Some("rs"),
+            "dnvalues" => return Some("rn"),
+            "dbvalues" => return Some("rb"),
+            "dsvalues" => return Some("rs"),
+            _ => {}
+        }
+        ["rn", "rb", "rs"]
+            .into_iter()
+            .find(|prefix| token.starts_with(prefix))
+    })
+}
+
+fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
+    expression.iter().find_map(|token| {
+        match token.as_str() {
+            "untagdn" => return Some("dn"),
+            "untagdb" => return Some("db"),
+            "untagds" => return Some("ds"),
+            _ => {}
+        }
+        ["dn", "db", "ds"]
+            .into_iter()
+            .find(|prefix| token.starts_with(prefix))
+    })
+}
+
+fn tag_jit_value(expression: &mut Vec<String>, kind: JitKind) -> Option<()> {
+    let token = match kind {
+        JitKind::Number => "tagnum",
+        JitKind::Boolean => "tagbool",
+        JitKind::String => "tagstr",
+        JitKind::Array => match array_prefix(expression)? {
+            "rn" => "tagrn",
+            "rb" => "tagrb",
+            "rs" => "tagrs",
+            _ => return None,
+        },
+        JitKind::Dictionary => match dictionary_prefix(expression)? {
+            "dn" => "tagdn",
+            "db" => "tagdb",
+            "ds" => "tagds",
+            _ => return None,
+        },
+        JitKind::Dynamic => return Some(()),
+    };
+    expression.push(token.into());
+    Some(())
 }
 
 fn normalize_callable_branches<'a>(
@@ -11447,22 +11467,31 @@ fn normalize_callable_branches<'a>(
         .iter()
         .map(|branch| jit_expression_kind(branch).map(|result| result.0))
         .collect::<Option<Vec<_>>>()?;
-    let kind = kinds
+    let mut kind = kinds
         .iter()
         .copied()
         .try_fold(*kinds.first()?, merge_jit_kinds)?;
+    let distinct_aggregates = match kind {
+        JitKind::Array => branches
+            .iter()
+            .map(|branch| array_prefix(branch))
+            .collect::<Option<std::collections::HashSet<_>>>()?
+            .len()
+            > 1,
+        JitKind::Dictionary => branches
+            .iter()
+            .map(|branch| dictionary_prefix(branch))
+            .collect::<Option<std::collections::HashSet<_>>>()?
+            .len()
+            > 1,
+        _ => false,
+    };
+    if distinct_aggregates {
+        kind = JitKind::Dynamic;
+    }
     if kind == JitKind::Dynamic {
         for (branch, branch_kind) in branches.iter_mut().zip(kinds) {
-            branch.push(
-                match branch_kind {
-                    JitKind::Number => "tagnum",
-                    JitKind::Boolean => "tagbool",
-                    JitKind::String => "tagstr",
-                    JitKind::Dynamic => continue,
-                    _ => return None,
-                }
-                .into(),
-            );
+            tag_jit_value(branch, branch_kind)?;
         }
     }
     Some(kind)
@@ -12949,6 +12978,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Dynamic);
         } else if token == "tagbool" {
             if stack.pop()? != JitKind::Boolean {
+                return None;
+            }
+            stack.push(JitKind::Dynamic);
+        } else if matches!(token.as_str(), "tagrn" | "tagrb" | "tagrs") {
+            if stack.pop()? != JitKind::Array {
+                return None;
+            }
+            stack.push(JitKind::Dynamic);
+        } else if matches!(token.as_str(), "tagdn" | "tagdb" | "tagds") {
+            if stack.pop()? != JitKind::Dictionary {
                 return None;
             }
             stack.push(JitKind::Dynamic);

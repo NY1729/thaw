@@ -3819,6 +3819,42 @@ extern "C" fn tag_boolean(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn tag_aggregate(value: f64, tag: u64) -> f64 {
+    let value = if matches!(tag, DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG) {
+        mutable_array_handle(value)
+    } else {
+        value
+    };
+    if CALL_ERROR.with(Cell::get).is_null() {
+        arena_dynamic(tag, value.to_bits())
+    } else {
+        0.0
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! aggregate_tagger {
+    ($name:ident, $tag:expr) => {
+        extern "C" fn $name(value: f64) -> f64 {
+            tag_aggregate(value, $tag)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+aggregate_tagger!(tag_number_array, DYNAMIC_NUMBER_ARRAY_TAG);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+aggregate_tagger!(tag_boolean_array, DYNAMIC_BOOLEAN_ARRAY_TAG);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+aggregate_tagger!(tag_string_array, DYNAMIC_STRING_ARRAY_TAG);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+aggregate_tagger!(tag_number_dictionary, DYNAMIC_NUMBER_DICTIONARY_TAG);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+aggregate_tagger!(tag_boolean_dictionary, DYNAMIC_BOOLEAN_DICTIONARY_TAG);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+aggregate_tagger!(tag_string_dictionary, DYNAMIC_STRING_DICTIONARY_TAG);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn dynamic_from_parts(tag: f64, payload: f64) -> f64 {
     let tag = tag as u64;
     if !(DYNAMIC_NUMBER_TAG..=DYNAMIC_STRING_DICTIONARY_TAG).contains(&tag) {
@@ -4972,6 +5008,7 @@ enum NumericValue {
     TagNumber,
     TagString,
     TagBoolean,
+    TagAggregate(u8),
     DynamicTag,
     UntagNumber,
     UntagString,
@@ -5345,6 +5382,12 @@ impl NumericProgram {
                     "tagnum" => Some(NumericValue::TagNumber),
                     "tagstr" => Some(NumericValue::TagString),
                     "tagbool" => Some(NumericValue::TagBoolean),
+                    "tagrn" => Some(NumericValue::TagAggregate(0)),
+                    "tagrb" => Some(NumericValue::TagAggregate(1)),
+                    "tagrs" => Some(NumericValue::TagAggregate(2)),
+                    "tagdn" => Some(NumericValue::TagAggregate(3)),
+                    "tagdb" => Some(NumericValue::TagAggregate(4)),
+                    "tagds" => Some(NumericValue::TagAggregate(5)),
                     "tagkind" => Some(NumericValue::DynamicTag),
                     "untagnum" => Some(NumericValue::UntagNumber),
                     "untagstr" => Some(NumericValue::UntagString),
@@ -6419,6 +6462,7 @@ impl NumericProgram {
                 | NumericValue::TagNumber
                 | NumericValue::TagString
                 | NumericValue::TagBoolean
+                | NumericValue::TagAggregate(_)
                 | NumericValue::DynamicTag
                 | NumericValue::UntagNumber
                 | NumericValue::UntagString
@@ -6445,6 +6489,14 @@ impl NumericProgram {
                         NumericValue::TagNumber => tag_number,
                         NumericValue::TagString => tag_string,
                         NumericValue::TagBoolean => tag_boolean,
+                        NumericValue::TagAggregate(kind) => [
+                            tag_number_array,
+                            tag_boolean_array,
+                            tag_string_array,
+                            tag_number_dictionary,
+                            tag_boolean_dictionary,
+                            tag_string_dictionary,
+                        ][*kind as usize],
                         NumericValue::DynamicTag => dynamic_tag,
                         NumericValue::UntagNumber => untag_number,
                         NumericValue::UntagString => untag_string,
@@ -9477,6 +9529,36 @@ mod tests {
                     .unwrap(),
                 "object"
             );
+        }
+        for (symbol, expected) in [
+            (
+                "expr:arrayempty,tagrn,tagkind:number-array-tag",
+                DYNAMIC_NUMBER_ARRAY_TAG,
+            ),
+            (
+                "expr:arrayempty,tagrb,tagkind:boolean-array-tag",
+                DYNAMIC_BOOLEAN_ARRAY_TAG,
+            ),
+            (
+                "expr:arrayempty,tagrs,tagkind:string-array-tag",
+                DYNAMIC_STRING_ARRAY_TAG,
+            ),
+            (
+                "expr:dnempty,tagdn,tagkind:number-dictionary-tag",
+                DYNAMIC_NUMBER_DICTIONARY_TAG,
+            ),
+            (
+                "expr:dbempty,tagdb,tagkind:boolean-dictionary-tag",
+                DYNAMIC_BOOLEAN_DICTIONARY_TAG,
+            ),
+            (
+                "expr:dsempty,tagds,tagkind:string-dictionary-tag",
+                DYNAMIC_STRING_DICTIONARY_TAG,
+            ),
+        ] {
+            let result = call(&CString::new(symbol).unwrap(), &[]);
+            assert!(result.error.is_null(), "{symbol}");
+            assert_eq!(result.value, expected as f64, "{symbol}");
         }
 
         for (symbol, expected) in [
