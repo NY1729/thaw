@@ -2853,6 +2853,11 @@ fn jit_export(
                             | "toSpliced"
                             | "some"
                             | "every"
+                            | "find"
+                            | "findIndex"
+                            | "findLast"
+                            | "findLastIndex"
+                            | "filter"
                     )
                 {
                     return None;
@@ -4838,6 +4843,11 @@ fn jit_export(
                     | "dynarrayappend"
                     | "dynarraysometruthy"
                     | "dynarrayeverytruthy"
+                    | "dynarrayfindtruthy"
+                    | "dynarrayfindindextruthy"
+                    | "dynarrayfindlasttruthy"
+                    | "dynarrayfindlastindextruthy"
+                    | "dynarrayfiltertruthy"
                     | "rnpush"
                     | "rspush"
                     | "rbpush"
@@ -11381,6 +11391,8 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
             | "rbshift"
             | "dynarraypop"
             | "dynarrayshift"
+            | "dynarrayfindtruthy"
+            | "dynarrayfindlasttruthy"
     ) || ["rn", "rb", "rs"].iter().any(|prefix| {
         token.strip_prefix(prefix).is_some_and(|suffix| {
             suffix.starts_with("find")
@@ -12188,12 +12200,22 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Number);
         } else if matches!(
             token.as_str(),
-            "dynarraysometruthy" | "dynarrayeverytruthy"
+            "dynarraysometruthy"
+                | "dynarrayeverytruthy"
+                | "dynarrayfindtruthy"
+                | "dynarrayfindindextruthy"
+                | "dynarrayfindlasttruthy"
+                | "dynarrayfindlastindextruthy"
+                | "dynarrayfiltertruthy"
         ) {
             if stack.pop()? != JitKind::Dynamic {
                 return None;
             }
-            stack.push(JitKind::Boolean);
+            stack.push(match token.as_str() {
+                "dynarraysometruthy" | "dynarrayeverytruthy" => JitKind::Boolean,
+                "dynarrayfindindextruthy" | "dynarrayfindlastindextruthy" => JitKind::Number,
+                _ => JitKind::Dynamic,
+            });
         } else if let Some(result) = primitive_truthy_result(token) {
             if stack.pop()? != JitKind::Array {
                 return None;

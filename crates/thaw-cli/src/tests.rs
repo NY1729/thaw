@@ -4227,6 +4227,39 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         );
         assert!(jit_numeric_export(&source, method, false, &predicate).is_some());
     }
+    for method in ["findIndex", "findLastIndex"] {
+        let index = thaw_bridge::DtsFunction {
+            name: method.into(),
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ..function.clone()
+        };
+        let source = format!(
+            "function {method}(value) {{ if (Array.isArray(value)) return value.{method}(item => item); return -1; }} module.exports = {{ {method} }};"
+        );
+        assert!(jit_numeric_export(&source, method, false, &index).is_some());
+    }
+    for method in ["find", "findLast"] {
+        let found = thaw_bridge::DtsFunction {
+            name: method.into(),
+            ..function.clone()
+        };
+        let source = format!(
+            "function {method}(value) {{ if (Array.isArray(value)) return value.{method}(item => item); return value; }} module.exports = {{ {method} }};"
+        );
+        assert!(jit_numeric_export(&source, method, false, &found).is_some());
+    }
+    let filter = thaw_bridge::DtsFunction {
+        name: "filter".into(),
+        ret: function.params[0].1.clone(),
+        ..function.clone()
+    };
+    assert!(jit_numeric_export(
+        "function filter(value) { if (Array.isArray(value)) return value.filter(item => item); return value; } module.exports = { filter };",
+        "filter",
+        false,
+        &filter,
+    )
+    .is_some());
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],
