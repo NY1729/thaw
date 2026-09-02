@@ -2833,6 +2833,8 @@ fn jit_export(
                             | "with"
                             | "push"
                             | "unshift"
+                            | "pop"
+                            | "shift"
                     )
                 {
                     return None;
@@ -3169,7 +3171,11 @@ fn jit_export(
                     if !call.args.is_empty() {
                         return None;
                     }
-                    output.push(format!("{prefix}{method}"));
+                    output.push(if dynamic_array {
+                        format!("dynarray{method}")
+                    } else {
+                        format!("{prefix}{method}")
+                    });
                 } else if matches!(method, "splice" | "toSpliced") {
                     let scalar_kind = match prefix {
                         "rn" => JitKind::Number,
@@ -4808,6 +4814,8 @@ fn jit_export(
                     | "rnshift"
                     | "rsshift"
                     | "rbshift"
+                    | "dynarraypop"
+                    | "dynarrayshift"
                     | "dkeys"
                     | "dnvalues"
                     | "dbvalues"
@@ -11328,6 +11336,8 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
             | "rnshift"
             | "rsshift"
             | "rbshift"
+            | "dynarraypop"
+            | "dynarrayshift"
     ) || ["rn", "rb", "rs"].iter().any(|prefix| {
         token.strip_prefix(prefix).is_some_and(|suffix| {
             suffix.starts_with("find")
@@ -11750,16 +11760,34 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Number);
         } else if matches!(
             token.as_str(),
-            "rnpop" | "rspop" | "rbpop" | "rnshift" | "rsshift" | "rbshift"
+            "rnpop"
+                | "rspop"
+                | "rbpop"
+                | "rnshift"
+                | "rsshift"
+                | "rbshift"
+                | "dynarraypop"
+                | "dynarrayshift"
         ) {
-            if stack.pop()? != JitKind::Array {
+            let dynamic = token.starts_with("dynarray");
+            if stack.pop()?
+                != if dynamic {
+                    JitKind::Dynamic
+                } else {
+                    JitKind::Array
+                }
+            {
                 return None;
             }
-            stack.push(match &token[..2] {
-                "rn" => JitKind::Number,
-                "rs" => JitKind::String,
-                "rb" => JitKind::Boolean,
-                _ => return None,
+            stack.push(if dynamic {
+                JitKind::Dynamic
+            } else {
+                match &token[..2] {
+                    "rn" => JitKind::Number,
+                    "rs" => JitKind::String,
+                    "rb" => JitKind::Boolean,
+                    _ => return None,
+                }
             });
         } else if matches!(token.as_str(), "dynarraypush" | "dynarrayunshift") {
             if stack.pop()? != JitKind::Dynamic || stack.pop()? != JitKind::Dynamic {
