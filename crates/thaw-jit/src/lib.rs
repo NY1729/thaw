@@ -6218,12 +6218,23 @@ impl NumericProgram {
                         })
                         .or_else(|| {
                             let encoded = value.strip_prefix("obj")?;
-                            let (kind, offset) = encoded.split_at(1);
-                            let kind = match kind {
-                                "n" => 0,
-                                "b" => 1,
-                                "s" => 2,
-                                _ => return None,
+                            let (kind, offset) = if let Some(offset) = encoded.strip_prefix("rn") {
+                                (2, offset)
+                            } else if let Some(offset) = encoded.strip_prefix("rb") {
+                                (2, offset)
+                            } else if let Some(offset) = encoded.strip_prefix("rs") {
+                                (2, offset)
+                            } else {
+                                let (kind, offset) = encoded.split_at(1);
+                                (
+                                    match kind {
+                                        "n" => 0,
+                                        "b" => 1,
+                                        "s" | "o" => 2,
+                                        _ => return None,
+                                    },
+                                    offset,
+                                )
                             };
                             offset
                                 .parse::<u16>()
