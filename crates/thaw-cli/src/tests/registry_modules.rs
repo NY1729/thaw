@@ -2117,11 +2117,19 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "export declare function callLiteral(value: number): string;\n",
         "export declare function callLocals(value: number): number;\n",
         "export declare function callSteps(value: number): number;\n",
+        "export declare function callArrayParts(value: number): number;\n",
+        "export declare function callArrayAssign(value: number): number;\n",
+        "export declare function callObjectParts(value: number): string;\n",
+        "export declare function callObjectDefault(): string;\n",
     );
     let source = concat!(
         "function makeLiteral(value) { return { unused: Math.random(), first: value, second: value, label: 'helper' }; } ",
         "function makeLocals(value) { const count = value + 1; const values = [value]; const unused = Math.random(); return { count, values }; } ",
         "function makeSteps(value) { let count = value; value += 1; count += value; count++; const unused = Math.random(); Math.random(); return { count }; } ",
+        "function makeArrayParts(value) { const [first, , fallback = 9] = [value, 8]; return { result: first * 10 + fallback }; } ",
+        "function makeArrayAssign(value) { let first = 0; let rest = [0]; [first, ...rest] = [value, value + 1]; return { result: first * 10 + rest.length }; } ",
+        "function makeObjectParts(value) { let count = 0; let label = ''; ({ count, label } = { unused: Math.random(), count: value + 1, label: 'box' }); return { result: label + ':' + String(count) }; } ",
+        "function makeObjectDefault() { const { missing = 'fallback' } = {}; return { result: missing }; } ",
         "module.exports.unpack = value => { const { count: amount, meta: { label, enabled }, pair: [index, text], values } = value; values.push(index); return label + ':' + String(amount) + ':' + String(enabled) + ':' + String(index) + ':' + text + ':' + values.join(','); }; ",
         "module.exports.reassign = value => { let count = 0; let label = ''; let index = 0; let text = ''; ({ count, meta: { label }, pair: [index, text] } = value); return String(count) + ':' + label + ':' + String(index) + ':' + text; }; ",
         "module.exports.reassignControl = (value, flag) => { let count = 0; let label = ''; ({ count, meta: { label } } = value); if (flag) count += 1; return String(count) + ':' + label; }; ",
@@ -2134,6 +2142,10 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "module.exports.callLiteral = value => { const { label } = makeLiteral(Math.random()); return label; }; ",
         "module.exports.callLocals = value => { const { count, values } = makeLocals(value); values.push(9); return count * 10 + values.length; };",
         "module.exports.callSteps = value => { const { count } = makeSteps(value); return count; };",
+        "module.exports.callArrayParts = value => { const { result } = makeArrayParts(value); return result; }; ",
+        "module.exports.callArrayAssign = value => { const { result } = makeArrayAssign(value); return result; }; ",
+        "module.exports.callObjectParts = value => { const { result } = makeObjectParts(value); return result; };",
+        "module.exports.callObjectDefault = () => { const { result } = makeObjectDefault(); return result; };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -2149,6 +2161,10 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "callLiteral",
         "callLocals",
         "callSteps",
+        "callArrayParts",
+        "callArrayAssign",
+        "callObjectParts",
+        "callObjectDefault",
     ]
         .into_iter()
         .enumerate()
@@ -2163,6 +2179,8 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
             assert_eq!(expression.unwrap().matches("random").count(), 1);
         } else if name == "callSteps" {
             assert_eq!(expression.unwrap().matches("random").count(), 2);
+        } else if name == "callObjectParts" {
+            assert_eq!(expression.unwrap().matches("random").count(), 1);
         }
     }
 
@@ -2178,7 +2196,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { callLiteral, callLocals, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); }\n",
+        "import { callArrayAssign, callArrayParts, callLiteral, callLocals, callObjectDefault, callObjectParts, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); console.log(callArrayParts(3)); console.log(callArrayAssign(3)); console.log(callObjectParts(3)); console.log(callObjectDefault()); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2194,7 +2212,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n"
+        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n39\n31\nbox:4\nfallback\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

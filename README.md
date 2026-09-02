@@ -2590,7 +2590,10 @@ order as well; later initializers and returned shorthand fields reuse those JIT
 locals, including the original mutable array identity. Straight-line assignments,
 compound numeric assignments, numeric updates, and encodable effect statements
 then update or consume those slots in source order; writes to immutable locals
-remain outside this specialization.
+remain outside this specialization. Array destructuring declarations and assignments
+materialize their source once and support holes, lazy defaults, and rest copies.
+Fixed object destructuring declarations and assignments reuse the same leaf
+materializer, including missing-property defaults and unused side effects.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
