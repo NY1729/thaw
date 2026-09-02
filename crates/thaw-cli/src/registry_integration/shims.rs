@@ -13089,15 +13089,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
 fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> Option<String> {
     let (mut kind, maximum_depth) = jit_expression_kind(&expression)?;
     if expected == JitKind::Dynamic && kind != JitKind::Dynamic {
-        expression.push(
-            match kind {
-                JitKind::Number => "tagnum",
-                JitKind::Boolean => "tagbool",
-                JitKind::String => "tagstr",
-                _ => return None,
-            }
-            .into(),
-        );
+        tag_jit_value(&mut expression, kind)?;
         kind = JitKind::Dynamic;
     }
     let compatible = kind == expected
