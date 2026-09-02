@@ -2415,6 +2415,35 @@ extern "C" fn dynamic_array_copy_within(array: f64, target: f64, start: f64, end
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_with(array: f64, index: f64, value: f64) -> f64 {
+    let (Some(array), Some(value)) = (
+        dynamic_primitive(array, None),
+        dynamic_primitive(value, None),
+    ) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let operation = match (array.tag, value.tag) {
+        (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG) => 0,
+        (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG) => 1,
+        (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG) => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    dynamic_array_result(
+        array.tag,
+        array_with(
+            operation,
+            f64::from_bits(array.payload),
+            index,
+            f64::from_bits(value.payload),
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn array_push(operation: u8, array: f64, value: f64) -> f64 {
     let Some(push) = ARRAY_PUSH.with(Cell::get) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
@@ -4312,6 +4341,7 @@ enum NumericValue {
     DynamicArrayFill,
     ArrayCopyWithin,
     DynamicArrayCopyWithin,
+    DynamicArrayWith,
     NumberArrayPush,
     StringArrayPush,
     BoolArrayPush,
@@ -4672,6 +4702,7 @@ impl NumericProgram {
                     "dynarrayfill" => Some(NumericValue::DynamicArrayFill),
                     "arraycopywithin" => Some(NumericValue::ArrayCopyWithin),
                     "dynarraycopywithin" => Some(NumericValue::DynamicArrayCopyWithin),
+                    "dynarraywith" => Some(NumericValue::DynamicArrayWith),
                     "arraysplice" => Some(NumericValue::ArraySplice),
                     "arraytospliced" => Some(NumericValue::ArrayToSpliced),
                     "rnpush" => Some(NumericValue::NumberArrayPush),
@@ -6863,7 +6894,8 @@ impl NumericProgram {
                 }
                 NumericValue::NumberArrayWith
                 | NumericValue::StringArrayWith
-                | NumericValue::BoolArrayWith => {
+                | NumericValue::BoolArrayWith
+                | NumericValue::DynamicArrayWith => {
                     if depth < 3 {
                         return None;
                     }
@@ -6871,6 +6903,7 @@ impl NumericProgram {
                         NumericValue::NumberArrayWith => number_array_with,
                         NumericValue::StringArrayWith => string_array_with,
                         NumericValue::BoolArrayWith => bool_array_with,
+                        NumericValue::DynamicArrayWith => dynamic_array_with,
                         _ => unreachable!(),
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);

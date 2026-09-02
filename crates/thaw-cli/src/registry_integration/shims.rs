@@ -2830,6 +2830,7 @@ fn jit_export(
                             | "sort"
                             | "fill"
                             | "copyWithin"
+                            | "with"
                     )
                 {
                     return None;
@@ -3411,13 +3412,18 @@ fn jit_export(
                         "rn" => JitKind::Number,
                         "rs" => JitKind::String,
                         "rb" => JitKind::Boolean,
+                        "dynamic" => JitKind::Dynamic,
                         _ => return None,
                     };
                     if jit_expression_kind(&encoded)?.0 != expected {
                         return None;
                     }
                     output.extend(encoded);
-                    output.push(format!("{prefix}with"));
+                    output.push(if dynamic_array {
+                        "dynarraywith".into()
+                    } else {
+                        format!("{prefix}with")
+                    });
                 } else if method == "slice" {
                     match call.args.as_slice() {
                         [] => {
@@ -4730,6 +4736,7 @@ fn jit_export(
                     | "rnwith"
                     | "rswith"
                     | "rbwith"
+                    | "dynarraywith"
                     | "charat"
                     | "at"
                     | "concat"
@@ -11993,21 +12000,24 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             }
             stack.push(stack[length - 2]);
             stack.push(stack[length - 1]);
-        } else if matches!(token.as_str(), "rnwith" | "rswith" | "rbwith") {
+        } else if matches!(
+            token.as_str(),
+            "rnwith" | "rswith" | "rbwith" | "dynarraywith"
+        ) {
             let value = stack.pop()?;
-            if stack.pop()? != JitKind::Number
-                || stack.pop()? != JitKind::Array
-                || value
-                    != match &token[..2] {
-                        "rn" => JitKind::Number,
-                        "rs" => JitKind::String,
-                        "rb" => JitKind::Boolean,
-                        _ => return None,
-                    }
-            {
+            let index = stack.pop()?;
+            let array = stack.pop()?;
+            let expected = match token.as_str() {
+                "rnwith" => (JitKind::Array, JitKind::Number),
+                "rswith" => (JitKind::Array, JitKind::String),
+                "rbwith" => (JitKind::Array, JitKind::Boolean),
+                "dynarraywith" => (JitKind::Dynamic, JitKind::Dynamic),
+                _ => return None,
+            };
+            if index != JitKind::Number || array != expected.0 || value != expected.1 {
                 return None;
             }
-            stack.push(JitKind::Array);
+            stack.push(expected.0);
         } else if matches!(
             token.as_str(),
             "charat" | "charcodeat" | "at" | "codepointat"
