@@ -4249,6 +4249,115 @@ fn fixed_object_set(object: f64, value: f64, offset: f64, kind: u8) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn tagged_object_number_update(object: f64, offset: f64, mode: f64) -> f64 {
+    let pointer = object.to_bits() as usize as *mut u8;
+    if pointer.is_null()
+        || !offset.is_finite()
+        || offset < 0.0
+        || offset.fract() != 0.0
+        || !mode.is_finite()
+        || mode < 0.0
+        || mode.fract() != 0.0
+        || mode >= 12.0
+    {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let mode = mode as u8;
+    let semantic = mode / 4;
+    let tag = unsafe { pointer.add(offset as usize).read() };
+    let present = match semantic {
+        0 | 1 => tag == 1,
+        2 => tag == 0,
+        _ => unreachable!(),
+    };
+    let old = if present {
+        unsafe { pointer.add(offset as usize + 8).cast::<f64>().read() }
+    } else {
+        match (semantic, tag) {
+            (0, 0) | (2, 2) => f64::NAN,
+            (1, 0) | (2, 1) => 0.0,
+            _ => {
+                CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+                return 0.0;
+            }
+        }
+    };
+    let new = if mode % 4 >= 2 { old - 1.0 } else { old + 1.0 };
+    unsafe {
+        pointer.add(offset as usize + 8).cast::<f64>().write(new);
+        pointer
+            .add(offset as usize)
+            .write(if semantic == 2 { 0 } else { 1 });
+    }
+    if mode.is_multiple_of(2) {
+        new
+    } else {
+        old
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn tagged_object_number_assign(object: f64, right: f64, offset: f64, mode: f64) -> f64 {
+    let pointer = object.to_bits() as usize as *mut u8;
+    if pointer.is_null()
+        || !offset.is_finite()
+        || offset < 0.0
+        || offset.fract() != 0.0
+        || !mode.is_finite()
+        || mode < 0.0
+        || mode.fract() != 0.0
+        || mode >= 36.0
+    {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let mode = mode as u8;
+    let semantic = mode / 12;
+    let operation = mode % 12;
+    let tag = unsafe { pointer.add(offset as usize).read() };
+    let present = match semantic {
+        0 | 1 => tag == 1,
+        2 => tag == 0,
+        _ => unreachable!(),
+    };
+    let left = if present {
+        unsafe { pointer.add(offset as usize + 8).cast::<f64>().read() }
+    } else {
+        match (semantic, tag) {
+            (0, 0) | (2, 2) => f64::NAN,
+            (1, 0) | (2, 1) => 0.0,
+            _ => {
+                CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+                return 0.0;
+            }
+        }
+    };
+    let value = match operation {
+        0 => left + right,
+        1 => left - right,
+        2 => left * right,
+        3 => left / right,
+        4 => unsafe { fmod(left, right) },
+        5 => shift_left(left, right),
+        6 => shift_right(left, right),
+        7 => shift_right_unsigned(left, right),
+        8 => bit_or(left, right),
+        9 => bit_xor(left, right),
+        10 => bit_and(left, right),
+        11 => power(left, right),
+        _ => unreachable!(),
+    };
+    unsafe {
+        pointer.add(offset as usize + 8).cast::<f64>().write(value);
+        pointer
+            .add(offset as usize)
+            .write(if semantic == 2 { 0 } else { 1 });
+    }
+    value
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 macro_rules! fixed_object_setter {
     ($name:ident, $kind:expr) => {
         extern "C" fn $name(object: f64, value: f64, offset: f64) -> f64 {
@@ -5387,6 +5496,8 @@ enum NumericValue {
     NullishTupleField(u8, u16),
     FixedObjectNew(u16),
     FixedObjectSet(u8, u16),
+    TaggedObjectNumberUpdate(u8, u16),
+    TaggedObjectNumberAssign(u8, u16),
     FixedTupleNew(u16),
     FixedTupleSet(u8, u16),
     FixedWideTupleNew(u16),
@@ -6583,6 +6694,61 @@ impl NumericProgram {
                                 .map(|index| NumericValue::FixedTupleSet(kind, index))
                         })
                         .or_else(|| {
+                            let encoded = value.strip_prefix("objca")?;
+                            let semantic = match encoded.as_bytes().first()? {
+                                b'o' => 0,
+                                b'l' => 1,
+                                b'n' => 2,
+                                _ => return None,
+                            };
+                            let operation = match encoded.as_bytes().get(1)? {
+                                b'a' => 0,
+                                b's' => 1,
+                                b'm' => 2,
+                                b'd' => 3,
+                                b'r' => 4,
+                                b'l' => 5,
+                                b'h' => 6,
+                                b'u' => 7,
+                                b'o' => 8,
+                                b'x' => 9,
+                                b'b' => 10,
+                                b'p' => 11,
+                                _ => return None,
+                            };
+                            encoded.get(2..)?.parse::<u16>().ok().map(|offset| {
+                                NumericValue::TaggedObjectNumberAssign(
+                                    semantic * 12 + operation,
+                                    offset,
+                                )
+                            })
+                        })
+                        .or_else(|| {
+                            let encoded = value.strip_prefix("objup")?;
+                            let semantic = match encoded.as_bytes().first()? {
+                                b'o' => 0,
+                                b'l' => 1,
+                                b'n' => 2,
+                                _ => return None,
+                            };
+                            let decrement = match encoded.as_bytes().get(1)? {
+                                b'i' => 0,
+                                b'd' => 2,
+                                _ => return None,
+                            };
+                            let postfix = match encoded.as_bytes().get(2)? {
+                                b'p' => 0,
+                                b'o' => 1,
+                                _ => return None,
+                            };
+                            encoded.get(3..)?.parse::<u16>().ok().map(|offset| {
+                                NumericValue::TaggedObjectNumberUpdate(
+                                    semantic * 4 + decrement + postfix,
+                                    offset,
+                                )
+                            })
+                        })
+                        .or_else(|| {
                             let encoded = value.strip_prefix("objset")?;
                             let (kind, offset) = encoded.split_at(1);
                             let kind = match kind {
@@ -6624,6 +6790,13 @@ impl NumericProgram {
                                 .parse::<u16>()
                                 .ok()
                                 .map(|offset| NumericValue::NullishObjectField(kind, offset))
+                        })
+                        .or_else(|| {
+                            value
+                                .strip_prefix("objnullablen")?
+                                .parse::<u16>()
+                                .ok()
+                                .map(|offset| NumericValue::OptionalObjectField(0, offset))
                         })
                         .or_else(|| {
                             let encoded = value.strip_prefix("objopt")?;
@@ -7216,6 +7389,55 @@ impl NumericProgram {
                         fixed_object_set_byte,
                     ][usize::from(*kind)];
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::TaggedObjectNumberUpdate(mode, offset) => {
+                    if depth == 0 || depth > 6 {
+                        return None;
+                    }
+                    for (index, value) in [f64::from(*offset), f64::from(*mode)]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        code.extend_from_slice(&[0x48, 0xb8]);
+                        code.extend_from_slice(&value.to_bits().to_le_bytes());
+                        code.extend_from_slice(&[
+                            0x66,
+                            0x48,
+                            0x0f,
+                            0x6e,
+                            0xc0 | ((depth + index as u8) << 3),
+                        ]);
+                    }
+                    emit_ternary_call(
+                        &mut code,
+                        tagged_object_number_update as *const () as u64,
+                        depth - 1,
+                    );
+                }
+                NumericValue::TaggedObjectNumberAssign(mode, offset) => {
+                    if !(2..=6).contains(&depth) {
+                        return None;
+                    }
+                    for (index, value) in [f64::from(*offset), f64::from(*mode)]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        code.extend_from_slice(&[0x48, 0xb8]);
+                        code.extend_from_slice(&value.to_bits().to_le_bytes());
+                        code.extend_from_slice(&[
+                            0x66,
+                            0x48,
+                            0x0f,
+                            0x6e,
+                            0xc0 | ((depth + index as u8) << 3),
+                        ]);
+                    }
+                    emit_quaternary_call(
+                        &mut code,
+                        tagged_object_number_assign as *const () as u64,
+                        depth - 2,
+                    );
                     depth -= 1;
                 }
                 NumericValue::FixedTupleNew(length) => {
