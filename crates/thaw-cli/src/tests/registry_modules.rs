@@ -1183,6 +1183,49 @@ fn optional_aggregates_use_jit_without_quickjs() {
 }
 
 #[test]
+fn optional_dictionary_unions_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-optional-dictionary-union-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-optional-dictionary-union");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function valueOr(value?: Record<string, number> | string): string;\nexport declare function valueDefault(value?: Record<string, number> | string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.valueDefault = (value = { count: 3 }) => String(value);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { valueOr, valueDefault } from 'jit-optional-dictionary-union';\nfunction main(): void { const first: Record<string, number> = { count: 1 }; const second: Record<string, number> = { count: 2 }; console.log(valueOr(first)); console.log(valueOr('text')); console.log(valueOr()); console.log(valueDefault(second)); console.log(valueDefault('given')); console.log(valueDefault()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[object Object]\ntext\nmissing\n[object Object]\ngiven\n[object Object]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn pure_numeric_registry_export_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-{}",

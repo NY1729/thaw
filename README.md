@@ -2427,7 +2427,7 @@ loading QuickJS. The same presence channel composes with tagged primitive
 unions such as `(number | string) | undefined` without dereferencing an absent
 payload. Optional parameters whose payload is a tagged union use three JIT
 slots for presence, runtime tag, and payload, including unions with native
-array or fixed-shape object members; `??` normalizes its selected fallback to
+array or primitive dictionary members; `??` normalizes its selected fallback to
 the same tagged representation. JavaScript default initializers on those
 parameters use the same selection path when the argument is omitted.
 Mutable dynamic locals may be reassigned between these representable shapes;
