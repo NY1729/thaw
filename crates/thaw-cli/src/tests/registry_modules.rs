@@ -1150,18 +1150,18 @@ fn optional_aggregates_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Nested { score: number; }\nexport interface Meta { count: number; label: string; enabled: boolean; nested: Nested; pair: [number, string]; flags: boolean[]; }\nexport declare function count(value?: Meta): number | undefined;\nexport declare function labelOr(value?: Meta): string;\nexport declare function enabled(value?: Meta): boolean | undefined;\nexport declare function nestedScore(value?: Meta): number | undefined;\nexport declare function pairName(value?: Meta): string | undefined;\nexport declare function flagCount(value?: Meta): number;\nexport declare function upper(value?: Meta): string;\nexport declare function tupleName(value?: [number, string]): string | undefined;\n",
+        "export interface Nested { score: number; }\nexport interface Meta { count: number; label: string; enabled: boolean; nested: Nested; pair: [number, string]; flags: boolean[]; }\nexport declare function count(value?: Meta): number | undefined;\nexport declare function labelOr(value?: Meta): string;\nexport declare function enabled(value?: Meta): boolean | undefined;\nexport declare function nestedScore(value?: Meta): number | undefined;\nexport declare function pairName(value?: Meta): string | undefined;\nexport declare function flags(value?: Meta): boolean[] | undefined;\nexport declare function optionalRecord(value?: Record<string, number>): Record<string, number> | undefined;\nexport declare function flagCount(value?: Meta): number;\nexport declare function upper(value?: Meta): string;\nexport declare function tupleName(value?: [number, string]): string | undefined;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.count = value => value?.count; module.exports.labelOr = value => value?.label ?? 'missing'; module.exports.enabled = value => value?.enabled; module.exports.nestedScore = value => value?.nested.score; module.exports.pairName = value => value?.pair[1]; module.exports.flagCount = value => value?.flags.length ?? 42; module.exports.upper = value => value?.label.toUpperCase() ?? 'missing'; module.exports.tupleName = value => value?.[1];\n",
+        "module.exports.count = value => value?.count; module.exports.labelOr = value => value?.label ?? 'missing'; module.exports.enabled = value => value?.enabled; module.exports.nestedScore = value => value?.nested.score; module.exports.pairName = value => value?.pair[1]; module.exports.flags = value => value?.flags; module.exports.optionalRecord = value => value?.valueOf(); module.exports.flagCount = value => value?.flags.length ?? 42; module.exports.upper = value => value?.label.toUpperCase() ?? 'missing'; module.exports.tupleName = value => value?.[1];\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { count, labelOr, enabled, nestedScore, pairName, flagCount, upper, tupleName } from 'jit-optional-aggregate';\nfunction main(): void { const value = { count: 7, label: 'ready', enabled: false, nested: { score: 9 }, pair: [1, 'nested'], flags: [true, false] }; console.log(count(value)); console.log(count() === undefined); console.log(labelOr(value)); console.log(labelOr()); console.log(enabled(value)); console.log(enabled() === undefined); console.log(nestedScore(value)); console.log(nestedScore() === undefined); console.log(pairName(value)); console.log(pairName() === undefined); console.log(flagCount(value)); console.log(flagCount()); console.log(upper(value)); console.log(upper()); console.log(tupleName([1, 'pair'])); console.log(tupleName() === undefined); }\n",
+        "import { count, labelOr, enabled, nestedScore, pairName, flags, optionalRecord, flagCount, upper, tupleName } from 'jit-optional-aggregate';\nfunction main(): void { const value = { count: 7, label: 'ready', enabled: false, nested: { score: 9 }, pair: [1, 'nested'], flags: [true, false] }; const record: Record<string, number> = { count: 42 }; console.log(count(value)); console.log(count() === undefined); console.log(labelOr(value)); console.log(labelOr()); console.log(enabled(value)); console.log(enabled() === undefined); console.log(nestedScore(value)); console.log(nestedScore() === undefined); console.log(pairName(value)); console.log(pairName() === undefined); console.log(flags(value)?.length); console.log(flags() === undefined); console.log(optionalRecord(record)?.count); console.log(optionalRecord() === undefined); console.log(flagCount(value)); console.log(flagCount()); console.log(upper(value)); console.log(upper()); console.log(tupleName([1, 'pair'])); console.log(tupleName() === undefined); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1177,7 +1177,7 @@ fn optional_aggregates_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "7\ntrue\nready\nmissing\nfalse\ntrue\n9\ntrue\nnested\ntrue\n2\n42\nREADY\nmissing\npair\ntrue\n"
+        "7\ntrue\nready\nmissing\nfalse\ntrue\n9\ntrue\nnested\ntrue\n2\ntrue\n42\ntrue\n2\n42\nREADY\nmissing\npair\ntrue\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
