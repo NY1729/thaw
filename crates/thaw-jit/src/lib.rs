@@ -1471,6 +1471,74 @@ extern "C" fn dynamic_array_jit_map_captured(
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn dynamic_array_jit_scan_impl(value: f64, callback: f64, mode: f64, captures: Option<f64>) -> f64 {
+    let mode = mode as u8;
+    let Some(array) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let (kind, element_tag) = match array.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => (0, DYNAMIC_NUMBER_TAG),
+        DYNAMIC_BOOLEAN_ARRAY_TAG => (1, DYNAMIC_BOOLEAN_TAG),
+        DYNAMIC_STRING_ARRAY_TAG => (2, DYNAMIC_STRING_TAG),
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    if mode > 6 {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let Some((callback, required)) = compile_jit_callback(callback) else {
+        return 0.0;
+    };
+    let captures = if let Some(captures) = captures {
+        let Some(captures) = capture_arguments(captures, 5, required) else {
+            return 0.0;
+        };
+        captures
+    } else {
+        if required > 5 {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return 0.0;
+        }
+        Vec::new()
+    };
+    let result = primitive_array_scan(f64::from_bits(array.payload), kind, mode, |data, index| {
+        let element = unsafe { array_element(data, index, kind) };
+        let result = call_jit_callback(
+            callback,
+            &[
+                element_tag as f64,
+                element,
+                index as f64,
+                array.tag as f64,
+                f64::from_bits(array.payload),
+            ],
+            &captures,
+        );
+        result != 0.0 && !result.is_nan()
+    });
+    dynamic_array_scan_result(array.tag, mode, result)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_jit_scan(value: f64, callback: f64, mode: f64) -> f64 {
+    dynamic_array_jit_scan_impl(value, callback, mode, None)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_jit_scan_captured(
+    value: f64,
+    callback: f64,
+    captures: f64,
+    mode: f64,
+) -> f64 {
+    dynamic_array_jit_scan_impl(value, callback, mode, Some(captures))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn primitive_array_jit_scan(value: f64, callback: f64, encoded: f64) -> f64 {
     let encoded = encoded as u8;
     let kind = encoded / 8;
@@ -4834,6 +4902,7 @@ enum NumericValue {
     DynamicArrayConvert(u8),
     DynamicArrayMapIdentity,
     DynamicArrayJitMap(u8, bool),
+    DynamicArrayJitScan(u8, bool),
     NumberArrayMap(NumericReduceOp, bool),
     PrimitiveArrayJitMap(u8, u8, bool),
     PrimitiveArrayJitScan(u8, u8, bool),
@@ -5212,6 +5281,27 @@ impl NumericProgram {
                             _ => return None,
                         };
                         Some(NumericValue::DynamicArrayJitMap(target, captured))
+                    }
+                    _ if token.starts_with("dynarray") && token.contains("jit") => {
+                        let suffix = token.strip_prefix("dynarray")?;
+                        let (mode, captured) = match suffix {
+                            "somejit" => (0, false),
+                            "everyjit" => (1, false),
+                            "findjit" => (2, false),
+                            "findindexjit" => (3, false),
+                            "findlastjit" => (4, false),
+                            "findlastindexjit" => (5, false),
+                            "filterjit" => (6, false),
+                            "somejitc" => (0, true),
+                            "everyjitc" => (1, true),
+                            "findjitc" => (2, true),
+                            "findindexjitc" => (3, true),
+                            "findlastjitc" => (4, true),
+                            "findlastindexjitc" => (5, true),
+                            "filterjitc" => (6, true),
+                            _ => return None,
+                        };
+                        Some(NumericValue::DynamicArrayJitScan(mode, captured))
                     }
                     _ if token.strip_prefix("dynarray").is_some_and(|operation| {
                         [
@@ -6582,6 +6672,35 @@ impl NumericProgram {
                         emit_ternary_call(
                             &mut code,
                             dynamic_array_jit_map as *const () as u64,
+                            depth - 2,
+                        );
+                        depth -= 1;
+                    }
+                }
+                NumericValue::DynamicArrayJitScan(mode, captured) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(*mode).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    if *captured {
+                        if depth < 3 {
+                            return None;
+                        }
+                        emit_quaternary_call(
+                            &mut code,
+                            dynamic_array_jit_scan_captured as *const () as u64,
+                            depth - 3,
+                        );
+                        depth -= 2;
+                    } else {
+                        if depth < 2 {
+                            return None;
+                        }
+                        emit_ternary_call(
+                            &mut code,
+                            dynamic_array_jit_scan as *const () as u64,
                             depth - 2,
                         );
                         depth -= 1;
