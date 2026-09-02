@@ -2862,6 +2862,63 @@ fn jit_export(
             })
         }
 
+        fn encode_fixed_computed_field(
+            path: &str,
+            key: &Expr,
+            parameters: &std::collections::HashMap<String, String>,
+            locals: &std::collections::HashMap<String, Vec<String>>,
+            context: &mut InlineContext<'_>,
+        ) -> Option<Vec<String>> {
+            match key {
+                Expr::Paren(parenthesized) => encode_fixed_computed_field(
+                    path,
+                    parenthesized.expr.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                ),
+                Expr::Lit(Lit::Str(property)) => {
+                    let field = format!("{path}.{}", property.value.to_string_lossy());
+                    locals
+                        .get(&field)
+                        .cloned()
+                        .or_else(|| parameters.get(&field).map(|value| vec![value.clone()]))
+                }
+                Expr::Cond(conditional) => {
+                    let mut output = Vec::new();
+                    encode_condition(
+                        conditional.test.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut output,
+                    )?;
+                    let mut consequent = encode_fixed_computed_field(
+                        path,
+                        conditional.cons.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                    )?;
+                    let mut alternate = encode_fixed_computed_field(
+                        path,
+                        conditional.alt.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                    )?;
+                    normalize_callable_branches([&mut consequent, &mut alternate])?;
+                    output.push("if".into());
+                    output.extend(consequent);
+                    output.push("else".into());
+                    output.extend(alternate);
+                    output.push("end".into());
+                    Some(output)
+                }
+                _ => None,
+            }
+        }
+
         match expression {
             Expr::Ident(identifier) if locals.contains_key(identifier.sym.as_ref()) => {
                 output.extend(locals.get(identifier.sym.as_ref())?.iter().cloned());
@@ -2980,12 +3037,25 @@ fn jit_export(
                 }
             }
             Expr::Member(member) => {
-                let object_field = member_path(expression).and_then(|path| {
+                let mut object_field = member_path(expression).and_then(|path| {
                     locals
                         .get(&path)
                         .cloned()
                         .or_else(|| parameters.get(&path).map(|field| vec![field.clone()]))
                 });
+                if object_field.is_none() {
+                    if let MemberProp::Computed(computed) = &member.prop {
+                        if let Some(path) = member_path(member.obj.as_ref()) {
+                            object_field = encode_fixed_computed_field(
+                                &path,
+                                computed.expr.as_ref(),
+                                parameters,
+                                locals,
+                                context,
+                            );
+                        }
+                    }
+                }
                 if matches!(
                     (member.obj.as_ref(), &member.prop),
                     (Expr::Ident(object), MemberProp::Ident(property))
