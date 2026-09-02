@@ -7176,6 +7176,7 @@ fn jit_export(
                         finalizer.stmts.iter().any(contains_aggregate_return)
                     })
             }
+            Stmt::Labeled(statement) => contains_aggregate_return(statement.body.as_ref()),
             _ => false,
         }
     }
@@ -7892,6 +7893,21 @@ fn jit_export(
                 output.extend(finalizer_output);
                 Some(())
             }
+            Stmt::Labeled(labeled) if contains_aggregate_return(labeled.body.as_ref()) => {
+                encode_aggregate_return_effects(
+                    labeled.body.as_ref(),
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    control_kinds,
+                    result_base_kinds,
+                    context,
+                    expected_kinds,
+                    expected_values,
+                    output,
+                )
+            }
             Stmt::For(_)
             | Stmt::ForIn(_)
             | Stmt::ForOf(_)
@@ -7930,6 +7946,22 @@ fn jit_export(
         match statement {
             Stmt::Block(block) => {
                 let nested = block.stmts.iter().chain(rest.iter().copied()).collect::<Vec<_>>();
+                materialize_helper_returns(
+                    &nested,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    kinds,
+                    materialized,
+                    output,
+                )
+            }
+            Stmt::Labeled(labeled) if contains_aggregate_return(labeled.body.as_ref()) => {
+                let nested = std::iter::once(labeled.body.as_ref())
+                    .chain(rest.iter().copied())
+                    .collect::<Vec<_>>();
                 materialize_helper_returns(
                     &nested,
                     requested,
