@@ -1283,6 +1283,49 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
 }
 
 #[test]
+fn object_dictionary_unions_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-object-dictionary-union-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-object-dictionary-union");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Item { count: number; label: string; }\nexport type Mixed = Item | Record<string, number> | string;\nexport declare function identity(value: Mixed): Mixed;\nexport declare function text(value: Mixed): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.identity = value => value; module.exports.text = value => String(value);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { identity, text } from 'jit-object-dictionary-union';\nfunction main(): void { const item = { count: 2, label: 'item' }; const record: Record<string, number> = { count: 3 }; console.log(text(item)); console.log(text(record)); console.log(text('word')); console.log(text(identity(item))); console.log(text(identity(record))); console.log(text(identity('done'))); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[object Object]\n[object Object]\nword\n[object Object]\n[object Object]\ndone\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_dictionary_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-dictionary-union-{}",
