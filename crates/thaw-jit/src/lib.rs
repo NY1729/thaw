@@ -2943,6 +2943,27 @@ extern "C" fn untag_string_dictionary(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn untag_dictionary(value: f64) -> f64 {
+    dynamic_primitive(value, None).map_or_else(
+        || {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            0.0
+        },
+        |dynamic| {
+            if matches!(
+                dynamic.tag,
+                DYNAMIC_NUMBER_DICTIONARY_TAG..=DYNAMIC_STRING_DICTIONARY_TAG
+            ) {
+                f64::from_bits(dynamic.payload)
+            } else {
+                CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+                0.0
+            }
+        },
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn untag_dynamic(value: f64, expected: u64) -> f64 {
     dynamic_primitive(value, Some(expected)).map_or_else(
         || {
@@ -3914,6 +3935,7 @@ enum NumericValue {
     UntagNumberDictionary,
     UntagBooleanDictionary,
     UntagStringDictionary,
+    UntagDictionary,
     ExcludeNumber,
     ExcludeString,
     ExcludeBoolean,
@@ -4257,6 +4279,7 @@ impl NumericProgram {
                     "untagdn" => Some(NumericValue::UntagNumberDictionary),
                     "untagdb" => Some(NumericValue::UntagBooleanDictionary),
                     "untagds" => Some(NumericValue::UntagStringDictionary),
+                    "untagdictionary" => Some(NumericValue::UntagDictionary),
                     "notnum" => Some(NumericValue::ExcludeNumber),
                     "notstr" => Some(NumericValue::ExcludeString),
                     "notbool" => Some(NumericValue::ExcludeBoolean),
@@ -5197,6 +5220,7 @@ impl NumericProgram {
                 | NumericValue::UntagNumberDictionary
                 | NumericValue::UntagBooleanDictionary
                 | NumericValue::UntagStringDictionary
+                | NumericValue::UntagDictionary
                 | NumericValue::ParseFloat
                 | NumericValue::NumberToExponentialShortest => {
                     if depth == 0 {
@@ -5222,6 +5246,7 @@ impl NumericProgram {
                         NumericValue::UntagNumberDictionary => untag_number_dictionary,
                         NumericValue::UntagBooleanDictionary => untag_boolean_dictionary,
                         NumericValue::UntagStringDictionary => untag_string_dictionary,
+                        NumericValue::UntagDictionary => untag_dictionary,
                         NumericValue::ParseFloat => parse_float,
                         NumericValue::NumberToExponentialShortest => number_to_exponential_shortest,
                         _ => unreachable!(),
