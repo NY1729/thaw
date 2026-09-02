@@ -3074,10 +3074,13 @@ fn jit_export(
                     let (getter, receiver) = operation.split_last()?;
                     if matches!(assignment, AssignOp::AndAssign | AssignOp::OrAssign) {
                         let kind = jit_expression_kind(&operation)?.0;
-                        if !matches!(kind, JitKind::Number | JitKind::Boolean | JitKind::String)
-                            || getter.starts_with("objopt")
+                        let tagged = getter.starts_with("objopt")
                             || getter.starts_with("objnullable")
-                            || getter.starts_with("objnull")
+                            || getter.starts_with("objnull");
+                        if !matches!(kind, JitKind::Number | JitKind::Boolean | JitKind::String)
+                            || (assignment == AssignOp::AndAssign
+                                && getter.starts_with("objnull")
+                                && !getter.starts_with("objnullable"))
                         {
                             return None;
                         }
@@ -3092,6 +3095,41 @@ fn jit_export(
                         )?;
                         let mut current = operation;
                         normalize_callable_branches([&mut current, &mut assigned])?;
+                        if tagged {
+                            let absent = match kind {
+                                JitKind::Number => "absentn",
+                                JitKind::Boolean => "absentb",
+                                JitKind::String => "absents",
+                                _ => unreachable!(),
+                            };
+                            let fallback = assigned.clone();
+                            current.push("ifpresent".into());
+                            current.push("dup".into());
+                            match kind {
+                                JitKind::Number => current.push("asbool".into()),
+                                JitKind::String => current.push("strbool".into()),
+                                JitKind::Boolean => {}
+                                _ => unreachable!(),
+                            }
+                            current.push(
+                                if assignment == AssignOp::AndAssign {
+                                    "&&"
+                                } else {
+                                    "||"
+                                }
+                                .into(),
+                            );
+                            current.extend(assigned);
+                            current.push("end".into());
+                            current.push("else".into());
+                            if assignment == AssignOp::OrAssign {
+                                current.extend(fallback);
+                            } else {
+                                current.push(absent.into());
+                            }
+                            current.push("end".into());
+                            return Some(current);
+                        }
                         current.push("dup".into());
                         match kind {
                             JitKind::Number => current.push("asbool".into()),
