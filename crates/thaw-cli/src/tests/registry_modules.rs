@@ -1907,19 +1907,19 @@ fn mixed_array_conversion_maps_use_jit_without_quickjs() {
     std::fs::write(
         package.join("package.d.ts"),
         format!(
-            "export declare function numbers(value: {union}): number[];\nexport declare function booleans(value: {union}): boolean[];\nexport declare function strings(value: {union}): string[];\n"
+            "export declare function numbers(value: {union}): number[];\nexport declare function booleans(value: {union}): boolean[];\nexport declare function strings(value: {union}): string[];\nexport declare function identity(value: {union}): {union};\n"
         ),
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function numbers(value) { if (Array.isArray(value)) return value.map(Number); return []; } function booleans(value) { if (Array.isArray(value)) return value.map(Boolean); return []; } function strings(value) { if (Array.isArray(value)) return value.map(String); return []; } module.exports = { numbers, booleans, strings };\n",
+        "function numbers(value) { if (Array.isArray(value)) return value.map(Number); return []; } function booleans(value) { if (Array.isArray(value)) return value.map(Boolean); return []; } function strings(value) { if (Array.isArray(value)) return value.map(String); return []; } function identity(value) { if (Array.isArray(value)) return value.map(item => item); return value; } module.exports = { numbers, booleans, strings, identity };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { numbers, booleans, strings } from 'jit-mixed-array-map'; function main(): void { console.log(numbers([2, -1])); console.log(numbers(['2', ''])); console.log(numbers([true, false])); console.log(booleans([0, 2])); console.log(booleans(['', 'x'])); console.log(booleans([false, true])); console.log(strings([2, -1])); console.log(strings(['a', ''])); console.log(strings([true, false])); }\n",
+        "import { numbers, booleans, strings, identity } from 'jit-mixed-array-map'; function main(): void { console.log(numbers([2, -1])); console.log(numbers(['2', ''])); console.log(numbers([true, false])); console.log(booleans([0, 2])); console.log(booleans(['', 'x'])); console.log(booleans([false, true])); console.log(strings([2, -1])); console.log(strings(['a', ''])); console.log(strings([true, false])); console.log(identity([2, -1])); console.log(identity(['a', ''])); console.log(identity([true, false])); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1931,7 +1931,7 @@ fn mixed_array_conversion_maps_use_jit_without_quickjs() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[2,-1]\n[2,0]\n[1,0]\n[false,true]\n[false,true]\n[false,true]\n[\"2\",\"-1\"]\n[\"a\",\"\"]\n[\"true\",\"false\"]\n"
+        "[2,-1]\n[2,0]\n[1,0]\n[false,true]\n[false,true]\n[false,true]\n[\"2\",\"-1\"]\n[\"a\",\"\"]\n[\"true\",\"false\"]\n[2,-1]\n[\"a\",\"\"]\n[true,false]\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
