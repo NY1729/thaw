@@ -7264,6 +7264,39 @@ fn jit_export(
                 *materialized = consequent_values;
                 Some(())
             }
+            Stmt::Try(statement)
+                if rest.is_empty()
+                    && statement.handler.is_none()
+                    && statement.finalizer.as_ref().is_some_and(|finalizer| {
+                        finalizer
+                            .stmts
+                            .iter()
+                            .all(|statement| matches!(statement, Stmt::Expr(_)))
+                    }) =>
+            {
+                let body = statement.block.stmts.iter().collect::<Vec<_>>();
+                materialize_helper_returns(
+                    &body,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    kinds,
+                    materialized,
+                    output,
+                )?;
+                let control_kinds = helper_control_kinds(kinds, locals)?;
+                encode_loop_effects(
+                    &Stmt::Block(statement.finalizer.clone()?),
+                    parameters,
+                    locals,
+                    mutable,
+                    (&control_kinds, root_loop_control(), &[]),
+                    context,
+                    output,
+                )
+            }
             Stmt::Switch(switch) if rest.is_empty() => {
                 if !matches!(switch.cases.last(), Some(case) if case.test.is_none()) {
                     return None;
