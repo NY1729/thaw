@@ -2430,6 +2430,10 @@ slots for presence, runtime tag, and payload, including unions with native
 array or primitive dictionary members; `??` normalizes its selected fallback to
 the same tagged representation. JavaScript default initializers on those
 parameters use the same selection path when the argument is omitted.
+Fixed-shape object members use an opaque object tag on the argument side, so
+object/string unions can be tested, coerced and forwarded without QuickJS;
+tagged fixed-object results remain outside this path until their concrete
+layout can be reconstructed safely.
 Mutable dynamic locals may be reassigned between these representable shapes;
 array results are converted to stable native handles before tagging. Other
 heterogeneous result mixtures still remain on the QuickJS path. Tagged

@@ -27,7 +27,7 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
 fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str => Some(1),
-        HirType::Union(elements) if jit_tagged_union(elements) => Some(2),
+        HirType::Union(elements) if jit_argument_tagged_union(elements) => Some(2),
         HirType::Array(element)
             if jit_array_result_element_supported(element) =>
         {
@@ -59,6 +59,13 @@ fn jit_array_result_element_supported(ty: &HirType) -> bool {
 }
 
 fn jit_tagged_union(elements: &[HirType]) -> bool {
+    jit_argument_tagged_union(elements)
+        && !elements
+            .iter()
+            .any(|element| matches!(element, HirType::Object(_)))
+}
+
+fn jit_argument_tagged_union(elements: &[HirType]) -> bool {
     (2..=9).contains(&elements.len())
         && elements.iter().all(|element| jit_union_member_tag(element).is_some())
         && elements
@@ -68,7 +75,12 @@ fn jit_tagged_union(elements: &[HirType]) -> bool {
         && (elements.contains(&HirType::Str)
             || elements
                 .iter()
-                .any(|element| matches!(element, HirType::Array(_) | HirType::Dictionary(_))))
+                .any(|element| {
+                    matches!(
+                        element,
+                        HirType::Array(_) | HirType::Dictionary(_) | HirType::Object(_)
+                    )
+                }))
 }
 
 fn jit_union_member_tag(ty: &HirType) -> Option<u64> {
@@ -88,6 +100,7 @@ fn jit_union_member_tag(ty: &HirType) -> Option<u64> {
             HirType::Str => Some(9),
             _ => None,
         },
+        HirType::Object(_) => Some(10),
         _ => None,
     }
 }
@@ -101,7 +114,7 @@ impl<'ctx> HirCompiler<'ctx> {
         output: &mut Vec<BasicValueEnum<'ctx>>,
     ) -> Result<(), String> {
         if let HirType::Union(elements) = ty {
-            if !jit_tagged_union(elements) {
+            if !jit_argument_tagged_union(elements) {
                 return Err(format!("unsupported JIT union argument {ty:?}"));
             }
             let union = value.into_struct_value();
