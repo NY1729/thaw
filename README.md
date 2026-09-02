@@ -2434,13 +2434,14 @@ Fixed-shape object members use an opaque object tag on the argument side, so
 object/string unions can be tested, coerced and forwarded without QuickJS.
 After a `typeof value === "object"` check, primitive fields, recursively nested
 fixed-object fields, primitive arrays, and homogeneous primitive dictionaries
-are loaded directly from the native object layout; supported nested string,
-array, and dictionary operations remain available to ordinary JIT operations;
+plus fixed primitive tuples are loaded directly from the native object layout;
+supported nested string, array, dictionary, and tuple-index operations remain
+available to ordinary JIT operations;
 the same tagged value can also return through LLVM without changing object
 identity or layout. Object literals with an exact fixed shape and recursively
 nested fixed objects, primitive arrays, homogeneous primitive dictionaries, or
-primitive number, boolean, and string fields are allocated in the runtime arena
-using that same native layout, so
+fixed primitive tuples and primitive number, boolean, and string fields are
+allocated in the runtime arena using that same native layout, so
 conditional object/string results can be constructed and returned without
 QuickJS. Array fields retain their shared mutable handle, including shorthand
 fields sourced from JIT parameters.

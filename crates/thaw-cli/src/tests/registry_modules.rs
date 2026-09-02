@@ -1185,17 +1185,17 @@ fn optional_aggregates_use_jit_without_quickjs() {
 #[test]
 fn fixed_object_union_result_builds_native_storage() {
     let functions = thaw_bridge::parse_dts(
-        "export interface Meta { label: string; enabled: boolean; }\nexport interface Item { count: number; meta: Meta; values: number[]; scores: Record<string, number>; }\nexport declare function make(flag: boolean): Item | string;\nexport declare function describe(value: Item | string): string;\n",
+        "export interface Meta { label: string; enabled: boolean; }\nexport interface Item { count: number; meta: Meta; values: number[]; scores: Record<string, number>; pair: [number, string, boolean]; }\nexport declare function make(flag: boolean): Item | string;\nexport declare function describe(value: Item | string): string;\n",
     )
     .unwrap();
     let operation = jit_numeric_export(
-        "module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4], scores: { primary: 7 } } : 'none';",
+        "module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4], scores: { primary: 7 }, pair: [8, 'tuple', true] } : 'none';",
         "make",
         false,
         &functions[0],
     )
     .unwrap();
-    assert!(operation.contains("objnew32"), "{operation}");
+    assert!(operation.contains("objnew40"), "{operation}");
     assert!(operation.contains("objsetn0"), "{operation}");
     assert!(operation.contains("objnew16"), "{operation}");
     assert!(operation.contains("objsets0"), "{operation}");
@@ -1203,6 +1203,11 @@ fn fixed_object_union_result_builds_native_storage() {
     assert!(operation.contains("objseto8"), "{operation}");
     assert!(operation.contains("objseta16"), "{operation}");
     assert!(operation.contains("objseto24"), "{operation}");
+    assert!(operation.contains("tupnew3"), "{operation}");
+    assert!(operation.contains("tupsetn0"), "{operation}");
+    assert!(operation.contains("tupsets1"), "{operation}");
+    assert!(operation.contains("tupsetb2"), "{operation}");
+    assert!(operation.contains("objseta32"), "{operation}");
     assert!(operation.contains(",if,"), "{operation}");
     assert!(jit_numeric_export(
         "module.exports.describe = value => typeof value === 'object' ? value.meta.label : value.toUpperCase();",
@@ -1226,7 +1231,7 @@ fn fixed_object_union_result_builds_native_storage() {
     )
     .is_some(), "array field join");
     assert!(jit_numeric_export(
-        "module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label.toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) : value.toUpperCase();",
+        "module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label.toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) + ':' + String(value.pair[0]) + ':' + value.pair[1] + ':' + String(value.pair[2]) : value.toUpperCase();",
         "describe",
         false,
         &functions[1],
@@ -1245,18 +1250,18 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export interface Meta { label: string; enabled: boolean; }\nexport interface Item { count: number; meta: Meta; values: number[]; scores: Record<string, number>; }\nexport declare function valueOr(value?: Item | string): string;\nexport declare function describe(value: Item | string): string;\nexport declare function identity(value: Item | string): Item | string;\nexport declare function make(flag: boolean): Item | string;\nexport declare function wrap(values: number[]): Item | string;\n",
+        "export interface Meta { label: string; enabled: boolean; }\nexport interface Item { count: number; meta: Meta; values: number[]; scores: Record<string, number>; pair: [number, string, boolean]; }\nexport declare function valueOr(value?: Item | string): string;\nexport declare function describe(value: Item | string): string;\nexport declare function identity(value: Item | string): Item | string;\nexport declare function make(flag: boolean): Item | string;\nexport declare function wrap(values: number[]): Item | string;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label.toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) : value.toUpperCase(); module.exports.identity = value => value; module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4], scores: { primary: 7 } } : 'none'; module.exports.wrap = values => ({ count: values.length, meta: { label: 'wrapped', enabled: true }, values, scores: { primary: values.length } });\n",
+        "module.exports.valueOr = value => String(value ?? 'missing'); module.exports.describe = value => typeof value === 'object' ? String(value.count) + ':' + value.meta.label.toUpperCase() + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) + ':' + String(value.pair[0]) + ':' + value.pair[1] + ':' + String(value.pair[2]) : value.toUpperCase(); module.exports.identity = value => value; module.exports.make = flag => flag ? { count: 2, meta: { label: 'made', enabled: false }, values: [3, 4], scores: { primary: 7 }, pair: [8, 'tuple', true] } : 'none'; module.exports.wrap = values => ({ count: values.length, meta: { label: 'wrapped', enabled: true }, values, scores: { primary: values.length }, pair: [values.length, 'shared', false] });\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { valueOr, describe, identity, make, wrap } from 'jit-optional-object-union';\ntype Item = { count: number; meta: { label: string; enabled: boolean }; values: number[]; scores: Record<string, number> };\nfunction show(value: Item | string): void { if (typeof value === 'object') console.log(String(value.count) + ':' + value.meta.label + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary)); else console.log(value); }\nfunction main(): void { const item: Item = { count: 1, meta: { label: 'one', enabled: true }, values: [1, 2], scores: { primary: 9 } }; console.log(valueOr(item)); console.log(valueOr('text')); console.log(valueOr()); console.log(describe(item)); console.log(describe('text')); show(identity(item)); show(identity('result')); show(make(true)); show(make(false)); const values = [5]; const wrapped = wrap(values); if (typeof wrapped === 'object') { wrapped.values.push(6); show(wrapped); console.log(values.join(',')); } }\n",
+        "import { valueOr, describe, identity, make, wrap } from 'jit-optional-object-union';\ntype Item = { count: number; meta: { label: string; enabled: boolean }; values: number[]; scores: Record<string, number>; pair: [number, string, boolean] };\nfunction show(value: Item | string): void { if (typeof value === 'object') console.log(String(value.count) + ':' + value.meta.label + ':' + String(value.meta.enabled) + ':' + value.values.join(',') + ':' + String(value.scores.primary) + ':' + String(value.pair[0]) + ':' + value.pair[1] + ':' + String(value.pair[2])); else console.log(value); }\nfunction main(): void { const item: Item = { count: 1, meta: { label: 'one', enabled: true }, values: [1, 2], scores: { primary: 9 }, pair: [3, 'local', false] }; console.log(valueOr(item)); console.log(valueOr('text')); console.log(valueOr()); console.log(describe(item)); console.log(describe('text')); show(identity(item)); show(identity('result')); show(make(true)); show(make(false)); const values = [5]; const wrapped = wrap(values); if (typeof wrapped === 'object') { wrapped.values.push(6); show(wrapped); console.log(values.join(',')); } }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -1272,7 +1277,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[object Object]\ntext\nmissing\n1:ONE:true:1,2:9\nTEXT\n1:one:true:1,2:9\nresult\n2:made:false:3,4:7\nnone\n1:wrapped:true:5,6:1\n5,6\n"
+        "[object Object]\ntext\nmissing\n1:ONE:true:1,2:9:3:local:false\nTEXT\n1:one:true:1,2:9:3:local:false\nresult\n2:made:false:3,4:7:8:tuple:true\nnone\n1:wrapped:true:5,6:1:1:shared:false\n5,6\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
