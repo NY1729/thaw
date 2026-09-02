@@ -4505,6 +4505,31 @@ fn jit_copies_a_narrowed_mixed_array_union() {
 }
 
 #[test]
+fn jit_joins_aggregate_only_union_branches() {
+    let function = thaw_bridge::DtsFunction {
+        name: "chooseArray".into(),
+        generic: None,
+        params: vec![(
+            "flag".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        )],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
+            thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)),
+            thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str)),
+        ])),
+    };
+    assert!(jit_numeric_export(
+        "function chooseArray(flag) { return flag ? [1, 2] : ['a', 'b']; } module.exports = { chooseArray };",
+        "chooseArray",
+        false,
+        &function,
+    )
+    .is_some());
+}
+
+#[test]
 fn rewrite_qualified_calls_is_a_no_op_with_no_rewrites() {
     let source = "function main(): void { console.log(qs.stringify(x)); }";
     assert_eq!(rewrite_qualified_calls(source, &[]).unwrap(), source);
