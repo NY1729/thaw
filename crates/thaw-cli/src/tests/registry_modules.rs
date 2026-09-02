@@ -1609,6 +1609,49 @@ fn nested_tagged_aggregate_fields_use_jit_without_quickjs() {
 }
 
 #[test]
+fn tagged_array_and_dictionary_fields_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-tagged-collections-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-tagged-collections");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Item { values?: number[]; lookup: Record<string, string> | null | undefined; pair: [boolean[] | null, Record<string, number> | undefined]; }\nexport declare function values(value: Item | string): string;\nexport declare function lookup(value: Item | string): string;\nexport declare function flags(value: Item | string): string;\nexport declare function score(value: Item | string): number;\nexport declare function make(full: boolean): Item | string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.values = value => typeof value === 'object' ? value.values?.join(',') ?? 'missing' : value; module.exports.lookup = value => typeof value === 'object' ? value.lookup?.name ?? 'missing' : value; module.exports.flags = value => typeof value === 'object' ? value.pair[0]?.join(',') ?? 'missing' : value; module.exports.score = value => typeof value === 'object' ? value.pair[1]?.score ?? 0 : -1; module.exports.make = full => full ? { values: [8, 9], lookup: { name: 'made' }, pair: [[true, false], { score: 7 }] } : { lookup: null, pair: [null, undefined] };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { flags, lookup, make, score, values } from 'jit-tagged-collections';\ntype Item = { values?: number[]; lookup: Record<string, string> | null | undefined; pair: [boolean[] | null, Record<string, number> | undefined] };\nfunction main(): void { const present: Item = { values: [1, 2], lookup: { name: 'local' }, pair: [[true, false], { score: 6 }] }; const absent: Item = { lookup: undefined, pair: [null, undefined] }; const made = make(true); const empty = make(false); console.log(values(present)); console.log(lookup(present)); console.log(flags(present)); console.log(score(present)); console.log(values(absent)); console.log(lookup(absent)); console.log(flags(absent)); console.log(score(absent)); console.log(values('plain')); console.log(values(made)); console.log(lookup(made)); console.log(flags(made)); console.log(score(made)); console.log(values(empty)); console.log(lookup(empty)); console.log(flags(empty)); console.log(score(empty)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1,2\nlocal\ntrue,false\n6\nmissing\nmissing\nmissing\n0\nplain\n8,9\nmade\ntrue,false\n7\nmissing\nmissing\nmissing\n0\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_dictionary_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-dictionary-union-{}",
