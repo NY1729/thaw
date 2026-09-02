@@ -2437,7 +2437,8 @@ fixed-object fields, primitive arrays, and homogeneous primitive dictionaries
 plus fixed primitive tuples are loaded directly from the native object layout;
 supported nested string, array, dictionary, and tuple-index operations remain
 available to ordinary JIT operations;
-optional and nullable primitive object fields use their native presence/payload layout, so
+optional, nullable, and nullish primitive object fields use their native
+tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
 loading QuickJS;
 the same tagged value can also return through LLVM without changing object
@@ -2449,10 +2450,11 @@ conditional object/string results can be constructed and returned without
 QuickJS. Fixed tuples may recursively contain other fixed primitive tuples,
 fixed objects, primitive arrays, and homogeneous primitive dictionaries; their
 native handles can be read from LLVM-created values or assembled by the JIT
-and passed directly to another specialized call. Optional and nullable
-primitive tuple elements use the native 16-byte element stride and support the
-same reads, `??`, optional string chains, JIT construction, and cross-call
-forwarding.
+and passed directly to another specialized call. Optional, nullable, and
+nullish primitive tuple elements use the native 16-byte element stride and
+support the same reads, `??`, optional string chains, JIT construction, and
+cross-call forwarding. Nullish construction preserves distinct `null` and
+`undefined` tags across the LLVM/JIT boundary.
 Array fields retain their
 shared mutable handle, including shorthand
 fields sourced from JIT parameters.
