@@ -1527,13 +1527,10 @@ fn jit_export(
         let Expr::Member(member) = callee.as_ref() else {
             return None;
         };
-        let local_string = match member.obj.as_ref() {
-            Expr::Ident(identifier) => locals
-                .get(identifier.sym.as_ref())
-                .and_then(|expression| jit_expression_kind(expression))
-                .is_some_and(|(kind, _)| matches!(kind, JitKind::String | JitKind::Dynamic)),
-            _ => false,
-        };
+        let local_string = member_path(member.obj.as_ref())
+            .and_then(|path| locals.get(&path))
+            .and_then(|expression| jit_expression_kind(expression))
+            .is_some_and(|(kind, _)| matches!(kind, JitKind::String | JitKind::Dynamic));
         let dynamic_parameter = matches!(member.obj.as_ref(), Expr::Ident(identifier) if parameters
             .get(identifier.sym.as_ref())
             .is_some_and(|token| jit_dynamic_argument(token).is_some()));
@@ -1648,19 +1645,17 @@ fn jit_export(
         let MemberProp::Ident(property) = &member.prop else {
             return None;
         };
-        let Expr::Ident(receiver) = member.obj.as_ref() else {
-            return None;
-        };
-        if !parameters
-            .get(receiver.sym.as_ref())
-            .is_some_and(|token| {
+        let parameter_array = match member.obj.as_ref() {
+            Expr::Ident(receiver) => parameters.get(receiver.sym.as_ref()).is_some_and(|token| {
                 token.starts_with('r') || jit_dynamic_array_argument(token)
-            })
-            && locals
-                .get(receiver.sym.as_ref())
-                .and_then(|tokens| jit_expression_kind(tokens))
-                .is_none_or(|(kind, _)| kind != JitKind::Array)
-        {
+            }),
+            _ => false,
+        };
+        let local_array = member_path(member.obj.as_ref())
+            .and_then(|path| locals.get(&path))
+            .and_then(|tokens| jit_expression_kind(tokens))
+            .is_some_and(|(kind, _)| kind == JitKind::Array);
+        if !parameter_array && !local_array {
             return None;
         }
         matches!(
