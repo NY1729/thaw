@@ -2594,6 +2594,8 @@ remain outside this specialization. Array destructuring declarations and assignm
 materialize their source once and support holes, lazy defaults, and rest copies.
 Fixed object destructuring declarations and assignments reuse the same leaf
 materializer, including missing-property defaults and unused side effects.
+Nested `if`/`else` blocks after those straight-line steps update the same typed
+helper-local slots, then flow into one fixed aggregate return without QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
