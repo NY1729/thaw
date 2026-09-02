@@ -8,7 +8,12 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+struct JitGlobals {
+    slots: [OnceLock<AtomicU64>; 16],
+}
 
 static INVALID_SYMBOL: &[u8] = b"invalid JIT symbol\0";
 const ABSENT_STATUS: *const c_char = ptr::dangling();
@@ -31,6 +36,16 @@ static INVALID_NORMALIZATION_FORM: &[u8] = b"invalid Unicode normalization form\
 static INVALID_ARRAY_WITH_INDEX: &[u8] = b"Invalid index for Array.prototype.with\0";
 static INVALID_CODE_POINT: &[u8] = b"Invalid code point\0";
 static EMPTY_REDUCE: &[u8] = b"Reduce of empty array with no initial value\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static VALUE_NOT_CALLABLE: &[u8] = b"value is not a function\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static TRUE_THROW: &[u8] = b"true\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static FALSE_THROW: &[u8] = b"false\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static COMMA: &[u8] = b",\0";
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+static OBJECT_THROW: &[u8] = b"[object Object]\0";
 
 pub type ArenaAlloc = unsafe extern "C" fn(usize, usize) -> *mut u8;
 pub type NumberToString = unsafe extern "C" fn(f64) -> *const c_char;
@@ -101,6 +116,62 @@ thread_local! {
     static DICTIONARY_QUERY: Cell<Option<DictionaryQuery>> = const { Cell::new(None) };
     static CALL_ERROR: Cell<*const c_char> = const { Cell::new(ptr::null()) };
     static CALL_PRESENT: Cell<bool> = const { Cell::new(true) };
+    static JIT_GLOBALS: Cell<*const JitGlobals> = const { Cell::new(ptr::null()) };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn global_get(index: f64) -> f64 {
+    if !index.is_finite() || index.fract() != 0.0 || !(0.0..16.0).contains(&index) {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let index = index as usize;
+    let globals = JIT_GLOBALS.with(Cell::get);
+    if globals.is_null() {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    f64::from_bits(
+        unsafe { &*globals }.slots[index]
+            .get_or_init(|| AtomicU64::new(0))
+            .load(Ordering::Relaxed),
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn global_set(index: f64, value: f64) -> f64 {
+    if !index.is_finite() || index.fract() != 0.0 || !(0.0..16.0).contains(&index) {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let index = index as usize;
+    let globals = JIT_GLOBALS.with(Cell::get);
+    if globals.is_null() {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { &*globals }.slots[index]
+        .get_or_init(|| AtomicU64::new(0))
+        .store(value.to_bits(), Ordering::Relaxed);
+    value
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn global_init(index: f64, initial: f64) -> f64 {
+    if !index.is_finite() || index.fract() != 0.0 || !(0.0..16.0).contains(&index) {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    let globals = JIT_GLOBALS.with(Cell::get);
+    if globals.is_null() {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    }
+    f64::from_bits(
+        unsafe { &*globals }.slots[index as usize]
+            .get_or_init(|| AtomicU64::new(initial.to_bits()))
+            .load(Ordering::Relaxed),
+    )
 }
 
 extern "C" fn dictionary_get(value: f64, key: f64, kind: u8) -> f64 {
@@ -148,6 +219,10 @@ extern "C" fn number_dictionary_set(object: f64, key: f64, value: f64) -> f64 {
 
 extern "C" fn bool_dictionary_set(object: f64, key: f64, value: f64) -> f64 {
     dictionary_mutate(object, key, value, 1)
+}
+
+extern "C" fn boolean_not(value: f64) -> f64 {
+    f64::from(value == 0.0 || value.is_nan())
 }
 
 extern "C" fn string_dictionary_set(object: f64, key: f64, value: f64) -> f64 {
@@ -221,6 +296,18 @@ extern "C" fn dictionary_from_string_entries(entries: f64) -> f64 {
 
 extern "C" fn dictionary_assign(target: f64, source: f64) -> f64 {
     dictionary_query(target, source, 11)
+}
+
+extern "C" fn empty_dictionary() -> f64 {
+    dictionary_query(0.0, 0.0, 12)
+}
+
+extern "C" fn dictionary_length(object: f64) -> f64 {
+    dictionary_query(object, 0.0, 13)
+}
+
+extern "C" fn dictionary_key_at(object: f64, index: f64) -> f64 {
+    dictionary_query(object, index, 14)
 }
 
 static STRING_CONSTANTS: OnceLock<Mutex<HashMap<String, CString>>> = OnceLock::new();
@@ -938,7 +1025,7 @@ fn compile_jit_callback(callback: f64) -> Option<(JitCallback, usize)> {
         return None;
     }
     let code = match compile(&symbol, &program) {
-        Ok(code) => code,
+        Ok((code, _)) => code,
         Err(error) => {
             CALL_ERROR.with(|slot| slot.set(error));
             return None;
@@ -1613,6 +1700,28 @@ extern "C" fn array_value(value: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn mutable_array_handle(value: f64) -> f64 {
+    let (Some(allocate), Some((data, _))) =
+        (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
+    else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    let handle = unsafe {
+        allocate(
+            std::mem::size_of::<*mut u8>(),
+            std::mem::align_of::<*mut u8>(),
+        )
+    };
+    if handle.is_null() {
+        CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe { handle.cast::<*const u8>().write(data) };
+    f64::from_bits(handle as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_to_array(value: f64) -> f64 {
     let Some(convert) = STRING_TO_ARRAY.with(Cell::get) else {
         CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
@@ -1670,6 +1779,12 @@ extern "C" fn is_not_array(_: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn absent_value() -> f64 {
     CALL_PRESENT.with(|present| present.set(false));
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn missing_callable() -> f64 {
+    CALL_ERROR.with(|error| error.set(VALUE_NOT_CALLABLE.as_ptr().cast()));
     0.0
 }
 
@@ -3327,6 +3442,9 @@ enum NumericValue {
     NumberToString,
     BooleanToString,
     StringToNumber,
+    GlobalGet,
+    GlobalInit,
+    GlobalSet,
     ParseFloat,
     ParseInt,
     NumberToFixed,
@@ -3375,6 +3493,11 @@ enum NumericValue {
     DictionaryFromBoolEntries,
     DictionaryFromStringEntries,
     DictionaryAssign,
+    DictionaryLength,
+    DictionaryKeyAt,
+    EmptyDictionary,
+    DictionaryAppend(u8),
+    DictionaryStaticAppend(u8, *const c_char),
     NumberArrayIncludes,
     BoolArrayIncludes,
     StringArrayIncludes,
@@ -3418,7 +3541,10 @@ enum NumericValue {
     NumberArrayPostSet,
     StringArraySet,
     BoolArraySet,
+    AggregateLocalSet(u8, u8),
+    AggregateLocalArrayInsert(u8, u8, bool),
     ArrayValue,
+    MutableArrayHandle,
     EmptyArray,
     NumberArrayMin,
     NumberArrayMax,
@@ -3485,16 +3611,50 @@ enum NumericValue {
     ShortCircuitEnd,
     Absent,
     AsBoolean,
+    BooleanNot,
     StrictMismatch(bool),
     Drop,
     DropUnder,
     Duplicate,
     DuplicatePair,
+    LocalGet(u8),
+    LocalSet(u8),
+    LoopStart,
+    LoopWhile,
+    LoopContinuePoint,
+    LoopBreak,
+    LoopContinue,
+    LoopEnd,
+    GuardStart,
+    GuardAlternate,
+    GuardEnd,
+    SwitchStart,
+    SwitchCaseStart,
+    SwitchCaseBody,
+    SwitchDefault,
+    SwitchBreak,
+    SwitchEnd,
+    TryStart,
+    TaggedTryStart,
+    CatchStart,
+    TryEnd,
+    Throw,
+    TaggedThrow(u8),
+    CheckError,
+    UncaughtNumberThrow,
+    UncaughtBooleanThrow,
+    UncaughtStringThrow,
+    UncaughtNumberArrayThrow,
+    UncaughtBooleanArrayThrow,
+    UncaughtStringArrayThrow,
+    UncaughtDictionaryThrow,
+    EarlyReturn,
     MathRandom,
     DateNow,
     PerformanceNow,
     ProcessPid,
     ProcessPpid,
+    MissingCallable,
     Recur(u8),
 }
 
@@ -3590,6 +3750,9 @@ impl NumericProgram {
                     "numstr" => Some(NumericValue::NumberToString),
                     "boolstr" => Some(NumericValue::BooleanToString),
                     "strnum" => Some(NumericValue::StringToNumber),
+                    "globalget" => Some(NumericValue::GlobalGet),
+                    "globalinit" => Some(NumericValue::GlobalInit),
+                    "globalset" => Some(NumericValue::GlobalSet),
                     "parsefloat" => Some(NumericValue::ParseFloat),
                     "parseint" => Some(NumericValue::ParseInt),
                     "tofixed" => Some(NumericValue::NumberToFixed),
@@ -3637,6 +3800,12 @@ impl NumericProgram {
                     "dbfromentries" => Some(NumericValue::DictionaryFromBoolEntries),
                     "dsfromentries" => Some(NumericValue::DictionaryFromStringEntries),
                     "dassign" => Some(NumericValue::DictionaryAssign),
+                    "dlen" => Some(NumericValue::DictionaryLength),
+                    "dkeyat" => Some(NumericValue::DictionaryKeyAt),
+                    "dnempty" | "dbempty" | "dsempty" => Some(NumericValue::EmptyDictionary),
+                    "dnappend" => Some(NumericValue::DictionaryAppend(0)),
+                    "dbappend" => Some(NumericValue::DictionaryAppend(1)),
+                    "dsappend" => Some(NumericValue::DictionaryAppend(2)),
                     "rnincludes" => Some(NumericValue::NumberArrayIncludes),
                     "rbincludes" => Some(NumericValue::BoolArrayIncludes),
                     "rsincludes" => Some(NumericValue::StringArrayIncludes),
@@ -3686,6 +3855,7 @@ impl NumericProgram {
                     "rsset" => Some(NumericValue::StringArraySet),
                     "rbset" => Some(NumericValue::BoolArraySet),
                     "arrayvalue" => Some(NumericValue::ArrayValue),
+                    "arrayhandle" => Some(NumericValue::MutableArrayHandle),
                     "arrayempty" => Some(NumericValue::EmptyArray),
                     "rnmin" => Some(NumericValue::NumberArrayMin),
                     "rnmax" => Some(NumericValue::NumberArrayMax),
@@ -3716,11 +3886,48 @@ impl NumericProgram {
                     "nip" => Some(NumericValue::DropUnder),
                     "dup" => Some(NumericValue::Duplicate),
                     "dup2" => Some(NumericValue::DuplicatePair),
+                    "loop" => Some(NumericValue::LoopStart),
+                    "while" => Some(NumericValue::LoopWhile),
+                    "looptail" => Some(NumericValue::LoopContinuePoint),
+                    "break" => Some(NumericValue::LoopBreak),
+                    "continue" => Some(NumericValue::LoopContinue),
+                    "loopend" => Some(NumericValue::LoopEnd),
+                    "guard" => Some(NumericValue::GuardStart),
+                    "guardelse" => Some(NumericValue::GuardAlternate),
+                    "guardend" => Some(NumericValue::GuardEnd),
+                    "switch" => Some(NumericValue::SwitchStart),
+                    "case" => Some(NumericValue::SwitchCaseStart),
+                    "casebody" => Some(NumericValue::SwitchCaseBody),
+                    "default" => Some(NumericValue::SwitchDefault),
+                    "switchbreak" => Some(NumericValue::SwitchBreak),
+                    "switchend" => Some(NumericValue::SwitchEnd),
+                    "trystart" => Some(NumericValue::TryStart),
+                    "trystarttag" => Some(NumericValue::TaggedTryStart),
+                    "catch" => Some(NumericValue::CatchStart),
+                    "tryend" => Some(NumericValue::TryEnd),
+                    "throw" => Some(NumericValue::Throw),
+                    value if value.starts_with("throwtag") => value
+                        .strip_prefix("throwtag")?
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|tag| *tag <= 8)
+                        .map(NumericValue::TaggedThrow),
+                    "checkerror" => Some(NumericValue::CheckError),
+                    "throwoutn" => Some(NumericValue::UncaughtNumberThrow),
+                    "throwoutb" => Some(NumericValue::UncaughtBooleanThrow),
+                    "throwouts" => Some(NumericValue::UncaughtStringThrow),
+                    "throwoutrn" => Some(NumericValue::UncaughtNumberArrayThrow),
+                    "throwoutrb" => Some(NumericValue::UncaughtBooleanArrayThrow),
+                    "throwoutrs" => Some(NumericValue::UncaughtStringArrayThrow),
+                    "throwoutd" => Some(NumericValue::UncaughtDictionaryThrow),
+                    "return" => Some(NumericValue::EarlyReturn),
                     "random" => Some(NumericValue::MathRandom),
                     "datenow" => Some(NumericValue::DateNow),
                     "performancenow" => Some(NumericValue::PerformanceNow),
                     "processpid" => Some(NumericValue::ProcessPid),
                     "processppid" => Some(NumericValue::ProcessPpid),
+                    "missingcalln" | "missingcallb" | "missingcalls" | "missingcalla"
+                    | "missingcalld" => Some(NumericValue::MissingCallable),
                     "rnwith" => Some(NumericValue::NumberArrayWith),
                     "rswith" => Some(NumericValue::StringArrayWith),
                     "rbwith" => Some(NumericValue::BoolArrayWith),
@@ -3758,6 +3965,7 @@ impl NumericProgram {
                     "end" => Some(NumericValue::ShortCircuitEnd),
                     "absentn" | "absentb" | "absents" => Some(NumericValue::Absent),
                     "asbool" => Some(NumericValue::AsBoolean),
+                    "boolnot" => Some(NumericValue::BooleanNot),
                     "strictfalse" => Some(NumericValue::StrictMismatch(false)),
                     "stricttrue" => Some(NumericValue::StrictMismatch(true)),
                     value => UnaryMath::parse(value)
@@ -4084,6 +4292,76 @@ impl NumericProgram {
                         })
                         .or_else(|| {
                             value
+                                .strip_prefix("setl")
+                                .and_then(|index| index.parse::<u8>().ok())
+                                .filter(|index| *index < 8)
+                                .map(NumericValue::LocalSet)
+                        })
+                        .or_else(|| {
+                            ["dnput", "dbput", "dsput"].iter().enumerate().find_map(
+                                |(kind, prefix)| {
+                                    value.strip_prefix(prefix).and_then(|key| {
+                                        intern_string(key).map(|key| {
+                                            NumericValue::DictionaryStaticAppend(kind as u8, key)
+                                        })
+                                    })
+                                },
+                            )
+                        })
+                        .or_else(|| {
+                            let (kind, index) =
+                                ["rnlset", "rblset", "rslset", "dnlset", "dblset", "dslset"]
+                                    .iter()
+                                    .enumerate()
+                                    .find_map(|(kind, prefix)| {
+                                        value.strip_prefix(prefix).map(|index| (kind as u8, index))
+                                    })?;
+                            index
+                                .parse::<u8>()
+                                .ok()
+                                .filter(|index| *index < 8)
+                                .map(|index| NumericValue::AggregateLocalSet(kind, index))
+                        })
+                        .or_else(|| {
+                            let (kind, index, unshift) = ["rn", "rb", "rs"]
+                                .iter()
+                                .enumerate()
+                                .find_map(|(kind, prefix)| {
+                                    value
+                                        .strip_prefix(&format!("{prefix}lpush"))
+                                        .map(|index| (kind as u8, index, false))
+                                        .or_else(|| {
+                                            value
+                                                .strip_prefix(&format!("{prefix}lunshift"))
+                                                .map(|index| (kind as u8, index, true))
+                                        })
+                                })?;
+                            index
+                                .parse::<u8>()
+                                .ok()
+                                .filter(|index| *index < 8)
+                                .map(|index| {
+                                    NumericValue::AggregateLocalArrayInsert(kind, index, unshift)
+                                })
+                        })
+                        .or_else(|| {
+                            value
+                                .strip_prefix("rnl")
+                                .or_else(|| value.strip_prefix("rbl"))
+                                .or_else(|| value.strip_prefix("rsl"))
+                                .or_else(|| value.strip_prefix("dnl"))
+                                .or_else(|| value.strip_prefix("dbl"))
+                                .or_else(|| value.strip_prefix("dsl"))
+                                .or_else(|| value.strip_prefix("ln"))
+                                .or_else(|| value.strip_prefix("lb"))
+                                .or_else(|| value.strip_prefix("ls"))
+                                .or_else(|| value.strip_prefix('l'))
+                                .and_then(|index| index.parse::<u8>().ok())
+                                .filter(|index| *index < 8)
+                                .map(NumericValue::LocalGet)
+                        })
+                        .or_else(|| {
+                            value
                                 .strip_prefix('t')
                                 .and_then(intern_string)
                                 .map(NumericValue::StringConstant)
@@ -4113,6 +4391,11 @@ impl NumericProgram {
         let mut code = Vec::with_capacity(self.0.len() * 12 + 8);
         let mut depth = 0u8;
         let mut branches = Vec::new();
+        let mut loops = Vec::new();
+        let mut guards = Vec::new();
+        let mut switches = Vec::new();
+        let mut tries = Vec::new();
+        let mut catches = Vec::new();
         for value in &self.0 {
             match value {
                 NumericValue::Argument(index) => {
@@ -4328,6 +4611,26 @@ impl NumericProgram {
                         _ => unreachable!(),
                     };
                     emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                }
+                NumericValue::GlobalGet => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, global_get as *const () as u64, depth - 1);
+                }
+                NumericValue::GlobalSet => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(&mut code, global_set as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::GlobalInit => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(&mut code, global_init as *const () as u64, depth - 2);
+                    depth -= 1;
                 }
                 NumericValue::ParseInt
                 | NumericValue::NumberToFixed
@@ -5036,6 +5339,54 @@ impl NumericProgram {
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
                     depth -= 2;
                 }
+                NumericValue::AggregateLocalSet(kind, index) => {
+                    if depth < 2 || *index >= depth - 2 {
+                        return None;
+                    }
+                    let function = match kind {
+                        0 => number_array_set,
+                        1 => bool_array_set,
+                        2 => string_array_set,
+                        3 => number_dictionary_set,
+                        4 => bool_dictionary_set,
+                        5 => string_dictionary_set,
+                        _ => return None,
+                    };
+                    let destination = depth - 2;
+                    emit_spill(&mut code, destination);
+                    emit_move(&mut code, 0, *index);
+                    emit_move(&mut code, 1, destination);
+                    emit_move(&mut code, 2, destination + 1);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_move(&mut code, destination, 0);
+                    emit_restore(&mut code, destination);
+                    depth -= 1;
+                }
+                NumericValue::AggregateLocalArrayInsert(kind, index, unshift) => {
+                    if depth == 0 || *index >= depth - 1 {
+                        return None;
+                    }
+                    let function = match (kind, unshift) {
+                        (0, false) => number_array_push,
+                        (1, false) => bool_array_push,
+                        (2, false) => string_array_push,
+                        (0, true) => number_array_unshift,
+                        (1, true) => bool_array_unshift,
+                        (2, true) => string_array_unshift,
+                        _ => return None,
+                    };
+                    let destination = depth - 1;
+                    emit_spill(&mut code, destination);
+                    emit_move(&mut code, 0, *index);
+                    emit_move(&mut code, 1, destination);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_move(&mut code, destination, 0);
+                    emit_restore(&mut code, destination);
+                }
                 NumericValue::NumberArrayPostSet => {
                     if depth < 4 {
                         return None;
@@ -5057,6 +5408,16 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, array_value as *const () as u64, depth - 1);
+                }
+                NumericValue::MutableArrayHandle => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(
+                        &mut code,
+                        mutable_array_handle as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::EmptyArray => {
                     if depth > 7 {
@@ -5118,11 +5479,374 @@ impl NumericProgram {
                     emit_move(&mut code, depth + 1, depth - 1);
                     depth += 2;
                 }
+                NumericValue::LocalGet(index) => {
+                    if *index >= depth || depth == 8 {
+                        return None;
+                    }
+                    emit_move(&mut code, depth, *index);
+                    depth += 1;
+                }
+                NumericValue::LocalSet(index) => {
+                    if depth == 0 || *index >= depth - 1 {
+                        return None;
+                    }
+                    emit_move(&mut code, *index, depth - 1);
+                    depth -= 1;
+                }
+                NumericValue::LoopStart => loops.push(LoopPatch {
+                    start: code.len(),
+                    continue_target: None,
+                    base_depth: depth,
+                    condition_exits: Vec::new(),
+                    continues: Vec::new(),
+                    breaks: Vec::new(),
+                }),
+                NumericValue::LoopWhile => {
+                    let loop_patch = loops.last_mut()?;
+                    if depth != loop_patch.base_depth + 1 {
+                        return None;
+                    }
+                    let condition = depth - 1;
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x0f,
+                        0x2e,
+                        0xc0 | (condition << 3) | condition,
+                    ]);
+                    let parity = emit_near_jump(&mut code, 0x8a);
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x7e,
+                        0xc0 | (condition << 3),
+                        0x48,
+                        0xd1,
+                        0xe0,
+                        0x48,
+                        0x85,
+                        0xc0,
+                    ]);
+                    loop_patch
+                        .condition_exits
+                        .extend([parity, emit_near_jump(&mut code, 0x84)]);
+                    depth -= 1;
+                }
+                NumericValue::LoopContinuePoint => {
+                    let loop_patch = loops.last_mut()?;
+                    if depth != loop_patch.base_depth || loop_patch.continue_target.is_some() {
+                        return None;
+                    }
+                    for jump in loop_patch.continues.drain(..) {
+                        patch_near_jump(&mut code, jump)?;
+                    }
+                    loop_patch.continue_target = Some(code.len());
+                }
+                NumericValue::LoopBreak => {
+                    let loop_patch = loops.last_mut()?;
+                    if depth < loop_patch.base_depth {
+                        return None;
+                    }
+                    loop_patch.breaks.push(emit_unconditional_jump(&mut code));
+                }
+                NumericValue::LoopContinue => {
+                    let loop_patch = loops.last_mut()?;
+                    if depth < loop_patch.base_depth {
+                        return None;
+                    }
+                    if let Some(target) = loop_patch.continue_target {
+                        emit_backward_jump(&mut code, target)?;
+                    } else {
+                        loop_patch
+                            .continues
+                            .push(emit_unconditional_jump(&mut code));
+                    }
+                }
+                NumericValue::LoopEnd => {
+                    let loop_patch = loops.pop()?;
+                    if depth != loop_patch.base_depth
+                        || loop_patch.continue_target.is_none()
+                        || !loop_patch.continues.is_empty()
+                    {
+                        return None;
+                    }
+                    emit_backward_jump(&mut code, loop_patch.start)?;
+                    for exit in loop_patch
+                        .condition_exits
+                        .into_iter()
+                        .chain(loop_patch.breaks)
+                    {
+                        patch_near_jump(&mut code, exit)?;
+                    }
+                }
+                NumericValue::GuardStart => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let condition = depth - 1;
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x0f,
+                        0x2e,
+                        0xc0 | (condition << 3) | condition,
+                    ]);
+                    let parity = emit_near_jump(&mut code, 0x8a);
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x7e,
+                        0xc0 | (condition << 3),
+                        0x48,
+                        0xd1,
+                        0xe0,
+                        0x48,
+                        0x85,
+                        0xc0,
+                    ]);
+                    let zero = emit_near_jump(&mut code, 0x84);
+                    depth -= 1;
+                    guards.push((depth, vec![parity, zero], Vec::new(), false));
+                }
+                NumericValue::GuardAlternate => {
+                    let (base_depth, false_exits, end_exits, has_alternate) = guards.last_mut()?;
+                    if *has_alternate || depth != *base_depth {
+                        return None;
+                    }
+                    end_exits.push(emit_unconditional_jump(&mut code));
+                    for exit in false_exits.drain(..) {
+                        patch_near_jump(&mut code, exit)?;
+                    }
+                    *has_alternate = true;
+                }
+                NumericValue::GuardEnd => {
+                    let (base_depth, false_exits, end_exits, _) = guards.pop()?;
+                    if depth != base_depth {
+                        return None;
+                    }
+                    for exit in false_exits.into_iter().chain(end_exits) {
+                        patch_near_jump(&mut code, exit)?;
+                    }
+                }
+                NumericValue::SwitchStart => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    switches.push(SwitchPatch {
+                        base_depth: depth,
+                        next_case: Vec::new(),
+                        fallthrough: None,
+                        breaks: Vec::new(),
+                        has_case: false,
+                        has_default: false,
+                        default_body: None,
+                    });
+                }
+                NumericValue::SwitchCaseStart => {
+                    let switch = switches.last_mut()?;
+                    if depth != switch.base_depth {
+                        return None;
+                    }
+                    if switch.has_case {
+                        switch.fallthrough = Some(emit_unconditional_jump(&mut code));
+                    }
+                    for next in switch.next_case.drain(..) {
+                        patch_near_jump(&mut code, next)?;
+                    }
+                    switch.has_case = true;
+                }
+                NumericValue::SwitchCaseBody => {
+                    let switch = switches.last_mut()?;
+                    if depth != switch.base_depth + 1 {
+                        return None;
+                    }
+                    let condition = depth - 1;
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x0f,
+                        0x2e,
+                        0xc0 | (condition << 3) | condition,
+                    ]);
+                    let parity = emit_near_jump(&mut code, 0x8a);
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x7e,
+                        0xc0 | (condition << 3),
+                        0x48,
+                        0xd1,
+                        0xe0,
+                        0x48,
+                        0x85,
+                        0xc0,
+                    ]);
+                    let mismatch = emit_near_jump(&mut code, 0x84);
+                    switch.next_case.extend([parity, mismatch]);
+                    if let Some(fallthrough) = switch.fallthrough.take() {
+                        patch_near_jump(&mut code, fallthrough)?;
+                    }
+                    depth -= 1;
+                }
+                NumericValue::SwitchDefault => {
+                    let switch = switches.last_mut()?;
+                    if depth != switch.base_depth || switch.has_default {
+                        return None;
+                    }
+                    let fallthrough = switch.has_case.then(|| emit_unconditional_jump(&mut code));
+                    for mismatch in switch.next_case.drain(..) {
+                        patch_near_jump(&mut code, mismatch)?;
+                    }
+                    switch.next_case.push(emit_unconditional_jump(&mut code));
+                    let body = code.len();
+                    if let Some(fallthrough) = fallthrough {
+                        patch_near_jump(&mut code, fallthrough)?;
+                    }
+                    switch.has_default = true;
+                    switch.default_body = Some(body);
+                }
+                NumericValue::SwitchBreak => {
+                    let switch = switches.last_mut()?;
+                    if depth < switch.base_depth {
+                        return None;
+                    }
+                    switch.breaks.push(emit_unconditional_jump(&mut code));
+                }
+                NumericValue::SwitchEnd => {
+                    let switch = switches.pop()?;
+                    if depth != switch.base_depth {
+                        return None;
+                    }
+                    let unmatched = switch.default_body.unwrap_or(code.len());
+                    for exit in switch.next_case {
+                        patch_jump_to(&mut code, exit, unmatched)?;
+                    }
+                    for exit in switch.breaks {
+                        patch_near_jump(&mut code, exit)?;
+                    }
+                    depth -= 1;
+                }
+                NumericValue::TryStart | NumericValue::TaggedTryStart => tries.push(TryPatch {
+                    base_depth: depth,
+                    throws: Vec::new(),
+                    tagged: matches!(value, NumericValue::TaggedTryStart),
+                }),
+                NumericValue::Throw => {
+                    let exception = tries.last_mut()?;
+                    if exception.tagged || depth <= exception.base_depth {
+                        return None;
+                    }
+                    emit_move(&mut code, exception.base_depth, depth - 1);
+                    exception.throws.push(emit_unconditional_jump(&mut code));
+                    depth -= 1;
+                }
+                NumericValue::TaggedThrow(tag) => {
+                    let exception = tries.last_mut()?;
+                    if !exception.tagged
+                        || depth <= exception.base_depth
+                        || exception.base_depth >= 7
+                    {
+                        return None;
+                    }
+                    emit_move(&mut code, exception.base_depth + 1, depth - 1);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(*tag).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[
+                        0x66,
+                        0x48,
+                        0x0f,
+                        0x6e,
+                        0xc0 | (exception.base_depth << 3),
+                    ]);
+                    exception.throws.push(emit_unconditional_jump(&mut code));
+                    depth -= 1;
+                }
+                NumericValue::CheckError => {
+                    let exception = tries.last_mut()?;
+                    if exception.tagged && exception.base_depth >= 7 {
+                        return None;
+                    }
+                    emit_spill(&mut code, depth);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(take_call_error as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0, 0x66, 0x48, 0x0f, 0x7e, 0xc0]);
+                    emit_restore(&mut code, depth);
+                    code.extend_from_slice(&[0x48, 0x85, 0xc0]);
+                    let no_error = emit_near_jump(&mut code, 0x84);
+                    let value_slot = exception.base_depth + u8::from(exception.tagged);
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (value_slot << 3)]);
+                    if exception.tagged {
+                        code.extend_from_slice(&[0x48, 0xb8]);
+                        code.extend_from_slice(&2.0_f64.to_bits().to_le_bytes());
+                        code.extend_from_slice(&[
+                            0x66,
+                            0x48,
+                            0x0f,
+                            0x6e,
+                            0xc0 | (exception.base_depth << 3),
+                        ]);
+                    }
+                    exception.throws.push(emit_unconditional_jump(&mut code));
+                    patch_near_jump(&mut code, no_error)?;
+                }
+                NumericValue::UncaughtNumberThrow
+                | NumericValue::UncaughtBooleanThrow
+                | NumericValue::UncaughtStringThrow
+                | NumericValue::UncaughtNumberArrayThrow
+                | NumericValue::UncaughtBooleanArrayThrow
+                | NumericValue::UncaughtStringArrayThrow
+                | NumericValue::UncaughtDictionaryThrow => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let function = match value {
+                        NumericValue::UncaughtNumberThrow => uncaught_number_throw,
+                        NumericValue::UncaughtBooleanThrow => uncaught_boolean_throw,
+                        NumericValue::UncaughtStringThrow => uncaught_string_throw,
+                        NumericValue::UncaughtNumberArrayThrow => uncaught_number_array_throw,
+                        NumericValue::UncaughtBooleanArrayThrow => uncaught_boolean_array_throw,
+                        NumericValue::UncaughtStringArrayThrow => uncaught_string_array_throw,
+                        NumericValue::UncaughtDictionaryThrow => uncaught_dictionary_throw,
+                        _ => unreachable!(),
+                    };
+                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                    code.push(0xc3);
+                    depth -= 1;
+                }
+                NumericValue::CatchStart => {
+                    let exception = tries.pop()?;
+                    if depth != exception.base_depth || exception.throws.is_empty() {
+                        return None;
+                    }
+                    let normal_exit = emit_unconditional_jump(&mut code);
+                    for jump in exception.throws {
+                        patch_near_jump(&mut code, jump)?;
+                    }
+                    catches.push((exception.base_depth, normal_exit));
+                    depth += if exception.tagged { 2 } else { 1 };
+                }
+                NumericValue::TryEnd => {
+                    let (base_depth, normal_exit) = catches.pop()?;
+                    if depth != base_depth {
+                        return None;
+                    }
+                    patch_near_jump(&mut code, normal_exit)?;
+                }
+                NumericValue::EarlyReturn => {
+                    let loop_patch = loops.last()?;
+                    if depth <= loop_patch.base_depth {
+                        return None;
+                    }
+                    emit_move(&mut code, 0, depth - 1);
+                    code.push(0xc3);
+                    depth -= 1;
+                }
                 NumericValue::MathRandom
                 | NumericValue::DateNow
                 | NumericValue::PerformanceNow
                 | NumericValue::ProcessPid
                 | NumericValue::ProcessPpid
+                | NumericValue::MissingCallable
                 | NumericValue::Absent => {
                     if depth > 7 {
                         return None;
@@ -5135,6 +5859,7 @@ impl NumericProgram {
                         NumericValue::PerformanceNow => performance_now,
                         NumericValue::ProcessPid => process_pid,
                         NumericValue::ProcessPpid => process_ppid,
+                        NumericValue::MissingCallable => missing_callable,
                         NumericValue::Absent => absent_value,
                         _ => unreachable!(),
                     };
@@ -5289,6 +6014,75 @@ impl NumericProgram {
                     };
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 3);
                     depth -= 2;
+                }
+                NumericValue::EmptyDictionary => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    emit_spill(&mut code, depth);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(empty_dictionary as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_move(&mut code, depth, 0);
+                    emit_restore(&mut code, depth);
+                    depth += 1;
+                }
+                NumericValue::DictionaryLength => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, dictionary_length as *const () as u64, depth - 1);
+                }
+                NumericValue::DictionaryKeyAt => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    emit_binary_call(&mut code, dictionary_key_at as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::DictionaryAppend(kind) => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    let function = match kind {
+                        0 => number_dictionary_set,
+                        1 => bool_dictionary_set,
+                        2 => string_dictionary_set,
+                        _ => return None,
+                    };
+                    let object = depth - 3;
+                    emit_spill(&mut code, depth);
+                    emit_move(&mut code, 0, object);
+                    emit_move(&mut code, 1, object + 1);
+                    emit_move(&mut code, 2, object + 2);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_restore(&mut code, depth);
+                    depth -= 2;
+                }
+                NumericValue::DictionaryStaticAppend(kind, key) => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    let function = match kind {
+                        0 => number_dictionary_set,
+                        1 => bool_dictionary_set,
+                        2 => string_dictionary_set,
+                        _ => return None,
+                    };
+                    let object = depth - 2;
+                    emit_spill(&mut code, depth);
+                    emit_move(&mut code, 0, object);
+                    emit_move(&mut code, 2, object + 1);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(*key as usize as u64).to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc8]);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&(function as *const () as u64).to_le_bytes());
+                    code.extend_from_slice(&[0xff, 0xd0]);
+                    emit_restore(&mut code, depth);
+                    depth -= 1;
                 }
                 NumericValue::NumberDictionaryPostSet => {
                     if depth < 4 {
@@ -5546,6 +6340,12 @@ impl NumericProgram {
                         return None;
                     }
                 }
+                NumericValue::BooleanNot => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(&mut code, boolean_not as *const () as u64, depth - 1);
+                }
                 NumericValue::StrictMismatch(result) => {
                     if depth < 2 {
                         return None;
@@ -5566,7 +6366,12 @@ impl NumericProgram {
                 }
             }
         }
-        (depth == 1 && branches.is_empty()).then(|| {
+        (depth == 1
+            && branches.is_empty()
+            && loops.is_empty()
+            && guards.is_empty()
+            && switches.is_empty())
+        .then(|| {
             code.push(0xc3);
             code
         })
@@ -5582,6 +6387,101 @@ impl NumericProgram {
             .max()
             .unwrap_or(0)
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+struct LoopPatch {
+    start: usize,
+    continue_target: Option<usize>,
+    base_depth: u8,
+    condition_exits: Vec<usize>,
+    continues: Vec<usize>,
+    breaks: Vec<usize>,
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+struct SwitchPatch {
+    base_depth: u8,
+    next_case: Vec<usize>,
+    fallthrough: Option<usize>,
+    breaks: Vec<usize>,
+    has_case: bool,
+    has_default: bool,
+    default_body: Option<usize>,
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+struct TryPatch {
+    base_depth: u8,
+    throws: Vec<usize>,
+    tagged: bool,
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn take_call_error() -> f64 {
+    let error = CALL_ERROR.with(|error| error.replace(ptr::null()));
+    f64::from_bits(error as usize as u64)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn uncaught_string_throw(value: f64) -> f64 {
+    CALL_ERROR.with(|error| error.set(value.to_bits() as usize as *const c_char));
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn uncaught_number_throw(value: f64) -> f64 {
+    let error = NUMBER_TO_STRING
+        .with(Cell::get)
+        .map(|format| unsafe { format(value) })
+        .unwrap_or_else(|| INVALID_SYMBOL.as_ptr().cast());
+    CALL_ERROR.with(|slot| slot.set(error));
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn uncaught_boolean_throw(value: f64) -> f64 {
+    let error = if value == 0.0 {
+        FALSE_THROW.as_ptr()
+    } else {
+        TRUE_THROW.as_ptr()
+    };
+    CALL_ERROR.with(|slot| slot.set(error.cast()));
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn uncaught_array_throw(value: f64, operation: u8) -> f64 {
+    let error = array_format(
+        operation,
+        value,
+        f64::from_bits(COMMA.as_ptr() as usize as u64),
+    );
+    if error != 0.0 {
+        CALL_ERROR.with(|slot| slot.set(error.to_bits() as usize as *const c_char));
+    }
+    0.0
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn uncaught_number_array_throw(value: f64) -> f64 {
+    uncaught_array_throw(value, 0)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn uncaught_string_array_throw(value: f64) -> f64 {
+    uncaught_array_throw(value, 1)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn uncaught_boolean_array_throw(value: f64) -> f64 {
+    uncaught_array_throw(value, 2)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn uncaught_dictionary_throw(_: f64) -> f64 {
+    CALL_ERROR.with(|slot| slot.set(OBJECT_THROW.as_ptr().cast()));
+    0.0
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -5647,8 +6547,23 @@ fn emit_unconditional_jump(code: &mut Vec<u8>) -> usize {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn emit_backward_jump(code: &mut Vec<u8>, target: usize) -> Option<()> {
+    code.push(0xe9);
+    let next = code.len().checked_add(4)?;
+    let distance = i32::try_from(target as isize - next as isize).ok()?;
+    code.extend_from_slice(&distance.to_le_bytes());
+    Some(())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn patch_near_jump(code: &mut [u8], displacement: usize) -> Option<()> {
-    let distance = i32::try_from(code.len().checked_sub(displacement + 4)?).ok()?;
+    patch_jump_to(code, displacement, code.len())
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn patch_jump_to(code: &mut [u8], displacement: usize, target: usize) -> Option<()> {
+    let next = displacement.checked_add(4)?;
+    let distance = i32::try_from(target as isize - next as isize).ok()?;
     code[displacement..displacement + 4].copy_from_slice(&distance.to_le_bytes());
     Some(())
 }
@@ -5768,14 +6683,17 @@ fn emit_compare(code: &mut Vec<u8>, left: u8, right: u8, operation: CompareOp) {
     code.extend_from_slice(&[0x0f, 0xb6, 0xc0, 0xf2, 0x0f, 0x2a, 0xc0 | (left << 3)]);
 }
 
-struct Code(*mut libc::c_void);
+struct Code {
+    memory: *mut libc::c_void,
+    globals: *const JitGlobals,
+}
 
 unsafe impl Send for Code {}
 unsafe impl Sync for Code {}
 
 impl Drop for Code {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.0, page_size()) };
+        unsafe { libc::munmap(self.memory, page_size()) };
     }
 }
 
@@ -5793,13 +6711,31 @@ fn cache() -> &'static Mutex<HashMap<String, Code>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn globals_cache() -> &'static Mutex<HashMap<String, Box<JitGlobals>>> {
+    static GLOBALS: OnceLock<Mutex<HashMap<String, Box<JitGlobals>>>> = OnceLock::new();
+    GLOBALS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn global_namespace(symbol: &str) -> &str {
+    if let Some((qualified, _)) = symbol.rsplit_once("::") {
+        return qualified
+            .rsplit_once(':')
+            .map_or(qualified, |(_, module)| module);
+    }
+    let label = symbol.rsplit_once(':').map_or(symbol, |(_, label)| label);
+    label
+}
+
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn compile(symbol: &str, program: &NumericProgram) -> Result<*mut libc::c_void, *const c_char> {
+fn compile(
+    symbol: &str,
+    program: &NumericProgram,
+) -> Result<(*mut libc::c_void, *const JitGlobals), *const c_char> {
     let mut cache = cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(code) = cache.get(symbol) {
-        return Ok(code.0);
+        return Ok((code.memory, code.globals));
     }
     let bytes = program
         .machine_code()
@@ -5825,12 +6761,34 @@ fn compile(symbol: &str, program: &NumericProgram) -> Result<*mut libc::c_void, 
             return Err(ALLOCATION_FAILED.as_ptr().cast());
         }
     }
-    cache.insert(symbol.to_owned(), Code(memory));
-    Ok(memory)
+    let globals_ptr = {
+        let mut globals = globals_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        globals
+            .entry(global_namespace(symbol).to_owned())
+            .or_insert_with(|| {
+                Box::new(JitGlobals {
+                    slots: std::array::from_fn(|_| OnceLock::new()),
+                })
+            })
+            .as_ref() as *const JitGlobals
+    };
+    cache.insert(
+        symbol.to_owned(),
+        Code {
+            memory,
+            globals: globals_ptr,
+        },
+    );
+    Ok((memory, globals_ptr))
 }
 
 #[cfg(not(all(target_arch = "x86_64", target_family = "unix")))]
-fn compile(_symbol: &str, _program: &NumericProgram) -> Result<*mut libc::c_void, *const c_char> {
+fn compile(
+    _symbol: &str,
+    _program: &NumericProgram,
+) -> Result<(*mut libc::c_void, *const JitGlobals), *const c_char> {
     Err(UNSUPPORTED_TARGET.as_ptr().cast())
 }
 
@@ -5909,8 +6867,8 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
             error: INVALID_SYMBOL.as_ptr().cast(),
         };
     }
-    let code = match compile(symbol, &program) {
-        Ok(code) => code,
+    let (code, globals) = match compile(symbol, &program) {
+        Ok(compiled) => compiled,
         Err(error) => return ThawJitResult { value: 0.0, error },
     };
     let function = std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code);
@@ -5957,12 +6915,14 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
     let previous_dictionary_query = DICTIONARY_QUERY.with(|query| query.replace(dictionary_query));
     let previous_error = CALL_ERROR.with(|error| error.replace(ptr::null()));
     let previous_present = CALL_PRESENT.with(|present| present.replace(true));
+    let previous_globals = JIT_GLOBALS.with(|slot| slot.replace(globals));
     let mut value = function(args);
     if program.returns_tagged_array() && value.to_bits() & ARRAY_RESULT_TAG != 0 {
         value = f64::from_bits(value.to_bits() & !ARRAY_RESULT_TAG);
     }
     let error = CALL_ERROR.with(|error| error.replace(previous_error));
     let present = CALL_PRESENT.with(|state| state.replace(previous_present));
+    JIT_GLOBALS.with(|slot| slot.set(previous_globals));
     ARENA_ALLOC.with(|allocator| allocator.set(previous_allocator));
     NUMBER_TO_STRING.with(|formatter| formatter.set(previous_formatter));
     STRING_TO_NUMBER.with(|parser| parser.set(previous_parser));
@@ -6097,8 +7057,11 @@ mod tests {
         ) -> *const c_char {
             assert_eq!(operation, 0);
             assert!(!array.is_null());
-            assert_eq!(unsafe { CStr::from_ptr(separator) }.to_bytes(), b"|");
-            c"10|20|30".as_ptr()
+            match unsafe { CStr::from_ptr(separator) }.to_bytes() {
+                b"|" => c"10|20|30".as_ptr(),
+                b"," => c"10,20,30".as_ptr(),
+                separator => panic!("unexpected separator {separator:?}"),
+            }
         }
         unsafe extern "C" fn normalize_string(
             value: *const c_char,
@@ -7510,6 +8473,32 @@ mod tests {
     }
 
     #[test]
+    fn persists_typed_globals_per_compiled_symbol() {
+        let first = CString::new(
+            "expr:c0000000000000000,c0000000000000000,globalget,c3ff0000000000000,+,globalset:first-global",
+        )
+        .unwrap();
+        assert_eq!(call(&first, &[]).value, 1.0);
+        assert_eq!(call(&first, &[]).value, 2.0);
+
+        let second = CString::new(
+            "expr:c0000000000000000,c0000000000000000,globalget,c3ff0000000000000,+,globalset:second-global",
+        )
+        .unwrap();
+        assert_eq!(call(&second, &[]).value, 1.0);
+
+        let writer = CString::new(
+            "expr:c0000000000000000,c0000000000000000,c4014000000000000,globalinit,c3ff0000000000000,+,globalset:shared::write",
+        )
+        .unwrap();
+        let reader =
+            CString::new("expr:c0000000000000000,c4014000000000000,globalinit:shared::read")
+                .unwrap();
+        assert_eq!(call(&writer, &[]).value, 6.0);
+        assert_eq!(call(&reader, &[]).value, 6.0);
+    }
+
+    #[test]
     fn converts_primitives_to_arena_strings() {
         for (symbol, argument, expected) in [
             ("expr:a0,numstr:number-string", 42.0, "42"),
@@ -7674,6 +8663,73 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "10|20|30"
+        );
+    }
+
+    #[test]
+    fn propagates_uncaught_typed_throws() {
+        for token in [
+            "missingcalln",
+            "missingcallb",
+            "missingcalls",
+            "missingcalla",
+            "missingcalld",
+        ] {
+            let result = call(
+                &CString::new(format!("expr:{token}:not-callable")).unwrap(),
+                &[],
+            );
+            assert_eq!(
+                unsafe { CStr::from_ptr(result.error) }.to_str().unwrap(),
+                "value is not a function"
+            );
+        }
+
+        for (symbol, expected) in [
+            (
+                "expr:c4045000000000000,throwoutn,c0000000000000000:number-throw",
+                "42",
+            ),
+            (
+                "expr:c3ff0000000000000,asbool,throwoutb,c0000000000000000:boolean-throw",
+                "true",
+            ),
+            (
+                "expr:t626f6f6d,throwouts,c0000000000000000:string-throw",
+                "boom",
+            ),
+        ] {
+            let result = call(&CString::new(symbol).unwrap(), &[]);
+            assert_eq!(
+                unsafe { CStr::from_ptr(result.error) }.to_str().unwrap(),
+                expected
+            );
+        }
+
+        let storage = [
+            3_u64,
+            10.0_f64.to_bits(),
+            20.0_f64.to_bits(),
+            30.0_f64.to_bits(),
+        ];
+        let data = storage.as_ptr().cast::<u8>();
+        let handle = &data as *const *const u8;
+        let result = call(
+            &CString::new("expr:rn0,throwoutrn,c0000000000000000:array-throw").unwrap(),
+            &[f64::from_bits(handle as usize as u64)],
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.error) }.to_str().unwrap(),
+            "10,20,30"
+        );
+
+        let result = call(
+            &CString::new("expr:dn0,throwoutd,c0000000000000000:dictionary-throw").unwrap(),
+            &[0.0],
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.error) }.to_str().unwrap(),
+            "[object Object]"
         );
     }
 }
