@@ -16,6 +16,8 @@ struct ResolvedPackage {
 
 enum JitExport {
     Value(String),
+    Null,
+    Undefined,
     Object(Vec<(String, JitExport)>),
     Dictionary(Vec<JitDictionaryEntry>),
     Tuple(Vec<JitExport>),
@@ -1562,6 +1564,49 @@ fn jit_export(
                 locals,
                 context,
             );
+        }
+        if let thaw_hir::HirType::Optional(payload)
+        | thaw_hir::HirType::Nullable(payload)
+        | thaw_hir::HirType::Nullish(payload) = ty
+        {
+            if matches!(expression, Expr::Lit(Lit::Null(_))) {
+                return matches!(ty, thaw_hir::HirType::Nullable(_) | thaw_hir::HirType::Nullish(_))
+                    .then_some(JitExport::Null);
+            }
+            if matches!(expression, Expr::Ident(identifier) if identifier.sym == "undefined") {
+                return matches!(ty, thaw_hir::HirType::Optional(_) | thaw_hir::HirType::Nullish(_))
+                    .then_some(JitExport::Undefined);
+            }
+            if let Expr::Cond(conditional) = expression {
+                let mut condition = Vec::new();
+                encode_condition(
+                    conditional.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut condition,
+                )?;
+                return Some(JitExport::Conditional(
+                    validated_jit_expression(condition, JitKind::Boolean)?,
+                    Box::new(encode_return_expression(
+                        conditional.cons.as_ref(),
+                        ty,
+                        parameters,
+                        locals,
+                        context,
+                    )?),
+                    Box::new(encode_return_expression(
+                        conditional.alt.as_ref(),
+                        ty,
+                        parameters,
+                        locals,
+                        context,
+                    )?),
+                ));
+            }
+            if matches!(payload.as_ref(), thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)) {
+                return encode_return_expression(expression, payload, parameters, locals, context);
+            }
         }
         if matches!(ty, thaw_hir::HirType::Union(elements) if elements.iter().any(|element| matches!(element, thaw_hir::HirType::Object(_))))
         {
@@ -12188,6 +12233,8 @@ fn jit_export(
                             | thaw_hir::HirType::Union(_)
                             | thaw_hir::HirType::Array(_)
                             | thaw_hir::HirType::Dictionary(_)
+                            | thaw_hir::HirType::Object(_)
+                            | thaw_hir::HirType::Tuple(_)
                     )
             }
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => {
@@ -13088,13 +13135,21 @@ fn jit_export(
     }
     if local_steps.is_empty() && !starts_loop {
         if let thaw_bridge::DtsType::Native(ty) = &function.ret {
+            let aggregate_wrapper = matches!(
+                ty,
+                thaw_hir::HirType::Optional(payload)
+                    | thaw_hir::HirType::Nullable(payload)
+                    | thaw_hir::HirType::Nullish(payload)
+                    if matches!(payload.as_ref(), thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_))
+            );
             if jit_result_supported(ty)
-                && !matches!(
-                    ty,
-                    thaw_hir::HirType::Optional(_)
-                        | thaw_hir::HirType::Nullable(_)
-                        | thaw_hir::HirType::Nullish(_)
-                )
+                && (aggregate_wrapper
+                    || !matches!(
+                        ty,
+                        thaw_hir::HirType::Optional(_)
+                            | thaw_hir::HirType::Nullable(_)
+                            | thaw_hir::HirType::Nullish(_)
+                    ))
             {
                 return encode_aggregate_body(body, ty, &parameters, &locals, &mut context);
             }
@@ -13153,6 +13208,8 @@ fn jit_numeric_export(
                 Some(result)
             }
             JitExport::Object(_)
+            | JitExport::Null
+            | JitExport::Undefined
             | JitExport::Dictionary(_)
             | JitExport::Tuple(_)
             | JitExport::WithLocals(_, _) => None,
@@ -13162,6 +13219,8 @@ fn jit_numeric_export(
     if matches!(
         export,
         JitExport::Object(_)
+            | JitExport::Null
+            | JitExport::Undefined
             | JitExport::Dictionary(_)
             | JitExport::Tuple(_)
             | JitExport::WithLocals(_, _)
@@ -15352,6 +15411,27 @@ fn jit_numeric_declaration(
         declaration: &mut String,
     ) -> String {
         match value {
+            JitExport::Null => return "null".into(),
+            JitExport::Undefined => return "undefined".into(),
+            JitExport::Conditional(_, _, _) => {}
+            _ => {
+                if let thaw_hir::HirType::Optional(payload)
+                | thaw_hir::HirType::Nullable(payload)
+                | thaw_hir::HirType::Nullish(payload) = ty
+                {
+                    return emit_aggregate_call(
+                        runtime_name,
+                        value,
+                        payload,
+                        path,
+                        direct_params,
+                        arguments,
+                        declaration,
+                    );
+                }
+            }
+        }
+        match value {
             JitExport::Value(operation) => {
                 let runtime_key = format!("{operation}:{runtime_name}:{}", path.join("."));
                 let symbol = encoded_symbol(&runtime_key);
@@ -15524,7 +15604,62 @@ fn jit_numeric_declaration(
                 format!("{symbol}({arguments}) ? {consequent} : {alternate}")
             }
             JitExport::WithLocals(_, _) => unreachable!(),
+            JitExport::Null | JitExport::Undefined => unreachable!(),
         }
+    }
+
+    fn emit_aggregate_return(
+        runtime_name: &str,
+        value: &JitExport,
+        ty: &thaw_hir::HirType,
+        path: &mut Vec<String>,
+        direct_params: &str,
+        arguments: &str,
+        declaration: &mut String,
+    ) -> String {
+        if let JitExport::Conditional(condition, consequent, alternate) = value {
+            let runtime_key = format!(
+                "{condition}:{runtime_name}:{}.condition",
+                path.join(".")
+            );
+            let symbol = encoded_symbol(&runtime_key);
+            declaration.push_str(&format!(
+                "declare function {symbol}({direct_params}): boolean;\n"
+            ));
+            return format!(
+                "if ({symbol}({arguments})) {{ {} }} else {{ {} }}",
+                emit_aggregate_return(
+                    runtime_name,
+                    consequent,
+                    ty,
+                    path,
+                    direct_params,
+                    arguments,
+                    declaration,
+                ),
+                emit_aggregate_return(
+                    runtime_name,
+                    alternate,
+                    ty,
+                    path,
+                    direct_params,
+                    arguments,
+                    declaration,
+                )
+            );
+        }
+        format!(
+            "return {};",
+            emit_aggregate_call(
+                runtime_name,
+                value,
+                ty,
+                path,
+                direct_params,
+                arguments,
+                declaration,
+            )
+        )
     }
 
     let params = declaration_params(function);
@@ -15541,6 +15676,8 @@ fn jit_numeric_declaration(
         .join(", ");
     let (jit_locals, aggregate) = match operation {
         JitExport::Object(_)
+        | JitExport::Null
+        | JitExport::Undefined
         | JitExport::Dictionary(_)
         | JitExport::Tuple(_)
         | JitExport::Conditional(_, _, _) => {
@@ -15553,6 +15690,8 @@ fn jit_numeric_declaration(
         || matches!(
             aggregate,
             JitExport::Object(_)
+            | JitExport::Null
+            | JitExport::Undefined
             | JitExport::Dictionary(_)
             | JitExport::Tuple(_)
             | JitExport::Conditional(_, _, _)
@@ -15590,7 +15729,7 @@ fn jit_numeric_declaration(
             leaf_params.push_str(&format!("{local_name}: {local_type}"));
             arguments.push_str(&local_name);
         }
-        let result = emit_aggregate_call(
+        let result = emit_aggregate_return(
             &runtime_name,
             aggregate,
             return_type,
@@ -15613,7 +15752,7 @@ fn jit_numeric_declaration(
             .collect::<Vec<_>>()
             .join(", ");
         declaration.push_str(&format!(
-            "function {wrapper}({wrapper_params}): {} {{ {local_statements}return {result}; }}\n",
+            "function {wrapper}({wrapper_params}): {} {{ {local_statements}{result} }}\n",
             render_dynamic_type(return_type).unwrap()
         ));
         return (wrapper, declaration);
