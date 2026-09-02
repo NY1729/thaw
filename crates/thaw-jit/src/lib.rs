@@ -6224,6 +6224,12 @@ impl NumericProgram {
                                 (2, offset)
                             } else if let Some(offset) = encoded.strip_prefix("rs") {
                                 (2, offset)
+                            } else if let Some(offset) = encoded.strip_prefix("dn") {
+                                (2, offset)
+                            } else if let Some(offset) = encoded.strip_prefix("db") {
+                                (2, offset)
+                            } else if let Some(offset) = encoded.strip_prefix("ds") {
+                                (2, offset)
                             } else {
                                 let (kind, offset) = encoded.split_at(1);
                                 (
