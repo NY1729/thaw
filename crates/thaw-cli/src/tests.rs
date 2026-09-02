@@ -4063,6 +4063,37 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &function,
     )
     .is_some());
+
+    let needle = thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
+        thaw_hir::HirType::F64,
+        thaw_hir::HirType::Str,
+        thaw_hir::HirType::Bool,
+    ]));
+    let search = thaw_bridge::DtsFunction {
+        name: "includes".into(),
+        params: vec![function.params[0].clone(), ("needle".into(), needle)],
+        required_params: 2,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool),
+        ..function
+    };
+    assert!(jit_numeric_export(
+        "function includes(value, needle) { if (Array.isArray(value)) return value.includes(needle); return false; } module.exports = { includes };",
+        "includes",
+        false,
+        &search,
+    )
+    .is_some());
+    for method in ["indexOf", "lastIndexOf"] {
+        let function = thaw_bridge::DtsFunction {
+            name: method.into(),
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ..search.clone()
+        };
+        let source = format!(
+            "function {method}(value, needle) {{ if (Array.isArray(value)) return value.{method}(needle); return -1; }} module.exports = {{ {method} }};"
+        );
+        assert!(jit_numeric_export(&source, method, false, &function).is_some());
+    }
 }
 
 #[test]
