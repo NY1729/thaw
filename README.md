@@ -2416,8 +2416,13 @@ its semantic tag and payload into the existing native union layout, including
 computed table calls, conditional expressions, mutable locals, statement-level
 `if`/`switch` returns, cross-type local assignments in control flow and loops,
 and chained `typeof` inspection/narrowing inside JIT expressions and loop branches,
-without embedding QuickJS. Other heterogeneous result mixtures still remain on
-the QuickJS path. Tagged primitive unions also use their runtime tag for direct
+without embedding QuickJS. Homogeneous primitive arrays and dictionaries can
+join those conditional results through the same tagged handle, including
+different array/dictionary element types and mixtures with primitive values.
+Mutable dynamic locals may be reassigned between these representable shapes;
+array results are converted to stable native handles before tagging. Other
+heterogeneous result mixtures still remain on the QuickJS path. Tagged
+primitive unions also use their runtime tag for direct
 JavaScript truthiness in conditions, unary `!`, and value-preserving `&&`/`||`.
 `String(value)` and `Number(value)` dispatch over the same number/boolean/string
 tag without returning to QuickJS. Binary `+` selects numeric addition or string
