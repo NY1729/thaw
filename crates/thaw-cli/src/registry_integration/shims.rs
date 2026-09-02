@@ -6813,6 +6813,84 @@ fn jit_export(
         }
     }
 
+    fn destructuring_property_name(property: &PropName) -> Option<String> {
+        match property {
+            PropName::Ident(name) => Some(name.sym.to_string()),
+            PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
+            PropName::Computed(name) => match name.expr.as_ref() {
+                Expr::Lit(Lit::Str(name)) => Some(name.value.to_string_lossy().into_owned()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn collect_fixed_object_bindings<'a>(
+        pattern: &'a Pat,
+        path: &str,
+        bindings: &mut Vec<(String, &'a Ident, Option<&'a Expr>)>,
+    ) -> Option<()> {
+        match pattern {
+            Pat::Ident(name) => bindings.push((path.into(), &name.id, None)),
+            Pat::Assign(assignment) => {
+                let Pat::Ident(name) = assignment.left.as_ref() else {
+                    return None;
+                };
+                bindings.push((
+                    path.into(),
+                    &name.id,
+                    Some(assignment.right.as_ref()),
+                ));
+            }
+            Pat::Object(pattern) => {
+                collect_fixed_object_pattern(pattern, path, bindings)?;
+            }
+            Pat::Array(pattern) => {
+                for (index, element) in pattern.elems.iter().enumerate() {
+                    let Some(element) = element else {
+                        continue;
+                    };
+                    if matches!(element, Pat::Rest(_)) {
+                        return None;
+                    }
+                    collect_fixed_object_bindings(
+                        element,
+                        &format!("{path}.{index}"),
+                        bindings,
+                    )?;
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    fn collect_fixed_object_pattern<'a>(
+        pattern: &'a thaw_parser::ast::ObjectPat,
+        path: &str,
+        bindings: &mut Vec<(String, &'a Ident, Option<&'a Expr>)>,
+    ) -> Option<()> {
+        for property in &pattern.props {
+            match property {
+                ObjectPatProp::Assign(property) => bindings.push((
+                    format!("{path}.{}", property.key.sym),
+                    &property.key.id,
+                    property.value.as_deref(),
+                )),
+                ObjectPatProp::KeyValue(property) => collect_fixed_object_bindings(
+                    property.value.as_ref(),
+                    &format!(
+                        "{path}.{}",
+                        destructuring_property_name(&property.key)?
+                    ),
+                    bindings,
+                )?,
+                ObjectPatProp::Rest(_) => return None,
+            }
+        }
+        Some(())
+    }
+
     fn split_numeric_body(statements: &[Stmt]) -> Option<(Vec<LocalStep<'_>>, NumericBody<'_>)> {
         type ArrayBindings<'a> = (
             Vec<(usize, &'a Ident, Option<&'a Expr>)>,
@@ -6850,79 +6928,6 @@ fn jit_export(
             (!bindings.is_empty() || rest.is_some()).then_some((bindings, rest))
         }
 
-        fn property_name(property: &PropName) -> Option<String> {
-            match property {
-                PropName::Ident(name) => Some(name.sym.to_string()),
-                PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
-                PropName::Computed(name) => match name.expr.as_ref() {
-                    Expr::Lit(Lit::Str(name)) => Some(name.value.to_string_lossy().into_owned()),
-                    _ => None,
-                },
-                _ => None,
-            }
-        }
-
-        fn collect_object_bindings<'a>(
-            pattern: &'a Pat,
-            path: &str,
-            bindings: &mut Vec<(String, &'a Ident, Option<&'a Expr>)>,
-        ) -> Option<()> {
-            match pattern {
-                Pat::Ident(name) => bindings.push((path.into(), &name.id, None)),
-                Pat::Assign(assignment) => {
-                    let Pat::Ident(name) = assignment.left.as_ref() else {
-                        return None;
-                    };
-                    bindings.push((
-                        path.into(),
-                        &name.id,
-                        Some(assignment.right.as_ref()),
-                    ));
-                }
-                Pat::Object(pattern) => collect_object_pattern(pattern, path, bindings)?,
-                Pat::Array(pattern) => {
-                    for (index, element) in pattern.elems.iter().enumerate() {
-                        let Some(element) = element else {
-                            continue;
-                        };
-                        if matches!(element, Pat::Rest(_)) {
-                            return None;
-                        }
-                        collect_object_bindings(
-                            element,
-                            &format!("{path}.{index}"),
-                            bindings,
-                        )?;
-                    }
-                }
-                _ => return None,
-            }
-            Some(())
-        }
-
-        fn collect_object_pattern<'a>(
-            pattern: &'a thaw_parser::ast::ObjectPat,
-            path: &str,
-            bindings: &mut Vec<(String, &'a Ident, Option<&'a Expr>)>,
-        ) -> Option<()> {
-            for property in &pattern.props {
-                match property {
-                    ObjectPatProp::Assign(property) => bindings.push((
-                        format!("{path}.{}", property.key.sym),
-                        &property.key.id,
-                        property.value.as_deref(),
-                    )),
-                    ObjectPatProp::KeyValue(property) => collect_object_bindings(
-                        property.value.as_ref(),
-                        &format!("{path}.{}", property_name(&property.key)?),
-                        bindings,
-                    )?,
-                    ObjectPatProp::Rest(_) => return None,
-                }
-            }
-            Some(())
-        }
-
         let mut steps = Vec::new();
         let mut offset = 0;
         loop {
@@ -6947,7 +6952,7 @@ fn jit_export(
                             }
                             Pat::Object(_) => {
                                 let mut bindings = Vec::new();
-                                collect_object_bindings(
+                                collect_fixed_object_bindings(
                                     &declarator.name,
                                     "",
                                     &mut bindings,
@@ -6997,7 +7002,7 @@ fn jit_export(
                                 if assignment.op == AssignOp::Assign =>
                             {
                                 let mut bindings = Vec::new();
-                                collect_object_pattern(pattern, "", &mut bindings)?;
+                                collect_fixed_object_pattern(pattern, "", &mut bindings)?;
                                 if bindings.is_empty() {
                                     return None;
                                 }
@@ -8554,6 +8559,72 @@ fn jit_export(
                         output.push(format!("setl{}", loop_local_index(local)?));
                     }
                     output.push("drop".into());
+                    return Some(());
+                }
+                if let AssignTarget::Pat(thaw_parser::ast::AssignTargetPat::Object(pattern)) =
+                    &assignment.left
+                {
+                    if assignment.op != AssignOp::Assign {
+                        return None;
+                    }
+                    let base = member_path(assignment.right.as_ref())?;
+                    let mut bindings = Vec::new();
+                    collect_fixed_object_pattern(pattern, "", &mut bindings)?;
+                    if bindings.is_empty() {
+                        return None;
+                    }
+                    for (path, name, default) in bindings {
+                        if !mutable.contains(name.sym.as_ref()) {
+                            return None;
+                        }
+                        let target_kind = *kinds.get(name.sym.as_ref())?;
+                        let local = locals.get(name.sym.as_ref())?.first()?;
+                        let path = format!("{base}{path}");
+                        let mut value = locals
+                            .get(&path)
+                            .cloned()
+                            .or_else(|| parameters.get(&path).map(|value| vec![value.clone()]))?;
+                        let value_kind = jit_expression_kind(&value)?.0;
+                        if value_kind != target_kind {
+                            return None;
+                        }
+                        if let Some(default) = default {
+                            let mut fallback = Vec::new();
+                            encode_expression(
+                                default,
+                                parameters,
+                                locals,
+                                context,
+                                &mut fallback,
+                            )?;
+                            if target_kind == JitKind::Boolean {
+                                let mut boolean = Vec::new();
+                                append_boolean(fallback, &mut boolean)?;
+                                fallback = boolean;
+                            }
+                            if jit_expression_kind(&fallback)?.0 != target_kind {
+                                return None;
+                            }
+                            value.push("ifpresent".into());
+                            value.push("else".into());
+                            value.extend(fallback);
+                            value.push("end".into());
+                        }
+                        output.extend(value);
+                        if target_kind == JitKind::Array {
+                            if array_prefix(
+                                parameters
+                                    .get(&path)
+                                    .map(std::slice::from_ref)
+                                    .or_else(|| locals.get(&path).map(Vec::as_slice))?,
+                            )? != local.get(..2)?
+                            {
+                                return None;
+                            }
+                            output.push("arrayhandle".into());
+                        }
+                        output.push(format!("setl{}", loop_local_index(local)?));
+                    }
                     return Some(());
                 }
                 let AssignTarget::Simple(SimpleAssignTarget::Ident(name)) = &assignment.left else {
