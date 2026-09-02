@@ -6577,7 +6577,7 @@ fn jit_export(
             mutable: bool,
         },
         DestructureArray {
-            bindings: Vec<(usize, &'a Ident)>,
+            bindings: Vec<(usize, &'a Ident, Option<&'a Expr>)>,
             initializer: &'a Expr,
             mutable: bool,
         },
@@ -6797,7 +6797,18 @@ fn jit_export(
                                     .enumerate()
                                     .filter_map(|(index, element)| {
                                         element.as_ref().map(|element| match element {
-                                            Pat::Ident(name) => Some((index, &name.id)),
+                                            Pat::Ident(name) => Some((index, &name.id, None)),
+                                            Pat::Assign(assignment) => {
+                                                let Pat::Ident(name) = assignment.left.as_ref()
+                                                else {
+                                                    return None;
+                                                };
+                                                Some((
+                                                    index,
+                                                    &name.id,
+                                                    Some(assignment.right.as_ref()),
+                                                ))
+                                            }
                                             _ => None,
                                         })
                                     })
@@ -9488,7 +9499,7 @@ fn jit_export(
                         "rs" => "rsl",
                         _ => return None,
                     };
-                    if bindings.iter().any(|(_, name)| {
+                    if bindings.iter().any(|(_, name, _)| {
                         parameters.contains_key(name.sym.as_ref())
                             || locals.contains_key(name.sym.as_ref())
                     }) {
@@ -9503,10 +9514,33 @@ fn jit_export(
                     );
                     runtime_locals = runtime_kinds.len();
                     let source_local = format!("{local_prefix}{source_index}");
-                    for (index, name) in bindings {
+                    for (index, name, default) in bindings {
                         let mut value = vec![source_local.clone()];
                         value.push(format!("c{:016x}", (index as f64).to_bits()));
                         value.push(format!("{prefix}get"));
+                        if let Some(default) = default {
+                            let value_kind = jit_expression_kind(&value)?.0;
+                            let mut fallback = Vec::new();
+                            encode_expression(
+                                default,
+                                parameters,
+                                &locals,
+                                context,
+                                &mut fallback,
+                            )?;
+                            if value_kind == JitKind::Boolean {
+                                let mut boolean = Vec::new();
+                                append_boolean(fallback, &mut boolean)?;
+                                fallback = boolean;
+                            }
+                            if jit_expression_kind(&fallback)?.0 != value_kind {
+                                return None;
+                            }
+                            value.push("ifpresent".into());
+                            value.push("else".into());
+                            value.extend(fallback);
+                            value.push("end".into());
+                        }
                         locals.insert(name.sym.to_string(), value);
                         if is_mutable {
                             mutable.insert(name.sym.to_string());
