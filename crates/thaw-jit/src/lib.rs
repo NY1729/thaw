@@ -9033,6 +9033,12 @@ impl NumericProgram {
                     exits: Vec::new(),
                 }),
                 NumericValue::ResultReturn(count) => {
+                    let continuation_depth = loops
+                        .last()
+                        .map(|loop_patch| loop_patch.base_depth)
+                        .into_iter()
+                        .chain(guards.last().map(|guard| guard.0))
+                        .max();
                     let result = results.last_mut()?;
                     if depth <= result.base_depth {
                         return None;
@@ -9057,7 +9063,9 @@ impl NumericProgram {
                         emit_move(&mut code, result.base_depth + offset, source + offset);
                     }
                     result.exits.push(emit_unconditional_jump(&mut code));
-                    depth = result.base_depth;
+                    depth = continuation_depth
+                        .unwrap_or(result.base_depth)
+                        .max(result.base_depth);
                 }
                 NumericValue::ResultEnd => {
                     let result = results.pop()?;
@@ -10841,6 +10849,16 @@ mod tests {
         .unwrap();
         for (early, expected) in [(0.0, 70.0), (1.0, 30.0)] {
             let result = call(&early_values, &[early]);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
+
+        let nested_loop_values = CString::new(format!(
+            "expr:{zero},resultstart,{zero},loop,ln1,{one},<,while,a0,asbool,guard,{ten},{twenty},resultreturn2,guardend,looptail,ln1,{one},+,setl1,loopend,drop,{thirty},{forty},resultend,+,nip:nested-loop-early-multiple"
+        ))
+        .unwrap();
+        for (early, expected) in [(0.0, 70.0), (1.0, 30.0)] {
+            let result = call(&nested_loop_values, &[early]);
             assert!(result.error.is_null());
             assert_eq!(result.value, expected);
         }
