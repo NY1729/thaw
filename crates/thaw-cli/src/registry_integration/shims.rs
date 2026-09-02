@@ -2826,6 +2826,8 @@ fn jit_export(
                             | "lastIndexOf"
                             | "toReversed"
                             | "reverse"
+                            | "toSorted"
+                            | "sort"
                     )
                 {
                     return None;
@@ -3302,7 +3304,11 @@ fn jit_export(
                 } else if matches!(method, "toSorted" | "sort") {
                     let suffix = if method == "sort" { "sort" } else { "sorted" };
                     match call.args.as_slice() {
-                        [] => output.push(format!("{prefix}{suffix}")),
+                        [] => output.push(if dynamic_array {
+                            format!("dynarray{suffix}")
+                        } else {
+                            format!("{prefix}{suffix}")
+                        }),
                         [callback] if callback.spread.is_none() && prefix == "rn" => output.push(
                             format!(
                                 "rn{suffix}{}",
@@ -12298,6 +12304,8 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "arrayreverse"
                 | "dynarrayreversed"
                 | "dynarrayreverse"
+                | "dynarraysorted"
+                | "dynarraysort"
                 | "rnsorted"
                 | "rssorted"
                 | "rbsorted"

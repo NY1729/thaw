@@ -4064,7 +4064,7 @@ fn jit_copies_a_narrowed_mixed_array_union() {
     )
     .is_some());
 
-    for method in ["toReversed", "reverse"] {
+    for method in ["toReversed", "reverse", "toSorted", "sort"] {
         let reversed = thaw_bridge::DtsFunction {
             name: method.into(),
             ret: function.params[0].1.clone(),
