@@ -4198,16 +4198,16 @@ fn jit_export(
             .bytes()
             .filter(|kind| matches!(kind, b'N' | b'B' | b'S'))
             .collect::<Vec<_>>();
-        if not_array || arrays.len() != 1 {
+        if not_array || arrays.is_empty() {
             return None;
         }
         let mut array_value = source.clone();
         array_value.push(
-            match arrays[0] {
-                b'N' => "untagrn",
-                b'B' => "untagrb",
-                b'S' => "untagrs",
-                _ => unreachable!(),
+            match arrays.as_slice() {
+                [b'N'] => "untagrn",
+                [b'B'] => "untagrb",
+                [b'S'] => "untagrs",
+                _ => "untagarray",
             }
             .into(),
         );
@@ -12438,6 +12438,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "untagrn"
                 | "untagrb"
                 | "untagrs"
+                | "untagarray"
                 | "untagdn"
                 | "untagdb"
                 | "untagds"
@@ -12449,7 +12450,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "untagnum" => JitKind::Number,
                 "untagbool" => JitKind::Boolean,
                 "untagstr" => JitKind::String,
-                "untagrn" | "untagrb" | "untagrs" => JitKind::Array,
+                "untagrn" | "untagrb" | "untagrs" | "untagarray" => JitKind::Array,
                 _ => JitKind::Dictionary,
             });
         } else if matches!(
