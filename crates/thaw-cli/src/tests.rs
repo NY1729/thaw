@@ -4332,6 +4332,55 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         &identity,
     )
     .is_some());
+    for (name, callback, element) in [
+        ("mapNumber", "item => Number(item)", thaw_hir::HirType::F64),
+        ("mapBoolean", "item => !!item", thaw_hir::HirType::Bool),
+        (
+            "mapString",
+            "(item, index) => String(item) + ':' + String(index)",
+            thaw_hir::HirType::Str,
+        ),
+        (
+            "mapWithArray",
+            "(item, index, values) => Number(item) + index + values.length",
+            thaw_hir::HirType::F64,
+        ),
+    ] {
+        let map = thaw_bridge::DtsFunction {
+            name: name.into(),
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(element))),
+            ..function.clone()
+        };
+        let source = format!(
+            "function {name}(value) {{ if (Array.isArray(value)) return value.map({callback}); return []; }} module.exports = {{ {name} }};"
+        );
+        assert!(
+            jit_numeric_export(&source, name, false, &map).is_some(),
+            "{name}"
+        );
+    }
+    let captured_map = thaw_bridge::DtsFunction {
+        name: "mapCaptured".into(),
+        params: vec![
+            function.params[0].clone(),
+            (
+                "offset".into(),
+                thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            ),
+        ],
+        required_params: 2,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(Box::new(
+            thaw_hir::HirType::F64,
+        ))),
+        ..function.clone()
+    };
+    assert!(jit_numeric_export(
+        "function mapCaptured(value, offset) { if (Array.isArray(value)) return value.map(item => Number(item) + offset); return []; } module.exports = { mapCaptured };",
+        "mapCaptured",
+        false,
+        &captured_map,
+    )
+    .is_some());
     let search = thaw_bridge::DtsFunction {
         name: "includes".into(),
         params: vec![function.params[0].clone(), ("needle".into(), needle)],

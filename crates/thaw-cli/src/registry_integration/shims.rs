@@ -1379,7 +1379,9 @@ fn jit_export(
         };
         if !parameters
             .get(receiver.sym.as_ref())
-            .is_some_and(|token| token.starts_with('r'))
+            .is_some_and(|token| {
+                token.starts_with('r') || jit_dynamic_array_argument(token)
+            })
             && locals
                 .get(receiver.sym.as_ref())
                 .and_then(|tokens| jit_expression_kind(tokens))
@@ -2051,6 +2053,9 @@ fn jit_export(
                         &mut receiver,
                     )
                     .is_some();
+                    if receiver.len() == 1 && jit_dynamic_array_argument(&receiver[0]) {
+                        receiver.push("untagarray".into());
+                    }
                     if encoded_receiver
                         && jit_expression_kind(&receiver)?.0 == JitKind::Dictionary
                     {
@@ -2818,6 +2823,9 @@ fn jit_export(
                 let (method, receiver) = array_method(call, parameters, locals)?;
                 let mut encoded = Vec::new();
                 encode_expression(receiver, parameters, locals, context, &mut encoded)?;
+                if encoded.len() == 1 && jit_dynamic_array_argument(&encoded[0]) {
+                    encoded.push("untagarray".into());
+                }
                 if jit_expression_kind(&encoded)?.0 != JitKind::Array {
                     return None;
                 }
@@ -2921,7 +2929,7 @@ fn jit_export(
                             context,
                             4,
                             Some(3),
-                            ("a", "rn"),
+                            ("a", "rn", false),
                         )?;
                         if kind != JitKind::Number {
                             return None;
@@ -2977,7 +2985,7 @@ fn jit_export(
                                 context,
                                 3,
                                 Some(2),
-                                (element_prefix, prefix),
+                                (element_prefix, prefix, dynamic_array),
                             )?;
                             let target = match kind {
                                 JitKind::Number => "n",
@@ -2992,7 +3000,8 @@ fn jit_export(
                                 append_jit_captures(captures, output);
                             }
                             output.push(format!(
-                                "{prefix}mapjit{target}{}",
+                                "{}mapjit{target}{}",
+                                if dynamic_array { "dynarray" } else { prefix },
                                 if captured { "c" } else { "" }
                             ));
                         }
@@ -3040,7 +3049,7 @@ fn jit_export(
                                 context,
                                 3,
                                 Some(2),
-                                ("a", "rn"),
+                                ("a", "rn", false),
                             )?;
                             if kind != JitKind::Number {
                                 return None;
@@ -3132,7 +3141,7 @@ fn jit_export(
                                 context,
                                 3,
                                 Some(2),
-                                (element_prefix, prefix),
+                                (element_prefix, prefix, false),
                             )?;
                             if !matches!(kind, JitKind::Number | JitKind::Boolean) {
                                 return None;
@@ -8804,8 +8813,9 @@ fn jit_export(
         context: &mut InlineContext<'_>,
         max_parameters: usize,
         array_parameter: Option<usize>,
-        callback_prefixes: (&str, &str),
+        callback_abi: (&str, &str, bool),
     ) -> Option<(Vec<String>, JitKind, Vec<Vec<String>>)> {
+        let (element_prefix, array_parameter_prefix, dynamic_array) = callback_abi;
         if matches!(expression, Expr::Ident(identifier)
             if outer_parameters.contains_key(identifier.sym.as_ref())
                 || outer_locals.contains_key(identifier.sym.as_ref()))
@@ -8825,17 +8835,26 @@ fn jit_export(
             if callback_parameters
                 .insert(
                     parameter.id.sym.to_string(),
-                    format!(
-                        "{}{}",
-                        if array_parameter == Some(index) {
-                            callback_prefixes.1
-                        } else if index == 0 {
-                            callback_prefixes.0
-                        } else {
-                            "a"
-                        },
-                        index
-                    ),
+                    if dynamic_array {
+                        match index {
+                            0 => "u0nbs".into(),
+                            1 => "a2".into(),
+                            2 => "u3NBS".into(),
+                            _ => return None,
+                        }
+                    } else {
+                        format!(
+                            "{}{}",
+                            if array_parameter == Some(index) {
+                                array_parameter_prefix
+                            } else if index == 0 {
+                                element_prefix
+                            } else {
+                                "a"
+                            },
+                            index
+                        )
+                    },
                 )
                 .is_some()
             {
@@ -8854,7 +8873,16 @@ fn jit_export(
             )
             .collect::<Vec<_>>();
         captures.sort_by(|left, right| left.0.cmp(&right.0));
-        if max_parameters + captures.len() > 16 {
+        if dynamic_array {
+            captures.retain(|(_, tokens)| {
+                jit_expression_kind(tokens).is_some_and(|(kind, _)| {
+                    kind != JitKind::Dynamic
+                        && (kind != JitKind::Array || array_prefix(tokens).is_some())
+                })
+            });
+        }
+        let capture_offset = if dynamic_array { 5 } else { max_parameters };
+        if capture_offset + captures.len() > 16 {
             return None;
         }
         let mut callback_locals = context.module_locals.clone();
@@ -8868,7 +8896,7 @@ fn jit_export(
                 JitKind::Array => array_prefix(tokens)?,
                 JitKind::Dictionary => dictionary_prefix(tokens)?,
             };
-            let token = format!("{prefix}{}", max_parameters + offset);
+            let token = format!("{prefix}{}", capture_offset + offset);
             capture_tokens.push(token.clone());
             if outer_parameters.contains_key(name) {
                 callback_parameters.insert(name.clone(), token);
@@ -8889,7 +8917,7 @@ fn jit_export(
         for ((_, capture), token) in captures.into_iter().zip(capture_tokens) {
             if encoded.iter().any(|encoded| encoded == &token) {
                 let prefix = token.trim_end_matches(|character: char| character.is_ascii_digit());
-                let replacement = format!("{prefix}{}", max_parameters + selected_captures.len());
+                let replacement = format!("{prefix}{}", capture_offset + selected_captures.len());
                 for encoded in &mut encoded {
                     if encoded == &token {
                         *encoded = replacement.clone();
@@ -11346,6 +11374,12 @@ fn jit_dynamic_argument(token: &str) -> Option<(usize, &str)> {
     Some((index.parse().ok()?, kinds))
 }
 
+fn jit_dynamic_array_argument(token: &str) -> bool {
+    jit_dynamic_argument(token).is_some_and(|(_, kinds)| {
+        kinds.bytes().all(|kind| matches!(kind, b'N' | b'B' | b'S'))
+    })
+}
+
 fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
     if left == right {
         Some(left)
@@ -11715,6 +11749,18 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Dynamic);
+        } else if token
+            .strip_prefix("dynarraymapjit")
+            .is_some_and(|target| matches!(target, "n" | "b" | "s" | "nc" | "bc" | "sc"))
+        {
+            let captured = token.ends_with('c');
+            if captured && stack.pop()? != JitKind::Array {
+                return None;
+            }
+            if stack.pop()? != JitKind::String || stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if matches!(
             token.as_str(),
             "throwoutn"
