@@ -336,6 +336,19 @@ fn jit_export(
                     thaw_hir::HirType::Bool => "rbget",
                     thaw_hir::HirType::Str => "rsget",
                     thaw_hir::HirType::Tuple(_) => "raget",
+                    thaw_hir::HirType::Object(_) => "roget",
+                    thaw_hir::HirType::Array(element) => match element.as_ref() {
+                        thaw_hir::HirType::F64 => "ragetrn",
+                        thaw_hir::HirType::Bool => "ragetrb",
+                        thaw_hir::HirType::Str => "ragetrs",
+                        _ => return None,
+                    },
+                    thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                        thaw_hir::HirType::F64 => "rogetdn",
+                        thaw_hir::HirType::Bool => "rogetdb",
+                        thaw_hir::HirType::Str => "rogetds",
+                        _ => return None,
+                    },
                     _ => return None,
                 };
                 let element_path = format!("{path}.{index}");
@@ -345,6 +358,8 @@ fn jit_export(
                 locals.insert(element_path.clone(), value.clone());
                 if let thaw_hir::HirType::Tuple(types) = element {
                     bind_tuple(&element_path, types, &value, locals)?;
+                } else if let thaw_hir::HirType::Object(fields) = element {
+                    bind_fields(&element_path, fields, &value, locals)?;
                 }
             }
             Some(())
@@ -607,6 +622,54 @@ fn jit_export(
                     )?,
                     'p',
                 ),
+                thaw_hir::HirType::Object(fields) => (
+                    encode_fixed_object_value(
+                        object_literal(element.expr.as_ref())?,
+                        fields,
+                        parameters,
+                        locals,
+                        context,
+                    )?,
+                    'o',
+                ),
+                thaw_hir::HirType::Array(element_type)
+                    if jit_array_result_element_supported(element_type) =>
+                {
+                    let mut value = Vec::new();
+                    encode_expression(
+                        element.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut value,
+                    )?;
+                    if jit_expression_kind(&value)?.0 != JitKind::Array {
+                        return None;
+                    }
+                    value.push("arrayhandle".into());
+                    (value, 'p')
+                }
+                thaw_hir::HirType::Dictionary(element_type)
+                    if matches!(
+                        element_type.as_ref(),
+                        thaw_hir::HirType::F64
+                            | thaw_hir::HirType::Bool
+                            | thaw_hir::HirType::Str
+                    ) =>
+                {
+                    let mut value = Vec::new();
+                    encode_expression(
+                        element.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut value,
+                    )?;
+                    if jit_expression_kind(&value)?.0 != JitKind::Dictionary {
+                        return None;
+                    }
+                    (value, 'o')
+                }
                 _ => {
                     let mut value = Vec::new();
                     encode_expression(
@@ -11881,6 +11944,15 @@ fn array_prefix(expression: &[String]) -> Option<&'static str> {
                 return Some(prefix);
             }
         }
+        for (field, prefix) in [
+            ("ragetrn", "rn"),
+            ("ragetrb", "rb"),
+            ("ragetrs", "rs"),
+        ] {
+            if token == field {
+                return Some(prefix);
+            }
+        }
         ["rn", "rb", "rs"]
             .into_iter()
             .find(|prefix| token.starts_with(prefix))
@@ -11897,6 +11969,15 @@ fn dictionary_prefix(expression: &[String]) -> Option<&'static str> {
         }
         for (field, prefix) in [("objdn", "dn"), ("objdb", "db"), ("objds", "ds")] {
             if token.starts_with(field) {
+                return Some(prefix);
+            }
+        }
+        for (field, prefix) in [
+            ("rogetdn", "dn"),
+            ("rogetdb", "db"),
+            ("rogetds", "ds"),
+        ] {
+            if token == field {
                 return Some(prefix);
             }
         }
@@ -11982,6 +12063,13 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
             | "rbget"
             | "rsget"
             | "raget"
+            | "roget"
+            | "ragetrn"
+            | "ragetrb"
+            | "ragetrs"
+            | "rogetdn"
+            | "rogetdb"
+            | "rogetds"
             | "rnpop"
             | "rspop"
             | "rbpop"
@@ -13333,6 +13421,13 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 | "rbget"
                 | "rsget"
                 | "raget"
+                | "roget"
+                | "ragetrn"
+                | "ragetrb"
+                | "ragetrs"
+                | "rogetdn"
+                | "rogetdb"
+                | "rogetds"
         ) {
             if stack.pop()? != JitKind::Number
                 || stack.pop()?
@@ -13349,6 +13444,9 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 "rbat" | "rbget" => JitKind::Boolean,
                 "rsat" | "rsget" => JitKind::String,
                 "raget" => JitKind::Array,
+                "roget" => JitKind::Dictionary,
+                "ragetrn" | "ragetrb" | "ragetrs" => JitKind::Array,
+                "rogetdn" | "rogetdb" | "rogetds" => JitKind::Dictionary,
                 "dynarrayat" => JitKind::Dynamic,
                 _ => unreachable!(),
             });
@@ -13489,6 +13587,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                     "b" => matches!(value, JitKind::Number | JitKind::Boolean),
                     "s" => value == JitKind::String,
                     "p" => value == JitKind::Array,
+                    "o" => value == JitKind::Dictionary,
                     _ => return None,
                 }
             {
