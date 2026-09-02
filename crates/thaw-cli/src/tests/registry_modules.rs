@@ -1955,6 +1955,8 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "export declare function assignPair(value: number[] | [number, number]): number;\n",
         "export declare function assignDefaults(value: number[] | [number, number]): number;\n",
         "export declare function assignDuplicate(value: number[] | [number, number]): number;\n",
+        "export declare function assignControl(value: number[] | [number, number], flag: boolean): number;\n",
+        "export declare function assignRestControl(value: number[] | [number, number], flag: boolean): number;\n",
     );
     let source = concat!(
         "module.exports.numberPair = value => { const [first, second] = value; return first * 10 + second; }; ",
@@ -1974,7 +1976,9 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "module.exports.chainedSplice = value => value.splice(0, 2).join('-') + ':' + value.join('-'); ",
         "module.exports.assignPair = value => { let first = 0; let second = 0; [first, second] = value.splice(0, 2); return first * 100 + second * 10; }; ",
         "module.exports.assignDefaults = value => { let first = 1; let second = 2; [first = 7, second = first + 1] = value; return first * 10 + second; }; ",
-        "module.exports.assignDuplicate = value => { let selected = 0; [selected, selected] = value; return selected; };",
+        "module.exports.assignDuplicate = value => { let selected = 0; [selected, selected] = value; return selected; }; ",
+        "module.exports.assignControl = (value, flag) => { let first = 0; let second = 0; [first, second] = value; if (flag) first += 1; return first * 10 + second; }; ",
+        "module.exports.assignRestControl = (value, flag) => { let first = 0; let rest = value.slice(0, 0); [first, ...rest] = value; if (flag) rest.push(9); return first * 100 + rest.length * 10 + rest.at(-1); };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -1996,6 +2000,8 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "assignPair",
         "assignDefaults",
         "assignDuplicate",
+        "assignControl",
+        "assignRestControl",
     ]
     .into_iter()
     .enumerate()
@@ -2019,7 +2025,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     std::fs::write(
         &entry,
         concat!(
-            "import { assignDefaults, assignDuplicate, assignPair, booleanDefaults, booleanPair, chainedCopy, chainedSplice, joined, lazyDefault, numberDefaults, numberPair, numberRest, restCopy, reversedPair, splicePair, stringDefaults, stringEnds, stringRest } from 'jit-tuple-union-destructuring';\n",
+            "import { assignControl, assignDefaults, assignDuplicate, assignPair, assignRestControl, booleanDefaults, booleanPair, chainedCopy, chainedSplice, joined, lazyDefault, numberDefaults, numberPair, numberRest, restCopy, reversedPair, splicePair, stringDefaults, stringEnds, stringRest } from 'jit-tuple-union-destructuring';\n",
             "function main(): void {\n",
             "  console.log(numberPair([1, 2, 3]));\n",
             "  console.log(numberPair([5, 6] as [number, number]));\n",
@@ -2053,6 +2059,10 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
             "  console.log(assignDefaults([]));\n",
             "  console.log(assignDefaults([3]));\n",
             "  console.log(assignDuplicate([4, 9]));\n",
+            "  console.log(assignControl([1, 2], false));\n",
+            "  console.log(assignControl([5, 6] as [number, number], true));\n",
+            "  console.log(assignRestControl([1, 2, 3], false));\n",
+            "  console.log(assignRestControl([5, 6] as [number, number], true));\n",
             "}\n",
         ),
     )
@@ -2070,7 +2080,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "12\n56\nac\nxz\ntrue\nfalse\n120\n560\n32\n65\n1-2-3\n5-6\n78\n34\nay\ntrue\nfalse\n43\n139\n529\nabcz\nxyz\n32\n3-2\n6-5\n1-2:3\n5-6:\n120\n560\n78\n34\n9\n"
+        "12\n56\nac\nxz\ntrue\nfalse\n120\n560\n32\n65\n1-2-3\n5-6\n78\n34\nay\ntrue\nfalse\n43\n139\n529\nabcz\nxyz\n32\n3-2\n6-5\n1-2:3\n5-6:\n120\n560\n78\n34\n9\n12\n66\n123\n529\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2080,13 +2090,18 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let dts = concat!(
         "export declare function unpack(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }): string;\n",
         "export declare function reassign(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }): string;\n",
+        "export declare function reassignControl(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }, flag: boolean): string;\n",
     );
     let source = concat!(
         "module.exports.unpack = value => { const { count: amount, meta: { label, enabled }, pair: [index, text], values } = value; values.push(index); return label + ':' + String(amount) + ':' + String(enabled) + ':' + String(index) + ':' + text + ':' + values.join(','); }; ",
-        "module.exports.reassign = value => { let count = 0; let label = ''; let index = 0; let text = ''; ({ count, meta: { label }, pair: [index, text] } = value); return String(count) + ':' + label + ':' + String(index) + ':' + text; };",
+        "module.exports.reassign = value => { let count = 0; let label = ''; let index = 0; let text = ''; ({ count, meta: { label }, pair: [index, text] } = value); return String(count) + ':' + label + ':' + String(index) + ':' + text; }; ",
+        "module.exports.reassignControl = (value, flag) => { let count = 0; let label = ''; ({ count, meta: { label } } = value); if (flag) count += 1; return String(count) + ':' + label; };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
-    for (index, name) in ["unpack", "reassign"].into_iter().enumerate() {
+    for (index, name) in ["unpack", "reassign", "reassignControl"]
+        .into_iter()
+        .enumerate()
+    {
         assert!(
             jit_numeric_export(source, name, false, &declarations[index]).is_some(),
             "{name}"
@@ -2105,7 +2120,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { reassign, unpack } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; console.log(unpack(value)); console.log(reassign(value)); }\n",
+        "import { reassign, reassignControl, unpack } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2121,7 +2136,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n"
+        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
