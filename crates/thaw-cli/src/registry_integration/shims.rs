@@ -2858,6 +2858,7 @@ fn jit_export(
                             | "findLast"
                             | "findLastIndex"
                             | "filter"
+                            | "map"
                     )
                 {
                     return None;
@@ -2947,7 +2948,10 @@ fn jit_export(
                         locals,
                         context,
                     ) {
-                        output.push(format!("{prefix}mapto{target}"));
+                        output.push(format!(
+                            "{}mapto{target}",
+                            if dynamic_array { "dynarray" } else { prefix }
+                        ));
                     } else if prefix != "rn" {
                         if let Some(operation) = primitive_unary_map(
                             callback.expr.as_ref(),
@@ -4856,6 +4860,9 @@ fn jit_export(
                     | "dynarrayfindlasttruthy"
                     | "dynarrayfindlastindextruthy"
                     | "dynarrayfiltertruthy"
+                    | "dynarraymaptonumber"
+                    | "dynarraymaptoboolean"
+                    | "dynarraymaptostring"
                     | "rnpush"
                     | "rspush"
                     | "rbpush"
@@ -11687,6 +11694,14 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
+        } else if token
+            .strip_prefix("dynarraymapto")
+            .is_some_and(|target| matches!(target, "number" | "boolean" | "string"))
+        {
+            if stack.pop()? != JitKind::Dynamic {
+                return None;
+            }
+            stack.push(JitKind::Array);
         } else if matches!(
             token.as_str(),
             "throwoutn"

@@ -1168,6 +1168,27 @@ fn primitive_array_convert(value: f64, encoded: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_convert(value: f64, target: f64) -> f64 {
+    let Some(array) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    let source = match array.tag {
+        DYNAMIC_NUMBER_ARRAY_TAG => 0,
+        DYNAMIC_BOOLEAN_ARRAY_TAG => 1,
+        DYNAMIC_STRING_ARRAY_TAG => 2,
+        _ => {
+            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+            return 0.0;
+        }
+    };
+    primitive_array_convert(
+        f64::from_bits(array.payload),
+        f64::from(source * 4 + target as u8),
+    )
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn number_array_map(value: f64, operation: impl Fn(f64, f64) -> f64) -> f64 {
     let (Some(allocate), Some((array, length))) =
         (ARENA_ALLOC.with(Cell::get), unsafe { array_data(value) })
@@ -4689,6 +4710,7 @@ enum NumericValue {
     DynamicArrayCompare(u8, u8),
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
+    DynamicArrayConvert(u8),
     NumberArrayMap(NumericReduceOp, bool),
     PrimitiveArrayJitMap(u8, u8, bool),
     PrimitiveArrayJitScan(u8, u8, bool),
@@ -5052,6 +5074,9 @@ impl NumericProgram {
                     "dynarrayfindlasttruthy" => Some(NumericValue::DynamicArrayTruthy(4)),
                     "dynarrayfindlastindextruthy" => Some(NumericValue::DynamicArrayTruthy(5)),
                     "dynarrayfiltertruthy" => Some(NumericValue::DynamicArrayTruthy(6)),
+                    "dynarraymaptonumber" => Some(NumericValue::DynamicArrayConvert(0)),
+                    "dynarraymaptoboolean" => Some(NumericValue::DynamicArrayConvert(1)),
+                    "dynarraymaptostring" => Some(NumericValue::DynamicArrayConvert(2)),
                     _ if token.strip_prefix("dynarray").is_some_and(|operation| {
                         [
                             "findlastindex",
@@ -5064,7 +5089,8 @@ impl NumericProgram {
                         ]
                         .iter()
                         .any(|method| operation.starts_with(method))
-                    }) => {
+                    }) =>
+                    {
                         let operation = token.strip_prefix("dynarray")?;
                         let (operation, mode) = [
                             ("findlastindex", 5),
@@ -6370,6 +6396,19 @@ impl NumericProgram {
                     emit_binary_call(
                         &mut code,
                         primitive_array_convert as *const () as u64,
+                        depth - 1,
+                    );
+                }
+                NumericValue::DynamicArrayConvert(target) => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(*target).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_binary_call(
+                        &mut code,
+                        dynamic_array_convert as *const () as u64,
                         depth - 1,
                     );
                 }
