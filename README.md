@@ -2610,6 +2610,10 @@ surrounding specialized export or loading QuickJS.
 Classic `for` initializer declarations stay in that result region as hidden
 typed slots, so an early aggregate may include the loop-scoped index while the
 post-loop fallback remains outside its lexical scope.
+Primitive-array `for...of` loops use the same early aggregate path. The native
+source handle is reused when it is already materialized, and the hidden index
+plus number, boolean, or string element slots remain stable across both return
+paths.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
