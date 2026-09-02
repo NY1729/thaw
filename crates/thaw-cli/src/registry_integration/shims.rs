@@ -34,19 +34,41 @@ struct JitLocal {
     operation: String,
 }
 
-fn jit_tagged_primitive_union(elements: &[thaw_hir::HirType]) -> bool {
-    (2..=3).contains(&elements.len())
-        && elements.iter().all(|element| {
-            matches!(
-                element,
-                thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
-            )
-        })
-        && elements.contains(&thaw_hir::HirType::Str)
-        && elements.len()
-            == usize::from(elements.contains(&thaw_hir::HirType::F64))
-                + usize::from(elements.contains(&thaw_hir::HirType::Bool))
-                + usize::from(elements.contains(&thaw_hir::HirType::Str))
+fn jit_tagged_union(elements: &[thaw_hir::HirType]) -> bool {
+    (2..=9).contains(&elements.len())
+        && elements.iter().all(|element| jit_union_member_code(element).is_some())
+        && elements
+            .iter()
+            .enumerate()
+            .all(|(index, element)| !elements[..index].contains(element))
+        && (elements.contains(&thaw_hir::HirType::Str)
+            || elements.iter().any(|element| {
+                matches!(
+                    element,
+                    thaw_hir::HirType::Array(_) | thaw_hir::HirType::Dictionary(_)
+                )
+            }))
+}
+
+fn jit_union_member_code(ty: &thaw_hir::HirType) -> Option<char> {
+    match ty {
+        thaw_hir::HirType::F64 => Some('n'),
+        thaw_hir::HirType::Bool => Some('b'),
+        thaw_hir::HirType::Str => Some('s'),
+        thaw_hir::HirType::Array(element) => match element.as_ref() {
+            thaw_hir::HirType::F64 => Some('N'),
+            thaw_hir::HirType::Bool => Some('B'),
+            thaw_hir::HirType::Str => Some('S'),
+            _ => None,
+        },
+        thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+            thaw_hir::HirType::F64 => Some('D'),
+            thaw_hir::HirType::Bool => Some('E'),
+            thaw_hir::HirType::Str => Some('F'),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn is_unary_math_method(operation: &str) -> bool {
@@ -99,7 +121,7 @@ fn jit_export(
     fn jit_parameter_slots(ty: &thaw_hir::HirType) -> Option<usize> {
         match ty {
             thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => Some(1),
-            thaw_hir::HirType::Union(elements) if jit_tagged_primitive_union(elements) => Some(2),
+            thaw_hir::HirType::Union(elements) if jit_tagged_union(elements) => Some(2),
             thaw_hir::HirType::Array(element)
                 if jit_array_result_element_supported(element) =>
             {
@@ -143,7 +165,7 @@ fn jit_export(
         match ty {
             thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => true,
             thaw_hir::HirType::Union(elements) => {
-                jit_tagged_primitive_union(elements)
+                jit_tagged_union(elements)
             }
             thaw_hir::HirType::Array(element) => jit_array_result_element_supported(element),
             thaw_hir::HirType::Dictionary(element) => matches!(
@@ -165,17 +187,13 @@ fn jit_export(
         slot: &mut usize,
     ) -> Option<()> {
         if let thaw_hir::HirType::Union(elements) = ty {
-            if !jit_tagged_primitive_union(elements) {
+            if !jit_tagged_union(elements) {
                 return None;
             }
-            let kinds = [
-                (thaw_hir::HirType::F64, 'n'),
-                (thaw_hir::HirType::Bool, 'b'),
-                (thaw_hir::HirType::Str, 's'),
-            ]
-            .into_iter()
-            .filter_map(|(kind, encoded)| elements.contains(&kind).then_some(encoded))
-            .collect::<String>();
+            let kinds = elements
+                .iter()
+                .map(jit_union_member_code)
+                .collect::<Option<String>>()?;
             parameters.insert(path.into(), format!("u{}{kinds}", *slot));
             *slot += 2;
             return Some(());
@@ -527,7 +545,7 @@ fn jit_export(
             thaw_hir::HirType::Bool => Some(JitKind::Boolean),
             thaw_hir::HirType::Str => Some(JitKind::String),
             thaw_hir::HirType::Union(elements)
-                if jit_tagged_primitive_union(elements) =>
+                if jit_tagged_union(elements) =>
             {
                 Some(JitKind::Dynamic)
             }
@@ -10009,7 +10027,7 @@ fn jit_export(
                 thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str,
             ) => true,
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(elements)) => {
-                jit_tagged_primitive_union(elements)
+                jit_tagged_union(elements)
             }
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
                 matches!(
@@ -10529,17 +10547,13 @@ fn jit_export(
         };
         let optional = *optional_parameter || optional_type;
         if let thaw_hir::HirType::Union(elements) = ty {
-            if optional || default.is_some() || !jit_tagged_primitive_union(elements) {
+            if optional || default.is_some() || !jit_tagged_union(elements) {
                 return None;
             }
-            let kinds = [
-                (thaw_hir::HirType::F64, 'n'),
-                (thaw_hir::HirType::Bool, 'b'),
-                (thaw_hir::HirType::Str, 's'),
-            ]
-            .into_iter()
-            .filter_map(|(kind, encoded)| elements.contains(&kind).then_some(encoded))
-            .collect::<String>();
+            let kinds = elements
+                .iter()
+                .map(jit_union_member_code)
+                .collect::<Option<String>>()?;
             locals.insert(parameter.clone(), vec![format!("u{slot}{kinds}")]);
             slot += 2;
             continue;
@@ -10819,7 +10833,7 @@ fn jit_export(
     let expected = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => JitKind::String,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(elements))
-            if jit_tagged_primitive_union(elements) =>
+            if jit_tagged_union(elements) =>
         {
             JitKind::Dynamic
         }
@@ -10895,7 +10909,7 @@ fn jit_dynamic_argument(token: &str) -> Option<(usize, &str)> {
     if kinds.is_empty()
         || !kinds
             .bytes()
-            .all(|kind| matches!(kind, b'n' | b'b' | b's'))
+            .all(|kind| matches!(kind, b'n' | b'b' | b's' | b'N' | b'B' | b'S' | b'D' | b'E' | b'F'))
     {
         return None;
     }
@@ -12613,7 +12627,7 @@ fn jit_numeric_declaration(
     let symbol = encoded_symbol(&runtime_key);
     let union_ret = match &function.ret {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(elements))
-            if jit_tagged_primitive_union(elements) =>
+            if jit_tagged_union(elements) =>
         {
             render_dynamic_type(&thaw_hir::HirType::Union(elements.clone()))
         }
@@ -12623,7 +12637,7 @@ fn jit_numeric_declaration(
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Bool) => "boolean",
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Str) => "string",
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(elements))
-            if jit_tagged_primitive_union(elements) =>
+            if jit_tagged_union(elements) =>
         {
             union_ret.as_deref().unwrap()
         }

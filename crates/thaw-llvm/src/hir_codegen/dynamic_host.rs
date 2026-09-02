@@ -27,7 +27,7 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
 fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str => Some(1),
-        HirType::Union(elements) if jit_tagged_primitive_union(elements) => Some(2),
+        HirType::Union(elements) if jit_tagged_union(elements) => Some(2),
         HirType::Array(element)
             if jit_array_result_element_supported(element) =>
         {
@@ -58,16 +58,38 @@ fn jit_array_result_element_supported(ty: &HirType) -> bool {
         )
 }
 
-fn jit_tagged_primitive_union(elements: &[HirType]) -> bool {
-    (2..=3).contains(&elements.len())
+fn jit_tagged_union(elements: &[HirType]) -> bool {
+    (2..=9).contains(&elements.len())
+        && elements.iter().all(|element| jit_union_member_tag(element).is_some())
         && elements
             .iter()
-            .all(|element| matches!(element, HirType::F64 | HirType::Bool | HirType::Str))
-        && elements.contains(&HirType::Str)
-        && elements.len()
-            == usize::from(elements.contains(&HirType::F64))
-                + usize::from(elements.contains(&HirType::Bool))
-                + usize::from(elements.contains(&HirType::Str))
+            .enumerate()
+            .all(|(index, element)| !elements[..index].contains(element))
+        && (elements.contains(&HirType::Str)
+            || elements
+                .iter()
+                .any(|element| matches!(element, HirType::Array(_) | HirType::Dictionary(_))))
+}
+
+fn jit_union_member_tag(ty: &HirType) -> Option<u64> {
+    match ty {
+        HirType::F64 => Some(1),
+        HirType::Str => Some(2),
+        HirType::Bool => Some(3),
+        HirType::Array(element) => match element.as_ref() {
+            HirType::F64 => Some(4),
+            HirType::Bool => Some(5),
+            HirType::Str => Some(6),
+            _ => None,
+        },
+        HirType::Dictionary(element) => match element.as_ref() {
+            HirType::F64 => Some(7),
+            HirType::Bool => Some(8),
+            HirType::Str => Some(9),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 impl<'ctx> HirCompiler<'ctx> {
@@ -79,7 +101,7 @@ impl<'ctx> HirCompiler<'ctx> {
         output: &mut Vec<BasicValueEnum<'ctx>>,
     ) -> Result<(), String> {
         if let HirType::Union(elements) = ty {
-            if !jit_tagged_primitive_union(elements) {
+            if !jit_tagged_union(elements) {
                 return Err(format!("unsupported JIT union argument {ty:?}"));
             }
             let union = value.into_struct_value();
@@ -95,12 +117,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .into_int_value();
             let mut runtime_tag = self.context.i8_type().const_zero();
             for (index, member) in elements.iter().enumerate() {
-                let semantic = match member {
-                    HirType::F64 => 1,
-                    HirType::Str => 2,
-                    HirType::Bool => 3,
-                    _ => unreachable!(),
-                };
+                let semantic = jit_union_member_tag(member).unwrap();
                 let selected = self
                     .builder
                     .build_int_compare(
@@ -1181,14 +1198,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 ty @ (HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 ty @ HirType::Union(elements)
-                    if jit_tagged_primitive_union(elements) => ty,
+                    if jit_tagged_union(elements) => ty,
                 ty @ HirType::Array(element)
                     if jit_array_result_element_supported(element) => ty,
                 ty @ HirType::Dictionary(element)
                     if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 _ => {
                     return Err(
-                        "JIT calls currently return primitives, tagged primitive unions containing string, supported arrays, dictionaries, or optional primitives"
+                        "JIT calls currently return supported primitives, tagged unions, arrays, dictionaries, or optional primitives"
                             .into(),
                     )
                 }
@@ -1198,7 +1215,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .iter()
                 .map(jit_parameter_slots)
                 .collect::<Option<Vec<_>>>()
-                .ok_or("JIT calls require primitive, tagged primitive union, primitive-array, object, or tuple arguments")?
+                .ok_or("JIT calls require supported primitive, tagged union, array, dictionary, object, or tuple arguments")?
                 .into_iter()
                 .sum::<usize>();
             if argument_slots > 16
@@ -1626,17 +1643,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(BasicValueEnum::from)
                     .map_err(|error| error.to_string())?
             } else if let HirType::Union(elements) = return_type {
-                let number = elements.iter().position(|member| *member == HirType::F64);
-                let boolean = elements.iter().position(|member| *member == HirType::Bool);
-                let string = elements.iter().position(|member| *member == HirType::Str);
-                let Some(string) = string else {
+                if !jit_tagged_union(elements) {
                     return Err(format!(
-                        "JIT tagged result requires a string member, found {return_type:?}"
-                    ));
-                };
-                if !jit_tagged_primitive_union(elements) {
-                    return Err(format!(
-                        "JIT tagged result only supports distinct number/boolean/string members, found {return_type:?}"
+                        "JIT tagged result has unsupported members {return_type:?}"
                     ));
                 }
                 let bits = self
@@ -1671,21 +1680,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_load(self.context.i64_type(), pointer, "jit_dynamic_tag")
                     .map_err(|error| error.to_string())?
                     .into_int_value();
-                let mut tag = self.context.i8_type().const_int(string as u64, false);
-                for (runtime, member, name) in [
-                    (3, boolean, "jit_dynamic_is_boolean"),
-                    (1, number, "jit_dynamic_is_number"),
-                ] {
-                    let Some(member) = member else {
-                        continue;
-                    };
+                let mut tag = self.context.i8_type().const_zero();
+                for (member, ty) in elements.iter().enumerate() {
+                    let runtime = jit_union_member_tag(ty).unwrap();
                     let selected = self
                         .builder
                         .build_int_compare(
                             inkwell::IntPredicate::EQ,
                             runtime_tag,
                             self.context.i64_type().const_int(runtime, false),
-                            name,
+                            &format!("jit_dynamic_is_{runtime}"),
                         )
                         .map_err(|error| error.to_string())?;
                     tag = self
