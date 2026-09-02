@@ -2093,16 +2093,26 @@ fn jit_export(
                     context,
                     &mut receiver,
                 )?;
-                let receiver_kind = jit_expression_kind(&receiver)?.0;
+                let dynamic_array = receiver.last().is_some_and(|token| token == "untagarray");
+                if dynamic_array {
+                    receiver.pop();
+                }
+                let receiver_kind = if dynamic_array {
+                    JitKind::Dynamic
+                } else {
+                    jit_expression_kind(&receiver)?.0
+                };
                 let prefix = match receiver_kind {
                     JitKind::Array => array_prefix(&receiver)?,
                     JitKind::Dictionary => dictionary_prefix(&receiver)?,
+                    JitKind::Dynamic if dynamic_array => "dynamic",
                     _ => return None,
                 };
                 let expected = match prefix.as_bytes().get(1) {
                     Some(b'n') => JitKind::Number,
                     Some(b's') => JitKind::String,
                     Some(b'b') => JitKind::Boolean,
+                    _ if dynamic_array => JitKind::Dynamic,
                     _ => return None,
                 };
                 let local_set = if assignment.op == AssignOp::Assign {
@@ -2126,7 +2136,7 @@ fn jit_export(
                     output.extend(receiver);
                 }
                 match (&target.prop, receiver_kind) {
-                    (MemberProp::Computed(index), JitKind::Array) => {
+                    (MemberProp::Computed(index), JitKind::Array | JitKind::Dynamic) => {
                         encode_number(index.expr.as_ref(), parameters, locals, context, output)?;
                     }
                     (MemberProp::Computed(key), JitKind::Dictionary) => {
@@ -2188,7 +2198,11 @@ fn jit_export(
                         );
                     }
                 }
-                output.push(local_set.unwrap_or_else(|| format!("{prefix}set")));
+                output.push(if dynamic_array {
+                    "dynarrayset".into()
+                } else {
+                    local_set.unwrap_or_else(|| format!("{prefix}set"))
+                });
             }
             Expr::Update(update) => {
                 let Expr::Member(target) = update.arg.as_ref() else {
@@ -4808,6 +4822,7 @@ fn jit_export(
                     | "rnpostset"
                     | "rsset"
                     | "rbset"
+                    | "dynarrayset"
                     | "rnpop"
                     | "rspop"
                     | "rbpop"
@@ -12002,16 +12017,28 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Number);
-        } else if matches!(token.as_str(), "rnset" | "rsset" | "rbset") {
+        } else if matches!(
+            token.as_str(),
+            "rnset" | "rsset" | "rbset" | "dynarrayset"
+        ) {
             let value = stack.pop()?;
             if stack.pop()? != JitKind::Number
-                || stack.pop()? != JitKind::Array
+                || stack.pop()?
+                    != if token == "dynarrayset" {
+                        JitKind::Dynamic
+                    } else {
+                        JitKind::Array
+                    }
                 || value
-                    != match &token[..2] {
-                        "rn" => JitKind::Number,
-                        "rs" => JitKind::String,
-                        "rb" => JitKind::Boolean,
-                        _ => return None,
+                    != if token == "dynarrayset" {
+                        JitKind::Dynamic
+                    } else {
+                        match &token[..2] {
+                            "rn" => JitKind::Number,
+                            "rs" => JitKind::String,
+                            "rb" => JitKind::Boolean,
+                            _ => return None,
+                        }
                     }
             {
                 return None;
