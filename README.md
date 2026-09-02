@@ -2565,12 +2565,15 @@ rest binding is copied once into its own typed mutable array handle, preserving
 rest-array identity and keeping later mutations separate from the source.
 The same one-evaluation lowering handles array assignment patterns targeting
 existing straight-line mutable locals, including holes, lazy defaults, repeated
-targets, and side-effecting array-returning right-hand sides.
+targets, side-effecting array-returning right-hand sides, and typed rest arrays.
+Bindings materialized for following control flow are updated in place through
+their JIT stack slots.
 Fixed object parameters also support nested object and tuple declaration
 patterns, shorthand or renamed leaves, skipped tuple positions, and direct
 aliases to contained primitive arrays on the same JIT path. Parenthesized object
 assignment patterns can write those same nested leaves back to existing
-straight-line mutable locals without QuickJS.
+mutable locals without QuickJS, including locals materialized for following
+control flow.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,

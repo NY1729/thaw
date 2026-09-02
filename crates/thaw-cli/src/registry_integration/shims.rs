@@ -9680,7 +9680,6 @@ fn jit_export(
                     if names.clone().any(|name| {
                         if assign_existing {
                             !mutable.contains(name.sym.as_ref())
-                                || runtime_kinds.contains_key(name.sym.as_ref())
                         } else {
                             parameters.contains_key(name.sym.as_ref())
                                 || locals.contains_key(name.sym.as_ref())
@@ -9724,21 +9723,46 @@ fn jit_export(
                             value.extend(fallback);
                             value.push("end".into());
                         }
-                        locals.insert(name.sym.to_string(), value);
+                        if assign_existing && runtime_kinds.contains_key(name.sym.as_ref()) {
+                            let target_kind = *runtime_kinds.get(name.sym.as_ref())?;
+                            if jit_expression_kind(&value)?.0 != target_kind {
+                                return None;
+                            }
+                            let target =
+                                loop_local_index(locals.get(name.sym.as_ref())?.first()?)?;
+                            output.extend(value);
+                            output.push(format!("setl{target}"));
+                        } else {
+                            locals.insert(name.sym.to_string(), value);
+                        }
                         if is_mutable && !assign_existing {
                             mutable.insert(name.sym.to_string());
                         }
                     }
                     if let Some((index, name)) = rest {
-                        let rest_index = runtime_kinds.len();
                         output.push(source_local);
                         output.push(format!("c{:016x}", (index as f64).to_bits()));
                         output.push(format!("c{:016x}", f64::INFINITY.to_bits()));
                         output.push("arrayslice".into());
                         output.push("arrayhandle".into());
-                        locals.insert(name.sym.to_string(), vec![format!("{local_prefix}{rest_index}")]);
-                        runtime_kinds.insert(name.sym.to_string(), JitKind::Array);
-                        runtime_locals = runtime_kinds.len();
+                        if assign_existing && runtime_kinds.contains_key(name.sym.as_ref()) {
+                            if runtime_kinds.get(name.sym.as_ref())? != &JitKind::Array {
+                                return None;
+                            }
+                            let local = locals.get(name.sym.as_ref())?.first()?;
+                            if !local.starts_with(local_prefix) {
+                                return None;
+                            }
+                            output.push(format!("setl{}", loop_local_index(local)?));
+                        } else {
+                            let rest_index = runtime_kinds.len();
+                            locals.insert(
+                                name.sym.to_string(),
+                                vec![format!("{local_prefix}{rest_index}")],
+                            );
+                            runtime_kinds.insert(name.sym.to_string(), JitKind::Array);
+                            runtime_locals = runtime_kinds.len();
+                        }
                         if is_mutable && !assign_existing {
                             mutable.insert(name.sym.to_string());
                         }
@@ -9754,7 +9778,6 @@ fn jit_export(
                     if bindings.iter().any(|(_, name, _)| {
                         if assign_existing {
                             !mutable.contains(name.sym.as_ref())
-                                || runtime_kinds.contains_key(name.sym.as_ref())
                         } else {
                             parameters.contains_key(name.sym.as_ref())
                                 || locals.contains_key(name.sym.as_ref())
@@ -9791,7 +9814,18 @@ fn jit_export(
                             value.extend(fallback);
                             value.push("end".into());
                         }
-                        locals.insert(name.sym.to_string(), value);
+                        if assign_existing && runtime_kinds.contains_key(name.sym.as_ref()) {
+                            let target_kind = *runtime_kinds.get(name.sym.as_ref())?;
+                            if jit_expression_kind(&value)?.0 != target_kind {
+                                return None;
+                            }
+                            let target =
+                                loop_local_index(locals.get(name.sym.as_ref())?.first()?)?;
+                            output.extend(value);
+                            output.push(format!("setl{target}"));
+                        } else {
+                            locals.insert(name.sym.to_string(), value);
+                        }
                         if is_mutable && !assign_existing {
                             mutable.insert(name.sym.to_string());
                         }
