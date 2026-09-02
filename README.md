@@ -2514,6 +2514,9 @@ truthiness, identity, and JavaScript string coercion operate on the runtime tag
 without embedding QuickJS. Fixed-shape objects and homogeneous primitive
 dictionaries may also coexist in one tagged union; identity returns and
 subsequent specialized calls preserve their distinct runtime tags.
+One fixed primitive tuple may occupy the aggregate member instead, sharing the
+native pointer tag while retaining typed index reads across JIT arguments,
+constructed results, and calls between specialized exports.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
