@@ -2503,7 +2503,8 @@ fn jit_export(
                         JitKind::Boolean => "absentb",
                         JitKind::String => "absents",
                         JitKind::Dynamic => return None,
-                        JitKind::Array | JitKind::Dictionary => return None,
+                        JitKind::Array => "absenta",
+                        JitKind::Dictionary => "absentd",
                     }
                     .into(),
                 );
@@ -10482,10 +10483,15 @@ fn jit_export(
                 jit_tagged_union(elements)
             }
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
-                matches!(
-                    payload.as_ref(),
-                    thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str
-                )
+                jit_result_supported(payload)
+                    && matches!(
+                        payload.as_ref(),
+                        thaw_hir::HirType::F64
+                            | thaw_hir::HirType::Bool
+                            | thaw_hir::HirType::Str
+                            | thaw_hir::HirType::Array(_)
+                            | thaw_hir::HirType::Dictionary(_)
+                    )
             }
             thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element)) => {
                 jit_array_result_element_supported(element)
@@ -11298,6 +11304,10 @@ fn jit_export(
             if **payload == thaw_hir::HirType::Str => JitKind::String,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
             if **payload == thaw_hir::HirType::Bool => JitKind::Boolean,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if matches!(payload.as_ref(), thaw_hir::HirType::Array(_)) => JitKind::Array,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload))
+            if matches!(payload.as_ref(), thaw_hir::HirType::Dictionary(_)) => JitKind::Dictionary,
         _ => JitKind::Number,
     };
     validated_jit_expression(expression, expected).map(JitExport::Value)
@@ -13039,11 +13049,16 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 _ => unreachable!(),
             });
             maximum_depth = maximum_depth.max(stack.len());
-        } else if matches!(token.as_str(), "absentn" | "absentb" | "absents") {
+        } else if matches!(
+            token.as_str(),
+            "absentn" | "absentb" | "absents" | "absenta" | "absentd"
+        ) {
             stack.push(match token.as_str() {
                 "absentn" => JitKind::Number,
                 "absentb" => JitKind::Boolean,
                 "absents" => JitKind::String,
+                "absenta" => JitKind::Array,
+                "absentd" => JitKind::Dictionary,
                 _ => unreachable!(),
             });
             maximum_depth = maximum_depth.max(stack.len());
@@ -13119,7 +13134,14 @@ fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> O
         return None;
     }
     if expected == JitKind::Array {
-        expression.push("arrayvalue".into());
+        if expression.iter().any(|token| token == "absenta") {
+            expression.extend(
+                ["ifpresent", "arrayvalue", "else", "absenta", "end"]
+                    .map(str::to_owned),
+            );
+        } else {
+            expression.push("arrayvalue".into());
+        }
     }
     Some(format!("expr:{}", expression.join(",")))
 }
@@ -13501,6 +13523,38 @@ fn jit_numeric_declaration(
             if **payload == thaw_hir::HirType::Bool =>
         {
             "boolean | undefined"
+        }
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(payload)) => {
+            match payload.as_ref() {
+                thaw_hir::HirType::Array(element) => match element.as_ref() {
+                    thaw_hir::HirType::F64 => "number[] | undefined",
+                    thaw_hir::HirType::Bool => "boolean[] | undefined",
+                    thaw_hir::HirType::Str => "string[] | undefined",
+                    thaw_hir::HirType::Tuple(elements)
+                        if matches!(elements.as_slice(), [thaw_hir::HirType::Str, thaw_hir::HirType::F64]) =>
+                    {
+                        "[string, number][] | undefined"
+                    }
+                    thaw_hir::HirType::Tuple(elements)
+                        if matches!(elements.as_slice(), [thaw_hir::HirType::Str, thaw_hir::HirType::Bool]) =>
+                    {
+                        "[string, boolean][] | undefined"
+                    }
+                    thaw_hir::HirType::Tuple(elements)
+                        if matches!(elements.as_slice(), [thaw_hir::HirType::Str, thaw_hir::HirType::Str]) =>
+                    {
+                        "[string, string][] | undefined"
+                    }
+                    _ => "never",
+                },
+                thaw_hir::HirType::Dictionary(element) => match element.as_ref() {
+                    thaw_hir::HirType::F64 => "{ [key: string]: number } | undefined",
+                    thaw_hir::HirType::Bool => "{ [key: string]: boolean } | undefined",
+                    thaw_hir::HirType::Str => "{ [key: string]: string } | undefined",
+                    _ => "never",
+                },
+                _ => "never",
+            }
         }
         _ => "number",
     };

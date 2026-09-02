@@ -1192,7 +1192,9 @@ impl<'ctx> HirCompiler<'ctx> {
         if signature.backend == DynamicBackend::Jit {
             let return_type = match &signature.ret {
                 HirType::Optional(payload)
-                    if matches!(payload.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) =>
+                    if matches!(payload.as_ref(), HirType::F64 | HirType::Bool | HirType::Str)
+                        || matches!(payload.as_ref(), HirType::Array(element) if jit_array_result_element_supported(element))
+                        || matches!(payload.as_ref(), HirType::Dictionary(element) if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str)) =>
                 {
                     payload.as_ref()
                 }
@@ -1205,7 +1207,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     if matches!(element.as_ref(), HirType::F64 | HirType::Bool | HirType::Str) => ty,
                 _ => {
                     return Err(
-                        "JIT calls currently return supported primitives, tagged unions, arrays, dictionaries, or optional primitives"
+                        "JIT calls currently return supported primitives, tagged unions, arrays, dictionaries, or optional supported values"
                             .into(),
                     )
                 }
