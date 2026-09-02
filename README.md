@@ -2417,6 +2417,11 @@ primitive without leaving the JIT. String methods on a tagged union validate
 the runtime string tag before reusing the typed string instruction; a
 non-string receiver raises through the native JIT error path rather than
 loading QuickJS.
+The same tagged ABI now carries homogeneous primitive arrays and dictionaries
+alongside primitive alternatives. Their native one-word handles round-trip
+through union arguments and results without JSON conversion; `typeof`,
+truthiness, identity, and JavaScript string coercion operate on the runtime tag
+without embedding QuickJS.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
