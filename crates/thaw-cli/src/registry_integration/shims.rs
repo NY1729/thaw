@@ -7301,7 +7301,8 @@ fn jit_export(
                     output,
                 )?;
                 output.push("while".into());
-                encode_aggregate_return_effects(
+                context.loop_depth += 1;
+                let body_result = encode_aggregate_return_effects(
                     loop_statement.body.as_ref(),
                     requested,
                     parameters,
@@ -7313,7 +7314,9 @@ fn jit_export(
                     expected_kinds,
                     expected_values,
                     output,
-                )?;
+                );
+                context.loop_depth -= 1;
+                body_result?;
                 output.push("loopend".into());
                 Some(())
             }
@@ -7321,7 +7324,8 @@ fn jit_export(
                 if contains_aggregate_return(loop_statement.body.as_ref()) =>
             {
                 output.push("loop".into());
-                encode_aggregate_return_effects(
+                context.loop_depth += 1;
+                let body_result = encode_aggregate_return_effects(
                     loop_statement.body.as_ref(),
                     requested,
                     parameters,
@@ -7333,7 +7337,9 @@ fn jit_export(
                     expected_kinds,
                     expected_values,
                     output,
-                )?;
+                );
+                context.loop_depth -= 1;
+                body_result?;
                 output.push("looptail".into());
                 encode_condition(
                     loop_statement.test.as_ref(),
@@ -7395,7 +7401,8 @@ fn jit_export(
                 }
                 output.push("while".into());
                 let nested_control_kinds = helper_control_kinds(&nested_kinds, &nested_locals)?;
-                encode_aggregate_return_effects(
+                context.loop_depth += 1;
+                let body_result = encode_aggregate_return_effects(
                     loop_statement.body.as_ref(),
                     requested,
                     parameters,
@@ -7407,7 +7414,9 @@ fn jit_export(
                     expected_kinds,
                     expected_values,
                     output,
-                )?;
+                );
+                context.loop_depth -= 1;
+                body_result?;
                 output.push("looptail".into());
                 if let Some(update) = loop_statement.update.as_deref() {
                     encode_loop_expression(
@@ -7548,7 +7557,8 @@ fn jit_export(
                     format!("setl{element_index}"),
                 ]);
                 let nested_control_kinds = helper_control_kinds(&nested_kinds, &nested_locals)?;
-                encode_aggregate_return_effects(
+                context.loop_depth += 1;
+                let body_result = encode_aggregate_return_effects(
                     loop_statement.body.as_ref(),
                     requested,
                     parameters,
@@ -7560,7 +7570,9 @@ fn jit_export(
                     expected_kinds,
                     expected_values,
                     output,
-                )?;
+                );
+                context.loop_depth -= 1;
+                body_result?;
                 output.extend([
                     "looptail".into(),
                     index_local,
@@ -7662,7 +7674,8 @@ fn jit_export(
                     format!("setl{key_index}"),
                 ]);
                 let nested_control_kinds = helper_control_kinds(&nested_kinds, &nested_locals)?;
-                encode_aggregate_return_effects(
+                context.loop_depth += 1;
+                let body_result = encode_aggregate_return_effects(
                     loop_statement.body.as_ref(),
                     requested,
                     parameters,
@@ -7674,7 +7687,9 @@ fn jit_export(
                     expected_kinds,
                     expected_values,
                     output,
-                )?;
+                );
+                context.loop_depth -= 1;
+                body_result?;
                 output.extend([
                     "looptail".into(),
                     index_local,
@@ -7894,7 +7909,11 @@ fn jit_export(
                 Some(())
             }
             Stmt::Labeled(labeled) if contains_aggregate_return(labeled.body.as_ref()) => {
-                encode_aggregate_return_effects(
+                let target = context.loop_depth;
+                context
+                    .loop_labels
+                    .push((labeled.label.sym.to_string(), target));
+                let result = encode_aggregate_return_effects(
                     labeled.body.as_ref(),
                     requested,
                     parameters,
@@ -7906,7 +7925,37 @@ fn jit_export(
                     expected_kinds,
                     expected_values,
                     output,
-                )
+                );
+                context.loop_labels.pop();
+                result
+            }
+            Stmt::Break(break_statement) if break_statement.label.is_some() => {
+                let label = break_statement.label.as_ref()?.sym.to_string();
+                let target = context
+                    .loop_labels
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == &label)
+                    .map(|(_, depth)| *depth)?;
+                let distance = context
+                    .loop_depth
+                    .checked_sub(target.checked_add(1)?)?;
+                output.push(format!("break{distance}"));
+                Some(())
+            }
+            Stmt::Continue(continue_statement) if continue_statement.label.is_some() => {
+                let label = continue_statement.label.as_ref()?.sym.to_string();
+                let target = context
+                    .loop_labels
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == &label)
+                    .map(|(_, depth)| *depth)?;
+                let distance = context
+                    .loop_depth
+                    .checked_sub(target.checked_add(1)?)?;
+                output.push(format!("continue{distance}"));
+                Some(())
             }
             Stmt::For(_)
             | Stmt::ForIn(_)
@@ -7959,10 +8008,14 @@ fn jit_export(
                 )
             }
             Stmt::Labeled(labeled) if contains_aggregate_return(labeled.body.as_ref()) => {
+                let target = context.loop_depth;
+                context
+                    .loop_labels
+                    .push((labeled.label.sym.to_string(), target));
                 let nested = std::iter::once(labeled.body.as_ref())
                     .chain(rest.iter().copied())
                     .collect::<Vec<_>>();
-                materialize_helper_returns(
+                let result = materialize_helper_returns(
                     &nested,
                     requested,
                     parameters,
@@ -7972,7 +8025,9 @@ fn jit_export(
                     kinds,
                     materialized,
                     output,
-                )
+                );
+                context.loop_labels.pop();
+                result
             }
             Stmt::Return(returned) if rest.is_empty() => materialize_fixed_literal(
                 returned.arg.as_deref()?,
@@ -8000,7 +8055,8 @@ fn jit_export(
                 let control_kinds = helper_control_kinds(kinds, locals)?;
                 let mut early_kinds = None;
                 let mut early_values = None;
-                encode_aggregate_return_effects(
+                context.loop_depth += 1;
+                let body_result = encode_aggregate_return_effects(
                     statement.body.as_ref(),
                     requested,
                     parameters,
@@ -8012,7 +8068,9 @@ fn jit_export(
                     &mut early_kinds,
                     &mut early_values,
                     &mut loop_output,
-                )?;
+                );
+                context.loop_depth -= 1;
+                body_result?;
                 let early_kinds = early_kinds?;
                 let early_values = early_values?;
                 loop_output.extend(["looptail".into(), "loopend".into()]);
@@ -8047,7 +8105,8 @@ fn jit_export(
                 let control_kinds = helper_control_kinds(kinds, locals)?;
                 let mut early_kinds = None;
                 let mut early_values = None;
-                encode_aggregate_return_effects(
+                context.loop_depth += 1;
+                let body_result = encode_aggregate_return_effects(
                     statement.body.as_ref(),
                     requested,
                     parameters,
@@ -8059,7 +8118,9 @@ fn jit_export(
                     &mut early_kinds,
                     &mut early_values,
                     &mut loop_output,
-                )?;
+                );
+                context.loop_depth -= 1;
+                body_result?;
                 let early_kinds = early_kinds?;
                 let early_values = early_values?;
                 loop_output.push("looptail".into());
@@ -13111,6 +13172,8 @@ fn jit_export(
         recursive_names: Vec<String>,
         recursive_parameters: Vec<thaw_hir::HirType>,
         recursive_result: Option<JitKind>,
+        loop_depth: usize,
+        loop_labels: Vec<(String, usize)>,
     }
 
     fn same_callable(left: NumericCallable<'_>, right: NumericCallable<'_>) -> bool {
@@ -15603,6 +15666,8 @@ fn jit_export(
                     recursive_names: Vec::new(),
                     recursive_parameters: Vec::new(),
                     recursive_result: None,
+                    loop_depth: 0,
+                    loop_labels: Vec::new(),
                 };
                 encode_expression(
                     initializer,
@@ -15687,6 +15752,8 @@ fn jit_export(
                         recursive_names: Vec::new(),
                         recursive_parameters: Vec::new(),
                         recursive_result: None,
+                        loop_depth: 0,
+                        loop_labels: Vec::new(),
                     },
                     &mut right,
                 )?;
@@ -15715,6 +15782,8 @@ fn jit_export(
                     recursive_names: Vec::new(),
                     recursive_parameters: Vec::new(),
                     recursive_result: None,
+                    loop_depth: 0,
+                    loop_labels: Vec::new(),
                 };
                 encode_expression(
                     assignment.right.as_ref(),
@@ -16012,6 +16081,8 @@ fn jit_export(
         recursive_names,
         recursive_parameters,
         recursive_result,
+        loop_depth: 0,
+        loop_labels: Vec::new(),
     };
     let mut parameters = std::collections::HashMap::new();
     let mut slot = 0usize;
