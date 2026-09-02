@@ -7769,6 +7769,82 @@ fn jit_export(
                 Some(())
             }
             Stmt::Try(try_statement)
+                if try_statement.handler.is_some()
+                    && try_statement.finalizer.as_ref().is_none_or(|finalizer| {
+                        finalizer
+                            .stmts
+                            .iter()
+                            .all(|statement| matches!(statement, Stmt::Expr(_)))
+                    })
+                    && try_statement
+                        .block
+                        .stmts
+                        .iter()
+                        .any(contains_aggregate_return) =>
+            {
+                let mut merged_kinds = control_kinds.clone();
+                let mut merged_values = std::collections::HashMap::new();
+                let mut merged_output = Vec::new();
+                materialize_helper_returns(
+                    std::slice::from_ref(&statement),
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    &mut merged_kinds,
+                    &mut merged_values,
+                    &mut merged_output,
+                )?;
+                let mut leaves = merged_values
+                    .iter()
+                    .map(|(path, tokens)| {
+                        let [token] = tokens.as_slice() else {
+                            return None;
+                        };
+                        Some((
+                            loop_local_index(token)?,
+                            path.clone(),
+                            runtime_local_kind(token)?,
+                            token
+                                .get(..token.find(|character: char| character.is_ascii_digit())?)?
+                                .to_string(),
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                leaves.sort_by_key(|leaf| leaf.0);
+                let first_leaf = merged_kinds.len().checked_sub(leaves.len())?;
+                if leaves
+                    .iter()
+                    .enumerate()
+                    .any(|(offset, leaf)| leaf.0 != first_leaf + offset)
+                {
+                    return None;
+                }
+                let mut returned_kinds = result_base_kinds.clone();
+                let mut returned_values = std::collections::HashMap::new();
+                for (_, path, kind, prefix) in leaves {
+                    let index = returned_kinds.len();
+                    returned_kinds.insert(format!("\0literal-{index}"), kind);
+                    returned_values.insert(path, vec![format!("{prefix}{index}")]);
+                }
+                if expected_kinds
+                    .as_ref()
+                    .is_some_and(|expected| expected != &returned_kinds)
+                    || expected_values
+                        .as_ref()
+                        .is_some_and(|expected| expected != &returned_values)
+                {
+                    return None;
+                }
+                let result_count = returned_kinds.len().checked_sub(result_base_kinds.len())?;
+                *expected_kinds = Some(returned_kinds);
+                *expected_values = Some(returned_values);
+                output.extend(merged_output);
+                output.push(format!("resultreturn{result_count}"));
+                Some(())
+            }
+            Stmt::Try(try_statement)
                 if try_statement.handler.is_none()
                     && try_statement.finalizer.as_ref().is_some_and(|finalizer| {
                         finalizer

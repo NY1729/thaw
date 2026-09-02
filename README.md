@@ -2633,6 +2633,10 @@ Nested `try/finally` statements can return through that result region too. The
 aggregate leaves are fixed before the straight-line finalizer runs, every
 return edge executes the finalizer exactly once, and normal fallthrough runs it
 before the surrounding loop continues.
+Nested `try/catch/finally` can join normal and caught fixed aggregates before
+that same early exit. The internal exception placeholder is excluded from the
+counted result, catch values retain their typed native representation, and the
+shared finalizer runs once on either path.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
