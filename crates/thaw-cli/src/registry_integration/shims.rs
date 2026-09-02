@@ -2645,7 +2645,7 @@ fn jit_export(
         output: &mut Vec<String>,
     ) -> Option<()> {
         struct OptionalChainOperation {
-            receiver_presence: Option<String>,
+            receiver_presence: Option<Vec<String>>,
             receiver: Vec<String>,
             continuation: Vec<String>,
         }
@@ -2653,7 +2653,7 @@ fn jit_export(
         fn optional_tokens<'a>(
             expression: &Expr,
             parameters: &'a std::collections::HashMap<String, String>,
-        ) -> Option<(&'a str, &'a str)> {
+        ) -> Option<(Vec<String>, &'a str)> {
             let expression = match expression {
                 Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
                 expression => expression,
@@ -2661,10 +2661,11 @@ fn jit_export(
             let Expr::Ident(identifier) = expression else {
                 return None;
             };
-            parameters
+            let (presence, value) = parameters
                 .get(identifier.sym.as_ref())?
                 .strip_prefix("optional:")?
-                .split_once(':')
+                .split_once(':')?;
+            Some((presence.split(',').map(str::to_owned).collect(), value))
         }
 
         fn flatten_nullish<'a>(expression: &'a Expr, output: &mut Vec<&'a Expr>) {
@@ -2787,14 +2788,18 @@ fn jit_export(
             fn optional_root<'a>(
                 expression: &Expr,
                 parameters: &'a std::collections::HashMap<String, String>,
-            ) -> Option<(&'a str, &'a str, String)> {
+            ) -> Option<(Vec<String>, &'a str, String)> {
                 match expression {
                     Expr::Ident(identifier) => {
                         let (presence, value) = parameters
                             .get(identifier.sym.as_ref())?
                             .strip_prefix("optional:")?
                             .split_once(':')?;
-                        Some((presence, value, identifier.sym.to_string()))
+                        Some((
+                            presence.split(',').map(str::to_owned).collect(),
+                            value,
+                            identifier.sym.to_string(),
+                        ))
                     }
                     Expr::Member(member) => optional_root(member.obj.as_ref(), parameters),
                     Expr::Call(call) => match &call.callee {
@@ -2821,7 +2826,7 @@ fn jit_export(
                     &mut operation,
                 )?;
                 return Some(OptionalChainOperation {
-                    receiver_presence: Some(presence.into()),
+                    receiver_presence: Some(presence),
                     receiver: operation,
                     continuation: Vec::new(),
                 });
@@ -4102,11 +4107,8 @@ fn jit_export(
                         let mut present = vec![value.into()];
                         let mut fallback = fallback;
                         normalize_callable_branches([&mut present, &mut fallback])?;
-                        selected = vec![
-                            presence.into(),
-                            "asbool".into(),
-                            "if".into(),
-                        ];
+                        selected = presence;
+                        selected.extend(["asbool".into(), "if".into()]);
                         selected.extend(present);
                         selected.push("else".into());
                         selected.extend(fallback);
@@ -4115,7 +4117,8 @@ fn jit_export(
                         let optional =
                             optional_chain_operation(chain, parameters, locals, context)?;
                         if let Some(presence) = optional.receiver_presence {
-                            selected = vec![presence, "asbool".into(), "if".into()];
+                            selected = presence;
+                            selected.extend(["asbool".into(), "if".into()]);
                             selected.extend(optional.receiver.clone());
                             selected.extend(optional.continuation);
                             if jit_operation_may_be_absent(&optional.receiver) {
@@ -4169,7 +4172,7 @@ fn jit_export(
                 operation.extend(optional.continuation.clone());
                 let kind = jit_expression_kind(&operation)?.0;
                 if let Some(presence) = optional.receiver_presence {
-                    output.push(presence);
+                    output.extend(presence);
                     output.push("asbool".into());
                     output.push("if".into());
                     output.extend(operation);
@@ -12696,6 +12699,23 @@ fn jit_export(
         if let thaw_hir::HirType::Nullable(payload) | thaw_hir::HirType::Nullish(payload) = ty {
             if default.is_some() || *optional_parameter {
                 return None;
+            }
+            if matches!(
+                payload.as_ref(),
+                thaw_hir::HirType::Object(_) | thaw_hir::HirType::Tuple(_)
+            ) {
+                let presence = if matches!(ty, thaw_hir::HirType::Nullable(_)) {
+                    format!("a{slot}")
+                } else {
+                    format!("a{slot},c0000000000000000,==")
+                };
+                slot += 1;
+                bind_jit_aggregate_fields(parameter, payload, &mut parameters, &mut slot)?;
+                parameters.insert(
+                    parameter.clone(),
+                    format!("optional:{presence}:aggregate"),
+                );
+                continue;
             }
             let (prefix, null, absent) = match payload.as_ref() {
                 thaw_hir::HirType::F64 => ("a", "nulln", "absentn"),
