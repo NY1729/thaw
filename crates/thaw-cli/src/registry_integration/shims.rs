@@ -356,12 +356,22 @@ fn jit_export(
                         thaw_hir::HirType::Str => "rogetds",
                         _ => return None,
                     },
+                    thaw_hir::HirType::Optional(payload) => match payload.as_ref() {
+                        thaw_hir::HirType::F64 => "tupoptn",
+                        thaw_hir::HirType::Bool => "tupoptb",
+                        thaw_hir::HirType::Str => "tupopts",
+                        _ => return None,
+                    },
                     _ => return None,
                 };
                 let element_path = format!("{path}.{index}");
                 let mut value = source.to_vec();
-                value.push(format!("c{:016x}", (index as f64).to_bits()));
-                value.push(operation.into());
+                if matches!(element, thaw_hir::HirType::Optional(_)) {
+                    value.push(format!("{operation}{index}"));
+                } else {
+                    value.push(format!("c{:016x}", (index as f64).to_bits()));
+                    value.push(operation.into());
+                }
                 locals.insert(element_path.clone(), value.clone());
                 if let thaw_hir::HirType::Tuple(types) = element {
                     bind_tuple(&element_path, types, &value, locals)?;
@@ -612,13 +622,46 @@ fn jit_export(
             return None;
         }
         let length = u16::try_from(types.len()).ok()?;
-        let mut output = vec![format!("tupnew{length}")];
+        let wide = types.iter().any(|ty| {
+            matches!(
+                ty,
+                thaw_hir::HirType::Optional(_)
+                    | thaw_hir::HirType::Nullable(_)
+                    | thaw_hir::HirType::Nullish(_)
+                    | thaw_hir::HirType::Union(_)
+            )
+        });
+        let mut output = vec![format!("tupnew{}{length}", if wide { "w" } else { "" })];
         for (index, (element, ty)) in tuple.elems.iter().zip(types).enumerate() {
             let element = element.as_ref()?;
             if element.spread.is_some() {
                 return None;
             }
-            let (value, kind) = match ty {
+            let (value, kind, optional) = match ty {
+                thaw_hir::HirType::Optional(payload) => {
+                    if matches!(element.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == "undefined") {
+                        continue;
+                    }
+                    let mut value = Vec::new();
+                    encode_expression(
+                        element.expr.as_ref(),
+                        parameters,
+                        locals,
+                        context,
+                        &mut value,
+                    )?;
+                    let expected = jit_return_kind(payload)?;
+                    if !jit_kind_compatible(jit_expression_kind(&value)?.0, expected) {
+                        return None;
+                    }
+                    let kind = match payload.as_ref() {
+                        thaw_hir::HirType::F64 => 'n',
+                        thaw_hir::HirType::Bool => 'b',
+                        thaw_hir::HirType::Str => 's',
+                        _ => return None,
+                    };
+                    (value, kind, true)
+                }
                 thaw_hir::HirType::Tuple(types) => (
                     encode_fixed_tuple_value(
                         element.expr.as_ref(),
@@ -628,6 +671,7 @@ fn jit_export(
                         context,
                     )?,
                     'p',
+                    false,
                 ),
                 thaw_hir::HirType::Object(fields) => (
                     encode_fixed_object_value(
@@ -638,6 +682,7 @@ fn jit_export(
                         context,
                     )?,
                     'o',
+                    false,
                 ),
                 thaw_hir::HirType::Array(element_type)
                     if jit_array_result_element_supported(element_type) =>
@@ -654,7 +699,7 @@ fn jit_export(
                         return None;
                     }
                     value.push("arrayhandle".into());
-                    (value, 'p')
+                    (value, 'p', false)
                 }
                 thaw_hir::HirType::Dictionary(element_type)
                     if matches!(
@@ -675,7 +720,7 @@ fn jit_export(
                     if jit_expression_kind(&value)?.0 != JitKind::Dictionary {
                         return None;
                     }
-                    (value, 'o')
+                    (value, 'o', false)
                 }
                 _ => {
                     let mut value = Vec::new();
@@ -696,11 +741,17 @@ fn jit_export(
                         thaw_hir::HirType::Str => 's',
                         _ => return None,
                     };
-                    (value, kind)
+                    (value, kind, false)
                 }
             };
             output.extend(value);
-            output.push(format!("tupset{kind}{index}"));
+            output.push(if optional {
+                format!("tupsetopt{kind}{index}")
+            } else if wide {
+                format!("tupsetw{kind}{index}")
+            } else {
+                format!("tupset{kind}{index}")
+            });
         }
         Some(output)
     }
@@ -12121,6 +12172,9 @@ fn jit_operation_may_be_absent(operation: &[String]) -> bool {
     if token.starts_with("objopt") {
         return true;
     }
+    if token.starts_with("tupopt") {
+        return true;
+    }
     matches!(
         token,
         "at"
@@ -13480,6 +13534,18 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
                 return None;
             }
             stack.push(JitKind::Array);
+        } else if let Some((kind, index)) = [
+            ("tupoptn", JitKind::Number),
+            ("tupoptb", JitKind::Boolean),
+            ("tupopts", JitKind::String),
+        ]
+        .into_iter()
+        .find_map(|(prefix, kind)| token.strip_prefix(prefix).map(|index| (kind, index)))
+        {
+            if stack.pop()? != JitKind::Array || index.parse::<u16>().is_err() {
+                return None;
+            }
+            stack.push(kind);
         } else if matches!(
             token.as_str(),
             "rnat"
@@ -13643,8 +13709,32 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         } else if let Some(size) = token.strip_prefix("objnew") {
             size.parse::<u16>().ok().filter(|size| *size > 0)?;
             stack.push(JitKind::Dictionary);
+        } else if let Some(length) = token.strip_prefix("tupneww") {
+            length.parse::<u16>().ok()?;
+            stack.push(JitKind::Array);
         } else if let Some(length) = token.strip_prefix("tupnew") {
             length.parse::<u16>().ok()?;
+            stack.push(JitKind::Array);
+        } else if let Some((optional, encoded)) = token
+            .strip_prefix("tupsetopt")
+            .map(|encoded| (true, encoded))
+            .or_else(|| token.strip_prefix("tupsetw").map(|encoded| (false, encoded)))
+        {
+            let (kind, index) = encoded.split_at(1);
+            let value = stack.pop()?;
+            if stack.pop()? != JitKind::Array
+                || index.parse::<u16>().is_err()
+                || !match kind {
+                    "n" | "b" => matches!(value, JitKind::Number | JitKind::Boolean),
+                    "s" => value == JitKind::String,
+                    "p" => value == JitKind::Array,
+                    "o" => value == JitKind::Dictionary,
+                    _ => return None,
+                }
+                || optional && !matches!(kind, "n" | "b" | "s")
+            {
+                return None;
+            }
             stack.push(JitKind::Array);
         } else if let Some(encoded) = token.strip_prefix("tupset") {
             let (kind, index) = encoded.split_at(1);

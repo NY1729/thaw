@@ -4119,6 +4119,47 @@ optional_object_getter!(object_optional_boolean_field, 1);
 optional_object_getter!(object_optional_pointer_field, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn optional_tuple_field(tuple: f64, index: f64, kind: u8) -> f64 {
+    let Some((data, length)) = (unsafe { array_data(tuple) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index as usize >= length {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    let field = unsafe { data.add(8 + index as usize * 16) };
+    if unsafe { field.read() } == 0 {
+        CALL_PRESENT.with(|present| present.set(false));
+        return 0.0;
+    }
+    unsafe {
+        match kind {
+            0 => field.add(8).cast::<f64>().read(),
+            1 => f64::from(field.add(1).read() != 0),
+            2 => f64::from_bits(field.add(8).cast::<usize>().read() as u64),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! optional_tuple_getter {
+    ($name:ident, $kind:expr) => {
+        extern "C" fn $name(tuple: f64, index: f64) -> f64 {
+            optional_tuple_field(tuple, index, $kind)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+optional_tuple_getter!(optional_tuple_number_field, 0);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+optional_tuple_getter!(optional_tuple_boolean_field, 1);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+optional_tuple_getter!(optional_tuple_pointer_field, 2);
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn fixed_object_new(size: f64) -> f64 {
     if !size.is_finite() || size <= 0.0 || size.fract() != 0.0 {
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
@@ -4177,12 +4218,22 @@ fixed_object_setter!(fixed_object_set_string, 2);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn fixed_tuple_new(length: f64) -> f64 {
+    fixed_tuple_new_with_stride(length, 8)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn fixed_wide_tuple_new(length: f64) -> f64 {
+    fixed_tuple_new_with_stride(length, 16)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn fixed_tuple_new_with_stride(length: f64, stride: usize) -> f64 {
     if !length.is_finite() || length < 0.0 || length.fract() != 0.0 {
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
     }
     let Some(size) = (length as usize)
-        .checked_mul(8)
+        .checked_mul(stride)
         .and_then(|size| size.checked_add(8))
     else {
         CALL_ERROR.with(|error| error.set(ALLOCATION_FAILED.as_ptr().cast()));
@@ -4204,6 +4255,56 @@ extern "C" fn fixed_tuple_new(length: f64) -> f64 {
     }
     mutable_array_handle(array_result(output))
 }
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn fixed_wide_tuple_set(tuple: f64, value: f64, index: f64, kind: u8, optional: bool) -> f64 {
+    let Some((data, length)) = (unsafe { array_data(tuple) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index as usize >= length {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    unsafe {
+        let field = data.cast_mut().add(8 + index as usize * 16);
+        let payload = if optional {
+            field.write(1);
+            field.add(if kind == 1 { 1 } else { 8 })
+        } else {
+            field
+        };
+        match kind {
+            0 => payload.cast::<f64>().write(value),
+            1 => payload.write(u8::from(value != 0.0)),
+            2 => payload.cast::<usize>().write(value.to_bits() as usize),
+            _ => unreachable!(),
+        }
+    }
+    tuple
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+macro_rules! fixed_wide_tuple_setter {
+    ($name:ident, $kind:expr, $optional:expr) => {
+        extern "C" fn $name(tuple: f64, value: f64, index: f64) -> f64 {
+            fixed_wide_tuple_set(tuple, value, index, $kind, $optional)
+        }
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_wide_tuple_setter!(fixed_wide_tuple_set_number, 0, false);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_wide_tuple_setter!(fixed_wide_tuple_set_boolean, 1, false);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_wide_tuple_setter!(fixed_wide_tuple_set_pointer, 2, false);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_wide_tuple_setter!(fixed_wide_tuple_set_optional_number, 0, true);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_wide_tuple_setter!(fixed_wide_tuple_set_optional_boolean, 1, true);
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fixed_wide_tuple_setter!(fixed_wide_tuple_set_optional_pointer, 2, true);
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn fixed_tuple_set(tuple: f64, value: f64, index: f64, kind: u8) -> f64 {
@@ -5220,10 +5321,13 @@ enum NumericValue {
     UntagObject,
     ObjectField(u8, u16),
     OptionalObjectField(u8, u16),
+    OptionalTupleField(u8, u16),
     FixedObjectNew(u16),
     FixedObjectSet(u8, u16),
     FixedTupleNew(u16),
     FixedTupleSet(u8, u16),
+    FixedWideTupleNew(u16),
+    FixedWideTupleSet(u8, u16, bool),
     ExcludeNumber,
     ExcludeString,
     ExcludeBoolean,
@@ -6310,10 +6414,52 @@ impl NumericProgram {
                         })
                         .or_else(|| {
                             value
+                                .strip_prefix("tupneww")?
+                                .parse::<u16>()
+                                .ok()
+                                .map(NumericValue::FixedWideTupleNew)
+                        })
+                        .or_else(|| {
+                            value
                                 .strip_prefix("tupnew")?
                                 .parse::<u16>()
                                 .ok()
                                 .map(NumericValue::FixedTupleNew)
+                        })
+                        .or_else(|| {
+                            let encoded = value.strip_prefix("tupopt")?;
+                            let (kind, index) = encoded.split_at(1);
+                            let kind = match kind {
+                                "n" => 0,
+                                "b" => 1,
+                                "s" => 2,
+                                _ => return None,
+                            };
+                            index
+                                .parse::<u16>()
+                                .ok()
+                                .map(|index| NumericValue::OptionalTupleField(kind, index))
+                        })
+                        .or_else(|| {
+                            let (optional, encoded) = value
+                                .strip_prefix("tupsetopt")
+                                .map(|encoded| (true, encoded))
+                                .or_else(|| {
+                                    value
+                                        .strip_prefix("tupsetw")
+                                        .map(|encoded| (false, encoded))
+                                })?;
+                            let (kind, index) = encoded.split_at(1);
+                            let kind = match kind {
+                                "n" => 0,
+                                "b" => 1,
+                                "s" | "p" | "o" => 2,
+                                _ => return None,
+                            };
+                            index
+                                .parse::<u16>()
+                                .ok()
+                                .map(|index| NumericValue::FixedWideTupleSet(kind, index, optional))
                         })
                         .or_else(|| {
                             let encoded = value.strip_prefix("tupset")?;
@@ -6849,6 +6995,21 @@ impl NumericProgram {
                     ][usize::from(*kind)];
                     emit_binary_call(&mut code, function as *const () as u64, depth - 1);
                 }
+                NumericValue::OptionalTupleField(kind, index) => {
+                    if depth == 0 || depth == 8 {
+                        return None;
+                    }
+                    let index = f64::from(*index);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&index.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    let function = [
+                        optional_tuple_number_field,
+                        optional_tuple_boolean_field,
+                        optional_tuple_pointer_field,
+                    ][usize::from(*kind)];
+                    emit_binary_call(&mut code, function as *const () as u64, depth - 1);
+                }
                 NumericValue::FixedObjectNew(size) => {
                     if depth == 8 {
                         return None;
@@ -6887,6 +7048,17 @@ impl NumericProgram {
                     emit_unary_call(&mut code, fixed_tuple_new as *const () as u64, depth);
                     depth += 1;
                 }
+                NumericValue::FixedWideTupleNew(length) => {
+                    if depth == 8 {
+                        return None;
+                    }
+                    let length = f64::from(*length);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&length.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_unary_call(&mut code, fixed_wide_tuple_new as *const () as u64, depth);
+                    depth += 1;
+                }
                 NumericValue::FixedTupleSet(kind, index) => {
                     if depth < 2 || depth == 8 {
                         return None;
@@ -6901,6 +7073,34 @@ impl NumericProgram {
                         fixed_tuple_set_pointer,
                     ][usize::from(*kind)];
                     emit_ternary_call(&mut code, function as *const () as u64, depth - 2);
+                    depth -= 1;
+                }
+                NumericValue::FixedWideTupleSet(kind, index, optional) => {
+                    if depth < 2 || depth == 8 {
+                        return None;
+                    }
+                    let index = f64::from(*index);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&index.to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    let functions = if *optional {
+                        [
+                            fixed_wide_tuple_set_optional_number,
+                            fixed_wide_tuple_set_optional_boolean,
+                            fixed_wide_tuple_set_optional_pointer,
+                        ]
+                    } else {
+                        [
+                            fixed_wide_tuple_set_number,
+                            fixed_wide_tuple_set_boolean,
+                            fixed_wide_tuple_set_pointer,
+                        ]
+                    };
+                    emit_ternary_call(
+                        &mut code,
+                        functions[usize::from(*kind)] as *const () as u64,
+                        depth - 2,
+                    );
                     depth -= 1;
                 }
                 NumericValue::ExcludeNumber
