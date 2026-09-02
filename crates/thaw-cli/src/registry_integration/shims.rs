@@ -7548,9 +7548,200 @@ fn jit_export(
                 output.extend(loop_output);
                 output.extend(fallback_output);
                 output.push("resultend".into());
-                for name in loop_kinds.keys().filter(|name| !kinds.contains_key(*name)) {
+                for (slot, name) in loop_kinds
+                    .keys()
+                    .filter(|name| !kinds.contains_key(*name))
+                    .enumerate()
+                {
                     let kind = fallback_kinds.remove(name)?;
-                    fallback_kinds.insert(format!("\0for-result-{}", fallback_kinds.len()), kind);
+                    fallback_kinds.insert(
+                        format!("\0for-result-{slot}-{}", fallback_kinds.len()),
+                        kind,
+                    );
+                }
+                *kinds = fallback_kinds;
+                *materialized = fallback_values;
+                Some(())
+            }
+            Stmt::ForOf(statement)
+                if !statement.is_await
+                    && !rest.is_empty()
+                    && contains_aggregate_return(statement.body.as_ref()) =>
+            {
+                let mut loop_locals = locals.clone();
+                let mut loop_mutable = mutable.clone();
+                let mut loop_kinds = kinds.clone();
+                let mut source = Vec::new();
+                encode_expression(
+                    statement.right.as_ref(),
+                    parameters,
+                    &loop_locals,
+                    context,
+                    &mut source,
+                )?;
+                if source.len() == 1 {
+                    if let Some(untag) = jit_typed_array_union_untag(&source[0]) {
+                        source.push(untag.into());
+                    }
+                }
+                if jit_expression_kind(&source)?.0 != JitKind::Array {
+                    return None;
+                }
+                let array = array_prefix(&source)?;
+                let element_kind = match array {
+                    "rn" => JitKind::Number,
+                    "rb" => JitKind::Boolean,
+                    "rs" => JitKind::String,
+                    _ => return None,
+                };
+                let local_prefix = format!("{array}l");
+                let source_local = if let [source] = source.as_slice() {
+                    source
+                        .starts_with(&local_prefix)
+                        .then(|| source.clone())
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| {
+                    let source_index = loop_kinds.len();
+                    output.extend(source);
+                    loop_kinds.insert(
+                        format!("\0forof-source-{source_index}"),
+                        JitKind::Array,
+                    );
+                    format!("{array}l{source_index}")
+                });
+                let index = loop_kinds.len();
+                output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                loop_kinds.insert(format!("\0forof-index-{index}"), JitKind::Number);
+                let index_local = format!("ln{index}");
+                let element_index = match &statement.left {
+                    ForHead::VarDecl(declaration) => {
+                        let [declarator] = declaration.decls.as_slice() else {
+                            return None;
+                        };
+                        let Pat::Ident(name) = &declarator.name else {
+                            return None;
+                        };
+                        if declarator.init.is_some()
+                            || parameters.contains_key(name.id.sym.as_ref())
+                            || loop_locals.contains_key(name.id.sym.as_ref())
+                        {
+                            return None;
+                        }
+                        match element_kind {
+                            JitKind::String => encode_string("", output)?,
+                            JitKind::Number | JitKind::Boolean => {
+                                output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                                if element_kind == JitKind::Boolean {
+                                    output.push("asbool".into());
+                                }
+                            }
+                            _ => return None,
+                        }
+                        let element_index = loop_kinds.len();
+                        let prefix = match element_kind {
+                            JitKind::Number => "ln",
+                            JitKind::Boolean => "lb",
+                            JitKind::String => "ls",
+                            _ => return None,
+                        };
+                        loop_locals.insert(
+                            name.id.sym.to_string(),
+                            vec![format!("{prefix}{element_index}")],
+                        );
+                        loop_kinds.insert(name.id.sym.to_string(), element_kind);
+                        if declaration.kind != VarDeclKind::Const {
+                            loop_mutable.insert(name.id.sym.to_string());
+                        }
+                        element_index
+                    }
+                    ForHead::Pat(pattern) => {
+                        let Pat::Ident(name) = pattern.as_ref() else {
+                            return None;
+                        };
+                        if !loop_mutable.contains(name.id.sym.as_ref())
+                            || loop_kinds.get(name.id.sym.as_ref())? != &element_kind
+                        {
+                            return None;
+                        }
+                        loop_locals
+                            .get(name.id.sym.as_ref())?
+                            .first()?
+                            .get(2..)?
+                            .parse::<usize>()
+                            .ok()?
+                    }
+                    ForHead::UsingDecl(_) => return None,
+                };
+                let mut loop_output = vec!["resultstart".into(), "loop".into()];
+                loop_output.extend([
+                    index_local.clone(),
+                    source_local.clone(),
+                    "arraylen".into(),
+                    "<".into(),
+                    "while".into(),
+                    source_local,
+                    index_local.clone(),
+                    format!("{array}get"),
+                    format!("setl{element_index}"),
+                ]);
+                let control_kinds = helper_control_kinds(&loop_kinds, &loop_locals)?;
+                let mut early_kinds = None;
+                let mut early_values = None;
+                encode_aggregate_return_effects(
+                    statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    &loop_locals,
+                    &loop_mutable,
+                    &control_kinds,
+                    &loop_kinds,
+                    context,
+                    &mut early_kinds,
+                    &mut early_values,
+                    &mut loop_output,
+                )?;
+                let early_kinds = early_kinds?;
+                let early_values = early_values?;
+                loop_output.extend([
+                    "looptail".into(),
+                    index_local,
+                    format!("c{:016x}", 1.0f64.to_bits()),
+                    "+".into(),
+                    format!("setl{index}"),
+                    "loopend".into(),
+                ]);
+                let mut fallback_kinds = loop_kinds.clone();
+                let mut fallback_values = std::collections::HashMap::new();
+                let mut fallback_output = Vec::new();
+                materialize_helper_returns(
+                    rest,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    &mut fallback_kinds,
+                    &mut fallback_values,
+                    &mut fallback_output,
+                )?;
+                if early_kinds != fallback_kinds || early_values != fallback_values {
+                    return None;
+                }
+                output.extend(loop_output);
+                output.extend(fallback_output);
+                output.push("resultend".into());
+                for (slot, name) in loop_kinds
+                    .keys()
+                    .filter(|name| !kinds.contains_key(*name))
+                    .enumerate()
+                {
+                    let kind = fallback_kinds.remove(name)?;
+                    fallback_kinds.insert(
+                        format!("\0forof-result-{slot}-{}", fallback_kinds.len()),
+                        kind,
+                    );
                 }
                 *kinds = fallback_kinds;
                 *materialized = fallback_values;

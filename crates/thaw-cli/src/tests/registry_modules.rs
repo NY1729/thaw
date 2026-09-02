@@ -2135,6 +2135,8 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "export declare function callHelperWhileReturn(values: number[]): string;\n",
         "export declare function callHelperForReturn(values: number[]): string;\n",
         "export declare function callHelperDoWhileReturn(values: number[]): string;\n",
+        "export declare function callHelperForOfReturn(values: number[]): string;\n",
+        "export declare function callHelperForOfString(values: string[]): string;\n",
     );
     let source = concat!(
         "function makeLiteral(value) { return { unused: Math.random(), first: value, second: value, label: 'helper' }; } ",
@@ -2157,6 +2159,8 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "function makeHelperWhileReturn(values) { let index = 0; while (index < values.length) { if (values[index] > 2) return { index, label: 'found' }; index++; } return { index: -1, label: 'missing' }; } ",
         "function makeHelperForReturn(values) { for (let index = 0; index < values.length; index++) { if (values[index] > 2) return { index, label: 'found' }; } return { index: -1, label: 'missing' }; } ",
         "function makeHelperDoWhileReturn(values) { let index = 0; do { if (values[index] > 2) return { index, label: 'found' }; index++; } while (index < values.length); return { index: -1, label: 'missing' }; } ",
+        "function makeHelperForOfReturn(values) { for (const value of values) { if (value > 2) return { index: value, label: 'found' }; } return { index: -1, label: 'missing' }; } ",
+        "function makeHelperForOfString(values) { for (const value of values) { if (value.length > 3) return { count: value.length, label: value }; } return { count: 0, label: 'missing' }; } ",
         "module.exports.unpack = value => { const { count: amount, meta: { label, enabled }, pair: [index, text], values } = value; values.push(index); return label + ':' + String(amount) + ':' + String(enabled) + ':' + String(index) + ':' + text + ':' + values.join(','); }; ",
         "module.exports.reassign = value => { let count = 0; let label = ''; let index = 0; let text = ''; ({ count, meta: { label }, pair: [index, text] } = value); return String(count) + ':' + label + ':' + String(index) + ':' + text; }; ",
         "module.exports.reassignControl = (value, flag) => { let count = 0; let label = ''; ({ count, meta: { label } } = value); if (flag) count += 1; return String(count) + ':' + label; }; ",
@@ -2186,6 +2190,8 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "module.exports.callHelperWhileReturn = values => { const { index, label } = makeHelperWhileReturn(values); return label + ':' + String(index); };",
         "module.exports.callHelperForReturn = values => { const { index, label } = makeHelperForReturn(values); return label + ':' + String(index); };",
         "module.exports.callHelperDoWhileReturn = values => { const { index, label } = makeHelperDoWhileReturn(values); return label + ':' + String(index); };",
+        "module.exports.callHelperForOfReturn = values => { const { index, label } = makeHelperForOfReturn(values); return label + ':' + String(index); };",
+        "module.exports.callHelperForOfString = values => { const { count, label } = makeHelperForOfString(values); return label + ':' + String(count); };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -2218,6 +2224,8 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "callHelperWhileReturn",
         "callHelperForReturn",
         "callHelperDoWhileReturn",
+        "callHelperForOfReturn",
+        "callHelperForOfString",
     ]
         .into_iter()
         .enumerate()
@@ -2246,7 +2254,11 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
             assert!(expression.contains("catch"));
         } else if matches!(
             name,
-            "callHelperWhileReturn" | "callHelperForReturn" | "callHelperDoWhileReturn"
+            "callHelperWhileReturn"
+                | "callHelperForReturn"
+                | "callHelperDoWhileReturn"
+                | "callHelperForOfReturn"
+                | "callHelperForOfString"
         ) {
             let expression = expression.unwrap();
             assert!(expression.contains("resultstart"));
@@ -2266,7 +2278,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { callArrayAssign, callArrayParts, callControl, callEarly, callHelperCatch, callHelperDoWhileReturn, callHelperFinally, callHelperFinallyReturn, callHelperFor, callHelperForReturn, callHelperLoop, callHelperSwitch, callHelperSwitchReturn, callHelperWhileReturn, callLiteral, callLocals, callNestedEarly, callObjectDefault, callObjectParts, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); console.log(callArrayParts(3)); console.log(callArrayAssign(3)); console.log(callObjectParts(3)); console.log(callObjectDefault()); console.log(callControl(3, true)); console.log(callControl(3, false)); console.log(callEarly(3, true)); console.log(callEarly(3, false)); console.log(callNestedEarly(3, true)); console.log(callNestedEarly(3, false)); console.log(callNestedEarly(0, true)); console.log(callHelperLoop(4)); console.log(callHelperFor(4)); console.log(callHelperFinally(5)); console.log(callHelperSwitch(1)); console.log(callHelperSwitch(2)); console.log(callHelperSwitch(3)); console.log(callHelperSwitchReturn([7, 2])); console.log(callHelperSwitchReturn([7, 9])); console.log(callHelperFinallyReturn(3)); const catchOk = [3]; console.log(callHelperCatch(3, false, catchOk)); console.log(catchOk.join(',')); const catchBad = [3]; console.log(callHelperCatch(3, true, catchBad)); console.log(catchBad.join(',')); const catchLow = [-1]; console.log(callHelperCatch(-1, false, catchLow)); console.log(catchLow.join(',')); console.log(callHelperWhileReturn([1, 4, 2])); console.log(callHelperWhileReturn([1, 2])); console.log(callHelperForReturn([1, 4, 2])); console.log(callHelperForReturn([1, 2])); console.log(callHelperDoWhileReturn([1, 4, 2])); console.log(callHelperDoWhileReturn([1, 2])); }\n",
+        "import { callArrayAssign, callArrayParts, callControl, callEarly, callHelperCatch, callHelperDoWhileReturn, callHelperFinally, callHelperFinallyReturn, callHelperFor, callHelperForOfReturn, callHelperForOfString, callHelperForReturn, callHelperLoop, callHelperSwitch, callHelperSwitchReturn, callHelperWhileReturn, callLiteral, callLocals, callNestedEarly, callObjectDefault, callObjectParts, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); console.log(callArrayParts(3)); console.log(callArrayAssign(3)); console.log(callObjectParts(3)); console.log(callObjectDefault()); console.log(callControl(3, true)); console.log(callControl(3, false)); console.log(callEarly(3, true)); console.log(callEarly(3, false)); console.log(callNestedEarly(3, true)); console.log(callNestedEarly(3, false)); console.log(callNestedEarly(0, true)); console.log(callHelperLoop(4)); console.log(callHelperFor(4)); console.log(callHelperFinally(5)); console.log(callHelperSwitch(1)); console.log(callHelperSwitch(2)); console.log(callHelperSwitch(3)); console.log(callHelperSwitchReturn([7, 2])); console.log(callHelperSwitchReturn([7, 9])); console.log(callHelperFinallyReturn(3)); const catchOk = [3]; console.log(callHelperCatch(3, false, catchOk)); console.log(catchOk.join(',')); const catchBad = [3]; console.log(callHelperCatch(3, true, catchBad)); console.log(catchBad.join(',')); const catchLow = [-1]; console.log(callHelperCatch(-1, false, catchLow)); console.log(catchLow.join(',')); console.log(callHelperWhileReturn([1, 4, 2])); console.log(callHelperWhileReturn([1, 2])); console.log(callHelperForReturn([1, 4, 2])); console.log(callHelperForReturn([1, 2])); console.log(callHelperDoWhileReturn([1, 4, 2])); console.log(callHelperDoWhileReturn([1, 2])); console.log(callHelperForOfReturn([1, 4, 2])); console.log(callHelperForOfReturn([1, 2])); console.log(callHelperForOfString(['a', 'word'])); console.log(callHelperForOfString(['a'])); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2282,7 +2294,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n39\n31\nbox:4\nfallback\nyes:5\nsmall:2\nyes:4\nno:2\nhigh:13\nlow:4\nzero:0\n4\n6\n10\none\ntwo\nother\ntwo:1\nother:1\n4:3,9\nok:3\n3,9\nbad:4\n3,9\nlow:0\n-1,9\nfound:1\nmissing:-1\nfound:1\nmissing:-1\nfound:1\nmissing:-1\n"
+        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n39\n31\nbox:4\nfallback\nyes:5\nsmall:2\nyes:4\nno:2\nhigh:13\nlow:4\nzero:0\n4\n6\n10\none\ntwo\nother\ntwo:1\nother:1\n4:3,9\nok:3\n3,9\nbad:4\n3,9\nlow:0\n-1,9\nfound:1\nmissing:-1\nfound:1\nmissing:-1\nfound:1\nmissing:-1\nfound:4\nmissing:-1\nword:4\nmissing:0\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
