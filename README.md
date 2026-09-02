@@ -2575,7 +2575,8 @@ patterns, shorthand or renamed leaves, skipped tuple positions, and direct
 aliases to contained primitive arrays on the same JIT path. Parenthesized object
 assignment patterns can write those same nested leaves back to existing
 mutable locals without QuickJS, including locals materialized for following
-control flow.
+control flow. The same fixed-path updates work when the object assignment
+itself occurs inside `if`, loops, or `try`/`finally`.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,
