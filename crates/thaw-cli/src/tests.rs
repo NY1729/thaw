@@ -4064,6 +4064,18 @@ fn jit_copies_a_narrowed_mixed_array_union() {
     )
     .is_some());
 
+    for method in ["toReversed", "reverse"] {
+        let reversed = thaw_bridge::DtsFunction {
+            name: method.into(),
+            ret: function.params[0].1.clone(),
+            ..function.clone()
+        };
+        let source = format!(
+            "function {method}(value) {{ if (Array.isArray(value)) return value.{method}(); return value; }} module.exports = {{ {method} }};"
+        );
+        assert!(jit_numeric_export(&source, method, false, &reversed).is_some());
+    }
+
     let needle = thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
         thaw_hir::HirType::F64,
         thaw_hir::HirType::Str,
