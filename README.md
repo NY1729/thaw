@@ -2452,7 +2452,9 @@ tag through the same path. Numeric compound assignments and prefix/postfix
 updates also operate on tagged fields directly; absent `undefined` converts to
 `NaN`, while `null` converts to zero before the update, matching JavaScript.
 Fixed primitive fields support lazy `&&=` and `||=`, and tagged scalar fields
-support lazy `??=` while updating both payload and presence tag;
+support lazy `??=` while updating both payload and presence tag. Tagged scalar
+`||=` assigns on either nullish absence, while optional and nullable scalar
+`&&=` preserves an absent result without evaluating its right-hand side;
 optional, nullable, and nullish primitive object fields use their native
 tag/payload layout, so
 direct reads, `??`, and optional string-method chains preserve absence without
