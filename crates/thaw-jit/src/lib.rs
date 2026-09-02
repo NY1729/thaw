@@ -910,7 +910,8 @@ fn primitive_array_truthy(value: f64, encoded: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn dynamic_array_truthy(value: f64, mode: u8) -> f64 {
+extern "C" fn dynamic_array_truthy(value: f64, mode: f64) -> f64 {
+    let mode = mode as u8;
     let Some(array) = dynamic_primitive(value, None) else {
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
@@ -924,17 +925,20 @@ fn dynamic_array_truthy(value: f64, mode: u8) -> f64 {
             return 0.0;
         }
     };
-    primitive_array_truthy(f64::from_bits(array.payload), f64::from(kind * 8 + mode))
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn dynamic_array_some_truthy(value: f64) -> f64 {
-    dynamic_array_truthy(value, 0)
-}
-
-#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn dynamic_array_every_truthy(value: f64) -> f64 {
-    dynamic_array_truthy(value, 1)
+    let result = primitive_array_truthy(f64::from_bits(array.payload), f64::from(kind * 8 + mode));
+    match mode {
+        2 | 4 if CALL_PRESENT.with(Cell::get) => {
+            let tag = match array.tag {
+                DYNAMIC_NUMBER_ARRAY_TAG => DYNAMIC_NUMBER_TAG,
+                DYNAMIC_BOOLEAN_ARRAY_TAG => DYNAMIC_BOOLEAN_TAG,
+                DYNAMIC_STRING_ARRAY_TAG => DYNAMIC_STRING_TAG,
+                _ => unreachable!(),
+            };
+            dynamic_from_parts(tag as f64, result)
+        }
+        6 => dynamic_array_result(array.tag, result),
+        _ => result,
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -4589,8 +4593,7 @@ enum NumericValue {
     NumberArrayFind(CompareOp, u8),
     NumberArrayFilter(CompareOp),
     PrimitiveArrayTruthy(u8, u8),
-    DynamicArraySomeTruthy,
-    DynamicArrayEveryTruthy,
+    DynamicArrayTruthy(u8),
     PrimitiveArrayCompare(u8, CompareOp, u8),
     PrimitiveArrayMap(u8, u8),
     PrimitiveArrayConvert(u8, u8),
@@ -4950,8 +4953,13 @@ impl NumericProgram {
                     "rsset" => Some(NumericValue::StringArraySet),
                     "rbset" => Some(NumericValue::BoolArraySet),
                     "dynarrayset" => Some(NumericValue::DynamicArraySet),
-                    "dynarraysometruthy" => Some(NumericValue::DynamicArraySomeTruthy),
-                    "dynarrayeverytruthy" => Some(NumericValue::DynamicArrayEveryTruthy),
+                    "dynarraysometruthy" => Some(NumericValue::DynamicArrayTruthy(0)),
+                    "dynarrayeverytruthy" => Some(NumericValue::DynamicArrayTruthy(1)),
+                    "dynarrayfindtruthy" => Some(NumericValue::DynamicArrayTruthy(2)),
+                    "dynarrayfindindextruthy" => Some(NumericValue::DynamicArrayTruthy(3)),
+                    "dynarrayfindlasttruthy" => Some(NumericValue::DynamicArrayTruthy(4)),
+                    "dynarrayfindlastindextruthy" => Some(NumericValue::DynamicArrayTruthy(5)),
+                    "dynarrayfiltertruthy" => Some(NumericValue::DynamicArrayTruthy(6)),
                     "arrayvalue" => Some(NumericValue::ArrayValue),
                     "arrayhandle" => Some(NumericValue::MutableArrayHandle),
                     "arrayempty" => Some(NumericValue::EmptyArray),
@@ -6156,16 +6164,18 @@ impl NumericProgram {
                         depth - 1,
                     );
                 }
-                NumericValue::DynamicArraySomeTruthy | NumericValue::DynamicArrayEveryTruthy => {
-                    if depth == 0 {
+                NumericValue::DynamicArrayTruthy(mode) => {
+                    if depth == 0 || depth == 8 {
                         return None;
                     }
-                    let function = if *value == NumericValue::DynamicArraySomeTruthy {
-                        dynamic_array_some_truthy
-                    } else {
-                        dynamic_array_every_truthy
-                    };
-                    emit_unary_call(&mut code, function as *const () as u64, depth - 1);
+                    code.extend_from_slice(&[0x48, 0xb8]);
+                    code.extend_from_slice(&f64::from(*mode).to_bits().to_le_bytes());
+                    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xc0 | (depth << 3)]);
+                    emit_binary_call(
+                        &mut code,
+                        dynamic_array_truthy as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::PrimitiveArrayCompare(kind, operation, mode) => {
                     if depth < 2 || depth == 8 {
