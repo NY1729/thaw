@@ -6158,7 +6158,6 @@ fn jit_export(
                 [b'B'] => "untagrb",
                 [b'S'] => "untagrs",
                 [b'T'] => "untagtuple",
-                _ if arrays.contains(&b'T') => return None,
                 _ => "untagarray",
             }
             .into(),
