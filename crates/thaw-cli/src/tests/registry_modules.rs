@@ -1552,6 +1552,63 @@ fn nullish_aggregate_fields_use_jit_without_quickjs() {
 }
 
 #[test]
+fn nested_tagged_aggregate_fields_use_jit_without_quickjs() {
+    let declarations = thaw_bridge::parse_dts(
+        "export interface Item { child?: { label: string }; nullable: { score: number } | null; pair: [number, string] | null | undefined; }\nexport declare function label(value: Item | string): string;\nexport declare function score(value: Item | string): number;\nexport declare function numberValue(value: Item | string): number;\nexport declare function stringValue(value: Item | string): string;\nexport declare function make(full: boolean): Item | string;\n",
+    )
+    .unwrap();
+    let source = "module.exports.label = value => typeof value === 'object' ? value.child?.label ?? 'missing' : value; module.exports.score = value => typeof value === 'object' ? value.nullable?.score ?? 0 : -1; module.exports.numberValue = value => typeof value === 'object' ? value.pair?.[0] ?? 0 : -1; module.exports.stringValue = value => typeof value === 'object' ? value.pair?.[1] ?? 'missing' : value; module.exports.make = full => full ? { child: { label: 'made' }, nullable: { score: 9 }, pair: [8, 'pair'] } : { nullable: null, pair: null };";
+    for (name, declaration) in ["label", "score", "numberValue", "stringValue", "make"]
+        .into_iter()
+        .zip(&declarations)
+    {
+        assert!(
+            jit_numeric_export(source, name, false, declaration).is_some(),
+            "{name} did not specialize"
+        );
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-nested-tagged-aggregate-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-nested-tagged-aggregate");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Item { child?: { label: string }; nullable: { score: number } | null; pair: [number, string] | null | undefined; }\nexport declare function label(value: Item | string): string;\nexport declare function score(value: Item | string): number;\nexport declare function numberValue(value: Item | string): number;\nexport declare function stringValue(value: Item | string): string;\nexport declare function make(full: boolean): Item | string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.label = value => typeof value === 'object' ? value.child?.label ?? 'missing' : value; module.exports.score = value => typeof value === 'object' ? value.nullable?.score ?? 0 : -1; module.exports.numberValue = value => typeof value === 'object' ? value.pair?.[0] ?? 0 : -1; module.exports.stringValue = value => typeof value === 'object' ? value.pair?.[1] ?? 'missing' : value; module.exports.make = full => full ? { child: { label: 'made' }, nullable: { score: 9 }, pair: [8, 'pair'] } : { nullable: null, pair: null };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { label, make, numberValue, score, stringValue } from 'jit-nested-tagged-aggregate';\ntype Item = { child?: { label: string }; nullable: { score: number } | null; pair: [number, string] | null | undefined };\nfunction main(): void { const present: Item = { child: { label: 'thaw' }, nullable: { score: 6 }, pair: [7, 'local'] }; const absent: Item = { nullable: null, pair: undefined }; const made = make(true); const empty = make(false); console.log(label(present)); console.log(score(present)); console.log(numberValue(present)); console.log(stringValue(present)); console.log(label(absent)); console.log(score(absent)); console.log(numberValue(absent)); console.log(stringValue(absent)); console.log(label('plain')); console.log(score('plain')); console.log(numberValue('plain')); console.log(stringValue('plain')); console.log(label(made)); console.log(score(made)); console.log(numberValue(made)); console.log(stringValue(made)); console.log(label(empty)); console.log(score(empty)); console.log(numberValue(empty)); console.log(stringValue(empty)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "thaw\n6\n7\nlocal\nmissing\n0\n0\nmissing\nplain\n-1\n-1\nplain\nmade\n9\n8\npair\nmissing\n0\n0\nmissing\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn optional_dictionary_unions_use_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-dictionary-union-{}",
