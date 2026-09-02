@@ -7146,6 +7146,152 @@ fn jit_export(
         Some(())
     }
 
+    fn contains_aggregate_return(statement: &Stmt) -> bool {
+        match statement {
+            Stmt::Return(returned) => returned.arg.is_some(),
+            Stmt::Block(block) => block.stmts.iter().any(contains_aggregate_return),
+            Stmt::If(branch) => {
+                contains_aggregate_return(branch.cons.as_ref())
+                    || branch
+                        .alt
+                        .as_deref()
+                        .is_some_and(contains_aggregate_return)
+            }
+            _ => false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_aggregate_return_effects(
+        statement: &Stmt,
+        requested: &std::collections::HashSet<String>,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        mutable: &std::collections::HashSet<String>,
+        control_kinds: &std::collections::HashMap<String, JitKind>,
+        result_base_kinds: &std::collections::HashMap<String, JitKind>,
+        context: &mut InlineContext<'_>,
+        expected_kinds: &mut Option<std::collections::HashMap<String, JitKind>>,
+        expected_values: &mut Option<std::collections::HashMap<String, Vec<String>>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        match statement {
+            Stmt::Return(returned) => {
+                let mut returned_kinds = result_base_kinds.clone();
+                let mut returned_values = std::collections::HashMap::new();
+                materialize_fixed_literal(
+                    returned.arg.as_deref()?,
+                    "",
+                    requested,
+                    parameters,
+                    locals,
+                    context,
+                    &mut returned_kinds,
+                    &mut returned_values,
+                    output,
+                )?;
+                if expected_kinds
+                    .as_ref()
+                    .is_some_and(|expected| expected != &returned_kinds)
+                    || expected_values
+                        .as_ref()
+                        .is_some_and(|expected| expected != &returned_values)
+                {
+                    return None;
+                }
+                *expected_kinds = Some(returned_kinds);
+                *expected_values = Some(returned_values);
+                output.push("resultreturn".into());
+                Some(())
+            }
+            Stmt::Block(block) => {
+                for statement in &block.stmts {
+                    encode_aggregate_return_effects(
+                        statement,
+                        requested,
+                        parameters,
+                        locals,
+                        mutable,
+                        control_kinds,
+                        result_base_kinds,
+                        context,
+                        expected_kinds,
+                        expected_values,
+                        output,
+                    )?;
+                    if matches!(statement, Stmt::Return(_)) {
+                        break;
+                    }
+                }
+                Some(())
+            }
+            Stmt::If(branch) => {
+                encode_condition(branch.test.as_ref(), parameters, locals, context, output)?;
+                let narrowed = narrowed_locals(
+                    branch.test.as_ref(),
+                    parameters,
+                    locals,
+                    context.helpers,
+                );
+                let consequent_locals = narrowed.as_ref().map_or(locals, |locals| &locals.0);
+                let alternate_locals = narrowed.as_ref().map_or(locals, |locals| &locals.1);
+                output.push("guard".into());
+                encode_aggregate_return_effects(
+                    branch.cons.as_ref(),
+                    requested,
+                    parameters,
+                    consequent_locals,
+                    mutable,
+                    control_kinds,
+                    result_base_kinds,
+                    context,
+                    expected_kinds,
+                    expected_values,
+                    output,
+                )?;
+                if let Some(alternate) = branch.alt.as_deref() {
+                    output.push("guardelse".into());
+                    encode_aggregate_return_effects(
+                        alternate,
+                        requested,
+                        parameters,
+                        alternate_locals,
+                        mutable,
+                        control_kinds,
+                        result_base_kinds,
+                        context,
+                        expected_kinds,
+                        expected_values,
+                        output,
+                    )?;
+                }
+                output.push("guardend".into());
+                Some(())
+            }
+            Stmt::While(_)
+            | Stmt::DoWhile(_)
+            | Stmt::For(_)
+            | Stmt::ForIn(_)
+            | Stmt::ForOf(_)
+            | Stmt::Switch(_)
+            | Stmt::Try(_)
+            | Stmt::Labeled(_) => None,
+            statement => encode_loop_effects(
+                statement,
+                parameters,
+                locals,
+                mutable,
+                (
+                    control_kinds,
+                    nested_loop_control(0, root_loop_control()),
+                    &[],
+                ),
+                context,
+                output,
+            ),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn materialize_helper_returns(
         statements: &[&Stmt],
@@ -7185,6 +7331,143 @@ fn jit_export(
                 materialized,
                 output,
             ),
+            Stmt::While(statement)
+                if !rest.is_empty() && contains_aggregate_return(statement.body.as_ref()) =>
+            {
+                let mut loop_output = vec!["resultstart".into(), "loop".into()];
+                encode_condition(
+                    statement.test.as_ref(),
+                    parameters,
+                    locals,
+                    context,
+                    &mut loop_output,
+                )?;
+                loop_output.push("while".into());
+                let control_kinds = helper_control_kinds(kinds, locals)?;
+                let mut early_kinds = None;
+                let mut early_values = None;
+                encode_aggregate_return_effects(
+                    statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    &control_kinds,
+                    kinds,
+                    context,
+                    &mut early_kinds,
+                    &mut early_values,
+                    &mut loop_output,
+                )?;
+                let early_kinds = early_kinds?;
+                let early_values = early_values?;
+                loop_output.extend(["looptail".into(), "loopend".into()]);
+                let mut fallback_kinds = kinds.clone();
+                let mut fallback_values = std::collections::HashMap::new();
+                let mut fallback_output = Vec::new();
+                materialize_helper_returns(
+                    rest,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    &mut fallback_kinds,
+                    &mut fallback_values,
+                    &mut fallback_output,
+                )?;
+                if early_kinds != fallback_kinds || early_values != fallback_values {
+                    return None;
+                }
+                output.extend(loop_output);
+                output.extend(fallback_output);
+                output.push("resultend".into());
+                *kinds = fallback_kinds;
+                *materialized = fallback_values;
+                Some(())
+            }
+            Stmt::For(statement)
+                if !rest.is_empty()
+                    && !matches!(statement.init.as_ref(), Some(VarDeclOrExpr::VarDecl(_)))
+                    && contains_aggregate_return(statement.body.as_ref()) =>
+            {
+                if let Some(VarDeclOrExpr::Expr(initializer)) = statement.init.as_ref() {
+                    let control_kinds = helper_control_kinds(kinds, locals)?;
+                    encode_loop_expression(
+                        initializer.as_ref(),
+                        parameters,
+                        locals,
+                        mutable,
+                        &control_kinds,
+                        context,
+                        output,
+                    )?;
+                }
+                let mut loop_output = vec!["resultstart".into(), "loop".into()];
+                if let Some(test) = statement.test.as_deref() {
+                    encode_condition(test, parameters, locals, context, &mut loop_output)?;
+                } else {
+                    loop_output.extend([
+                        format!("c{:016x}", 1.0f64.to_bits()),
+                        "asbool".into(),
+                    ]);
+                }
+                loop_output.push("while".into());
+                let control_kinds = helper_control_kinds(kinds, locals)?;
+                let mut early_kinds = None;
+                let mut early_values = None;
+                encode_aggregate_return_effects(
+                    statement.body.as_ref(),
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    &control_kinds,
+                    kinds,
+                    context,
+                    &mut early_kinds,
+                    &mut early_values,
+                    &mut loop_output,
+                )?;
+                let early_kinds = early_kinds?;
+                let early_values = early_values?;
+                loop_output.push("looptail".into());
+                if let Some(update) = statement.update.as_deref() {
+                    encode_loop_expression(
+                        update,
+                        parameters,
+                        locals,
+                        mutable,
+                        &control_kinds,
+                        context,
+                        &mut loop_output,
+                    )?;
+                }
+                loop_output.push("loopend".into());
+                let mut fallback_kinds = kinds.clone();
+                let mut fallback_values = std::collections::HashMap::new();
+                let mut fallback_output = Vec::new();
+                materialize_helper_returns(
+                    rest,
+                    requested,
+                    parameters,
+                    locals,
+                    mutable,
+                    context,
+                    &mut fallback_kinds,
+                    &mut fallback_values,
+                    &mut fallback_output,
+                )?;
+                if early_kinds != fallback_kinds || early_values != fallback_values {
+                    return None;
+                }
+                output.extend(loop_output);
+                output.extend(fallback_output);
+                output.push("resultend".into());
+                *kinds = fallback_kinds;
+                *materialized = fallback_values;
+                Some(())
+            }
             Stmt::If(branch) => {
                 if let Some((name, tag_index, value_index, selected, alternate, probe)) =
                     dynamic_catch_narrowing(branch.test.as_ref(), locals)
@@ -15563,6 +15846,7 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
     let mut switches = Vec::new();
     let mut tries = Vec::new();
     let mut catches = Vec::new();
+    let mut result_regions: Vec<(Vec<JitKind>, Option<Vec<JitKind>>)> = Vec::new();
     let mut dynamic_slots = std::collections::HashSet::new();
     let mut returns = Vec::new();
     let mut maximum_depth = 0;
@@ -15857,6 +16141,41 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             let caught = stack.split_off(base.len());
             for (expected, caught) in expected.into_iter().zip(caught) {
                 stack.push(merge_jit_kinds(expected, caught)?);
+            }
+        } else if token == "resultstart" {
+            result_regions.push((stack.clone(), None));
+        } else if token == "resultreturn" {
+            let (base, expected) = result_regions.last_mut()?;
+            if !stack.starts_with(base.as_slice()) || stack.len() == base.len() {
+                return None;
+            }
+            let returned = stack.split_off(base.len());
+            if let Some(previous) = expected.take() {
+                if previous.len() != returned.len() {
+                    return None;
+                }
+                *expected = Some(
+                    previous
+                        .into_iter()
+                        .zip(returned)
+                        .map(|(left, right)| merge_jit_kinds(left, right))
+                        .collect::<Option<Vec<_>>>()?,
+                );
+            } else {
+                *expected = Some(returned);
+            }
+        } else if token == "resultend" {
+            let (base, expected) = result_regions.pop()?;
+            if !stack.starts_with(&base) {
+                return None;
+            }
+            let returned = stack.split_off(base.len());
+            let expected = expected?;
+            if returned.len() != expected.len() {
+                return None;
+            }
+            for (expected, returned) in expected.into_iter().zip(returned) {
+                stack.push(merge_jit_kinds(expected, returned)?);
             }
         } else if token == "return" {
             let result = stack.pop()?;
@@ -17282,7 +17601,8 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
         && guards.is_empty()
         && switches.is_empty()
         && tries.is_empty()
-        && catches.is_empty())
+        && catches.is_empty()
+        && result_regions.is_empty())
     .then_some((kind, maximum_depth))
 }
 

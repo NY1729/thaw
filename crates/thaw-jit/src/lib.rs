@@ -5766,6 +5766,9 @@ enum NumericValue {
     TaggedTryStart,
     CatchStart,
     TryEnd,
+    ResultStart,
+    ResultReturn,
+    ResultEnd,
     Throw,
     TaggedThrow(u8),
     CheckError,
@@ -6219,6 +6222,9 @@ impl NumericProgram {
                     "trystarttag" => Some(NumericValue::TaggedTryStart),
                     "catch" => Some(NumericValue::CatchStart),
                     "tryend" => Some(NumericValue::TryEnd),
+                    "resultstart" => Some(NumericValue::ResultStart),
+                    "resultreturn" => Some(NumericValue::ResultReturn),
+                    "resultend" => Some(NumericValue::ResultEnd),
                     "throw" => Some(NumericValue::Throw),
                     value if value.starts_with("throwtag") => value
                         .strip_prefix("throwtag")?
@@ -7025,6 +7031,7 @@ impl NumericProgram {
         let mut switches = Vec::new();
         let mut tries = Vec::new();
         let mut catches = Vec::new();
+        let mut results = Vec::new();
         for value in &self.0 {
             match value {
                 NumericValue::Argument(index) => {
@@ -9014,6 +9021,36 @@ impl NumericProgram {
                     }
                     patch_near_jump(&mut code, normal_exit)?;
                 }
+                NumericValue::ResultStart => results.push(ResultPatch {
+                    base_depth: depth,
+                    result_depth: None,
+                    exits: Vec::new(),
+                }),
+                NumericValue::ResultReturn => {
+                    let result = results.last_mut()?;
+                    if depth <= result.base_depth {
+                        return None;
+                    }
+                    let result_depth = depth - result.base_depth;
+                    if result
+                        .result_depth
+                        .replace(result_depth)
+                        .is_some_and(|expected| expected != result_depth)
+                    {
+                        return None;
+                    }
+                    result.exits.push(emit_unconditional_jump(&mut code));
+                    depth = result.base_depth;
+                }
+                NumericValue::ResultEnd => {
+                    let result = results.pop()?;
+                    if depth != result.base_depth + result.result_depth? {
+                        return None;
+                    }
+                    for exit in result.exits {
+                        patch_near_jump(&mut code, exit)?;
+                    }
+                }
                 NumericValue::EarlyReturn => {
                     let loop_patch = loops.last()?;
                     if depth <= loop_patch.base_depth {
@@ -9576,7 +9613,8 @@ impl NumericProgram {
             && branches.is_empty()
             && loops.is_empty()
             && guards.is_empty()
-            && switches.is_empty())
+            && switches.is_empty()
+            && results.is_empty())
         .then(|| {
             code.push(0xc3);
             code
@@ -9622,6 +9660,13 @@ struct TryPatch {
     base_depth: u8,
     throws: Vec<usize>,
     tagged: bool,
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+struct ResultPatch {
+    base_depth: u8,
+    result_depth: Option<u8>,
+    exits: Vec<usize>,
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -10769,6 +10814,16 @@ mod tests {
         .unwrap();
         for (throws, expected) in [(0.0, 30.0), (1.0, 70.0)] {
             let result = call(&try_values, &[throws]);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
+
+        let early_values = CString::new(format!(
+            "expr:resultstart,a0,asbool,guard,{ten},{twenty},resultreturn,guardend,{thirty},{forty},resultend,+:early-multiple"
+        ))
+        .unwrap();
+        for (early, expected) in [(0.0, 70.0), (1.0, 30.0)] {
+            let result = call(&early_values, &[early]);
             assert!(result.error.is_null());
             assert_eq!(result.value, expected);
         }
