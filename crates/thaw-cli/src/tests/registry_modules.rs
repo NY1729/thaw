@@ -1957,6 +1957,10 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "export declare function assignDuplicate(value: number[] | [number, number]): number;\n",
         "export declare function assignControl(value: number[] | [number, number], flag: boolean): number;\n",
         "export declare function assignRestControl(value: number[] | [number, number], flag: boolean): number;\n",
+        "export declare function assignInsideIf(value: number[] | [number, number], reverse: boolean): number;\n",
+        "export declare function assignInsideLoop(value: number[] | [number, number]): number;\n",
+        "export declare function assignInsideTry(value: number[] | [number, number]): number;\n",
+        "export declare function assignRestInsideIf(value: number[] | [number, number], active: boolean): number;\n",
     );
     let source = concat!(
         "module.exports.numberPair = value => { const [first, second] = value; return first * 10 + second; }; ",
@@ -1978,7 +1982,11 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "module.exports.assignDefaults = value => { let first = 1; let second = 2; [first = 7, second = first + 1] = value; return first * 10 + second; }; ",
         "module.exports.assignDuplicate = value => { let selected = 0; [selected, selected] = value; return selected; }; ",
         "module.exports.assignControl = (value, flag) => { let first = 0; let second = 0; [first, second] = value; if (flag) first += 1; return first * 10 + second; }; ",
-        "module.exports.assignRestControl = (value, flag) => { let first = 0; let rest = value.slice(0, 0); [first, ...rest] = value; if (flag) rest.push(9); return first * 100 + rest.length * 10 + rest.at(-1); };",
+        "module.exports.assignRestControl = (value, flag) => { let first = 0; let rest = value.slice(0, 0); [first, ...rest] = value; if (flag) rest.push(9); return first * 100 + rest.length * 10 + rest.at(-1); }; ",
+        "module.exports.assignInsideIf = (value, reverse) => { let first = 0; let second = 0; if (reverse) { [first, second] = value.toReversed(); } else { [first, second] = value; } return first * 10 + second; }; ",
+        "module.exports.assignInsideLoop = value => { let first = 0; let second = 0; let index = 0; while (index < 1) { [first, second] = value; index++; } return first * 10 + second; }; ",
+        "module.exports.assignInsideTry = value => { let first = 0; let second = 0; try { [first, second] = value; } finally { second += 1; } return first * 10 + second; }; ",
+        "module.exports.assignRestInsideIf = (value, active) => { let first = 0; let rest = value.slice(0, 0); if (active) { [first, ...rest] = value; } return first * 100 + rest.length * 10 + rest.at(-1); };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -2002,6 +2010,10 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
         "assignDuplicate",
         "assignControl",
         "assignRestControl",
+        "assignInsideIf",
+        "assignInsideLoop",
+        "assignInsideTry",
+        "assignRestInsideIf",
     ]
     .into_iter()
     .enumerate()
@@ -2025,7 +2037,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     std::fs::write(
         &entry,
         concat!(
-            "import { assignControl, assignDefaults, assignDuplicate, assignPair, assignRestControl, booleanDefaults, booleanPair, chainedCopy, chainedSplice, joined, lazyDefault, numberDefaults, numberPair, numberRest, restCopy, reversedPair, splicePair, stringDefaults, stringEnds, stringRest } from 'jit-tuple-union-destructuring';\n",
+            "import { assignControl, assignDefaults, assignDuplicate, assignInsideIf, assignInsideLoop, assignInsideTry, assignPair, assignRestControl, assignRestInsideIf, booleanDefaults, booleanPair, chainedCopy, chainedSplice, joined, lazyDefault, numberDefaults, numberPair, numberRest, restCopy, reversedPair, splicePair, stringDefaults, stringEnds, stringRest } from 'jit-tuple-union-destructuring';\n",
             "function main(): void {\n",
             "  console.log(numberPair([1, 2, 3]));\n",
             "  console.log(numberPair([5, 6] as [number, number]));\n",
@@ -2063,6 +2075,11 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
             "  console.log(assignControl([5, 6] as [number, number], true));\n",
             "  console.log(assignRestControl([1, 2, 3], false));\n",
             "  console.log(assignRestControl([5, 6] as [number, number], true));\n",
+            "  console.log(assignInsideIf([1, 2], false));\n",
+            "  console.log(assignInsideIf([5, 6] as [number, number], true));\n",
+            "  console.log(assignInsideLoop([3, 4]));\n",
+            "  console.log(assignInsideTry([7, 8]));\n",
+            "  console.log(assignRestInsideIf([1, 2, 3], true));\n",
             "}\n",
         ),
     )
@@ -2080,7 +2097,7 @@ fn tuple_union_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "12\n56\nac\nxz\ntrue\nfalse\n120\n560\n32\n65\n1-2-3\n5-6\n78\n34\nay\ntrue\nfalse\n43\n139\n529\nabcz\nxyz\n32\n3-2\n6-5\n1-2:3\n5-6:\n120\n560\n78\n34\n9\n12\n66\n123\n529\n"
+        "12\n56\nac\nxz\ntrue\nfalse\n120\n560\n32\n65\n1-2-3\n5-6\n78\n34\nay\ntrue\nfalse\n43\n139\n529\nabcz\nxyz\n32\n3-2\n6-5\n1-2:3\n5-6:\n120\n560\n78\n34\n9\n12\n66\n123\n529\n12\n65\n34\n79\n123\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

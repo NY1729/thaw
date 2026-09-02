@@ -2567,7 +2567,9 @@ The same one-evaluation lowering handles array assignment patterns targeting
 existing straight-line mutable locals, including holes, lazy defaults, repeated
 targets, side-effecting array-returning right-hand sides, and typed rest arrays.
 Bindings materialized for following control flow are updated in place through
-their JIT stack slots.
+their JIT stack slots. Array assignment patterns inside `if`, loops, and
+`try`/`finally` reuse those slots; the right-hand array is retained once on the
+JIT stack while each positional or rest target is updated.
 Fixed object parameters also support nested object and tuple declaration
 patterns, shorthand or renamed leaves, skipped tuple positions, and direct
 aliases to contained primitive arrays on the same JIT path. Parenthesized object
