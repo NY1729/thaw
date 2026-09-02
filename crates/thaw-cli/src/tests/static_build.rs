@@ -71,6 +71,50 @@ fn specialized_jit_runs_without_quickjs() {
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn tagged_jit_union_runs_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-jit-union-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    let operation = format!(
+        "expr:a0,asbool,if,c{:016x},tagnum,else,t68656c6c6f,tagstr,end:tagged-union",
+        42.0f64.to_bits()
+    );
+    let symbol = operation
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::fs::write(
+        &source,
+        format!(
+            "declare function __thaw_typed_jit_{symbol}(numberResult: boolean): number | string;\nfunction main(): void {{ const numberResult = __thaw_typed_jit_{symbol}(true); if (typeof numberResult === 'number') {{ console.log(numberResult + 1); }} const stringResult = __thaw_typed_jit_{symbol}(false); if (typeof stringResult === 'string') {{ console.log(stringResult.toUpperCase()); }} }}\n"
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &dir.join("registry"),
+        &[],
+    )
+    .unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "43\nHELLO\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn builds_and_runs_a_fully_static_elf() {
     if ensure_static_system_libraries().is_err() {
