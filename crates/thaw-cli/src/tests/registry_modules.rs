@@ -2113,6 +2113,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "export declare function reassignInsideTry(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }): string;\n",
         "export declare function unpackTuple(value: [[number, string], { enabled: boolean; values: number[] }]): string;\n",
         "export declare function reassignTuple(value: [[number, string], { enabled: boolean; values: number[] }]): string;\n",
+        "export declare function literal(value: number): string;\n",
     );
     let source = concat!(
         "module.exports.unpack = value => { const { count: amount, meta: { label, enabled }, pair: [index, text], values } = value; values.push(index); return label + ':' + String(amount) + ':' + String(enabled) + ':' + String(index) + ':' + text + ':' + values.join(','); }; ",
@@ -2122,7 +2123,8 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "module.exports.reassignInsideLoop = value => { let count = 0; let label = ''; let active = true; while (active) { ({ count, meta: { label } } = value); active = false; } return String(count) + ':' + label; }; ",
         "module.exports.reassignInsideTry = value => { let count = 0; let label = ''; try { ({ count, meta: { label } } = value); } finally { count += 1; } return String(count) + ':' + label; }; ",
         "module.exports.unpackTuple = value => { const [[count, label], { enabled, values }] = value; values.push(count); return label + ':' + String(count) + ':' + String(enabled) + ':' + values.join(','); }; ",
-        "module.exports.reassignTuple = value => { let count = 0; let label = ''; let enabled = true; [[count, label], { enabled }] = value; return String(count) + ':' + label + ':' + String(enabled); };",
+        "module.exports.reassignTuple = value => { let count = 0; let label = ''; let enabled = true; [[count, label], { enabled }] = value; return String(count) + ':' + label + ':' + String(enabled); }; ",
+        "module.exports.literal = value => { const { count, nested: { label, values } } = { unused: Math.random(), count: value + 1, nested: { label: 'made', values: [value] } }; values.push(9); return label + ':' + String(count) + ':' + values.join(','); };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -2134,14 +2136,16 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "reassignInsideTry",
         "unpackTuple",
         "reassignTuple",
+        "literal",
     ]
         .into_iter()
         .enumerate()
     {
-        assert!(
-            jit_numeric_export(source, name, false, &declarations[index]).is_some(),
-            "{name}"
-        );
+        let expression = jit_numeric_export(source, name, false, &declarations[index]);
+        assert!(expression.is_some(), "{name}");
+        if name == "literal" {
+            assert!(expression.unwrap().contains("random"));
+        }
     }
 
     let dir = std::env::temp_dir().join(format!(
@@ -2156,7 +2160,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); }\n",
+        "import { literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2172,7 +2176,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\n"
+        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

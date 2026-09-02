@@ -6868,6 +6868,125 @@ fn jit_export(
         Some(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_fixed_literal(
+        expression: &Expr,
+        path: &str,
+        requested: &std::collections::HashSet<String>,
+        parameters: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, Vec<String>>,
+        context: &mut InlineContext<'_>,
+        kinds: &mut std::collections::HashMap<String, JitKind>,
+        materialized: &mut std::collections::HashMap<String, Vec<String>>,
+        output: &mut Vec<String>,
+    ) -> Option<()> {
+        match expression {
+            Expr::Paren(parenthesized) => materialize_fixed_literal(
+                parenthesized.expr.as_ref(),
+                path,
+                requested,
+                parameters,
+                locals,
+                context,
+                kinds,
+                materialized,
+                output,
+            ),
+            Expr::Object(object) if !requested.contains(path) => {
+                for property in &object.props {
+                    let PropOrSpread::Prop(property) = property else {
+                        return None;
+                    };
+                    let (name, value) = match property.as_ref() {
+                        Prop::Shorthand(name) => (
+                            name.sym.to_string(),
+                            locals
+                                .get(name.sym.as_ref())
+                                .map(|_| Expr::Ident(name.clone()))
+                                .or_else(|| {
+                                    parameters
+                                        .get(name.sym.as_ref())
+                                        .map(|_| Expr::Ident(name.clone()))
+                                })?,
+                        ),
+                        Prop::KeyValue(property) => (
+                            destructuring_property_name(&property.key)?,
+                            property.value.as_ref().clone(),
+                        ),
+                        _ => return None,
+                    };
+                    materialize_fixed_literal(
+                        &value,
+                        &format!("{path}.{name}"),
+                        requested,
+                        parameters,
+                        locals,
+                        context,
+                        kinds,
+                        materialized,
+                        output,
+                    )?;
+                }
+                Some(())
+            }
+            Expr::Array(array) if !requested.contains(path) => {
+                for (index, element) in array.elems.iter().enumerate() {
+                    let Some(element) = element else {
+                        continue;
+                    };
+                    if element.spread.is_some() {
+                        return None;
+                    }
+                    materialize_fixed_literal(
+                        element.expr.as_ref(),
+                        &format!("{path}.{index}"),
+                        requested,
+                        parameters,
+                        locals,
+                        context,
+                        kinds,
+                        materialized,
+                        output,
+                    )?;
+                }
+                Some(())
+            }
+            expression => {
+                let mut encoded = Vec::new();
+                encode_expression(expression, parameters, locals, context, &mut encoded)?;
+                let kind = jit_expression_kind(&encoded)?.0;
+                let prefix = match kind {
+                    JitKind::Number => "ln",
+                    JitKind::Boolean => "lb",
+                    JitKind::String => "ls",
+                    JitKind::Dynamic => "ld",
+                    JitKind::Array => match array_prefix(&encoded)? {
+                        "rn" => "rnl",
+                        "rb" => "rbl",
+                        "rs" => "rsl",
+                        _ => return None,
+                    },
+                    JitKind::Dictionary => match dictionary_prefix(&encoded)? {
+                        "dn" => "dnl",
+                        "db" => "dbl",
+                        "ds" => "dsl",
+                        _ => return None,
+                    },
+                };
+                let index = kinds.len();
+                output.extend(encoded);
+                if kind == JitKind::Boolean {
+                    output.push("asbool".into());
+                } else if kind == JitKind::Array {
+                    output.push("arrayhandle".into());
+                }
+                kinds.insert(format!(" literal-{index}"), kind);
+                materialized.insert(path.into(), vec![format!("{prefix}{index}")]);
+                Some(())
+            }
+        }
+    }
+
     fn collect_fixed_object_pattern<'a>(
         pattern: &'a thaw_parser::ast::ObjectPat,
         path: &str,
@@ -9986,7 +10105,6 @@ fn jit_export(
                     mutable: is_mutable,
                     assign_existing,
                 } => {
-                    let base = member_path(initializer)?;
                     if bindings.iter().any(|(_, name, _)| {
                         if assign_existing {
                             !mutable.contains(name.sym.as_ref())
@@ -9997,11 +10115,34 @@ fn jit_export(
                     }) {
                         return None;
                     }
+                    let base = member_path(initializer);
+                    let mut materialized = std::collections::HashMap::new();
+                    if base.is_none() {
+                        let requested = bindings
+                            .iter()
+                            .map(|(path, _, _)| path.clone())
+                            .collect();
+                        materialize_fixed_literal(
+                            initializer,
+                            "",
+                            &requested,
+                            parameters,
+                            &locals,
+                            context,
+                            &mut runtime_kinds,
+                            &mut materialized,
+                            output,
+                        )?;
+                        runtime_locals = runtime_kinds.len();
+                    }
                     for (path, name, default) in bindings {
-                        let path = format!("{base}{path}");
-                        let mut value = locals
+                        let path = base
+                            .as_ref()
+                            .map_or_else(|| path.clone(), |base| format!("{base}{path}"));
+                        let mut value = materialized
                             .get(&path)
                             .cloned()
+                            .or_else(|| locals.get(&path).cloned())
                             .or_else(|| parameters.get(&path).map(|value| vec![value.clone()]))?;
                         if let Some(default) = default {
                             let value_kind = jit_expression_kind(&value)?.0;
