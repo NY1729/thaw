@@ -2517,14 +2517,19 @@ fn jit_export(
         };
         let parameter_array = match member.obj.as_ref() {
             Expr::Ident(receiver) => parameters.get(receiver.sym.as_ref()).is_some_and(|token| {
-                token.starts_with('r') || jit_dynamic_array_argument(token)
+                token.starts_with('r')
+                    || jit_dynamic_array_argument(token)
+                    || jit_typed_array_union_untag(token).is_some()
             }),
             _ => false,
         };
         let local_array = member_path(member.obj.as_ref())
             .and_then(|path| locals.get(&path))
-            .and_then(|tokens| jit_expression_kind(tokens))
-            .is_some_and(|(kind, _)| kind == JitKind::Array);
+            .is_some_and(|tokens| {
+                jit_expression_kind(tokens).is_some_and(|(kind, _)| kind == JitKind::Array)
+                    || matches!(tokens.as_slice(), [token] if jit_dynamic_array_argument(token)
+                        || jit_typed_array_union_untag(token).is_some())
+            });
         if !parameter_array && !local_array {
             return None;
         }
