@@ -5750,8 +5750,8 @@ enum NumericValue {
     LoopStart,
     LoopWhile,
     LoopContinuePoint,
-    LoopBreak,
-    LoopContinue,
+    LoopBreak(u8),
+    LoopContinue(u8),
     LoopEnd,
     GuardStart,
     GuardAlternate,
@@ -6206,8 +6206,18 @@ impl NumericProgram {
                     "loop" => Some(NumericValue::LoopStart),
                     "while" => Some(NumericValue::LoopWhile),
                     "looptail" => Some(NumericValue::LoopContinuePoint),
-                    "break" => Some(NumericValue::LoopBreak),
-                    "continue" => Some(NumericValue::LoopContinue),
+                    "break" => Some(NumericValue::LoopBreak(0)),
+                    value if value.starts_with("break") => value
+                        .strip_prefix("break")?
+                        .parse::<u8>()
+                        .ok()
+                        .map(NumericValue::LoopBreak),
+                    "continue" => Some(NumericValue::LoopContinue(0)),
+                    value if value.starts_with("continue") => value
+                        .strip_prefix("continue")?
+                        .parse::<u8>()
+                        .ok()
+                        .map(NumericValue::LoopContinue),
                     "loopend" => Some(NumericValue::LoopEnd),
                     "guard" => Some(NumericValue::GuardStart),
                     "guardelse" => Some(NumericValue::GuardAlternate),
@@ -8736,15 +8746,21 @@ impl NumericProgram {
                     }
                     loop_patch.continue_target = Some(code.len());
                 }
-                NumericValue::LoopBreak => {
-                    let loop_patch = loops.last_mut()?;
+                NumericValue::LoopBreak(target_depth) => {
+                    let target = loops
+                        .len()
+                        .checked_sub(usize::from(*target_depth).checked_add(1)?)?;
+                    let loop_patch = loops.get_mut(target)?;
                     if depth < loop_patch.base_depth {
                         return None;
                     }
                     loop_patch.breaks.push(emit_unconditional_jump(&mut code));
                 }
-                NumericValue::LoopContinue => {
-                    let loop_patch = loops.last_mut()?;
+                NumericValue::LoopContinue(target_depth) => {
+                    let target = loops
+                        .len()
+                        .checked_sub(usize::from(*target_depth).checked_add(1)?)?;
+                    let loop_patch = loops.get_mut(target)?;
                     if depth < loop_patch.base_depth {
                         return None;
                     }
@@ -10863,6 +10879,22 @@ mod tests {
             assert!(result.error.is_null());
             assert_eq!(result.value, expected);
         }
+
+        let outer_break = CString::new(format!(
+            "expr:{zero},loop,{one},asbool,while,loop,{one},asbool,while,break1,looptail,loopend,looptail,loopend,ln0,nip:outer-break"
+        ))
+        .unwrap();
+        let result = call(&outer_break, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 0.0);
+
+        let outer_continue = CString::new(format!(
+            "expr:{zero},loop,ln0,{two},<,while,loop,{one},asbool,while,ln0,{one},+,setl0,continue1,looptail,loopend,looptail,loopend,ln0,nip:outer-continue"
+        ))
+        .unwrap();
+        let result = call(&outer_continue, &[]);
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 2.0);
 
         let nested_switch_values = CString::new(format!(
             "expr:{zero},resultstart,a0,switch,case,dup,{five},==,casebody,{ten},{twenty},resultreturn2,default,switchbreak,switchend,{thirty},{forty},resultend,+,nip:nested-switch-early-multiple"
