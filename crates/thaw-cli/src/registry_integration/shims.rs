@@ -7016,6 +7016,7 @@ fn jit_export(
             return None;
         }
         let mut helper_locals = context.module_locals.clone();
+        let mut helper_mutable = std::collections::HashSet::new();
         for (index, (parameter, argument)) in helper_parameters.iter().zip(&call.args).enumerate() {
             let Pat::Ident(parameter) = parameter else {
                 return None;
@@ -7038,6 +7039,7 @@ fn jit_export(
                 parameter.id.sym.to_string(),
                 argument_values.remove(&path)?,
             );
+            helper_mutable.insert(parameter.id.sym.to_string());
         }
         let active = match callee.as_ref() {
             Expr::Ident(name) => Some(name.sym.to_string()),
@@ -7052,27 +7054,128 @@ fn jit_export(
         let result = (|| {
             let no_parameters = std::collections::HashMap::new();
             for (index, step) in steps.into_iter().enumerate() {
-                let LocalStep::Declare {
-                    name, initializer, ..
-                } = step
-                else {
-                    return None;
-                };
-                let path = format!(".local{index}");
-                let local_paths = std::collections::HashSet::from([path.clone()]);
-                let mut local_values = std::collections::HashMap::new();
-                materialize_fixed_literal(
-                    initializer,
-                    &path,
-                    &local_paths,
-                    &no_parameters,
-                    &helper_locals,
-                    context,
-                    kinds,
-                    &mut local_values,
-                    output,
-                )?;
-                helper_locals.insert(name.sym.to_string(), local_values.remove(&path)?);
+                match step {
+                    LocalStep::Declare {
+                        name,
+                        initializer,
+                        mutable,
+                    } => {
+                        let path = format!(".local{index}");
+                        let local_paths = std::collections::HashSet::from([path.clone()]);
+                        let mut local_values = std::collections::HashMap::new();
+                        materialize_fixed_literal(
+                            initializer,
+                            &path,
+                            &local_paths,
+                            &no_parameters,
+                            &helper_locals,
+                            context,
+                            kinds,
+                            &mut local_values,
+                            output,
+                        )?;
+                        helper_locals
+                            .insert(name.sym.to_string(), local_values.remove(&path)?);
+                        if mutable {
+                            helper_mutable.insert(name.sym.to_string());
+                        }
+                    }
+                    LocalStep::Assign {
+                        name,
+                        operation,
+                        value,
+                    } => {
+                        if !helper_mutable.contains(name.sym.as_ref()) {
+                            return None;
+                        }
+                        let current = helper_locals.get(name.sym.as_ref())?.clone();
+                        let target = loop_local_index(current.first()?)?;
+                        let expected = jit_expression_kind(&current)?.0;
+                        let mut encoded = Vec::new();
+                        if operation == AssignOp::AddAssign {
+                            let mut right = Vec::new();
+                            encode_expression(
+                                value,
+                                &no_parameters,
+                                &helper_locals,
+                                context,
+                                &mut right,
+                            )?;
+                            append_add(current, right, &mut encoded)?;
+                        } else {
+                            if operation != AssignOp::Assign {
+                                encoded.extend(current);
+                            }
+                            encode_expression(
+                                value,
+                                &no_parameters,
+                                &helper_locals,
+                                context,
+                                &mut encoded,
+                            )?;
+                            if operation != AssignOp::Assign {
+                                encoded.push(
+                                    match operation {
+                                        AssignOp::SubAssign => "-",
+                                        AssignOp::MulAssign => "*",
+                                        AssignOp::DivAssign => "/",
+                                        AssignOp::ModAssign => "%",
+                                        AssignOp::LShiftAssign => "shl",
+                                        AssignOp::RShiftAssign => "shr",
+                                        AssignOp::ZeroFillRShiftAssign => "ushr",
+                                        AssignOp::BitOrAssign => "bor",
+                                        AssignOp::BitXorAssign => "bxor",
+                                        AssignOp::BitAndAssign => "band",
+                                        AssignOp::ExpAssign => "pow",
+                                        _ => return None,
+                                    }
+                                    .into(),
+                                );
+                            }
+                        }
+                        if jit_expression_kind(&encoded)?.0 != expected {
+                            return None;
+                        }
+                        output.extend(encoded);
+                        if expected == JitKind::Boolean {
+                            output.push("asbool".into());
+                        } else if expected == JitKind::Array {
+                            output.push("arrayhandle".into());
+                        }
+                        output.push(format!("setl{target}"));
+                    }
+                    LocalStep::Update { name, operation } => {
+                        if !helper_mutable.contains(name.sym.as_ref()) {
+                            return None;
+                        }
+                        let current = helper_locals.get(name.sym.as_ref())?.clone();
+                        if jit_expression_kind(&current)?.0 != JitKind::Number {
+                            return None;
+                        }
+                        let target = loop_local_index(current.first()?)?;
+                        output.extend(current);
+                        output.extend([
+                            format!("c{:016x}", 1.0f64.to_bits()),
+                            match operation {
+                                UpdateOp::PlusPlus => "+".into(),
+                                UpdateOp::MinusMinus => "-".into(),
+                            },
+                            format!("setl{target}"),
+                        ]);
+                    }
+                    LocalStep::Effect(expression) => {
+                        encode_expression(
+                            expression,
+                            &no_parameters,
+                            &helper_locals,
+                            context,
+                            output,
+                        )?;
+                        output.push("drop".into());
+                    }
+                    LocalStep::DestructureArray { .. }
+                    | LocalStep::DestructureObject { .. } => return None,
+                }
             }
             let returned = match body {
                 NumericBody::Expression(expression) => expression,

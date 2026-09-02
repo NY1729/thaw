@@ -2116,10 +2116,12 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "export declare function literal(value: number): string;\n",
         "export declare function callLiteral(value: number): string;\n",
         "export declare function callLocals(value: number): number;\n",
+        "export declare function callSteps(value: number): number;\n",
     );
     let source = concat!(
         "function makeLiteral(value) { return { unused: Math.random(), first: value, second: value, label: 'helper' }; } ",
         "function makeLocals(value) { const count = value + 1; const values = [value]; const unused = Math.random(); return { count, values }; } ",
+        "function makeSteps(value) { let count = value; value += 1; count += value; count++; const unused = Math.random(); Math.random(); return { count }; } ",
         "module.exports.unpack = value => { const { count: amount, meta: { label, enabled }, pair: [index, text], values } = value; values.push(index); return label + ':' + String(amount) + ':' + String(enabled) + ':' + String(index) + ':' + text + ':' + values.join(','); }; ",
         "module.exports.reassign = value => { let count = 0; let label = ''; let index = 0; let text = ''; ({ count, meta: { label }, pair: [index, text] } = value); return String(count) + ':' + label + ':' + String(index) + ':' + text; }; ",
         "module.exports.reassignControl = (value, flag) => { let count = 0; let label = ''; ({ count, meta: { label } } = value); if (flag) count += 1; return String(count) + ':' + label; }; ",
@@ -2131,6 +2133,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "module.exports.literal = value => { const { count, nested: { label, values } } = { unused: Math.random(), count: value + 1, nested: { label: 'made', values: [value] } }; values.push(9); return label + ':' + String(count) + ':' + values.join(','); }; ",
         "module.exports.callLiteral = value => { const { label } = makeLiteral(Math.random()); return label; }; ",
         "module.exports.callLocals = value => { const { count, values } = makeLocals(value); values.push(9); return count * 10 + values.length; };",
+        "module.exports.callSteps = value => { const { count } = makeSteps(value); return count; };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -2145,6 +2148,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "literal",
         "callLiteral",
         "callLocals",
+        "callSteps",
     ]
         .into_iter()
         .enumerate()
@@ -2157,6 +2161,8 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
             assert_eq!(expression.unwrap().matches("random").count(), 2);
         } else if name == "callLocals" {
             assert_eq!(expression.unwrap().matches("random").count(), 1);
+        } else if name == "callSteps" {
+            assert_eq!(expression.unwrap().matches("random").count(), 2);
         }
     }
 
@@ -2172,7 +2178,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { callLiteral, callLocals, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); }\n",
+        "import { callLiteral, callLocals, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2188,7 +2194,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n"
+        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2357,6 +2363,28 @@ fn nested_tuple_fields_use_jit_without_quickjs() {
         "module.exports.numberValue = value => typeof value === 'object' ? value.pair[1][0] : 0; module.exports.stringValue = value => typeof value === 'object' ? value.pair[1][1] : value; module.exports.objectNumber = value => typeof value === 'object' ? value.pair[2].score : 0; module.exports.objectString = value => typeof value === 'object' ? value.pair[2].label : value; module.exports.arrayValue = value => typeof value === 'object' ? value.pair[3].join(',') : value; module.exports.dictionaryValue = value => typeof value === 'object' ? value.pair[4].score : 0; module.exports.make = flag => flag ? { pair: [false, [7, 'made'], { score: 8, label: 'object' }, [10, 11], { score: 12 }] } : 'none';\n",
     )
     .unwrap();
+    let declarations = thaw_bridge::parse_dts(
+        &std::fs::read_to_string(package.join("package.d.ts")).unwrap(),
+    )
+    .unwrap();
+    let source = std::fs::read_to_string(package.join("bundle.js")).unwrap();
+    for (index, name) in [
+        "numberValue",
+        "stringValue",
+        "objectNumber",
+        "objectString",
+        "arrayValue",
+        "dictionaryValue",
+        "make",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            jit_numeric_export(&source, name, false, &declarations[index]).is_some(),
+            "{name}"
+        );
+    }
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
