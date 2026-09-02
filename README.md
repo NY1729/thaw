@@ -2547,6 +2547,10 @@ leaving the JIT. Numeric `.reduce()` and `.reduceRight()` also support omitted
 initial values on array/tuple unions: the first element is retained as the
 typed accumulator, left/right iteration order is preserved, and an empty
 ordinary array raises the standard reduction error through the JIT path.
+Homogeneous array/tuple unions can also enter array literals through spread
+and synchronous `for...of` loops directly. Both constructs reuse the typed
+untag operation, so callers do not need a redundant `Array.isArray` guard;
+loop elements retain their number, boolean, or string JIT type.
 Calls
 to side-effect-free function
 declarations and arrow aliases in the same bundle are inlined into the typed IR,

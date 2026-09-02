@@ -2704,6 +2704,11 @@ fn jit_export(
             context,
             &mut encoded,
         )?;
+        if element.spread.is_some() && encoded.len() == 1 {
+            if let Some(untag) = jit_typed_array_union_untag(&encoded[0]) {
+                encoded.push(untag.into());
+            }
+        }
         if element.spread.is_none() && matches!(element.expr.as_ref(), Expr::Lit(Lit::Bool(_))) {
             encoded.push("asbool".into());
         }
@@ -4586,8 +4591,12 @@ fn jit_export(
                 let (method, receiver) = array_method(call, parameters, locals)?;
                 let mut encoded = Vec::new();
                 encode_expression(receiver, parameters, locals, context, &mut encoded)?;
-                if encoded.len() == 1 && jit_dynamic_array_argument(&encoded[0]) {
-                    encoded.push("untagarray".into());
+                if encoded.len() == 1 {
+                    if let Some(untag) = jit_typed_array_union_untag(&encoded[0]) {
+                        encoded.push(untag.into());
+                    } else if jit_dynamic_array_argument(&encoded[0]) {
+                        encoded.push("untagarray".into());
+                    }
                 }
                 if jit_expression_kind(&encoded)?.0 != JitKind::Array {
                     return None;
@@ -8054,6 +8063,11 @@ fn jit_export(
                 context,
                 &mut source,
             )?;
+            if source.len() == 1 {
+                if let Some(untag) = jit_typed_array_union_untag(&source[0]) {
+                    source.push(untag.into());
+                }
+            }
             if jit_expression_kind(&source)?.0 != JitKind::Array {
                 return None;
             }
@@ -9048,6 +9062,11 @@ fn jit_export(
         encode_expression(
             loop_statement.right.as_ref(), parameters, &locals, context, &mut source,
         )?;
+        if source.len() == 1 {
+            if let Some(untag) = jit_typed_array_union_untag(&source[0]) {
+                source.push(untag.into());
+            }
+        }
         if jit_expression_kind(&source)?.0 != JitKind::Array {
             return None;
         }
@@ -13343,6 +13362,19 @@ fn jit_dynamic_array_argument(token: &str) -> bool {
     jit_dynamic_argument(token).is_some_and(|(_, kinds)| {
         kinds.bytes().all(|kind| matches!(kind, b'N' | b'B' | b'S'))
     })
+}
+
+fn jit_typed_array_union_untag(token: &str) -> Option<&'static str> {
+    let (_, kinds) = jit_dynamic_argument(token)?;
+    if kinds.bytes().all(|kind| matches!(kind, b'N' | b'X')) {
+        Some("untagarrayn")
+    } else if kinds.bytes().all(|kind| matches!(kind, b'B' | b'Y')) {
+        Some("untagarrayb")
+    } else if kinds.bytes().all(|kind| matches!(kind, b'S' | b'Z')) {
+        Some("untagarrays")
+    } else {
+        None
+    }
 }
 
 fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
