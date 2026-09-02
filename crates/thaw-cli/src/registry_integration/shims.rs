@@ -555,7 +555,7 @@ fn jit_export(
         locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
     ) -> Option<JitExport> {
-        if object.props.len() != fields.len() {
+        if object.props.len() > fields.len() {
             return None;
         }
         let mut names = std::collections::HashSet::new();
@@ -712,7 +712,7 @@ fn jit_export(
         locals: &std::collections::HashMap<String, Vec<String>>,
         context: &mut InlineContext<'_>,
     ) -> Option<Vec<String>> {
-        if object.props.len() != fields.len() {
+        if object.props.len() > fields.len() {
             return None;
         }
         let mut properties = std::collections::HashMap::new();
@@ -745,7 +745,14 @@ fn jit_export(
         let mut output = vec![format!("objnew{size}")];
         let mut offset = 0usize;
         for (field, ty) in fields {
-            let (value, operation) = match properties.get(field)? {
+            let Some(property) = properties.get(field) else {
+                if matches!(ty, thaw_hir::HirType::Optional(_)) {
+                    offset += field_size(ty);
+                    continue;
+                }
+                return None;
+            };
+            let (value, operation) = match property {
                 ObjectReturnValue::Expression(expression) => match ty {
                     thaw_hir::HirType::Object(nested) => (
                         encode_fixed_object_value(
