@@ -259,31 +259,53 @@ impl<'a> FnLowerer<'a> {
                                 .into(),
                         );
                     };
+                    fn is_error_family_name(name: &str) -> bool {
+                        matches!(
+                            name,
+                            "Error"
+                                | "TypeError"
+                                | "RangeError"
+                                | "SyntaxError"
+                                | "ReferenceError"
+                                | "EvalError"
+                                | "URIError"
+                        )
+                    }
+                    // True for the built-ins themselves and for any user
+                    // class transitively `extends`ing one of them (its
+                    // identity chain, synthesized in
+                    // `lower/module/classes.rs`, then includes an
+                    // Error-family name even though it has no entry of its
+                    // own in `self.signatures`/`self.interfaces` under that
+                    // name).
+                    let extends_error_family = is_error_family_name(class.sym.as_ref())
+                        || self.interfaces.get(class.sym.as_ref()).is_some_and(|ty| {
+                            let HirType::Object(fields) = ty else {
+                                return false;
+                            };
+                            fields.first().is_some_and(|(marker, ty)| {
+                                *ty == HirType::Bool
+                                    && marker
+                                        .strip_prefix("__thaw_class_identity_")
+                                        .is_some_and(|chain| {
+                                            chain.split('$').any(is_error_family_name)
+                                        })
+                            })
+                        });
+                    let value = self.lower_expr(&bin.left)?;
+                    let value_type = self.infer_expr_type(&value)?;
                     // A caught exception has no real `Error` object or class
-                    // hierarchy behind it -- just a string, optionally
-                    // tagged with a class name ahead of the message (see
-                    // `new Error(...)`/etc. above) -- so this checks the
-                    // tagged (or defaulted) name at runtime instead of the
-                    // compile-time class-identity check used for genuine
-                    // native classes below.
-                    if matches!(
-                        class.sym.as_ref(),
-                        "Error"
-                            | "TypeError"
-                            | "RangeError"
-                            | "SyntaxError"
-                            | "ReferenceError"
-                            | "EvalError"
-                            | "URIError"
-                    ) {
-                        let value = self.lower_expr(&bin.left)?;
-                        let value_type = self.infer_expr_type(&value)?;
-                        if value_type != HirType::Str {
-                            return Err(format!(
-                                "`instanceof {}` requires a caught-exception (string) operand, found {value_type:?}",
-                                class.sym
-                            ));
-                        }
+                    // hierarchy behind it once thrown -- just a string,
+                    // optionally tagged with a class identity chain ahead
+                    // of the message (see `new Error(...)`/
+                    // `coerce_primitive_to_string` above) -- so testing one
+                    // against an Error-family class checks the tagged (or
+                    // defaulted) chain at runtime. A *not-yet-thrown* value
+                    // of a real Error-derived class (still `HirType::Object`,
+                    // e.g. right after `new MyError(...)`) instead falls
+                    // through to the same compile-time class-identity check
+                    // used for every other native class below.
+                    if extends_error_family && value_type == HirType::Str {
                         let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), value_type.clone());
@@ -299,17 +321,16 @@ impl<'a> FnLowerer<'a> {
                             &[(name, value_type, value)],
                         );
                     }
-                    if !self
-                        .signatures
-                        .contains_key(&class_constructor_symbol(class.sym.as_ref()))
+                    if !extends_error_family
+                        && !self
+                            .signatures
+                            .contains_key(&class_constructor_symbol(class.sym.as_ref()))
                     {
                         return Err(format!(
                             "native `instanceof` right operand `{}` is not a known class",
                             class.sym
                         ));
                     }
-                    let value = self.lower_expr(&bin.left)?;
-                    let value_type = self.infer_expr_type(&value)?;
                     let result = class_type_has_identity(&value_type, class.sym.as_ref());
                     let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                     self.next_binding += 1;

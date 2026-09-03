@@ -547,10 +547,53 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         if matches!(call.callee, Callee::Super(_)) {
-            let (mut symbol, _base_type, _base_name) = self
+            let (mut symbol, _base_type, base_name) = self
                 .super_initializer
                 .clone()
                 .ok_or("`super(...)` is only valid in a derived class constructor")?;
+            // `Error`/`TypeError`/etc. are not real declared classes (see
+            // `lower/module/classes.rs`), so there is no base initializer
+            // function to call -- `super(message)` for a class directly
+            // extending one of them instead assigns the inherited
+            // `message` field itself. A class extending *that* class still
+            // goes through the normal call-the-base-initializer path below
+            // (its own generated initializer function already runs this
+            // assignment as part of its body), so only a *direct* `extends
+            // Error`-family base needs this.
+            if matches!(
+                base_name.as_str(),
+                "Error"
+                    | "TypeError"
+                    | "RangeError"
+                    | "SyntaxError"
+                    | "ReferenceError"
+                    | "EvalError"
+                    | "URIError"
+            ) {
+                if call.type_args.is_some() {
+                    return Err("native `super(...)` does not support type arguments".into());
+                }
+                let [message] = call.args.as_slice() else {
+                    return Err(format!("`super(...)` for `{base_name}` expects a message argument"));
+                };
+                if message.spread.is_some() {
+                    return Err("`super(...)` does not support a spread argument".into());
+                }
+                let message = self.lower_expr(&message.expr)?;
+                let message = self.coerce_primitive_to_string(message)?;
+                let this_name = self.resolve_binding("this");
+                let this_type = self
+                    .scope
+                    .get(&this_name)
+                    .cloned()
+                    .ok_or("`super(...)` used outside a constructor")?;
+                return Ok(HirExpr::PropAssign(
+                    Box::new(HirExpr::Var(this_name)),
+                    this_type,
+                    "message".to_string(),
+                    Box::new(message),
+                ));
+            }
             let mut signature = self
                 .signatures
                 .get(&symbol)
