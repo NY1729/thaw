@@ -7007,3 +7007,62 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n1\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function whose parameter (or an object argument's own
+/// field) is a union type -- real-world example: camelcase's own
+/// `camelCase(input: string | readonly string[], options?: {
+/// pascalCase?: boolean, ... }): string`. Marshaling a dynamic call's
+/// argument to JSON had no case for `HirType::Union` at either the
+/// top-level-argument or the nested-object-field layer, so passing a
+/// plain string (matching the union's *first* member, but still a
+/// union statically) failed outright rather than only breaking for
+/// values that actually needed the second member.
+#[test]
+fn fallback_function_with_a_union_typed_argument_builds_and_runs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-union-argument-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("case-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        // `separator` is itself a union field *inside* the options
+        // object, exercising the object-field JSON-marshaling path
+        // separately from `input`'s own top-level union.
+        "export interface CaseOptions { separator?: string | boolean; }\n\
+         export declare function toCase(input: string | readonly string[], options?: CaseOptions): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.toCase = function(input, options) {\n\
+             var s = Array.isArray(input) ? input.join('-') : input;\n\
+             var sep = options && options.separator;\n\
+             return typeof sep === 'string' ? s.split('-').join(sep) : s;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { toCase } from "case-kit";
+function main(): void {
+    console.log(toCase("foo"));
+    console.log(toCase(["a", "b"], { separator: "_" }));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "foo\na_b\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
