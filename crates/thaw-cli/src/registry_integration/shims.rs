@@ -4561,19 +4561,99 @@ fn jit_export(
                 if object_from_entries_call(call, parameters, locals, context.helpers).is_some() =>
             {
                 let entries = object_from_entries_call(call, parameters, locals, context.helpers)?;
-                let mut encoded = Vec::new();
-                encode_expression(entries, parameters, locals, context, &mut encoded)?;
-                if jit_expression_kind(&encoded)?.0 != JitKind::Array {
-                    return None;
+                // `Object.fromEntries` most commonly round-trips `Object.entries(dict)`
+                // (handled below via `entry_prefix`), but a literal array of
+                // statically-keyed pairs can be built directly into a dictionary
+                // literal instead - the general array encoder can't represent an
+                // array of tuples at all, so this bypasses it entirely rather than
+                // trying to make tuple-shaped array elements a general capability.
+                fn literal_entries_dictionary(
+                    entries: &Expr,
+                    parameters: &std::collections::HashMap<String, String>,
+                    locals: &std::collections::HashMap<String, Vec<String>>,
+                    context: &mut InlineContext<'_>,
+                ) -> Option<Vec<String>> {
+                    let entries = match entries {
+                        Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
+                        entries => entries,
+                    };
+                    let Expr::Array(entries) = entries else {
+                        return None;
+                    };
+                    let mut kind = None;
+                    let mut pairs = Vec::new();
+                    for element in &entries.elems {
+                        let element = element.as_ref()?;
+                        if element.spread.is_some() {
+                            return None;
+                        }
+                        let Expr::Array(pair) = element.expr.as_ref() else {
+                            return None;
+                        };
+                        let [Some(key), Some(value)] = pair.elems.as_slice() else {
+                            return None;
+                        };
+                        if key.spread.is_some() || value.spread.is_some() {
+                            return None;
+                        }
+                        let Expr::Lit(Lit::Str(key)) = key.expr.as_ref() else {
+                            return None;
+                        };
+                        let mut encoded_value = Vec::new();
+                        encode_expression(
+                            value.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded_value,
+                        )?;
+                        let value_kind = jit_expression_kind(&encoded_value)?.0;
+                        if matches!(
+                            value_kind,
+                            JitKind::Array | JitKind::Dictionary | JitKind::Dynamic
+                        ) || kind.replace(value_kind).is_some_and(|kind| kind != value_kind)
+                        {
+                            return None;
+                        }
+                        pairs.push((key.value.to_string_lossy().into_owned(), encoded_value));
+                    }
+                    let prefix = match kind? {
+                        JitKind::Number => "dn",
+                        JitKind::Boolean => "db",
+                        JitKind::String => "ds",
+                        JitKind::Dynamic | JitKind::Array | JitKind::Dictionary => {
+                            unreachable!()
+                        }
+                    };
+                    let mut output = vec![format!("{prefix}empty")];
+                    for (key, value) in pairs {
+                        let mut encoded_key = Vec::new();
+                        encode_string(&key, &mut encoded_key)?;
+                        let encoded_key = encoded_key.pop()?.strip_prefix('t')?.to_owned();
+                        output.extend(value);
+                        output.push(format!("{prefix}put{encoded_key}"));
+                    }
+                    Some(output)
                 }
-                let operation = match entry_prefix(&encoded)? {
-                    "dn" => "dnfromentries",
-                    "db" => "dbfromentries",
-                    "ds" => "dsfromentries",
-                    _ => unreachable!(),
-                };
-                output.extend(encoded);
-                output.push(operation.into());
+                if let Some(literal) =
+                    literal_entries_dictionary(entries, parameters, locals, context)
+                {
+                    output.extend(literal);
+                } else {
+                    let mut encoded = Vec::new();
+                    encode_expression(entries, parameters, locals, context, &mut encoded)?;
+                    if jit_expression_kind(&encoded)?.0 != JitKind::Array {
+                        return None;
+                    }
+                    let operation = match entry_prefix(&encoded)? {
+                        "dn" => "dnfromentries",
+                        "db" => "dbfromentries",
+                        "ds" => "dsfromentries",
+                        _ => unreachable!(),
+                    };
+                    output.extend(encoded);
+                    output.push(operation.into());
+                }
             }
             Expr::Call(call)
                 if object_dictionary_call(call, parameters, locals, context.helpers).is_some() =>
