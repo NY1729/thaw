@@ -324,6 +324,55 @@ fn installed_package_inlines_import_equals_reexports() {
 }
 
 #[test]
+fn installed_package_inlines_the_type_an_import_equals_value_is_declared_with() {
+    // `import Name = require("./path")` used as a *type* reference
+    // (`declare const x: Name;`), not the value re-export
+    // `installed_package_inlines_import_equals_reexports` already
+    // covers -- real-world example: mime's `import Mime =
+    // require("./Mime"); declare const mime: Mime; export = mime;`,
+    // `Mime` itself an ambient class declared in a wholly different
+    // file. Without following that reference, `Mime`'s class body
+    // (needed to make `mime.getType(...)` classifiable at all) never
+    // reaches the flattened `.d.ts`.
+    let scratch = temp_registry("installed-dts-import-equals-type-scratch");
+    let registry = temp_registry("installed-dts-import-equals-type-registry");
+    let package = scratch.join("node_modules/type-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"type-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import Thing = require('./Thing');\n\
+         declare const thing: Thing;\n\
+         export = thing;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("Thing.d.ts"),
+        "declare class Thing {\n    label(): string;\n}\n\nexport = Thing;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { label: function() { return 'thing'; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "type-kit").unwrap();
+    let declarations = resolve(&registry, "type-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("declare class Thing"),
+        "{declarations}"
+    );
+    assert!(declarations.contains("label(): string"), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_triple_slash_referenced_declarations() {
     // `/// <reference path="..." />` -- the classic DefinitelyTyped-style
     // split for a package whose real API is spread across many files
