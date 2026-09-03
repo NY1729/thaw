@@ -700,11 +700,7 @@ unsafe fn call_impl(
     };
     let result = (function.callback)(&mut *env, &mut info);
     if let Some(exception) = env.exception {
-        let message = match value_ref(exception).map_err(|_| "invalid exception")? {
-            Value::Error(message) | Value::String(message) => message.clone(),
-            _ => json_from_value(exception)?.to_string(),
-        };
-        return Err(message);
+        return Err(describe_env_exception(&mut *env as *mut Env, exception)?);
     }
     let result = wait_for_promise(result)?;
     serde_json::to_string(&json_from_value_with_undefined(result, preserve_undefined)?)
@@ -921,6 +917,24 @@ pub unsafe extern "C" fn thaw_napi_call_handle_typed_result(
     text_result(result)
 }
 
+// `napi_create_error`/`napi_create_type_error`/etc. record the error's class
+// name in `error_names` alongside its message (see `alloc_error`); tag it
+// onto the message the same way `new Error(...)`/etc. do in thaw-hir
+// (`\u{1}<Name>\u{1}<message>`, see `thaw_runtime::split_error_tag`) so a
+// native addon's typed error still exposes `.name`/`instanceof` at the
+// catching Thaw code's catch site instead of collapsing to an untagged
+// (default-`Error`) string.
+unsafe fn describe_env_exception(env: NapiEnv, exception: NapiValue) -> Result<String, String> {
+    let message = match value_ref(exception).map_err(|_| "invalid exception")? {
+        Value::Error(message) | Value::String(message) => message.clone(),
+        _ => json_from_value(exception)?.to_string(),
+    };
+    Ok(match error_name_for_owner(env, exception as usize) {
+        Some(name) => format!("\u{1}{name}\u{1}{message}"),
+        None => message,
+    })
+}
+
 unsafe fn take_env_exception(env: NapiEnv) -> Result<(), String> {
     let Some(exception) = env_mut(env)
         .map_err(|_| "invalid native addon environment")?
@@ -929,11 +943,7 @@ unsafe fn take_env_exception(env: NapiEnv) -> Result<(), String> {
     else {
         return Ok(());
     };
-    let message = match value_ref(exception).map_err(|_| "invalid exception")? {
-        Value::Error(message) | Value::String(message) => message.clone(),
-        _ => json_from_value(exception)?.to_string(),
-    };
-    Err(message)
+    Err(describe_env_exception(env, exception)?)
 }
 
 unsafe fn construct_handle_impl(
@@ -1279,11 +1289,7 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
         };
         let value = (function.callback)(&mut *env, &mut info);
         if let Some(exception) = env.exception {
-            let message = match value_ref(exception).map_err(|_| "invalid exception")? {
-                Value::Error(message) | Value::String(message) => message.clone(),
-                _ => json_from_value(exception)?.to_string(),
-            };
-            return Err(message);
+            return Err(describe_env_exception(&mut *env as *mut Env, exception)?);
         }
         let value = wait_for_promise(value)?;
         let value = if value.is_null() {
