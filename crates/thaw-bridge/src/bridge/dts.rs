@@ -868,6 +868,11 @@ fn lower_dts_function(
                 _ => "Json".into(),
             })
             .collect(),
+        return_type: func
+            .return_type
+            .as_ref()
+            .map(|annotation| describe_ts_type(&annotation.type_ann))
+            .unwrap_or_else(|| "JsValue".into()),
     });
     let mut substitution = HashMap::new();
     if let Some(type_params) = &func.type_params {
@@ -997,6 +1002,11 @@ fn lower_dts_method_signature(
                 _ => "Json".into(),
             })
             .collect(),
+        return_type: method
+            .type_ann
+            .as_ref()
+            .map(|annotation| describe_ts_type(&annotation.type_ann))
+            .unwrap_or_else(|| "JsValue".into()),
     });
     let mut substitution = HashMap::new();
     if let Some(type_params) = &method.type_params {

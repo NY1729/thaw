@@ -6787,6 +6787,14 @@ function main(): void {
 /// real argument would be passed as the whole *args array* instead.
 /// Regression coverage for substituting `Json` for just that one
 /// parameter instead of giving up on the whole function.
+///
+/// `firstOf`'s return is bare `T`, preserved by the same generic branch
+/// as a real type parameter (see
+/// `generic_fallback_function_with_return_only_type_parameter_infers_it_from_a_let_annotation`),
+/// so this specific call needs a `let`/`const` annotation to give
+/// thaw-hir something to infer `T` from -- an unannotated, directly
+/// nested call has no argument that mentions `T` either, once `items`
+/// itself was substituted to `Json`.
 #[test]
 fn generic_fallback_function_with_unresolvable_param_type_passes_it_through_as_json() {
     let dir = std::env::temp_dir().join(format!(
@@ -6812,7 +6820,8 @@ fn generic_fallback_function_with_unresolvable_param_type_passes_it_through_as_j
         r#"import { firstOf } from "first-kit";
 function main(): void {
     const items: Json = JSON.parse("[10, 20, 30]");
-    console.log(firstOf(items));
+    const first: number = firstOf(items);
+    console.log(first);
 }
 "#,
     )
@@ -6826,5 +6835,64 @@ function main(): void {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&result.stdout), "10\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A generic Fallback function whose type parameter appears *only* in
+/// the return position -- real-world example: nanoid's own `nanoid<Type
+/// extends string>(size?: number): Type`. thaw-hir has no argument to
+/// infer `Type` from at all here, but can still infer it from a
+/// `let`/`const` declaration's own type annotation as a fallback (see
+/// `infer_generic_type_tuple`/`lower_expr_with_expected_type` in
+/// thaw-hir), so the generic branch keeps this one type parameter
+/// declared (unlike a type parameter with no remaining occurrence
+/// anywhere, dropped as dead syntax) and renders the real return type
+/// instead of the usual hardcoded `JsValue`.
+#[test]
+fn generic_fallback_function_with_return_only_type_parameter_infers_it_from_a_let_annotation() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-return-only-generic-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("id-gen-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeId<Type extends string>(size?: number): Type;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.makeId = function(size) {\n\
+             var n = size === undefined ? 3 : size;\n\
+             var out = '';\n\
+             for (var i = 0; i < n; i++) { out += 'x'; }\n\
+             return out;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeId } from "id-gen-kit";
+function main(): void {
+    const id: string = makeId();
+    console.log(id.length);
+    const short: string = makeId(5);
+    console.log(short.length);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n5\n");
     let _ = std::fs::remove_dir_all(dir);
 }
