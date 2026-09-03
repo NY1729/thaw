@@ -599,6 +599,21 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     UnaryOp::TypeOf => {
+                        // `generic_arrows`/`generic_named_templates` describe *this same*
+                        // local binding (a local `const` holding a generic arrow, or one
+                        // forwarding to a named generic template) -- they apply regardless
+                        // of whether the name is also in `self.scope`, since `infer_expr_
+                        // type`'s scope-based inference doesn't know the real, generic
+                        // signature for such a binding (it only sees a `Dynamic`
+                        // placeholder there). `self.signatures`, in contrast, is the
+                        // *global* function table -- a bare reference to an unrelated
+                        // top-level function -- which must NOT be consulted when `name` is
+                        // actually a local variable/parameter of some other type: a local
+                        // binding shadows a same-named top-level function. Checking
+                        // signatures unconditionally here used to let a same-named extern/
+                        // Fallback function silently steal a shadowing parameter's `typeof`
+                        // check, folding it to a constant and running the wrong branch at
+                        // runtime.
                         let operand_type = if let HirExpr::Var(name) = &value {
                             self.generic_arrows
                                 .get(name)
@@ -619,6 +634,9 @@ impl<'a> FnLowerer<'a> {
                                     })
                                 })
                                 .or_else(|| {
+                                    if self.scope.contains_key(name) {
+                                        return None;
+                                    }
                                     self.signatures.get(name).map(|signature| {
                                         let ret = if signature.is_async {
                                             HirType::Promise(Box::new(signature.ret.clone()))
