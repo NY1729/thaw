@@ -1438,6 +1438,62 @@ fn extracts_functions_from_a_nested_namespace() {
     assert!(funcs.iter().any(|f| f.name == "shallow"));
 }
 
+/// The `export = obj` shape backed by an *interface* rather than a
+/// namespace's own `function` declarations -- real-world example:
+/// lodash's `declare const _: _.LoDashStatic;` with `interface
+/// LoDashStatic { chunk(...): ...; }`, its ~300 methods commonly spread
+/// (TS declaration merging) across several files each re-opening the
+/// same interface name, the way `thaw_registry`'s triple-slash-reference
+/// inlining now brings them all into one file.
+#[test]
+fn extracts_methods_from_an_export_assignment_interface() {
+    let source = r#"
+            export = _;
+            export as namespace _;
+            declare const _: _.LoDashStatic;
+            declare namespace _ {
+                interface LoDashStatic {}
+            }
+            declare namespace _ {
+                interface LoDashStatic {
+                    now(): number;
+                }
+            }
+            declare namespace _ {
+                interface LoDashStatic {
+                    capitalize(value: string): string;
+                }
+            }
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 2, "{funcs:?}");
+    let now = funcs.iter().find(|f| f.name == "now").unwrap();
+    assert!(matches!(classify(now), Classification::FastPath(_)));
+    let capitalize = funcs.iter().find(|f| f.name == "capitalize").unwrap();
+    assert!(matches!(classify(capitalize), Classification::FastPath(_)));
+}
+
+/// An interface used only as some *other* value's parameter/return type
+/// (not the type an `export = obj` binding was declared with) must not
+/// contribute its own methods as if they were package-level functions --
+/// real-world example: `p-limit`'s `Limit` interface, the type its
+/// default-exported factory function *returns*, whose `clearQueue()`
+/// method exists on that returned object, not on the package itself.
+#[test]
+fn interface_methods_outside_the_export_assignment_type_are_not_extracted() {
+    let source = r#"
+            export interface Limit {
+                <T>(task: () => T): Promise<T>;
+                readonly activeCount: number;
+                clearQueue(): void;
+            }
+            export default function pLimit(concurrency: number): Limit;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 1, "{funcs:?}");
+    assert_eq!(funcs[0].name, "pLimit");
+}
+
 /// The exact shape found in a real ESM npm package's `.d.ts`
 /// (`escape-string-regexp`): `export default function name(...): T;`
 /// is a different AST node (`ExportDefaultDecl`) than
