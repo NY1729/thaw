@@ -8,10 +8,13 @@
   （`napi_create_error`系→`napi_throw`）を越えるタグ保持も実装済み。非文字列の
   `throw`は同じ文字列変換（`String(value)`が使うものと同一）を通るため、
   クラッシュではなくコンパイルエラーか安全な文字列化になる）。
-  本ドキュメントが扱うのは未実装の部分 -- **ユーザー定義クラスが`Error`を
-  継承するケース**（`class MyError extends Error { code: number; ... }`）で、
-  現状は`class \`MyError\` extends unknown native class \`Error\``という
-  コンパイルエラーになる。
+  **V1(3.3節・6節)も実装済み**: `class MyError extends Error { code: number; ... }`
+  は既存のクラス/オブジェクト機構をそのまま再利用する形でコンパイルできる
+  ようになった。フィールドはthrowされるまで(オブジェクトのままの間)は
+  普通に読み書きでき、throw後は`.message`/`.name`/`instanceof`(多段継承の
+  祖先も含めて)が正しく動く。`code`のような独自フィールドをcatch後に
+  読む(`if (e instanceof MyError) { e.code }`)ことはまだできない --
+  それが3.1〜3.2節で提案した`_object`並行チャンネル(V2、未実装)の役割。
 - 前提: [thaw-hir/src/lower/expressions/lowering.rs](../../crates/thaw-hir/src/lower/expressions/lowering.rs)
   の`new Error`系特殊扱いと`instanceof`特殊扱い、
   [thaw-hir/src/lower/module/classes.rs](../../crates/thaw-hir/src/lower/module/classes.rs)
