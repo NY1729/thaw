@@ -4503,35 +4503,58 @@ fn jit_export(
                 if object_assign_call(call, parameters, locals, context.helpers).is_some() =>
             {
                 let arguments = object_assign_call(call, parameters, locals, context.helpers)?;
-                let mut target = Vec::new();
-                encode_expression(
-                    arguments.first()?.expr.as_ref(),
-                    parameters,
-                    locals,
-                    context,
-                    &mut target,
-                )?;
-                if jit_expression_kind(&target)?.0 != JitKind::Dictionary {
-                    return None;
+                fn is_empty_object_literal(expression: &Expr) -> bool {
+                    match expression {
+                        Expr::Paren(parenthesized) => {
+                            is_empty_object_literal(parenthesized.expr.as_ref())
+                        }
+                        Expr::Object(object) => object.props.is_empty(),
+                        _ => false,
+                    }
                 }
-                let prefix = dictionary_prefix(&target)?;
-                output.extend(target);
-                for source in &arguments[1..] {
+                // A bare `{}` argument has no properties to infer a dictionary value
+                // type from on its own, so its kind is resolved from whichever
+                // sibling argument (target or source) does carry one instead; an
+                // empty literal then becomes a same-prefix empty dictionary rather
+                // than going through the normal (kind-less) object-literal encoding.
+                let prefix = arguments
+                    .iter()
+                    .filter(|argument| !is_empty_object_literal(argument.expr.as_ref()))
+                    .find_map(|argument| {
+                        let mut encoded = Vec::new();
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        (jit_expression_kind(&encoded)?.0 == JitKind::Dictionary)
+                            .then_some(())
+                            .and_then(|()| dictionary_prefix(&encoded))
+                    })?;
+                for (index, argument) in arguments.iter().enumerate() {
                     let mut encoded = Vec::new();
-                    encode_expression(
-                        source.expr.as_ref(),
-                        parameters,
-                        locals,
-                        context,
-                        &mut encoded,
-                    )?;
-                    if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary
-                        || dictionary_prefix(&encoded)? != prefix
-                    {
-                        return None;
+                    if is_empty_object_literal(argument.expr.as_ref()) {
+                        encoded.push(format!("{prefix}empty"));
+                    } else {
+                        encode_expression(
+                            argument.expr.as_ref(),
+                            parameters,
+                            locals,
+                            context,
+                            &mut encoded,
+                        )?;
+                        if jit_expression_kind(&encoded)?.0 != JitKind::Dictionary
+                            || dictionary_prefix(&encoded)? != prefix
+                        {
+                            return None;
+                        }
                     }
                     output.extend(encoded);
-                    output.push("dassign".into());
+                    if index > 0 {
+                        output.push("dassign".into());
+                    }
                 }
             }
             Expr::Call(call)
