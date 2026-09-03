@@ -4820,6 +4820,7 @@ fn generates_typed_napi_tuple_class_shims() {
         false,
         &std::collections::HashMap::new(),
         &mut shim,
+        true,
     );
     assert_eq!(methods.len(), 1);
     assert_eq!(methods[0].4, vec![tuple.clone()]);
@@ -4882,6 +4883,7 @@ fn generates_typed_napi_recursive_array_shims() {
         false,
         &std::collections::HashMap::new(),
         &mut shim,
+        true,
     );
     assert_eq!(methods[0].4, vec![booleans]);
     assert_eq!(
@@ -4957,6 +4959,7 @@ fn generates_typed_napi_nullable_shims() {
         false,
         &std::collections::HashMap::new(),
         &mut shim,
+        true,
     );
     assert_eq!(methods[0].4, vec![nullable]);
     let property = &class.properties[0];
@@ -5018,6 +5021,7 @@ fn generates_typed_napi_optional_and_nullish_shims() {
         false,
         &std::collections::HashMap::new(),
         &mut shim,
+        true,
     );
     assert_eq!(methods[0].4, vec![optional]);
     assert_eq!(methods[1].4, vec![nullish]);
@@ -5128,6 +5132,7 @@ fn rewrites_inherited_external_class_methods() {
         false,
         &std::collections::HashMap::new(),
         &mut shim,
+        true,
     );
     let inherited = generated
         .iter()
@@ -5210,6 +5215,7 @@ fn rewrites_named_and_namespace_static_class_methods() {
         &[],
         &[],
         &[],
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -5235,6 +5241,7 @@ fn rewrites_typed_napi_instance_getters() {
             "value".into(),
             "__thaw_get_value".into(),
         )],
+        &[],
         &[],
         &[],
         &[],
@@ -5265,6 +5272,7 @@ fn rewrites_typed_napi_instance_setters_and_preserves_expression_values() {
             "__thaw_set_value".into(),
             thaw_hir::HirType::F64,
         )],
+        &[],
         &[],
         &[],
     )
@@ -5298,6 +5306,7 @@ fn rewrites_named_and_namespace_static_accessors() {
             "__thaw_set_version".into(),
             thaw_hir::HirType::F64,
         )],
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -5334,6 +5343,7 @@ fn generates_typed_napi_static_method_shims_without_instance_receivers() {
         true,
         &std::collections::HashMap::new(),
         &mut shim,
+        true,
     );
     assert_eq!(generated.len(), 1);
     assert_eq!(generated[0].0, "create");
