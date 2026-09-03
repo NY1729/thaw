@@ -192,6 +192,7 @@ pub struct HirCompiler<'ctx> {
     active_async_completion: Option<PointerValue<'ctx>>,
     next_lambda: usize,
     uses_napi: bool,
+    uses_quickjs: bool,
     uses_quickjs_handles: bool,
 }
 
@@ -212,6 +213,7 @@ impl<'ctx> HirCompiler<'ctx> {
             active_async_completion: None,
             next_lambda: 0,
             uses_napi: false,
+            uses_quickjs: false,
             uses_quickjs_handles: false,
         }
     }
@@ -263,6 +265,18 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .verify()
             .map_err(|e| format!("module verification failed:\n{e}"))
+    }
+
+    /// Whether the generated module actually calls the QuickJS fallback host.
+    /// Callers can omit that archive when every operation was lowered to the
+    /// native/JIT paths.
+    pub fn uses_quickjs(&self) -> bool {
+        self.uses_quickjs
+    }
+
+    /// Whether the generated module calls the N-API addon host.
+    pub fn uses_napi(&self) -> bool {
+        self.uses_napi
     }
 
     fn declare_exception_state(&self) {

@@ -11,6 +11,12 @@ impl<'ctx> HirCompiler<'ctx> {
         backend_symbol: &str,
         source_name: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if backend_symbol.starts_with("thaw_js_") {
+            self.uses_quickjs = true;
+        }
+        if backend_symbol.starts_with("thaw_napi_") {
+            self.uses_napi = true;
+        }
         let [name, call_args] = args else {
             return Err(format!(
                 "{source_name} expects exactly two arguments (name, args)"

@@ -54,6 +54,17 @@ fn adapts_typed_dynamic_callable_results_to_natural_calls() {
 }
 
 #[test]
+fn quickjs_manifest_detection_tracks_dynamic_host_calls() {
+    assert!(!source_uses_quickjs("function main() { return 42; }"));
+    assert!(source_uses_quickjs(
+        "function main() { return callDynamic('add', []); }"
+    ));
+    assert!(source_uses_quickjs(
+        "declare function __thaw_typed_js_616464(value: number): number;"
+    ));
+}
+
+#[test]
 fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     let function = thaw_bridge::DtsFunction {
         name: "add".into(),
