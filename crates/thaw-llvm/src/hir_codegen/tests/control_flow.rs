@@ -752,3 +752,75 @@ fn catch_without_a_binding_still_prints_correctly() {
     );
 }
 
+#[test]
+fn throwing_a_non_string_value_coerces_it_to_a_string() {
+    // The exception channel is a single tagged string end to end (see
+    // `new Error(...)`'s lowering); a thrown number, boolean, or plain
+    // object used to be stored into that `i8*` slot as whatever raw bits
+    // it happened to have and crash the moment anything tried to read it
+    // as a string. Coercing at the `throw` site instead makes every
+    // supported thrown type safe, using the same string conversion
+    // `String(value)` already uses.
+    let source = r#"
+        function main(): void {
+            try {
+                throw 42;
+            } catch (e) {
+                console.log(e);
+            }
+            try {
+                throw true;
+            } catch (e) {
+                console.log(e);
+            }
+            try {
+                throw { code: 42, reason: "bad" };
+            } catch (e) {
+                console.log(e);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "throw_non_string_coerces"),
+        "42\ntrue\n[object Object]\n"
+    );
+}
+
+#[test]
+fn throwing_an_unsupported_value_is_a_compile_error_not_a_crash() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            throw Promise.resolve(1);
+        }"#,
+    )
+    .unwrap();
+    let error = thaw_hir::lower_module(&module).unwrap_err();
+    assert!(error.contains("string conversion") || error.contains("Promise"), "{error}");
+}
+
+#[test]
+fn a_non_tail_throw_still_skips_the_rest_of_every_caller() {
+    let source = r#"
+        function boom(): number {
+            throw "boom";
+        }
+        function middle(): number {
+            const x = boom();
+            console.log("must not print: " + x);
+            return x + 1;
+        }
+        function main(): void {
+            try {
+                const result = middle() + 100;
+                console.log("must not print: " + result);
+            } catch (e) {
+                console.log("caught: " + e);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "non_tail_throw_propagation"),
+        "caught: boom\n"
+    );
+}
+
