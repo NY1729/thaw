@@ -49,6 +49,13 @@ pub struct DtsFunction {
 pub struct DtsGenericFunction {
     pub type_params: Vec<(String, Option<String>)>,
     pub param_types: Vec<String>,
+    /// The declared return type, rendered the same crude way
+    /// `param_types` are (`describe_ts_type`) -- used to recognize the
+    /// specific, safe-to-preserve shape of a type parameter that appears
+    /// *only* in the return position (e.g. `nanoid<Type extends string>
+    /// (size?: number): Type`), where this is exactly one of
+    /// `type_params`' own names.
+    pub return_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

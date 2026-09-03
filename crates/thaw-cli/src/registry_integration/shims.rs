@@ -20195,12 +20195,49 @@ fn contains_word(text: &str, word: &str) -> bool {
 /// (see `is_reparseable_ts_type`) but rejected outright inside a nested
 /// function-type signature).
 fn is_safe_callback_param_type(text: &str, generic: &thaw_bridge::DtsGenericFunction) -> bool {
+    // A leaf type good to splice into this declaration's own source: one
+    // of thaw-hir's callback-type keywords, or `Json`/`JsValue` (already
+    // proven safe as a *plain* parameter, and no more of an external
+    // reference here than there), or itself a nested callback
+    // recursively checked the same way. Anything else -- most commonly a
+    // real type reference like `Uint8Array`, but also one of this
+    // function's own type parameters (proven separately to produce an
+    // unresolvable bare name once compiled when used *inside* a nested
+    // callback signature, unlike as a bare top-level parameter) -- isn't
+    // in thaw-hir's short callback-type keyword list and/or names
+    // something this shim doesn't carry along with it, so it's rejected
+    // the same as a top-level `extends` constraint would be (see
+    // `is_reparseable_ts_type`'s doc comment).
+    fn is_safe_leaf_type(ty: &str, generic: &thaw_bridge::DtsGenericFunction) -> bool {
+        let ty = ty.trim().trim_end_matches('?');
+        if is_reparseable_ts_type(ty) || matches!(ty, "Json" | "JsValue") {
+            return true;
+        }
+        ty.starts_with('(') && is_safe_callback_param_type(ty, generic)
+    }
+
     if mentions_any_type_param(text, generic) {
         return false;
     }
-    !["any", "unknown", "object", "bigint", "symbol", "never", "undefined", "null"]
-        .into_iter()
-        .any(|keyword| contains_word(text, keyword))
+    let Some(arrow) = text.rfind("=> ") else {
+        return false;
+    };
+    let (params, ret) = (&text[..arrow], &text[arrow + "=> ".len()..]);
+    if !is_safe_leaf_type(ret, generic) {
+        return false;
+    }
+    let Some(params) = params
+        .trim()
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(") "))
+    else {
+        return false;
+    };
+    params.split(',').filter(|param| !param.trim().is_empty()).all(|param| {
+        param
+            .split_once(':')
+            .is_some_and(|(_, ty)| is_safe_leaf_type(ty, generic))
+    })
 }
 
 fn is_reparseable_ts_type(text: &str) -> bool {
@@ -20292,27 +20329,51 @@ fn typed_dynamic_declaration(
                 }
             })
             .collect::<Vec<_>>();
-        // A type parameter substituted out of every parameter that used
-        // to carry it (the case just above) is no longer inferable from
-        // any call argument -- thaw-hir requires inferring every
-        // declared type parameter from *some* argument, with no
-        // contextual/return-type-driven inference, so keeping it
-        // declared here would make every real call an inference error
-        // even though nothing downstream actually needed it: the return
-        // stays hardcoded `JsValue` either way, never the original
-        // `.d.ts` return type (which could itself have been that same
-        // type parameter, as in `uniq<T>(...): T[]`). Dropped from the
-        // declaration entirely rather than kept as dead syntax.
+        // thaw-hir can infer a type parameter from the call site's own
+        // expected type (a `let`/`const` declaration's annotation) as a
+        // fallback when no argument mentions it at all, but only when
+        // *this* declaration's return type actually still says so --
+        // real example: `nanoid<Type extends string>(size?: number):
+        // Type`, where `Type` appears solely in the return position, so
+        // `const id: string = nanoid()` is the only place its value is
+        // ever written down. Preserved (kept declared, return rendered
+        // as the parameter name itself) only for that exact shape --
+        // the return being precisely one bare type parameter -- since
+        // anything more complex (`T[]`, `Promise<T>`, ...) would need
+        // the same re-parseability/external-name scrutiny the parameter
+        // substitution above already goes through, not yet done for a
+        // return position.
+        //
+        // A type parameter that isn't returned bare like that, and was
+        // substituted out of every parameter that used to carry it (the
+        // case just above), is left with no remaining occurrence to
+        // infer it from at all -- thaw-hir requires inferring every
+        // declared type parameter from some argument or the return
+        // fallback, so keeping it declared here would make every real
+        // call an inference error even though nothing downstream
+        // actually needed it. Dropped from the declaration entirely
+        // rather than kept as dead syntax.
+        let returns_bare_type_param = generic
+            .type_params
+            .iter()
+            .any(|(name, _)| *name == generic.return_type);
         let type_params = generic
             .type_params
             .iter()
-            .filter(|(name, _)| param_types.iter().any(|ty| ty == name))
+            .filter(|(name, _)| {
+                param_types.iter().any(|ty| ty == name) || *name == generic.return_type
+            })
             .map(|(name, constraint)| match constraint {
                 Some(constraint) => format!("{name} extends {constraint}"),
                 None => name.clone(),
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let return_type = if returns_bare_type_param {
+            generic.return_type.as_str()
+        } else {
+            "JsValue"
+        };
         let params = function
             .params
             .iter()
@@ -20337,7 +20398,7 @@ fn typed_dynamic_declaration(
         };
         return Some((
             base_symbol.clone(),
-            format!("declare function {base_symbol}{generics}({params}): JsValue;\n"),
+            format!("declare function {base_symbol}{generics}({params}): {return_type};\n"),
         ));
     }
     let params = function
