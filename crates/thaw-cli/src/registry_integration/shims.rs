@@ -2583,19 +2583,25 @@ fn jit_export(
             _ => false,
         };
         let literal_array = matches!(member.obj.as_ref(), Expr::Array(_));
-        // A ternary's own array-ness (both branches agreeing on element type) is only
-        // knowable by actually encoding it, which needs `context` and happens anyway
-        // right after this gate returns; the downstream `jit_expression_kind` check
-        // rejects it there if either branch isn't array-shaped. Chaining a method onto
-        // a bare ternary requires parenthesizing it (`(a ? b : c).map(...)`), so the
-        // receiver is `Expr::Paren` wrapping the `Expr::Cond`, not the `Cond` itself.
-        let conditional_array = matches!(
-            match member.obj.as_ref() {
-                Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
-                receiver => receiver,
-            },
-            Expr::Cond(_)
-        );
+        // A ternary's/short-circuit's own array-ness (both branches agreeing on
+        // element type) is only knowable by actually encoding it, which needs
+        // `context` and happens anyway right after this gate returns; the
+        // downstream `jit_expression_kind` check rejects it there if either side
+        // isn't array-shaped. Chaining a method onto any of these requires
+        // parenthesizing it (`(a ? b : c).map(...)`, `(a || b).map(...)`), so the
+        // receiver is `Expr::Paren` wrapping the branching expression, not that
+        // expression itself.
+        let conditional_array = match match member.obj.as_ref() {
+            Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
+            receiver => receiver,
+        } {
+            Expr::Cond(_) => true,
+            Expr::Bin(binary) => matches!(
+                binary.op,
+                BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::NullishCoalescing
+            ),
+            _ => false,
+        };
         if !parameter_array
             && !local_array
             && !returned_array
@@ -4271,7 +4277,19 @@ fn jit_export(
                     return None;
                 };
                 if matches!(kind, JitKind::Array | JitKind::Dictionary) {
-                    return None;
+                    // Arrays and dictionaries are unconditionally truthy in JavaScript
+                    // (even when empty), so the runtime value never needs checking:
+                    // `a || b` always yields `a` and `a && b` always yields `b`. Both
+                    // sides were already validated as encodable above; only the
+                    // statically-selected side's tokens need to survive into the
+                    // output, and the other side's evaluation (side effects
+                    // included) is correctly never observed at runtime either way.
+                    output.extend(if binary.op == BinaryOp::LogicalAnd {
+                        right
+                    } else {
+                        left
+                    });
+                    return Some(());
                 }
                 output.extend(left);
                 output.push("dup".into());
