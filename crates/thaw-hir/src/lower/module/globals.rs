@@ -85,7 +85,7 @@ fn lower_top_level_initializers(
                         .and_then(|base| match base.as_ref() {
                             Expr::Ident(base) => Some((
                                 class_initializer_symbol(base.sym.as_ref()),
-                                interfaces[base.sym.as_ref()].clone(),
+                                interfaces.get(base.sym.as_ref()).cloned().unwrap_or(HirType::Void),
                                 base.sym.to_string(),
                             )),
                             _ => None,
@@ -262,7 +262,7 @@ fn lower_static_class_globals(
                 .and_then(|base| match base.as_ref() {
                     Expr::Ident(base) => Some((
                         class_initializer_symbol(base.sym.as_ref()),
-                        interfaces[base.sym.as_ref()].clone(),
+                        interfaces.get(base.sym.as_ref()).cloned().unwrap_or(HirType::Void),
                         base.sym.to_string(),
                     )),
                     _ => None,

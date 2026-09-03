@@ -650,7 +650,12 @@ fn validate_abstract_generic_class_methods(
         let mut selected = HashMap::<(bool, MethodKind, Symbol), (&str, &ClassMethod)>::new();
         let mut current = Some(name.as_str());
         while let Some(class_name) = current {
-            let class = classes[class_name];
+            // `Error`/`TypeError`/etc. are not real declared classes (see
+            // `lower/module/classes.rs`'s synthetic base-layout branch) and
+            // so have no abstract generic methods of their own to walk.
+            let Some(&class) = classes.get(class_name) else {
+                break;
+            };
             for member in &class.class.body {
                 let ClassMember::Method(method) = member else {
                     continue;

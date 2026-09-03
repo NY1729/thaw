@@ -303,10 +303,62 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
                 vec![value],
             )),
-            HirType::Object(_) => Ok(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_object_to_string".to_string())),
-                vec![value],
-            )),
+            HirType::Object(fields) => {
+                // A class extending `Error`/`TypeError`/etc. (see
+                // `lower/module/classes.rs`) is a real object with an
+                // inherited `message: Str` field, not the tagged string
+                // `new Error(...)` produces directly -- but `throw`ing one
+                // (or any other string coercion: `String(value)`, `+`,
+                // template literals) needs to recover that same tagged
+                // form (`\u{1}<Name>[$<AncestorName>...]\u{1}<message>`, the
+                // full identity chain rather than just the most-derived
+                // name, so `instanceof` on an intermediate ancestor still
+                // matches -- see `thaw_error_is_instance`) so every
+                // existing exception reader still understands it, instead
+                // of falling into the generic `[object Object]` conversion.
+                let error_chain = fields.first().and_then(|(marker, ty)| {
+                    (*ty == HirType::Bool)
+                        .then(|| marker.strip_prefix("__thaw_class_identity_"))
+                        .flatten()
+                        .filter(|chain| {
+                            chain.split('$').any(|name| {
+                                matches!(
+                                    name,
+                                    "Error"
+                                        | "TypeError"
+                                        | "RangeError"
+                                        | "SyntaxError"
+                                        | "ReferenceError"
+                                        | "EvalError"
+                                        | "URIError"
+                                )
+                            })
+                        })
+                        .map(str::to_string)
+                });
+                match error_chain {
+                    Some(name)
+                        if fields
+                            .iter()
+                            .any(|(field, ty)| field == "message" && *ty == HirType::Str) =>
+                    {
+                        let message = HirExpr::PropAccess(
+                            Box::new(value),
+                            HirType::Object(fields),
+                            "message".to_string(),
+                        );
+                        let tag = HirExpr::Lit(HirLit::Str(format!("\u{1}{name}\u{1}")));
+                        Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![tag, message],
+                        ))
+                    }
+                    _ => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_object_to_string".to_string())),
+                        vec![value],
+                    )),
+                }
+            }
             HirType::Array(element) => {
                 let builtin = match element.as_ref() {
                     HirType::F64 => "__thaw_number_array_to_string",
