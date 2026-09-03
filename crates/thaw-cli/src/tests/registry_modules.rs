@@ -6003,3 +6003,46 @@ fn bitwise_int32_boundary_edge_cases_use_jit_without_quickjs() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn string_surrogate_pair_and_empty_edge_cases_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-surrogate-edge-cases-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("strings-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function codePoints(s: string): number[];\nexport declare function charCodes(s: string): number[];\nexport declare function fromStringInfo(s: string): number[];\nexport declare function emptyProbe(s: string): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.codePoints = (s) => [s.codePointAt(0), s.codePointAt(1), s.codePointAt(2)]; module.exports.charCodes = (s) => [s.charCodeAt(0), s.charCodeAt(1), s.charCodeAt(2), s.charCodeAt(99)]; module.exports.fromStringInfo = (s) => [Array.from(s).length, s.length]; module.exports.emptyProbe = (s) => s.charCodeAt(0);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { codePoints, charCodes, fromStringInfo, emptyProbe } from 'strings-kit';\nfunction main(): void { const emoji = \"\\uD83D\\uDE00x\"; console.log(codePoints(emoji).join(',')); console.log(charCodes(emoji).join(',')); console.log(fromStringInfo(emoji).join(',')); console.log(emptyProbe(\"\")); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "128512,56832,120\n55357,56832,120,NaN\n2,3\nNaN\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
