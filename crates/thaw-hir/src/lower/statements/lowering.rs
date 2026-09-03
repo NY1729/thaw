@@ -848,6 +848,38 @@ impl<'a> FnLowerer<'a> {
                 // `Promise`, function, `Map`/`Set`, etc.) are a compile
                 // error instead of memory corruption.
                 let value = self.lower_expr(&throw_stmt.arg)?;
+                let value_type = self.infer_expr_type(&value)?;
+                // A real (Error-family) class instance also gets its raw
+                // object pointer stashed in the parallel, opt-in
+                // `__thaw_pending_exception_object` channel (see
+                // `docs/design/exceptions.md` section 3) *in addition* to
+                // the tagged string every other reader already
+                // understands, so an explicit `(e as MyError).code` at a
+                // `catch` site downstream can recover fields beyond
+                // `message`/`name`. A plain string or fieldless Error
+                // throw leaves that channel untouched (still null, or
+                // stale from a previous throw already cleared at the
+                // catching `catch` -- see `compile_try`).
+                let error_object_name = object_type_is_error_family(&value_type).then(|| {
+                    let name = format!("__thaw_thrown_object_{}", self.next_binding);
+                    self.next_binding += 1;
+                    name
+                });
+                if let Some(name) = error_object_name {
+                    self.scope.insert(name.clone(), value_type.clone());
+                    let object_var = HirExpr::Var(name.clone());
+                    let message = self.coerce_primitive_to_string(object_var.clone())?;
+                    return Ok(vec![
+                        HirStmt::Let(name, value_type, value),
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_set_pending_exception_object".to_string(),
+                            )),
+                            vec![object_var],
+                        )),
+                        HirStmt::Throw(message),
+                    ]);
+                }
                 let value = self.coerce_primitive_to_string(value)?;
                 Ok(vec![HirStmt::Throw(value)])
             }

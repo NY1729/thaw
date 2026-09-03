@@ -316,26 +316,14 @@ impl<'a> FnLowerer<'a> {
                 // matches -- see `thaw_error_is_instance`) so every
                 // existing exception reader still understands it, instead
                 // of falling into the generic `[object Object]` conversion.
-                let error_chain = fields.first().and_then(|(marker, ty)| {
-                    (*ty == HirType::Bool)
-                        .then(|| marker.strip_prefix("__thaw_class_identity_"))
-                        .flatten()
-                        .filter(|chain| {
-                            chain.split('$').any(|name| {
-                                matches!(
-                                    name,
-                                    "Error"
-                                        | "TypeError"
-                                        | "RangeError"
-                                        | "SyntaxError"
-                                        | "ReferenceError"
-                                        | "EvalError"
-                                        | "URIError"
-                                )
-                            })
-                        })
-                        .map(str::to_string)
-                });
+                let error_chain = object_type_is_error_family(&HirType::Object(fields.clone()))
+                    .then(|| {
+                        let (marker, _) = &fields[0];
+                        marker
+                            .strip_prefix("__thaw_class_identity_")
+                            .expect("checked by object_type_is_error_family")
+                            .to_string()
+                    });
                 match error_chain {
                     Some(name)
                         if fields

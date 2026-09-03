@@ -260,8 +260,42 @@ impl<'ctx> HirCompiler<'ctx> {
                 ptr_ty.const_null(),
             )
             .map_err(|e| e.to_string())?;
+        // Companion to `catch_slot` for the parallel object channel (see
+        // `docs/design/exceptions.md` section 3): always captured and
+        // cleared alongside the string, even though it is usually null
+        // (nothing but a real Error-family class instance throw ever
+        // populates it -- see `HirStmt::Throw`'s codegen). An explicit
+        // `(e as MyError)` cast, lowered in thaw-hir to
+        // `Var("<catch_name>__thaw_exception_object")`, is what actually
+        // reads this slot; a plain `catch (e) { e.message }` never
+        // references it at all.
+        let object_slot = self
+            .builder
+            .build_alloca(str_ty, "catch_object_slot")
+            .map_err(|e| e.to_string())?;
+        let thrown_object = self
+            .builder
+            .build_load(
+                ptr_ty,
+                self.pending_exception_object().as_pointer_value(),
+                "caught_exception_object",
+            )
+            .map_err(|e| e.to_string())?;
+        self.builder
+            .build_store(object_slot, thrown_object)
+            .map_err(|e| e.to_string())?;
+        self.builder
+            .build_store(
+                self.pending_exception_object().as_pointer_value(),
+                ptr_ty.const_null(),
+            )
+            .map_err(|e| e.to_string())?;
         self.variables
             .insert(catch_name.to_string(), (catch_slot, str_ty));
+        self.variables.insert(
+            format!("{catch_name}__thaw_exception_object"),
+            (object_slot, str_ty),
+        );
         let catch_terminated = self.compile_block(catch_body)?;
         if !catch_terminated {
             self.builder

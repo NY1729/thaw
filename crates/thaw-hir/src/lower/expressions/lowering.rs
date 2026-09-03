@@ -117,7 +117,42 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
-            Expr::TsAs(assertion) => self.lower_expr(&assertion.expr),
+            Expr::TsAs(assertion) => {
+                // `(e as MyError)` on a caught exception (`e`, always
+                // `HirType::Str` -- see `statements/lowering.rs`) reads the
+                // parallel object channel a `MyError`-instance `throw`
+                // populated alongside the tagged string (see
+                // `docs/design/exceptions.md` section 3 and
+                // `HirStmt::Throw`'s lowering just above `Stmt::Throw`),
+                // instead of the ordinary (no-op) type-assertion passthrough
+                // every other `as` cast uses. This is the only way to reach
+                // fields beyond `.message`/`.name` at a catch site; nothing
+                // checks that an `instanceof` guard actually preceded it,
+                // matching real TypeScript's own unchecked `as` -- unlike
+                // real TypeScript, though, misusing it here (on a caught
+                // value that was never a matching object, e.g. a plain
+                // `throw "x"`) reads a null pointer and crashes the process
+                // rather than yielding `undefined`. This is a known sharp
+                // edge (see `docs/design/exceptions.md` section 5) accepted
+                // for now: always guard with the matching `instanceof`
+                // check first.
+                if let (Expr::Ident(ident), TsType::TsTypeRef(reference)) =
+                    (assertion.expr.as_ref(), assertion.type_ann.as_ref())
+                {
+                    if let swc_ecma_ast::TsEntityName::Ident(class) = &reference.type_name {
+                        let resolved = self.resolve_binding(ident.sym.as_ref());
+                        let target = self.interfaces.get(class.sym.as_ref()).cloned();
+                        if self.scope.get(&resolved) == Some(&HirType::Str) {
+                            if let Some(target) = target.filter(object_type_is_error_family) {
+                                let object_name = format!("{resolved}__thaw_exception_object");
+                                self.scope.insert(object_name.clone(), target);
+                                return Ok(HirExpr::Var(object_name));
+                            }
+                        }
+                    }
+                }
+                self.lower_expr(&assertion.expr)
+            }
             Expr::TsTypeAssertion(assertion) => self.lower_expr(&assertion.expr),
             Expr::TsSatisfies(satisfies) => self.lower_satisfies(satisfies),
             Expr::TsNonNull(assertion) => self.lower_non_null_assertion(assertion),
@@ -259,18 +294,6 @@ impl<'a> FnLowerer<'a> {
                                 .into(),
                         );
                     };
-                    fn is_error_family_name(name: &str) -> bool {
-                        matches!(
-                            name,
-                            "Error"
-                                | "TypeError"
-                                | "RangeError"
-                                | "SyntaxError"
-                                | "ReferenceError"
-                                | "EvalError"
-                                | "URIError"
-                        )
-                    }
                     // True for the built-ins themselves and for any user
                     // class transitively `extends`ing one of them (its
                     // identity chain, synthesized in
@@ -279,19 +302,10 @@ impl<'a> FnLowerer<'a> {
                     // own in `self.signatures`/`self.interfaces` under that
                     // name).
                     let extends_error_family = is_error_family_name(class.sym.as_ref())
-                        || self.interfaces.get(class.sym.as_ref()).is_some_and(|ty| {
-                            let HirType::Object(fields) = ty else {
-                                return false;
-                            };
-                            fields.first().is_some_and(|(marker, ty)| {
-                                *ty == HirType::Bool
-                                    && marker
-                                        .strip_prefix("__thaw_class_identity_")
-                                        .is_some_and(|chain| {
-                                            chain.split('$').any(is_error_family_name)
-                                        })
-                            })
-                        });
+                        || self
+                            .interfaces
+                            .get(class.sym.as_ref())
+                            .is_some_and(object_type_is_error_family);
                     let value = self.lower_expr(&bin.left)?;
                     let value_type = self.infer_expr_type(&value)?;
                     // A caught exception has no real `Error` object or class
