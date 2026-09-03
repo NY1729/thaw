@@ -687,7 +687,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     _ => None,
                 });
         while let Some(current_name) = base_name {
-            let base = class_by_name[&current_name];
+            // `Error`/`TypeError`/etc. are not real declared classes (see
+            // `lower/module/classes.rs`'s synthetic base-layout branch) and
+            // so have no members of their own to inherit here.
+            let Some(&base) = class_by_name.get(&current_name) else {
+                break;
+            };
             for member in &base.class.body {
                 let ClassMember::Method(method) = member else {
                     continue;
@@ -941,7 +946,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     _ => None,
                 });
         while let Some(current_name) = base_name {
-            let base = class_by_name[&current_name];
+            // `Error`/`TypeError`/etc. are not real declared classes (see
+            // `lower/module/classes.rs`'s synthetic base-layout branch) and
+            // so have no members of their own to inherit here.
+            let Some(&base) = class_by_name.get(&current_name) else {
+                break;
+            };
             for member in &base.class.body {
                 let field = match member {
                     ClassMember::ClassProp(property) if property.is_static => {

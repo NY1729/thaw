@@ -350,7 +350,7 @@ fn lower_class_constructor(
         };
         lowerer.super_initializer = Some((
             class_initializer_symbol(base.sym.as_ref()),
-            interfaces[base.sym.as_ref()].clone(),
+            interfaces.get(base.sym.as_ref()).cloned().unwrap_or(HirType::Void),
             base.sym.to_string(),
         ));
     }
@@ -802,7 +802,7 @@ fn lower_class_methods(
             };
             lowerer.super_initializer = Some((
                 class_initializer_symbol(base.sym.as_ref()),
-                interfaces[base.sym.as_ref()].clone(),
+                interfaces.get(base.sym.as_ref()).cloned().unwrap_or(HirType::Void),
                 base.sym.to_string(),
             ));
         }
@@ -859,7 +859,7 @@ fn lower_class_methods(
                 };
                 unbound.super_initializer = Some((
                     class_initializer_symbol(base.sym.as_ref()),
-                    interfaces[base.sym.as_ref()].clone(),
+                    interfaces.get(base.sym.as_ref()).cloned().unwrap_or(HirType::Void),
                     base.sym.to_string(),
                 ));
             }

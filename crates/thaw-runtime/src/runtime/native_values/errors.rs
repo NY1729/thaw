@@ -9,6 +9,14 @@
 /// tag and is treated as an untagged `Error` with the whole string as its
 /// message -- matching real JavaScript's own default `Error.prototype.name`.
 ///
+/// A user class extending `Error`/etc. (see `lower/module/classes.rs`) tags
+/// with its *full* identity chain instead of just its own name (e.g.
+/// `Sub$MyError$Error` for `class Sub extends MyError extends Error`, see
+/// `lower/expressions/coercions.rs`'s `coerce_primitive_to_string`), so
+/// `instanceof` on an intermediate ancestor still matches; `.name` only ever
+/// reports the first (most-derived) segment, matching how real JavaScript's
+/// `Error.prototype.name` names the actual thrown class, not its ancestors.
+///
 /// `\u{1}` (SOH) was picked because it can never appear in a JSON-encoded
 /// Lambda error body or in ordinary program text, and (unlike `\0`) doesn't
 /// truncate the C string it's embedded in.
@@ -32,7 +40,8 @@ pub unsafe extern "C" fn thaw_error_name(message: *const c_char) -> *const c_cha
         return std::ptr::null();
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    let (name, _) = split_error_tag(&text);
+    let (chain, _) = split_error_tag(&text);
+    let name = chain.split('$').next().unwrap_or(chain);
     arena_c_string(name).map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -51,10 +60,12 @@ pub unsafe extern "C" fn thaw_error_message(message: *const c_char) -> *const c_
     arena_c_string(body).map_or(std::ptr::null(), |value| value.cast())
 }
 
-/// Whether `message`'s tagged (or defaulted) name matches `class_name`, or
-/// `class_name` is `"Error"` -- every tagged/untagged exception this channel
-/// can carry is some kind of `Error`, matching real JavaScript's error
-/// class hierarchy without needing to represent it.
+/// Whether `message`'s tagged (or defaulted) identity chain includes
+/// `class_name`, or `class_name` is `"Error"` -- every tagged/untagged
+/// exception this channel can carry is some kind of `Error`, matching real
+/// JavaScript's error class hierarchy without needing to represent it. A
+/// multi-level chain (`Sub$MyError$Error`) matches any ancestor's name, not
+/// just the most-derived one.
 ///
 /// # Safety
 /// Both pointers must be null or a valid, NUL-terminated C string.
@@ -68,8 +79,8 @@ pub unsafe extern "C" fn thaw_error_is_instance(
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let class_name = unsafe { CStr::from_ptr(class_name) }.to_string_lossy();
-    let (name, _) = split_error_tag(&text);
-    class_name == "Error" || name == class_name
+    let (chain, _) = split_error_tag(&text);
+    class_name == "Error" || chain.split('$').any(|name| name == class_name)
 }
 
 #[cfg(test)]
@@ -125,6 +136,17 @@ mod error_native_tests {
         let tagged = "\u{1}Error\u{1}first\u{1}second";
         assert_eq!(call_name(tagged), "Error");
         assert_eq!(call_message(tagged), "first\u{1}second");
+    }
+
+    #[test]
+    fn a_multi_level_identity_chain_matches_any_ancestor_but_names_only_the_leaf() {
+        let tagged = "\u{1}Sub$MyError$Error\u{1}deep failure";
+        assert_eq!(call_name(tagged), "Sub");
+        assert_eq!(call_message(tagged), "deep failure");
+        assert!(call_is_instance(tagged, "Sub"));
+        assert!(call_is_instance(tagged, "MyError"));
+        assert!(call_is_instance(tagged, "Error"));
+        assert!(!call_is_instance(tagged, "TypeError"));
     }
 
     #[test]

@@ -889,3 +889,66 @@ fn promise_all_rejects_when_one_element_is_promise_reject() {
     );
 }
 
+#[test]
+fn user_class_extends_error_exposes_message_name_instanceof() {
+    let source = r#"
+        class MyError extends Error {
+            code: number;
+            constructor(message: string, code: number) {
+                super(message);
+                this.code = code;
+            }
+        }
+        function main(): void {
+            const built = new MyError("bad thing", 42);
+            console.log(built.code);
+            console.log(built instanceof MyError);
+            try {
+                throw built;
+            } catch (e) {
+                console.log(e.message);
+                console.log(e.name);
+                console.log(e instanceof Error);
+                console.log(e instanceof MyError);
+                console.log(e instanceof TypeError);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "user_class_extends_error"),
+        "42\ntrue\nbad thing\nMyError\ntrue\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn multi_level_error_subclass_instanceof_matches_every_ancestor() {
+    let source = r#"
+        class MyError extends Error {
+            constructor(message: string) {
+                super(message);
+            }
+        }
+        class Sub extends MyError {
+            constructor(message: string) {
+                super(message);
+            }
+        }
+        function main(): void {
+            try {
+                throw new Sub("deep failure");
+            } catch (e) {
+                console.log(e.message);
+                console.log(e.name);
+                console.log(e instanceof Sub);
+                console.log(e instanceof MyError);
+                console.log(e instanceof Error);
+                console.log(e instanceof TypeError);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "multi_level_error_subclass"),
+        "deep failure\nSub\ntrue\ntrue\ntrue\nfalse\n"
+    );
+}
+

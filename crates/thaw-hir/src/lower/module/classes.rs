@@ -32,28 +32,54 @@ fn collect_native_classes<'a>(
             };
             let base_name = base.sym.as_ref();
             if !declarations.contains_key(base_name) {
-                return Err(format!(
-                    "class `{name}` extends unknown native class `{base_name}`"
-                ));
+                // `Error`/`TypeError`/etc. are not real declared classes --
+                // `new Error(message)` lowers straight to a tagged string
+                // (see `lower/expressions/lowering.rs`), not an object. A
+                // user class extending one of them still gets a real
+                // object layout here (an inherited `message: Str` field
+                // plus its own identity marker), so normal construction,
+                // field access, and `instanceof` on the object all work
+                // the usual way; `throw`ing such an instance is what
+                // recovers the tagged-string form other exception readers
+                // (`.message`/`.name`/`instanceof` on the *caught* value,
+                // console.log, N-API, Lambda error reporting) already
+                // understand -- see `lower/statements/lowering.rs`.
+                if !matches!(
+                    base_name,
+                    "Error"
+                        | "TypeError"
+                        | "RangeError"
+                        | "SyntaxError"
+                        | "ReferenceError"
+                        | "EvalError"
+                        | "URIError"
+                ) {
+                    return Err(format!(
+                        "class `{name}` extends unknown native class `{base_name}`"
+                    ));
+                }
+                identities.push(base_name.to_string());
+                inherited_fields.push(("message".to_string(), HirType::Str));
+            } else {
+                resolve_layout(
+                    base_name,
+                    declarations,
+                    interfaces,
+                    generic_interfaces,
+                    resolved,
+                    active,
+                )?;
+                let HirType::Object(base_fields) = &interfaces[base_name] else {
+                    unreachable!("native class layouts are objects")
+                };
+                if let Some((marker, HirType::Bool)) = base_fields.first() {
+                    let inherited = marker
+                        .strip_prefix("__thaw_class_identity_")
+                        .expect("base class identity marker");
+                    identities.extend(inherited.split('$').map(str::to_owned));
+                }
+                inherited_fields.extend(base_fields.iter().skip(1).cloned());
             }
-            resolve_layout(
-                base_name,
-                declarations,
-                interfaces,
-                generic_interfaces,
-                resolved,
-                active,
-            )?;
-            let HirType::Object(base_fields) = &interfaces[base_name] else {
-                unreachable!("native class layouts are objects")
-            };
-            if let Some((marker, HirType::Bool)) = base_fields.first() {
-                let inherited = marker
-                    .strip_prefix("__thaw_class_identity_")
-                    .expect("base class identity marker");
-                identities.extend(inherited.split('$').map(str::to_owned));
-            }
-            inherited_fields.extend(base_fields.iter().skip(1).cloned());
         }
         let mut fields = vec![(
             format!("__thaw_class_identity_{}", identities.join("$")),
@@ -103,7 +129,12 @@ fn collect_native_classes<'a>(
                         });
                 let mut overrides_abstract = false;
                 while let Some(current) = base_name {
-                    let base = declarations[&current];
+                    // `Error`/`TypeError`/etc. are not real declared classes
+                    // (see the synthetic base-layout branch above) and so
+                    // have no abstract members of their own to check.
+                    let Some(&base) = declarations.get(&current) else {
+                        break;
+                    };
                     if base.class.body.iter().any(|member| {
                         matches!(member, ClassMember::ClassProp(candidate)
                             if !candidate.is_static
@@ -277,7 +308,12 @@ fn collect_native_classes<'a>(
         let mut seen = HashSet::new();
         let mut current = Some(name.to_string());
         while let Some(current_name) = current {
-            let class = declarations[&current_name];
+            // `Error`/`TypeError`/etc. are not real declared classes (see
+            // the synthetic base-layout branch above) and so have no
+            // `ClassMember`s of their own to walk.
+            let Some(&class) = declarations.get(&current_name) else {
+                break;
+            };
             for member in &class.class.body {
                 let ClassMember::ClassProp(property) = member else {
                     continue;
