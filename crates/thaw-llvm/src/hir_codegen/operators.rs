@@ -288,6 +288,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::FunctionCallWithThis(_, _, _, _, ret) => Some(ret.clone()),
             HirExpr::FfiCall(signature, _) => Some(signature.ret.clone()),
+            HirExpr::DynamicCall(signature, _) => Some(signature.ret.clone()),
             HirExpr::FunctionBindThis(_, _, bound, params, ret) => Some(HirType::Function(
                 params[bound.len()..].to_vec(),
                 Box::new(ret.clone()),

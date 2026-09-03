@@ -679,6 +679,15 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
+            // A `void`-returning dynamic call still marshals a JSON result
+            // back across the boundary (there's no "no value" JSON
+            // representation to special-case on the JS side), but the
+            // caller has nothing to do with it: a `void`-declared
+            // function's own return codegen discards whatever value its
+            // return expression produced and emits a bare `build_return
+            // (None)` regardless (see `compile_ignored_this_adapter` for
+            // the same pattern), so any placeholder value is fine here.
+            HirType::Void => Ok(self.context.i32_type().const_zero().into()),
             other => Err(format!("typed dynamic return does not support {other:?} yet")),
         }
     }
