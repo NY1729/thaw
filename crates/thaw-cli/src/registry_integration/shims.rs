@@ -20272,11 +20272,203 @@ fn is_reparseable_ts_type(text: &str) -> bool {
     )
 }
 
+/// The mutually-exclusive JS `typeof` category `ty` maps to, when it's
+/// simple enough for [`union_overload_dispatch_declaration`] to branch
+/// on unambiguously -- deliberately narrow (no object/array/function
+/// categories, where more than one shape can share a `typeof`) so every
+/// qualifying overload's first parameter type maps to a distinct
+/// category or the whole mechanism bails out.
+fn typeof_discriminator(ty: &thaw_hir::HirType) -> Option<&'static str> {
+    match ty {
+        thaw_hir::HirType::F64 => Some("number"),
+        thaw_hir::HirType::Str => Some("string"),
+        thaw_hir::HirType::Bool => Some("boolean"),
+        _ => None,
+    }
+}
+
+/// Dispatches a top-level Fallback function's `.d.ts` overloads purely
+/// by the *type* of their shared first parameter -- real example: `ms`'s
+/// two overloads, `(value: number, options?): string` and `(value:
+/// string): number`, both really calling the same real JS function
+/// (whose own implementation already does this exact `typeof` dispatch
+/// internally). Without this, `typed_dynamic_declaration`'s per-function
+/// "first successful overload wins" rule (needed to avoid emitting two
+/// conflicting ambient declarations under the same name -- see its own
+/// doc comment) picks exactly one of the two, silently breaking every
+/// call shaped like the other.
+///
+/// Deliberately narrow: every qualifying overload's first parameter type
+/// must map to a distinct `typeof` category (`typeof_discriminator`),
+/// its return type must be `Native` and non-`void`, and at most one
+/// ("primary") overload may carry its own extra parameters -- every
+/// other ("secondary") overload must take exactly that one required
+/// parameter and nothing else. Returns `None` (falls back to ordinary
+/// first-wins) for anything wider than that -- ambiguous discriminators,
+/// two overloads both wanting extra parameters, or fewer than two
+/// overloads actually qualifying at all. The generated dispatcher's own
+/// parameter and return types are the union of every qualifying
+/// overload's own (`coerce_to_declared`'s existing `Union` handling,
+/// already exercised by an ordinary Union-typed Fallback parameter,
+/// covers wrapping each branch's concrete result into it for free).
+fn union_overload_dispatch_declaration(
+    package: &str,
+    name: &str,
+    overloads: &[&thaw_bridge::DtsFunction],
+) -> Option<(String, String)> {
+    struct Candidate<'a> {
+        symbol: String,
+        category: &'static str,
+        param_name: &'a str,
+        param_type: thaw_hir::HirType,
+        ret_type: thaw_hir::HirType,
+        extra_params: Vec<(&'a str, thaw_hir::HirType, bool)>,
+    }
+
+    let empty_arities = std::collections::BTreeSet::new();
+    let mut candidates = Vec::new();
+    for (index, function) in overloads.iter().enumerate() {
+        if function.generic.is_some() || function.rest_param.is_some() {
+            continue;
+        }
+        let Some((param_name, thaw_bridge::DtsType::Native(param_type))) = function.params.first()
+        else {
+            continue;
+        };
+        let Some(category) = typeof_discriminator(param_type) else {
+            continue;
+        };
+        let thaw_bridge::DtsType::Native(ret_type) = &function.ret else {
+            continue;
+        };
+        if *ret_type == thaw_hir::HirType::Void {
+            continue;
+        }
+        if function.params.len() > 1 && function.required_params != 1 {
+            continue;
+        }
+        let Some(extra_params) = function.params[1..]
+            .iter()
+            .enumerate()
+            .map(|(offset, (name, ty))| {
+                let thaw_bridge::DtsType::Native(ty) = ty else {
+                    return None;
+                };
+                Some((
+                    name.as_str(),
+                    ty.clone(),
+                    offset + 1 >= function.required_params,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let Some((symbol, declaration)) =
+            typed_dynamic_declaration(package, function, false, &empty_arities, Some(index))
+        else {
+            continue;
+        };
+        candidates.push((
+            declaration,
+            Candidate {
+                symbol,
+                category,
+                param_name,
+                param_type: param_type.clone(),
+                ret_type: ret_type.clone(),
+                extra_params,
+            },
+        ));
+    }
+    if candidates.len() < 2 {
+        return None;
+    }
+    let mut categories = candidates.iter().map(|(_, c)| c.category).collect::<Vec<_>>();
+    categories.sort_unstable();
+    categories.dedup();
+    if categories.len() != candidates.len() {
+        return None;
+    }
+    if candidates
+        .iter()
+        .filter(|(_, c)| !c.extra_params.is_empty())
+        .count()
+        > 1
+    {
+        return None;
+    }
+
+    let mut declarations = candidates
+        .iter()
+        .map(|(declaration, _)| declaration.clone())
+        .collect::<String>();
+    let primary = candidates
+        .iter()
+        .map(|(_, c)| c)
+        .find(|c| !c.extra_params.is_empty());
+    let param_types = candidates
+        .iter()
+        .map(|(_, c)| c.param_type.clone())
+        .collect::<Vec<_>>();
+    let param_union = if let [only] = param_types.as_slice() {
+        only.clone()
+    } else {
+        thaw_hir::HirType::Union(param_types)
+    };
+    let mut ret_types = candidates.iter().map(|(_, c)| c.ret_type.clone()).collect::<Vec<_>>();
+    ret_types.dedup();
+    let ret_union = if let [only] = ret_types.as_slice() {
+        only.clone()
+    } else {
+        thaw_hir::HirType::Union(ret_types)
+    };
+    let param_name = primary.map_or(candidates[0].1.param_name, |primary| primary.param_name);
+    let mut params_text = format!("{param_name}: {}", render_dynamic_type(&param_union)?);
+    if let Some(primary) = primary {
+        for (name, ty, optional) in &primary.extra_params {
+            params_text.push_str(&format!(
+                ", {name}{}: {}",
+                if *optional { "?" } else { "" },
+                render_dynamic_type(ty)?
+            ));
+        }
+    }
+    let ret_text = render_dynamic_type(&ret_union)?;
+    let encoded = format!("{package}::{name}")
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let dispatcher = format!("__thaw_typed_dispatch_js_{encoded}");
+    declarations.push_str(&format!(
+        "function {dispatcher}({params_text}): {ret_text} {{\n"
+    ));
+    for (index, (_, candidate)) in candidates.iter().enumerate() {
+        let arguments = std::iter::once(candidate.param_name.to_string())
+            .chain(candidate.extra_params.iter().map(|(name, ..)| name.to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let call = format!("{}({arguments})", candidate.symbol);
+        if index + 1 == candidates.len() {
+            declarations.push_str(&format!("    return {call};\n"));
+        } else {
+            declarations.push_str(&format!(
+                "    if (typeof {param_name} === \"{}\") {{ return {call}; }}\n",
+                candidate.category
+            ));
+        }
+    }
+    declarations.push_str("}\n");
+    Some((dispatcher, declarations))
+}
+
 fn typed_dynamic_declaration(
     package: &str,
     function: &thaw_bridge::DtsFunction,
     napi: bool,
     observed_call_arities: &std::collections::BTreeSet<usize>,
+    overload_suffix: Option<usize>,
 ) -> Option<(String, String)> {
     let runtime_key = if napi {
         function.name.clone()
@@ -20288,6 +20480,21 @@ fn typed_dynamic_declaration(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
+    // Distinguishes two ambient declarations that must decode back to
+    // the *same* runtime symbol (both dispatch through the one real JS
+    // function at the far end -- see `union_overload_dispatch_declaration`)
+    // but need different Rust/LLVM-level names because their own
+    // parameter/return types genuinely differ. Stripped back off by
+    // thaw-hir's `dynamic_symbol` before hex-decoding, so it's applied
+    // to `encoded` itself (every symbol this function derives from it,
+    // including the rest/arity-dispatch helpers below, inherits it) --
+    // never to the `runtime_key` text above, which is the literal
+    // lookup string `thaw_js_call`/`getDynamicValue` uses at runtime and
+    // must stay exactly what the real JS function is bound under.
+    let encoded = match overload_suffix {
+        Some(index) => format!("{encoded}__overload_{index}"),
+        None => encoded,
+    };
     let base_symbol = format!(
         "__thaw_typed_{}_{}",
         if napi { "napi" } else { "js" },
@@ -21670,6 +21877,41 @@ fn generate_registry_shims(
                 }
             }
         }
+        // Pre-claims a genuinely type-disjoint overload set's name (real
+        // case: `ms`) with a proper dispatcher before the ordinary
+        // first-successful-overload-wins loop below ever reaches it --
+        // see that loop's own comment on `already_bound`. Runs only for
+        // a name with more than one `.d.ts` overload at all, so an
+        // ordinary non-overloaded function (the common case) doesn't pay
+        // for this check.
+        let mut overloaded_names: Vec<&str> = Vec::new();
+        for function in &pkg.functions {
+            if !overloaded_names.contains(&function.name.as_str())
+                && pkg.functions.iter().filter(|f| f.name == function.name).count() > 1
+            {
+                overloaded_names.push(&function.name);
+            }
+        }
+        for name in overloaded_names {
+            let is_fallback = pkg.classifications.iter().any(|(candidate, classification)| {
+                candidate == name
+                    && matches!(classification, thaw_bridge::Classification::Fallback { .. })
+            });
+            if !is_fallback {
+                continue;
+            }
+            let overloads = pkg
+                .functions
+                .iter()
+                .filter(|f| f.name == name)
+                .collect::<Vec<_>>();
+            if let Some((symbol, declaration)) =
+                union_overload_dispatch_declaration(&pkg.name, name, &overloads)
+            {
+                shim.push_str(&declaration);
+                typed_targets.insert((pkg.name.clone(), name.to_string()), symbol);
+            }
+        }
         for function in &pkg.functions {
             let is_fallback = pkg.classifications.iter().any(|(name, classification)| {
                 name == &function.name
@@ -21702,6 +21944,7 @@ fn generate_registry_shims(
                             function,
                             pkg.native_addon.is_some() && pkg.bundle_js.is_none(),
                             call_arities,
+                            None,
                         )
                     });
                 // First successful overload wins, matching TS's own
@@ -21709,18 +21952,25 @@ fn generate_registry_shims(
                 // declared match: an overloaded `.d.ts` name (see
                 // `Classification::classify_all`'s doc comment) can have
                 // *several* overloads each independently produce a typed
-                // declaration here -- e.g. `ms`'s `(value: number,
-                // options?)` and `(value: string)` both do, and they
-                // don't share a call convention, so blindly keeping the
-                // last one silently discards an earlier, already-correct
-                // (and possibly more general) wrapper. Every overload's
-                // declaration text uses the *same* symbol name (derived
-                // only from `package::name`, not the overload), so a
-                // later one isn't just an unused, harmlessly-discarded
-                // alternative if it's emitted too -- it's a duplicate
-                // declaration of that same name with a different
-                // signature, which thaw-hir has no defined behavior for.
-                // Real case: lodash's `random` (5 overloads).
+                // declaration here. Every overload's declaration text
+                // uses the *same* symbol name (derived only from
+                // `package::name`, not the overload), so a later one
+                // isn't just an unused, harmlessly-discarded alternative
+                // if it's emitted too -- it's a duplicate declaration of
+                // that same name with a different signature, which
+                // thaw-hir has no defined behavior for. Real case:
+                // lodash's `random` (5 overloads, all just arity/
+                // optional-parameter variations of each other -- any one
+                // of them is a reasonable enough default).
+                //
+                // A `typed_targets` entry may already exist here even on
+                // this function's very *first* overload:
+                // `union_overload_dispatch_declaration` below pre-claims
+                // the name for a genuinely type-disjoint overload set
+                // (real case: `ms`'s `(value: number, options?): string`
+                // vs. `(value: string): number`, which the "first wins"
+                // rule alone would otherwise silently narrow to just one
+                // calling convention) before this loop ever reaches it.
                 let already_bound = typed_targets.contains_key(&(pkg.name.clone(), function.name.clone()));
                 if let Some((symbol, declaration)) = declaration.filter(|_| !already_bound) {
                     shim.push_str(&declaration);
