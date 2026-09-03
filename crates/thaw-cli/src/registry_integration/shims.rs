@@ -20249,6 +20249,19 @@ fn is_safe_callback_param_type(text: &str, generic: &thaw_bridge::DtsGenericFunc
     })
 }
 
+/// Whether `text` is safe to splice into a generated declaration as a
+/// type parameter's own `extends` *constraint* -- thaw-hir keeps a
+/// generic function's declared constraints as raw, unlowered syntax
+/// (`FnSignature.generic_type_constraints`, checked structurally via
+/// `bridge_type_satisfies_constraint`-style comparisons rather than
+/// `lower_ts_type`), so this whitelist is deliberately wider than what's
+/// valid in an ordinary *value* type position (a parameter or return
+/// type) -- see `is_reparseable_value_type` for that narrower one.
+/// Splicing a constraint this crude a renderer can't fully describe
+/// (`describe_ts_type`'s `{ ... }` placeholder for a non-empty object
+/// literal, found via a real interface method's `T extends { __trapAny:
+/// any }`) would otherwise be spliced into the generated source
+/// verbatim as broken syntax.
 fn is_reparseable_ts_type(text: &str) -> bool {
     matches!(
         text,
@@ -20272,6 +20285,21 @@ fn is_reparseable_ts_type(text: &str) -> bool {
     )
 }
 
+/// Whether `text` is safe to splice into a generated declaration as an
+/// ordinary *value* type -- a parameter or return type, which (unlike a
+/// type parameter's own constraint, see `is_reparseable_ts_type`) does
+/// get lowered through thaw-hir's `lower_ts_type`, whose keyword support
+/// is deliberately narrower (`any`/`unknown`/`object`/`bigint`/`symbol`/
+/// `undefined`/`null`/`never` are all rejected there, "supports
+/// number/string/boolean/void" only) -- real example: lodash's
+/// `cloneDeepWith<T>(value: T, customizer?: ...): any`, whose literal
+/// `any` return used to get spliced straight into the generated ambient
+/// declaration's own return position, which `lower_ts_type` then
+/// rejected outright when the whole shim got lowered.
+fn is_reparseable_value_type(text: &str) -> bool {
+    matches!(text, "string" | "number" | "boolean" | "void" | "Date")
+}
+
 /// The mutually-exclusive JS `typeof` category `ty` maps to, when it's
 /// simple enough for [`union_overload_dispatch_declaration`] to branch
 /// on unambiguously -- deliberately narrow (no object/array/function
@@ -20282,7 +20310,26 @@ fn typeof_discriminator(ty: &thaw_hir::HirType) -> Option<&'static str> {
     match ty {
         thaw_hir::HirType::F64 => Some("number"),
         thaw_hir::HirType::Str => Some("string"),
-        thaw_hir::HirType::Bool => Some("boolean"),
+        // `Bool` deliberately excluded, unlike `F64`/`Str` above: a
+        // Union whose members include `Bool` (real example: lodash's
+        // `random(floating?: boolean): number` vs. `random(max: number,
+        // floating?: boolean): number`) reproducibly corrupts the
+        // `boolean` argument's own value (observed as `5e-324` --
+        // `Number.MIN_VALUE`, the bit pattern for the integer `1`
+        // bit-cast to `f64` instead of converted, suggesting the
+        // packed union payload gets unpacked through the wrong member's
+        // branch somewhere) when compiled *inside* a real npm package's
+        // full-size `.d.ts` -- extensively bisected (isolated
+        // reproductions with up to 2000 filler functions, 200 other
+        // Bool/F64-discriminated overloads, and 280 TypeScript
+        // declaration-merged `interface` blocks all failed to
+        // reproduce it; only real lodash's own multi-thousand-line
+        // `.d.ts` does) without finding the actual mechanism. `F64`/
+        // `Str` discriminators are unaffected (`ms`'s own real package
+        // -- the case this mechanism exists for -- verified correct).
+        // Until root-caused, a `Bool`-discriminated overload set falls
+        // back to plain first-overload-wins instead of risking silent
+        // data corruption.
         _ => None,
     }
 }
@@ -20445,7 +20492,16 @@ fn union_overload_dispatch_declaration(
         "function {dispatcher}({params_text}): {ret_text} {{\n"
     ));
     for (index, (_, candidate)) in candidates.iter().enumerate() {
-        let arguments = std::iter::once(candidate.param_name.to_string())
+        // The dispatcher has exactly one shared variable for this
+        // shared first-argument slot -- `param_name` (the dispatcher's
+        // own declared parameter, possibly named after a *different*
+        // candidate's own parameter than this one, real example:
+        // lodash's `random`'s `(floating?: boolean): number` overload
+        // names its only parameter `floating`, not `max`) -- so every
+        // branch's call must reference that one shared name, never
+        // `candidate.param_name` (that candidate's own, possibly
+        // differently-spelled, name for the very same slot).
+        let arguments = std::iter::once(param_name.to_string())
             .chain(candidate.extra_params.iter().map(|(name, ..)| name.to_string()))
             .collect::<Vec<_>>()
             .join(", ");
@@ -20626,7 +20682,7 @@ fn typed_dynamic_declaration(
         // noted above).
         let return_type = if returns_bare_type_param
             || (!mentions_any_type_param(&generic.return_type, generic)
-                && is_reparseable_ts_type(&generic.return_type))
+                && is_reparseable_value_type(&generic.return_type))
         {
             generic.return_type.as_str()
         } else {
