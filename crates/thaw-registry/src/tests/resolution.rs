@@ -217,6 +217,124 @@ fn installed_package_inlines_named_function_reexports() {
 }
 
 #[test]
+fn installed_package_inlines_default_reexports() {
+    // `export { default as v4 } from './v4'` -- the common shape for a
+    // package that splits one function per file and re-exports each one
+    // under a name from a barrel (e.g. real-world `uuid`). The re-exported
+    // name is never literally declared as `default` anywhere, so following
+    // it means resolving `export default v4;` back to the real identifier
+    // `v4` first and matching *that* against the plain (non-exported)
+    // `declare function v4(...)` sitting next to it.
+    let scratch = temp_registry("installed-dts-default-reexport-scratch");
+    let registry = temp_registry("installed-dts-default-reexport-registry");
+    let package = scratch.join("node_modules/id-kit");
+    fs::create_dir_all(package.join("dist")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"id-kit","version":"1.0.0","types":"./dist/index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/index.d.ts"),
+        "export { default as v4 } from './v4';\nexport { default as validate } from './validate';",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/v4.d.ts"),
+        "declare function v4(options?: unknown): string;\nexport default v4;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/validate.d.ts"),
+        // The less common inline shape (`export default function ...`),
+        // covered alongside the `export default <ident>;` shape above.
+        "export default function validate(value: unknown): boolean;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { v4: function() { return 'id'; }, validate: function(x) { return true; } };",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "id-kit").unwrap();
+    let declarations = resolve(&registry, "id-kit").unwrap().dts_source;
+    assert!(declarations.contains("declare function v4(options?: unknown): string"));
+    assert!(declarations.contains("function validate(value: unknown): boolean"));
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_package_inlines_triple_slash_referenced_declarations() {
+    // `/// <reference path="..." />` -- the classic DefinitelyTyped-style
+    // split for a package whose real API is spread across many files
+    // (real-world example: `@types/lodash`'s `index.d.ts` referencing a
+    // dozen files under `common/`). A referenced file's own module
+    // augmentation targeting the entry file itself (`declare module
+    // "../index" { interface LoDashStatic { ... } }`) should land inside
+    // the *entry file's own* exported namespace (`declare namespace
+    // <name> { ... }`, `<name>` from `export as namespace <name>;`) once
+    // inlined, since that's the namespace `export = <const>` actually
+    // exposes; an augmentation aimed at some other module is kept as its
+    // own (unresolved but harmless) `declare module "..." { ... }`.
+    let scratch = temp_registry("installed-dts-triple-slash-scratch");
+    let registry = temp_registry("installed-dts-triple-slash-registry");
+    let package = scratch.join("node_modules/stat-kit");
+    fs::create_dir_all(package.join("common")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"stat-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "/// <reference path=\"./common/array.d.ts\" />\n\
+         export = _;\n\
+         export as namespace _;\n\
+         declare const _: _.StatStatic;\n\
+         declare namespace _ {\n\
+             interface StatStatic {}\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("common/array.d.ts"),
+        "declare module \"../index\" {\n\
+             interface StatStatic {\n\
+                 sum(values: number[]): number;\n\
+             }\n\
+         }\n\
+         declare module \"unrelated-package\" {\n\
+             function untouched(): void;\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { sum: function(values) { return values.reduce(function(a, b) { return a + b; }, 0); } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "stat-kit").unwrap();
+    let declarations = resolve(&registry, "stat-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("declare namespace _"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("sum(values: number[]): number"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("declare module \"unrelated-package\""),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn resolves_an_installed_package_subpath() {
     let registry = temp_registry("subpath");
     let dir = registry.join("math-kit/subpaths/advanced");
