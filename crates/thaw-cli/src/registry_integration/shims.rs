@@ -2583,6 +2583,19 @@ fn jit_export(
             _ => false,
         };
         let literal_array = matches!(member.obj.as_ref(), Expr::Array(_));
+        // A ternary's own array-ness (both branches agreeing on element type) is only
+        // knowable by actually encoding it, which needs `context` and happens anyway
+        // right after this gate returns; the downstream `jit_expression_kind` check
+        // rejects it there if either branch isn't array-shaped. Chaining a method onto
+        // a bare ternary requires parenthesizing it (`(a ? b : c).map(...)`), so the
+        // receiver is `Expr::Paren` wrapping the `Expr::Cond`, not the `Cond` itself.
+        let conditional_array = matches!(
+            match member.obj.as_ref() {
+                Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
+                receiver => receiver,
+            },
+            Expr::Cond(_)
+        );
         if !parameter_array
             && !local_array
             && !returned_array
@@ -2590,6 +2603,7 @@ fn jit_export(
             && !dictionary_array
             && !split_array
             && !literal_array
+            && !conditional_array
         {
             return None;
         }
