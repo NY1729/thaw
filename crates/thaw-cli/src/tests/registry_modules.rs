@@ -6380,3 +6380,86 @@ fn object_from_entries_and_assign_round_trips_use_jit_without_quickjs() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "2\n1,2\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn array_valued_short_circuit_operators_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-short-circuit-array-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("short-circuit-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function orValue(a: number[], b: number[]): number[];\nexport declare function andValue(a: number[], b: number[]): number[];\nexport declare function nullishValue(a: number[], b: number[]): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.orValue = (a, b) => a || b; module.exports.andValue = (a, b) => a && b; module.exports.nullishValue = (a, b) => a ?? b;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { orValue, andValue, nullishValue } from 'short-circuit-kit';\nfunction main(): void { console.log(orValue([], [3, 4]).join(',')); console.log(orValue([1, 2], [3, 4]).join(',')); console.log(andValue([1, 2], [3, 4]).join(',')); console.log(nullishValue([1, 2], [3, 4]).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\n1,2\n3,4\n1,2\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn array_methods_chained_on_short_circuit_operators_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-short-circuit-chain-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("short-circuit-chain-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function orChain(a: number[], b: number[]): number[];\nexport declare function andChain(a: number[], b: number[]): number[];\nexport declare function nullishChain(a: number[], b: number[]): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.orChain = (a, b) => (a || b).map((v) => v * 2); module.exports.andChain = (a, b) => (a && b).map((v) => v * 2); module.exports.nullishChain = (a, b) => (a ?? b).map((v) => v * 2);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { orChain, andChain, nullishChain } from 'short-circuit-chain-kit';\nfunction main(): void { console.log(orChain([1, 2], [3, 4]).join(',')); console.log(andChain([1, 2], [3, 4]).join(',')); console.log(nullishChain([1, 2], [3, 4]).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "2,4\n6,8\n2,4\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
