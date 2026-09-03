@@ -439,6 +439,7 @@ impl<'a> FnLowerer<'a> {
             parameter_types,
             self.interfaces,
             self.generic_interfaces,
+            expected_return,
         )?;
         let return_type =
             if let Some(expected) = expected_return.filter(|ty| **ty != HirType::Dynamic) {
@@ -597,12 +598,14 @@ impl<'a> FnLowerer<'a> {
                     .return_type
                     .as_ref()
                     .map(|annotation| annotation.type_ann.clone()),
+                generic_return_pattern: None,
             };
             let types = infer_generic_type_tuple(
                 &signature,
                 parameter_types,
                 self.interfaces,
                 self.generic_interfaces,
+                None,
             )?;
             let substitution = signature
                 .generic_type_params

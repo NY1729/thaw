@@ -87,6 +87,7 @@ impl<'a> FnLowerer<'a> {
                 &parameter_types,
                 self.interfaces,
                 self.generic_interfaces,
+                None,
             )
             .map_err(|error| format!("cannot specialize generic arrow `{name}`: {error}"))?
         };
@@ -209,6 +210,7 @@ impl<'a> FnLowerer<'a> {
                 .as_ref()
                 .map(|annotation| annotation.type_ann.clone())
                 .or_else(|| inferred_generic_arrow_return_type(arrow)),
+            generic_return_pattern: None,
         })
     }
 
@@ -370,6 +372,7 @@ impl<'a> FnLowerer<'a> {
                 })
                 .collect(),
             generic_return_type: Some(return_type.type_ann.clone()),
+            generic_return_pattern: None,
         })
     }
 
@@ -492,6 +495,7 @@ impl<'a> FnLowerer<'a> {
                 })
                 .collect(),
             generic_return_type: Some(Box::new(return_type.clone())),
+            generic_return_pattern: None,
         })
     }
 

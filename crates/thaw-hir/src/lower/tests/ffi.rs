@@ -106,3 +106,88 @@ fn variadic_ambient_calls_still_require_every_fixed_argument() {
         "{error}"
     );
 }
+
+/// `nanoid<Type extends string>(size?: number): Type` -- `Type` appears
+/// solely in the return position, so nothing in `size`'s own type ever
+/// mentions it. `infer_generic_type_tuple` has no argument to infer it
+/// from, but a `let`/`const` declaration's own type annotation is
+/// offered as a fallback via `lower_expr_with_expected_type`, so
+/// `const id: string = nanoid()` still resolves `Type` to `string` (and,
+/// separately, the actual `FfiCall`'s substituted `params`/`ret` -- not
+/// just the outer `let`'s own declared type -- must reflect that: they
+/// were collected with every type parameter placeholder'd to `Dynamic`,
+/// re-derived per call site once `Type` is known).
+#[test]
+fn infers_a_return_only_generic_type_parameter_from_a_let_annotation() {
+    let program = lower(
+        r#"declare function nanoid<Type extends string>(size?: number): Type;
+           function main(): void {
+               const id: string = nanoid();
+               console.log(id);
+           }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    assert_eq!(
+        main.body[0],
+        HirStmt::Let(
+            "id".into(),
+            HirType::Str,
+            HirExpr::FfiCall(
+                Box::new(crate::FfiSignature {
+                    symbol: "nanoid".into(),
+                    params: vec![HirType::Optional(Box::new(HirType::F64))],
+                    variadic: None,
+                    variadic_abi: crate::FfiVariadicAbi::Native,
+                    ret: HirType::Str,
+                    error_abi: crate::FfiErrorAbi::Direct,
+                    return_ownership: crate::FfiOwnership::Borrowed,
+                    error_ownership: crate::FfiOwnership::Borrowed,
+                    param_string_abis: vec![crate::FfiStringAbi::NullTerminated],
+                    return_string_abi: crate::FfiStringAbi::NullTerminated,
+                    calling_convention: crate::FfiCallingConvention::C,
+                    aggregate_return_abi: crate::FfiAggregateAbi::Internal,
+                    aggregate_return_layout: None,
+                }),
+                Vec::new(),
+            ),
+        )
+    );
+}
+
+/// The same function called with its optional parameter actually
+/// supplied: the argument must still be coerced to the *substituted*
+/// declared type (`Optional(F64)`, not the pre-substitution `Dynamic`
+/// placeholder coercion would previously have skipped entirely for any
+/// generic call), wrapping the raw `5` into that Optional's own
+/// representation.
+#[test]
+fn coerces_arguments_of_a_generic_ambient_call_to_the_substituted_type() {
+    let program = lower(
+        r#"declare function nanoid<Type extends string>(size?: number): Type;
+           function main(): void {
+               const short: string = nanoid(5);
+               console.log(short);
+           }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    let HirStmt::Let(_, _, HirExpr::FfiCall(_, args)) = &main.body[0] else {
+        panic!("expected a Let binding an FfiCall, got {:?}", main.body[0]);
+    };
+    assert_eq!(
+        args.as_slice(),
+        [HirExpr::OptionalSome(
+            Box::new(HirExpr::Lit(HirLit::F64(5.0))),
+            HirType::F64,
+        )]
+    );
+}
+
+

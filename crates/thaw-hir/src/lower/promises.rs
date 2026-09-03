@@ -46,6 +46,7 @@ impl<'a> FnLowerer<'a> {
                             parameter_types,
                             self.interfaces,
                             self.generic_interfaces,
+                            None,
                         )
                         .map_err(|error| {
                             format!("cannot specialize generic callback `{name}`: {error}")
