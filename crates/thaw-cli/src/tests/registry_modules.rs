@@ -6335,3 +6335,48 @@ fn array_methods_chained_on_a_parenthesized_ternary_use_jit_without_quickjs() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "2,4,6\n2,4,6\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// Object.fromEntries only accepts the output of Object.entries(...) (a round trip),
+// not an arbitrary array-of-pairs literal; Object.assign requires every argument to
+// already be dictionary-typed (a plain `{}` object literal defaults to a fixed-shape
+// object type instead). Both are intentional scope limits, not receiver-gate bugs -
+// this locks in the shapes that already work correctly through the JIT today.
+#[test]
+fn object_from_entries_and_assign_round_trips_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-fromentries-assign-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("obj-roundtrip-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function roundtripKeyCount(o: Record<string, number>): number;\nexport declare function assignedValues(a: Record<string, number>, b: Record<string, number>): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.roundtripKeyCount = (o) => Object.keys(Object.fromEntries(Object.entries(o))).length; module.exports.assignedValues = (a, b) => Object.values(Object.assign(a, b));\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { roundtripKeyCount, assignedValues } from 'obj-roundtrip-kit';\nfunction main(): void { console.log(roundtripKeyCount({ a: 1, b: 2 })); console.log(assignedValues({ x: 1 }, { y: 2 }).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "2\n1,2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
