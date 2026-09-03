@@ -546,6 +546,13 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        // Taken (not just read) as the very first action, before this
+        // call's own arguments are lowered below -- a hint set for *this*
+        // call must never still be visible if lowering one of its own
+        // arguments recurses into another `lower_call` for a nested call
+        // expression, which would otherwise see and wrongly consume a
+        // hint meant for its parent. See `lower_expr_with_expected_type`.
+        let expected_return_hint = self.expected_return_hint.take();
         if matches!(call.callee, Callee::Super(_)) {
             let (mut symbol, _base_type, base_name) = self
                 .super_initializer
@@ -1679,6 +1686,7 @@ impl<'a> FnLowerer<'a> {
                     &actual,
                     self.interfaces,
                     self.generic_interfaces,
+                    expected_return_hint.as_ref(),
                 )
             }
             .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
@@ -1733,8 +1741,12 @@ impl<'a> FnLowerer<'a> {
                     let params = sig
                         .generic_param_patterns
                         .iter()
-                        .map(|pattern| instantiate_generic_pattern(pattern, &substitution))
-                        .collect::<Result<Vec<_>, _>>()?;
+                        .zip(&sig.generic_param_optional)
+                        .map(|(pattern, optional)| {
+                            let ty = instantiate_generic_pattern(pattern, &substitution)?;
+                            Ok(if *optional { optional_parameter_type(ty) } else { ty })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
                     let ret = resolve_ts_type_with_substitution(
                         sig.generic_return_type
                             .as_ref()
@@ -1748,6 +1760,38 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     (sig.params, sig.ret)
                 };
+                // Argument coercion was skipped for every generic
+                // function's call above (`param_types` there was still
+                // the pre-substitution, `Dynamic`-placeholder version --
+                // coercing against it would be meaningless), deferred to
+                // here where `params` is finally the real, substituted
+                // type. Needed for a value going into a parameter that's
+                // optional only *after* substitution (e.g. `nanoid`'s
+                // `size?: number`, `Optional(F64)` -- a raw `5.0` needs
+                // wrapping into that Optional's own representation, not
+                // just passing through unwrapped). Coerces only the
+                // arguments actually present, up to `params.len()` --
+                // never more (a variadic call's own trailing rest
+                // arguments, beyond `params.len()`, pass through
+                // unchanged instead of being truncated away), and never
+                // fewer either (an optional trailing parameter, like
+                // `size?` above, can legitimately be omitted; arity is
+                // somebody else's job, not this coercion step's).
+                let fixed_count = params.len().min(args.len());
+                let mut args = args.into_iter();
+                let mut coerced_args = params
+                    .iter()
+                    .take(fixed_count)
+                    .enumerate()
+                    .map(|(i, declared)| {
+                        let value = args.next().expect("fixed_count <= args.len()");
+                        self.coerce_to_declared(declared, value).map_err(|error| {
+                            format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                coerced_args.extend(args);
+                let args = coerced_args;
                 let result = HirExpr::DynamicCall(
                     DynamicSignature {
                         backend,
@@ -1759,13 +1803,78 @@ impl<'a> FnLowerer<'a> {
                 );
                 return self.wrap_call_argument_bindings(result, &argument_bindings);
             }
-            let param_count = sig.params.len();
+            // A plain (non-`__thaw_typed_*`) generic extern function's own
+            // `params`/`ret` were collected using every type parameter
+            // substituted with `Dynamic` (a placeholder so the signature
+            // parses at all -- see `function_type_substitution`), not this
+            // call's actual inferred types; re-derive them the same way
+            // the `dynamic_symbol` branch above already does, or a
+            // parameter/return that mentions a type parameter at all
+            // (e.g. `nanoid<Type extends string>(size?: number): Type`'s
+            // return) would stay `Dynamic` here regardless of `Type`
+            // having been successfully inferred just above.
+            let (params, ret) = if let Some(types) = &generic_types {
+                let substitution = sig
+                    .generic_type_params
+                    .iter()
+                    .cloned()
+                    .zip(types.iter().cloned())
+                    .collect::<HashMap<_, _>>();
+                let params = sig
+                    .generic_param_patterns
+                    .iter()
+                    .zip(&sig.generic_param_optional)
+                    .map(|(pattern, optional)| {
+                        let ty = instantiate_generic_pattern(pattern, &substitution)?;
+                        Ok(if *optional { optional_parameter_type(ty) } else { ty })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let ret = match &sig.generic_return_type {
+                    Some(declared) => resolve_ts_type_with_substitution(
+                        declared,
+                        &substitution,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        &mut Vec::new(),
+                    )?,
+                    None => sig.ret.clone(),
+                };
+                (params, ret)
+            } else {
+                (sig.params.clone(), sig.ret.clone())
+            };
+            // See the identical comment on the `dynamic_symbol` branch
+            // above: argument coercion against the real, substituted
+            // parameter types (rather than the pre-substitution
+            // `Dynamic` placeholder) was deferred to here, touching only
+            // the arguments actually present up to `params.len()` -- a
+            // variadic call's own trailing rest arguments (beyond
+            // `params.len()`) pass through unchanged rather than being
+            // truncated away, and an omitted optional trailing
+            // parameter is left for arity checking elsewhere to handle,
+            // not an error here.
+            let fixed_count = params.len().min(args.len());
+            let mut args = args.into_iter();
+            let mut coerced_args = params
+                .iter()
+                .take(fixed_count)
+                .enumerate()
+                .map(|(i, declared)| {
+                    let value = args.next().expect("fixed_count <= args.len()");
+                    self.coerce_to_declared(declared, value).map_err(|error| {
+                        format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            coerced_args.extend(args);
+            let args = coerced_args;
+            let param_count = params.len();
             let ffi_signature = FfiSignature {
                 symbol: callee_name,
-                params: sig.params,
+                params,
                 variadic: sig.variadic,
                 variadic_abi: crate::FfiVariadicAbi::Native,
-                ret: sig.ret,
+                ret,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,

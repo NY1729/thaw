@@ -41,6 +41,12 @@ struct FnLowerer<'a> {
     class_static_context: bool,
     class_context: Option<Symbol>,
     unbound_this_context: bool,
+    /// A contextual type hint for the *next* call expression `lower_call`
+    /// handles, consumed (taken, not just read) as its very first action
+    /// so it can never leak into a nested/argument call's own inference --
+    /// see `lower_expr_with_expected_type`'s doc comment for why this
+    /// exists and how it stays scoped to exactly one call.
+    expected_return_hint: Option<HirType>,
 }
 
 #[derive(Clone)]

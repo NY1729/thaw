@@ -82,14 +82,20 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let generic_param_patterns = if generic_type_params.is_empty() {
-                    Vec::new()
+                let generic_substitutions = if generic_type_params.is_empty() {
+                    None
                 } else {
-                    let substitutions = generic_type_params
-                        .iter()
-                        .map(|name| (name.clone(), GenericTypePattern::Variable(name.clone())))
-                        .collect::<HashMap<_, _>>();
-                    func.params
+                    Some(
+                        generic_type_params
+                            .iter()
+                            .map(|name| (name.clone(), GenericTypePattern::Variable(name.clone())))
+                            .collect::<HashMap<_, _>>(),
+                    )
+                };
+                let generic_param_patterns = match &generic_substitutions {
+                    None => Vec::new(),
+                    Some(substitutions) => func
+                        .params
                         .iter()
                         .map(|param| match &param.pat {
                             Pat::Ident(binding) => binding
@@ -98,15 +104,33 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                 .ok_or_else(|| format!("generic function `{name}` needs parameter type annotations"))
                                 .and_then(|ann| generic_type_pattern(
                                     &ann.type_ann,
-                                    &substitutions,
+                                    substitutions,
                                     &interfaces,
                                     &generic_interfaces,
                                     &mut Vec::new(),
                                 )),
                             _ => Err(format!("generic function `{name}` requires identifier parameters")),
                         })
-                        .collect::<Result<Vec<_>, _>>()?
+                        .collect::<Result<Vec<_>, _>>()?,
                 };
+                // Best-effort only (never aborts the signature over it,
+                // unlike the parameter patterns above): a fallback source
+                // for inferring a type parameter that appears in no
+                // parameter at all, e.g. `nanoid<Type extends string>
+                // (size?: number): Type`. See
+                // `infer_generic_type_tuple`/`lower_expr_with_expected_type`.
+                let generic_return_pattern = generic_substitutions.as_ref().and_then(|substitutions| {
+                    func.return_type.as_ref().and_then(|ann| {
+                        generic_type_pattern(
+                            &ann.type_ann,
+                            substitutions,
+                            &interfaces,
+                            &generic_interfaces,
+                            &mut Vec::new(),
+                        )
+                        .ok()
+                    })
+                });
                 let variadic = if is_extern {
                     func.params.last().and_then(|param| match &param.pat {
                         Pat::Rest(rest) => Some(rest),
@@ -210,6 +234,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             })
                             .collect(),
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
+                        generic_return_pattern,
                     },
                 );
                 if generates_call_wrappers {
@@ -286,6 +311,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
                         generic_return_type: None,
+                        generic_return_pattern: None,
                     },
                 );
                 let mut initializer_params = vec![instance_type.clone()];
@@ -313,6 +339,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
                         generic_return_type: None,
+                        generic_return_pattern: None,
                     },
                 );
                 if let Some(constructor) = constructors.first() {
@@ -461,6 +488,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_param_patterns: Vec::new(),
                             generic_param_optional: Vec::new(),
                             generic_return_type: None,
+                            generic_return_pattern: None,
                         },
                     );
                     let patterns = method
@@ -990,6 +1018,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
                         generic_return_type: None,
+                        generic_return_pattern: None,
                     },
                 );
                 inherited_class_functions.push(HirFunction {
@@ -1019,6 +1048,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_param_patterns: Vec::new(),
                             generic_param_optional: Vec::new(),
                             generic_return_type: None,
+                            generic_return_pattern: None,
                         },
                     );
                     let parameter = "__thaw_inherited_static_value".to_string();
