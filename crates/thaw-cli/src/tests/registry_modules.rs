@@ -6295,3 +6295,43 @@ fn array_methods_chained_on_split_and_spread_literals_use_jit_without_quickjs() 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "2,3,1\n2,4,6\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn array_methods_chained_on_a_parenthesized_ternary_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-ternary-receiver-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("ternary-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function ternaryChain(flag: boolean, values: number[]): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.ternaryChain = (flag, values) => (flag ? Array.from(values) : values).map((v) => v * 2);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { ternaryChain } from 'ternary-kit';\nfunction main(): void { console.log(ternaryChain(true, [1, 2, 3]).join(',')); console.log(ternaryChain(false, [1, 2, 3]).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "2,4,6\n2,4,6\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
