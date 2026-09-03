@@ -7289,3 +7289,116 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A generic Fallback function whose return type is declared literally
+/// `any` -- real-world example: lodash's `cloneDeepWith<TValue>(...):
+/// any`. The generic branch's "a return that doesn't mention any type
+/// parameter is just a concrete type" rule (see
+/// `fallback_function_with_a_generic_date_argument_and_return_builds_
+/// and_runs`) used to splice that `any` text straight into the
+/// generated ambient declaration's own return position -- reparseable
+/// for a type parameter's own `extends` *constraint* (`is_reparseable_
+/// ts_type`, since thaw-hir keeps a constraint as raw, unlowered
+/// syntax), but not for an ordinary *value* type position, which does
+/// get lowered through thaw-hir's `lower_ts_type` and only supports
+/// `number`/`string`/`boolean`/`void` there -- so the whole generated
+/// shim failed to compile ("unsupported type keyword TsAnyKeyword")
+/// the moment any Fallback package had a generic function shaped this
+/// way, even one the user's own program never calls.
+#[test]
+fn generic_fallback_function_with_a_literal_any_return_type_builds() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-generic-any-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("clone-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function cloneDeepWith<T>(value: T, customizer: unknown): any;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.cloneDeepWith = function(value) { return value; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { cloneDeepWith } from "clone-kit";
+function main(): void {
+    console.log("built");
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "built\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A `Str`/`F64`-type-disjoint overload set whose two overloads name
+/// their (structurally corresponding) first parameter *differently* --
+/// unlike this session's own `ms` regression test, whose two overloads
+/// happen to both call theirs `value`, masking a real bug:
+/// `union_overload_dispatch_declaration`'s generated dispatcher
+/// referenced each branch's *own* parameter name when forwarding the
+/// call (`secondary_overload(name)`) instead of the dispatcher's own
+/// shared variable for that slot (`primary`'s name, since the
+/// dispatcher's outer signature is named after whichever overload
+/// carries extra parameters) -- an undefined-reference bug that would
+/// otherwise make the "secondary" (non-primary) branch always forward
+/// `undefined` instead of the real argument.
+#[test]
+fn fallback_function_with_differently_named_overload_parameters_forwards_the_shared_variable() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-overload-param-names-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("pick-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function pick(word: string): number;\n\
+         export declare function pick(count: number, label?: string): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.pick = function(a, b) {\n\
+             return typeof a === 'string' ? a.length : a + (b ? b.length : 0);\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { pick } from "pick-kit";
+function main(): void {
+    console.log(pick("hello"));
+    console.log(pick(10, "ab"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n12\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
