@@ -20254,6 +20254,12 @@ fn is_reparseable_ts_type(text: &str) -> bool {
             | "undefined"
             | "null"
             | "never"
+            // `Date` is special-cased by both thaw-bridge's classification
+            // and thaw-hir's own `lower_ts_type` (see `date_object_type`),
+            // so it's just as safe to splice into a generated declaration
+            // as the keywords above -- real example: date-fns's
+            // `format<DateType extends Date>(...)`.
+            | "Date"
     )
 }
 
@@ -20369,17 +20375,68 @@ fn typed_dynamic_declaration(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let return_type = if returns_bare_type_param {
+        // A return type that doesn't mention any of the function's own
+        // type parameters at all is just a concrete type, generic
+        // function or not -- real example: date-fns's `format<DateType
+        // extends Date>(date: DateType | number | string, formatStr:
+        // string, options?: FormatOptions): string`, whose `string`
+        // return has nothing to do with `DateType`. Rendering it as
+        // `JsValue` unconditionally (as if every generic function's
+        // return depended on its type parameters) would needlessly
+        // discard a plain, safely-reparseable type. Anything that does
+        // mention a type param, beyond the bare-type-param case above,
+        // still falls back to `JsValue` (same unresolved-scope limitation
+        // noted above).
+        let return_type = if returns_bare_type_param
+            || (!mentions_any_type_param(&generic.return_type, generic)
+                && is_reparseable_ts_type(&generic.return_type))
+        {
             generic.return_type.as_str()
         } else {
             "JsValue"
         };
-        let params = function
+        let generics = if type_params.is_empty() {
+            String::new()
+        } else {
+            format!("<{type_params}>")
+        };
+        let params: Vec<(String, String)> = function
             .params
             .iter()
             .zip(&param_types)
+            .map(|((name, _), ty)| (name.clone(), ty.clone()))
+            .collect();
+        // A single ambient declaration with `?`-marked optional trailing
+        // parameters relies on thaw-hir tolerating an omitted trailing
+        // argument only for a *still-generic* declaration's own
+        // `generic_param_optional` arity check (`lower/invocations.rs`)
+        // -- exactly nanoid's shape (`nanoid<Type extends string>(size?:
+        // number): Type`, `type_params` non-empty below). Once every type
+        // parameter this function declared has been substituted or
+        // dropped above (`type_params` empty here -- real example:
+        // date-fns's `format<DateType extends Date>(date: DateType |
+        // number | string, formatStr: string, options?: FormatOptions):
+        // string`, whose only type parameter doesn't survive into any
+        // retained parameter or the return), the emitted declaration is
+        // just a plain ambient function, and thaw-hir enforces *exact*
+        // arity for those -- falling back to the same per-arity-
+        // declarations-plus-dispatcher trick the plain branch below uses
+        // for the same reason.
+        if type_params.is_empty() && function.required_params < params.len() {
+            return typed_dynamic_arity_dispatch_declaration(
+                &encoded,
+                base_symbol,
+                &params,
+                function.required_params,
+                return_type,
+                napi,
+                &thaw_hir::HirType::JsValue,
+            );
+        }
+        let rendered_params = params
+            .iter()
             .enumerate()
-            .map(|(index, ((name, _), ty))| {
+            .map(|(index, (name, ty))| {
                 format!(
                     "{name}{}: {ty}",
                     if index >= function.required_params {
@@ -20391,14 +20448,11 @@ fn typed_dynamic_declaration(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let generics = if type_params.is_empty() {
-            String::new()
-        } else {
-            format!("<{type_params}>")
-        };
         return Some((
             base_symbol.clone(),
-            format!("declare function {base_symbol}{generics}({params}): {return_type};\n"),
+            format!(
+                "declare function {base_symbol}{generics}({rendered_params}): {return_type};\n"
+            ),
         ));
     }
     let params = function
@@ -20461,13 +20515,52 @@ fn typed_dynamic_declaration(
             &ret_hir_type,
         );
     }
+    typed_dynamic_arity_dispatch_declaration(
+        &encoded,
+        base_symbol,
+        &params,
+        function.required_params,
+        &ret,
+        napi,
+        &ret_hir_type,
+    )
+}
+
+/// Shared tail of [`typed_dynamic_declaration`]'s plain and generic
+/// branches for a function with optional trailing parameters: thaw-hir
+/// enforces *exact* arity for a plain ambient (`declare function`)
+/// signature (see `lower/invocations.rs`'s arity check -- only a
+/// still-generic declaration's own `generic_param_optional` tolerance
+/// lets a real trailing argument be omitted), so a single declaration
+/// with `?`-marked params would make a legitimately optional trailing
+/// argument a hard arity error. Declares one ambient function per arity
+/// from `required_params` to `params.len()` instead, plus a real
+/// (non-ambient) TS wrapper function that narrows each optional argument
+/// with its own nested `!== undefined` guard and dispatches to the
+/// matching fixed-arity declaration.
+fn typed_dynamic_arity_dispatch_declaration(
+    encoded: &str,
+    base_symbol: String,
+    params: &[(String, String)],
+    required_params: usize,
+    ret: &str,
+    napi: bool,
+    ret_hir_type: &thaw_hir::HirType,
+) -> Option<(String, String)> {
+    let render_params = |arity: usize| {
+        params[..arity]
+            .iter()
+            .map(|(name, ty)| format!("{name}: {ty}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let wrapper = format!(
         "__thaw_typed_wrapper_{}_{}",
         if napi { "napi" } else { "js" },
         encoded
     );
     let mut declarations = String::new();
-    for arity in function.required_params..=params.len() {
+    for arity in required_params..=params.len() {
         declarations.push_str(&format!(
             "declare function {base_symbol}__arity_{arity}({}): {ret};\n",
             render_params(arity)
@@ -20479,11 +20572,7 @@ fn typed_dynamic_declaration(
         .map(|(index, (name, ty))| {
             format!(
                 "{name}{}: {ty}",
-                if index >= function.required_params {
-                    "?"
-                } else {
-                    ""
-                }
+                if index >= required_params { "?" } else { "" }
             )
         })
         .collect::<Vec<_>>()
@@ -20500,7 +20589,7 @@ fn typed_dynamic_declaration(
         }
     };
     declarations.push_str(&format!("function {wrapper}({wrapper_params}): {ret} {{\n"));
-    for arity in (function.required_params + 1..=params.len()).rev() {
+    for arity in (required_params + 1..=params.len()).rev() {
         // Every optional slot up to `arity`, not just the last one, needs
         // its own `!== undefined` guard *nested* around this call, not
         // ANDed into one condition: the type-narrowing pass only narrows
@@ -20511,7 +20600,7 @@ fn typed_dynamic_declaration(
         // Nesting instead gets each one narrowed by its own `if`, and all
         // of them stay narrowed going deeper. Real case: uuid's
         // `v4(options?, buf?, offset?)`, three trailing optional params.
-        let optional_slots = &params[function.required_params..arity];
+        let optional_slots = &params[required_params..arity];
         for (name, _) in optional_slots.iter().rev() {
             declarations.push_str(&format!("    if ({name} !== undefined) {{\n"));
         }
@@ -20526,24 +20615,21 @@ fn typed_dynamic_declaration(
             declarations.push_str("    }\n");
         }
     }
-    let arguments = params[..function.required_params]
+    let arguments = params[..required_params]
         .iter()
         .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let call = call_and_return(format!(
-        "{base_symbol}__arity_{}({arguments})",
-        function.required_params
-    ));
+    let call = call_and_return(format!("{base_symbol}__arity_{required_params}({arguments})"));
     declarations.push_str(&format!("    {call}\n}}\n"));
     typed_dynamic_callable_adapter(
-        &encoded,
+        encoded,
         wrapper,
         declarations,
-        &params,
-        function.required_params,
+        params,
+        required_params,
         napi,
-        &ret_hir_type,
+        ret_hir_type,
     )
 }
 

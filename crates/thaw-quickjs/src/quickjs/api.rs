@@ -159,9 +159,18 @@ fn invoke_impl<'js>(
 
     let json: Object = ctx.globals().get("JSON").map_err(to_string_err)?;
     let parse: Function = json.get("parse").map_err(to_string_err)?;
+    // Reconstructs a real `Date` from Thaw's native `{"timestamp": N}`
+    // wire shape (see `platform_globals/dates.js`) at every nesting depth
+    // -- `JSON.parse`'s reviver runs bottom-up over the whole parsed
+    // value, so a `Date`-typed field nested inside an array/object
+    // argument is revived just like a top-level one.
+    let date_reviver: Function = ctx
+        .globals()
+        .get("__thaw_json_date_reviver")
+        .map_err(to_string_err)?;
 
     let args_array: Array = parse
-        .call((args_json,))
+        .call((args_json, date_reviver))
         .map_err(|e| format!("args_json is not a valid JSON array: {e}"))?;
 
     let mut call_args = Args::new_unsized(ctx.clone());
@@ -184,8 +193,6 @@ fn resolve_value_impl<'js>(
     label: &str,
 ) -> Result<String, String> {
     let to_string_err = |e: rquickjs::Error| e.to_string();
-    let json: Object = ctx.globals().get("JSON").map_err(to_string_err)?;
-    let stringify: Function = json.get("stringify").map_err(to_string_err)?;
 
     // Always pass the result through the realm's Promise resolution
     // procedure. `Value::as_promise` only recognizes native Promise objects;
@@ -211,9 +218,25 @@ fn resolve_value_impl<'js>(
         e => format!("`{label}`'s promise rejected or stalled: {e}"),
     })?;
 
-    stringify
-        .call((result,))
-        .map_err(|e| format!("failed to JSON-encode the result: {e}"))
+    // `ctx.json_stringify` (rather than calling the JS `JSON.stringify`
+    // function directly and coercing its return value straight to a Rust
+    // `String`) surfaces `JSON.stringify`'s "not representable" case as
+    // `Ok(None)` instead of a real JS `undefined` value that a direct
+    // `String` conversion would just fail on. That case is not rare here:
+    // it's exactly what a genuinely `void`-returning (or otherwise
+    // undefined-returning) Fallback function's real result looks like --
+    // `null` is the universal placeholder every typed decoder on the
+    // other side already tolerates (a `Void`-declared return, notably,
+    // never even inspects the JSON it's handed).
+    match ctx
+        .json_stringify(result)
+        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?
+    {
+        Some(text) => text
+            .to_string()
+            .map_err(|e| format!("failed to JSON-encode the result: {e}")),
+        None => Ok("null".to_string()),
+    }
 }
 
 fn finish_with_platform_events<'js>(
