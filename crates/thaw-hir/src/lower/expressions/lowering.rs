@@ -259,6 +259,46 @@ impl<'a> FnLowerer<'a> {
                                 .into(),
                         );
                     };
+                    // A caught exception has no real `Error` object or class
+                    // hierarchy behind it -- just a string, optionally
+                    // tagged with a class name ahead of the message (see
+                    // `new Error(...)`/etc. above) -- so this checks the
+                    // tagged (or defaulted) name at runtime instead of the
+                    // compile-time class-identity check used for genuine
+                    // native classes below.
+                    if matches!(
+                        class.sym.as_ref(),
+                        "Error"
+                            | "TypeError"
+                            | "RangeError"
+                            | "SyntaxError"
+                            | "ReferenceError"
+                            | "EvalError"
+                            | "URIError"
+                    ) {
+                        let value = self.lower_expr(&bin.left)?;
+                        let value_type = self.infer_expr_type(&value)?;
+                        if value_type != HirType::Str {
+                            return Err(format!(
+                                "`instanceof {}` requires a caught-exception (string) operand, found {value_type:?}",
+                                class.sym
+                            ));
+                        }
+                        let name = format!("__thaw_instanceof_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), value_type.clone());
+                        let call = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_is_instance".to_string())),
+                            vec![
+                                HirExpr::Var(name.clone()),
+                                HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                            ],
+                        );
+                        return self.wrap_call_argument_bindings(
+                            call,
+                            &[(name, value_type, value)],
+                        );
+                    }
                     if !self
                         .signatures
                         .contains_key(&class_constructor_symbol(class.sym.as_ref()))
@@ -1254,17 +1294,20 @@ impl<'a> FnLowerer<'a> {
                             | "EvalError"
                             | "URIError"
                     ) {
-                        // `throw` already only ever unwinds a plain string
-                        // (`catch` binds it as `HirType::Str`, see
+                        // `throw` unwinds a single tagged string (`catch`
+                        // binds it as `HirType::Str`, see
                         // `lower/statements/lowering.rs`) -- there is no
-                        // `Error` object, stack trace, or `.name`/`.message`
-                        // field, and no support for a class extending one of
-                        // these. `new Error(message)`/`new TypeError(...)`/
-                        // etc. all just become `message` itself (defaulting
-                        // to `""` when omitted), so `throw new Error("x")`
-                        // works exactly like the already-supported
-                        // `throw "x"`, without a new exception
-                        // representation to plumb through every catch site.
+                        // `Error` object, stack trace, or support for a class
+                        // extending one of these, but `new Error(message)`/
+                        // `new TypeError(...)`/etc. tag that string with
+                        // their class name ahead of a `\u{1}` marker and the
+                        // message (see `thaw_runtime`'s `split_error_tag`),
+                        // so `.message`/`.name`/`instanceof` can recover it
+                        // at a catch site. A bare `throw "x"` (no `new`)
+                        // still throws exactly that string, untagged, and
+                        // every reader treats an untagged string as a
+                        // default-named `Error` whose message is the whole
+                        // string.
                         let args = new_expr.args.clone().unwrap_or_default();
                         if args.iter().any(|argument| argument.spread.is_some()) {
                             return Err(format!(
@@ -1278,13 +1321,18 @@ impl<'a> FnLowerer<'a> {
                                 class.sym
                             ));
                         }
-                        return match args.first() {
+                        let message = match args.first() {
                             Some(argument) => {
                                 let message = self.lower_expr(&argument.expr)?;
-                                self.coerce_primitive_to_string(message)
+                                self.coerce_primitive_to_string(message)?
                             }
-                            None => Ok(HirExpr::Lit(HirLit::Str(String::new()))),
+                            None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
+                        let tag = HirExpr::Lit(HirLit::Str(format!("\u{1}{}\u{1}", class.sym)));
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![tag, message],
+                        ));
                     }
                     let constructor = class_constructor_symbol(class.sym.as_ref());
                     if let Some(signature) = self.signatures.get(&constructor) {

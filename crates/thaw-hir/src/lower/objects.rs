@@ -761,6 +761,24 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_string_length".to_string())),
                         vec![obj],
                     )),
+                    // Every string is a potential caught exception (there is
+                    // no separate `Error` type -- see
+                    // `lower/expressions/lowering.rs`'s `new Error(...)`
+                    // handling), so `.message`/`.name` are available on any
+                    // `HirType::Str` value, not only ones bound by `catch`.
+                    // An untagged string (a plain `throw "..."`, or any
+                    // other ordinary string) has no name of its own and
+                    // defaults to `Error`, with itself as the message,
+                    // matching JavaScript's own default
+                    // `Error.prototype.name`.
+                    HirType::Str if prop.sym == *"message" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_message".to_string())),
+                        vec![obj],
+                    )),
+                    HirType::Str if prop.sym == *"name" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_name".to_string())),
+                        vec![obj],
+                    )),
                     HirType::Map(_, _) | HirType::Set(_) if prop.sym == *"size" => {
                         Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_map_size".to_string())),
