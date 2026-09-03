@@ -6132,3 +6132,46 @@ fn array_methods_chained_directly_on_array_from_use_jit_without_quickjs() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn array_from_and_of_chains_generalize_across_methods_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-from-of-chains-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("chain-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function reduceFrom(values: number[]): number;\nexport declare function doubleChain(values: number[]): number[];\nexport declare function ofChain(): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.reduceFrom = (values) => Array.from(values).reduce((a, b) => a + b, 0); module.exports.doubleChain = (values) => Array.from(values).map((v) => v * 2).filter((v) => v > 4); module.exports.ofChain = () => Array.of(1, 2, 3).map((v) => v * 10);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { reduceFrom, doubleChain, ofChain } from 'chain-kit';\nfunction main(): void { console.log(reduceFrom([1, 2, 3, 4])); console.log(doubleChain([1, 2, 3, 4]).join(',')); console.log(ofChain().join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "10\n6,8\n10,20,30\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
