@@ -625,6 +625,21 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string length receiver")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_error_message" | "__thaw_error_name" => {
+                        let [argument] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        self.expect_type(&HirType::Str, argument, "error property receiver")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_error_is_instance" => {
+                        let [value, class_name] = args.as_slice() else {
+                            return Err("error instanceof check expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "instanceof receiver")?;
+                        self.expect_type(&HirType::Str, class_name, "instanceof class name")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_string_char_code_at" => {
                         let [value, index] = args.as_slice() else {
                             return Err("string charCodeAt expects two operands".into());

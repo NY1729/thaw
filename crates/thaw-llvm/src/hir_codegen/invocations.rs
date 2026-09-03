@@ -967,6 +967,43 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date string conversion returned no value".into());
             }
+            "__thaw_error_message" | "__thaw_error_name" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let value = self.compile_expr(value)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[value.into()],
+                        "error_property",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("error property access returned no value".into());
+            }
+            "__thaw_error_is_instance" => {
+                let [value, class_name] = args else {
+                    return Err(format!("{name} expects two operands"));
+                };
+                let value = self.compile_expr(value)?;
+                let class_name = self.compile_expr(class_name)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_error_is_instance").unwrap(),
+                        &[value.into(), class_name.into()],
+                        "error_is_instance",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("error instanceof check returned no value".into());
+            }
             "__thaw_date_set_full_year"
             | "__thaw_date_set_month"
             | "__thaw_date_set_date"
