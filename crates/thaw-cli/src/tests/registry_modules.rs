@@ -6046,3 +6046,46 @@ fn string_surrogate_pair_and_empty_edge_cases_use_jit_without_quickjs() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn recursion_and_dictionary_aliasing_edge_cases_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-recursion-edge-cases-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("rec-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function fib(n: number): number;\nexport declare function isEven(n: number): boolean;\nexport declare function isOdd(n: number): boolean;\nexport declare function dictAlias(seed: Record<string, number>): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }\nfunction isEven(n) { return n === 0 ? true : isOdd(n - 1); }\nfunction isOdd(n) { return n === 0 ? false : isEven(n - 1); }\nfunction dictAlias(seed) { const alias = seed; seed[\"a\"] = 1; alias[\"b\"] = 2; seed[\"a\"] = (seed[\"a\"] ?? 0) + 10; return alias[\"a\"] + alias[\"b\"]; }\nmodule.exports = { fib, isEven, isOdd, dictAlias };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { fib, isEven, isOdd, dictAlias } from 'rec-kit';\nfunction main(): void { console.log(fib(20)); console.log(isEven(11)); console.log(isOdd(11)); console.log(dictAlias({})); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "6765\nfalse\ntrue\n13\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
