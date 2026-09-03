@@ -96,6 +96,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
         host.libraries.push(handle);
         host.module_envs.push(env);
     });
+    #[cfg(feature = "quickjs")]
     thaw_quickjs::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call,
@@ -105,6 +106,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "quickjs")]
 unsafe extern "C" fn thaw_napi_export_names() -> *const c_char {
     let names = HOST.with(|host| host.borrow().functions.keys().cloned().collect::<Vec<_>>());
     CString::new(serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()))
@@ -112,6 +114,7 @@ unsafe extern "C" fn thaw_napi_export_names() -> *const c_char {
         .into_raw()
 }
 
+#[cfg(feature = "quickjs")]
 unsafe extern "C" fn thaw_napi_handle_bridge(
     operation: *const c_char,
     target: *const c_char,
@@ -214,6 +217,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         .into_raw()
 }
 
+#[cfg(feature = "quickjs")]
 fn release_quickjs_reference(reference: u64) {
     let released = HOST.with(|host| {
         let mut host = host.borrow_mut();
@@ -243,6 +247,7 @@ fn release_quickjs_reference(reference: u64) {
     }
 }
 
+#[cfg(feature = "quickjs")]
 fn release_napi_handle(handle: u64) -> Result<(), String> {
     let released = HOST.with(|host| {
         let mut host = host.borrow_mut();
@@ -461,6 +466,13 @@ fn value_from_json_with_undefined(
                 .get("__thaw_napi_function__")
                 .and_then(JsonValue::as_u64)
             {
+                #[cfg(not(feature = "quickjs"))]
+                {
+                    let _ = reference;
+                    return env.alloc(Value::Undefined);
+                }
+                #[cfg(feature = "quickjs")]
+                {
                 if let Some(value) = env.quickjs_references.get(&reference) {
                     return *value;
                 }
@@ -476,6 +488,7 @@ fn value_from_json_with_undefined(
                 }));
                 env.quickjs_references.insert(reference, function);
                 return function;
+                }
             }
             if let Some(reference) = values
                 .get("__thaw_napi_object__")
@@ -1133,24 +1146,34 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
     let Some(bridge) = (info.data as *const ThawCallbackBridge).as_ref() else {
         return ptr::null_mut();
     };
-    if let ThawCallback::Value(callback) | ThawCallback::QuickJs(callback) = bridge.callback {
-        let mut args = info
+    let callback = match bridge.callback {
+        ThawCallback::Value(callback) => Some((callback, false)),
+        #[cfg(feature = "quickjs")]
+        ThawCallback::QuickJs(callback) => Some((callback, true)),
+        ThawCallback::Event(_) => None,
+    };
+    if let Some((callback, _is_quickjs)) = callback {
+        let args = info
             .args
             .iter()
             .map(|value| json_from_value_with_undefined(*value, true))
             .collect::<Result<Vec<_>, _>>();
-        if matches!(bridge.callback, ThawCallback::QuickJs(_)) {
-            let receiver = value_ref(info.this_arg)
-                .ok()
-                .filter(|value| is_object_value(value))
-                .map(|_| serde_json::json!({
-                    "__thaw_napi_this_handle__": (info.this_arg as u64).to_string()
-                }))
-                .unwrap_or(JsonValue::Null);
-            if let Ok(args) = &mut args {
+        #[cfg(feature = "quickjs")]
+        let args = if _is_quickjs {
+            args.map(|mut args| {
+                let receiver = value_ref(info.this_arg)
+                    .ok()
+                    .filter(|value| is_object_value(value))
+                    .map(|_| serde_json::json!({
+                        "__thaw_napi_this_handle__": (info.this_arg as u64).to_string()
+                    }))
+                    .unwrap_or(JsonValue::Null);
                 args.insert(0, receiver);
-            }
-        }
+                args
+            })
+        } else {
+            args
+        };
         let args = args.and_then(|args| {
             serde_json::to_string(&args).map_err(|error| error.to_string())
         });

@@ -688,6 +688,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// same reason (the extern function avoids relying on `bool`'s C ABI
     /// shape).
     fn compile_load_script(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         let [source] = args else {
             return Err("loadScript expects exactly one argument".to_string());
         };
@@ -797,6 +798,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         self.compile_single_arg_call("thaw_js_get_global", args, "getDynamicValue")
     }
@@ -824,6 +826,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let [handle, call_args] = args else {
             return Err("callDynamicValueHandle expects exactly two arguments".into());
@@ -874,6 +877,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let [callable, argument] = args else {
             return Err("callDynamicValueWithValue expects exactly two arguments".into());
@@ -922,6 +926,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let released = self
             .compile_single_arg_call("thaw_js_release_handle", args, "releaseDynamicValue")?
@@ -942,6 +947,7 @@ impl<'ctx> HirCompiler<'ctx> {
         symbol: &str,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let values = args
             .iter()
@@ -974,6 +980,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let [handle, name, call_args] = args else {
             return Err("callDynamicMethod expects exactly three arguments".into());
@@ -1034,6 +1041,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let [handle] = args else {
             return Err("readDynamicValue expects exactly one argument".into());
@@ -1081,6 +1089,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let [callable, json_args, handles] = args else {
             return Err(
@@ -1144,6 +1153,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let [constructor, json_args] = args else {
             return Err("constructDynamicValue expects constructor and JSON arguments".into());
@@ -1195,6 +1205,12 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if signature.backend == DynamicBackend::QuickJs {
+            self.uses_quickjs = true;
+        }
+        if signature.backend == DynamicBackend::Napi {
+            self.uses_napi = true;
+        }
         if signature.backend == DynamicBackend::Napi
             && (signature.symbol.starts_with("$getter$")
                 || signature.symbol.starts_with("$staticgetter$"))

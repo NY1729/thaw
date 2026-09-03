@@ -148,7 +148,13 @@ fn build_with_link_mode(
     }
     let manifest = serde_json::json!({
         "packages": resolved_packages,
-        "quickjs": shim_source.contains("loadScript("),
+        // Registry fallback wrappers contain `callDynamic(...)` even when a
+        // JIT declaration shadows them, so only count the generated shim's
+        // module initializer here. User-authored dynamic calls and explicit
+        // QuickJS typed symbols are checked separately below.
+        "quickjs": shim_source.contains("loadScript(")
+            || source_uses_quickjs(&user_source)
+            || shim_source.contains("__thaw_typed_js_"),
         "napi": shim_source.contains("loadNativeAddonEmbedded("),
     });
     let marker = format!("{ARTIFACT_MARKER}{manifest}");
@@ -204,6 +210,8 @@ fn build_with_link_mode(
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
     compiler.compile_program(&program)?;
+    let uses_quickjs = compiler.uses_quickjs();
+    let uses_napi = compiler.uses_napi();
 
     let obj_path = output.with_extension("o");
     compiler.write_object_file(&obj_path)?;
@@ -212,16 +220,22 @@ fn build_with_link_mode(
     // (Phase 1/2), thaw-runtime backs the Lambda event loop for
     // `handler`-based programs (Phase 2), thaw-std backs `fetch`/`JSON.*`,
     // thaw-quickjs backs `loadScript`/`callDynamic` (the QuickJS-NG
-    // fallback path, docs/design/bridge.md section 7). An unreferenced
-    // static archive member is simply never pulled into the final binary,
-    // so linking all of them unconditionally is harmless and keeps this
-    // simple.
+    // fallback path, docs/design/bridge.md section 7). It is built and
+    // linked only when LLVM found a call into that host.
     let arena_lib = build_staticlib("thaw-arena")?;
     let runtime_lib = build_staticlib("thaw-runtime")?;
     let std_lib = build_staticlib("thaw-std")?;
     let jit_lib = build_staticlib("thaw-jit")?;
-    let quickjs_lib = build_staticlib("thaw-quickjs")?;
-    let napi_lib = build_staticlib("thaw-napi")?;
+    let quickjs_lib = uses_quickjs
+        .then(|| build_staticlib("thaw-quickjs"))
+        .transpose()?;
+    let napi_lib = uses_napi.then(|| {
+        if uses_quickjs {
+            build_staticlib("thaw-napi")
+        } else {
+            build_staticlib_without_default_features("thaw-napi")
+        }
+    }).transpose()?;
 
     // `--link <path>` lets a program using `declare function` (see
     // docs/design/bridge.md section 6) actually resolve at link time,
@@ -238,9 +252,14 @@ fn build_with_link_mode(
         .arg(&arena_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        .arg(&jit_lib)
-        .arg(&quickjs_lib)
-        .arg(&napi_lib)
+        .arg(&jit_lib);
+    if let Some(quickjs_lib) = quickjs_lib {
+        linker.arg(quickjs_lib);
+    }
+    if let Some(napi_lib) = napi_lib {
+        linker.arg(napi_lib);
+    }
+    linker
         // QuickJS-NG's C code calls libm math functions directly; `rustc`
         // normally adds `-lm` automatically when it does the final link,
         // but this is a manual `cc` invocation instead.
@@ -277,6 +296,31 @@ fn build_with_link_mode(
 
     println!("built `{}`", output.display());
     Ok(())
+}
+
+/// Returns whether generated or user source explicitly requires the dynamic
+/// JavaScript host. QuickJS typed symbols are intentionally included here:
+/// unlike ordinary extracted functions, they are direct calls into that host
+/// ABI and therefore determine whether the QuickJS archive must be retained.
+fn source_uses_quickjs(source: &str) -> bool {
+    [
+        "loadScript(",
+        "callDynamic(",
+        "getDynamicValue(",
+        "callDynamicValue(",
+        "callDynamicValueHandle(",
+        "callDynamicValueWithValue(",
+        "releaseDynamicValue(",
+        "getDynamicProperty(",
+        "setDynamicProperty(",
+        "callDynamicMethod(",
+        "readDynamicValue(",
+        "callDynamicValueMixed(",
+        "constructDynamicValue(",
+        "__thaw_typed_js_",
+    ]
+    .iter()
+    .any(|marker| source.contains(marker))
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
@@ -337,8 +381,29 @@ fn elf_has_program_interpreter(path: &Path) -> Result<bool, String> {
 /// artifact output. That's robust to `CARGO_TARGET_DIR` overrides, unlike
 /// guessing a relative path.
 fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
-    let output = Command::new("cargo")
-        .args(["build", "--release", "-p", pkg, "--message-format=json"])
+    build_staticlib_with_options(pkg, false)
+}
+
+/// Builds a package without its default features. This is used for the N-API
+/// host when the generated program has no QuickJS call sites, so the host's
+/// optional QuickJS bridge is not compiled into the final archive.
+fn build_staticlib_without_default_features(pkg: &str) -> Result<PathBuf, String> {
+    build_staticlib_with_options(pkg, true)
+}
+
+fn build_staticlib_with_options(pkg: &str, no_default_features: bool) -> Result<PathBuf, String> {
+    let mut command = Command::new("cargo");
+    command.args(["build", "--release", "-p", pkg, "--message-format=json"]);
+    if no_default_features {
+        command.arg("--no-default-features");
+        // Keep feature variants in separate target directories. CLI tests build
+        // several artifacts concurrently; sharing target/release would let a
+        // QuickJS-enabled and a QuickJS-free static archive replace each other.
+        command
+            .arg("--target-dir")
+            .arg(no_quickjs_target_dir());
+    }
+    let output = command
         .output()
         .map_err(|e| format!("failed to invoke `cargo build -p {pkg}`: {e}"))?;
     if !output.status.success() {
@@ -364,4 +429,11 @@ fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
     Err(format!(
         "could not find a staticlib for `{pkg}` in `cargo build` output"
     ))
+}
+
+fn no_quickjs_target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .join("thaw-no-quickjs")
 }

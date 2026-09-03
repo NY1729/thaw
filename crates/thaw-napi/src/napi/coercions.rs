@@ -521,7 +521,17 @@ pub unsafe extern "C" fn napi_run_script(
         Ok(Value::String(source)) => source.clone(),
         _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
-    let evaluated = thaw_quickjs::eval_json(&source);
+    // A JSON literal is also a valid JavaScript script, but evaluating it does
+    // not require a JavaScript engine. Keep this fast path deliberately strict:
+    // assignments, expressions, and other syntax continue through QuickJS so
+    // `napi_run_script` retains its existing semantics for non-JSON scripts.
+    let evaluated = match serde_json::from_str::<JsonValue>(&source) {
+        Ok(json) => Ok(Some(json.to_string())),
+        #[cfg(feature = "quickjs")]
+        Err(_) => thaw_quickjs::eval_json(&source),
+        #[cfg(not(feature = "quickjs"))]
+        Err(_) => Err("napi_run_script requires the QuickJS feature for JavaScript syntax".into()),
+    };
     let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -547,4 +557,3 @@ pub unsafe extern "C" fn napi_run_script(
     };
     record_status(env_ptr, status)
 }
-

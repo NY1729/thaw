@@ -634,6 +634,95 @@ fn primitive_loops_use_jit_without_quickjs() {
 }
 
 #[test]
+fn string_for_of_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-string-loop-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-string-loop");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function copy(value: string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function copy(value) { let result = ''; for (const character of value) { result += character; } return result; } module.exports = { copy };\n",
+    )
+    .unwrap();
+    let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
+    let functions = thaw_bridge::parse_dts(&declarations).unwrap();
+    let bundle = std::fs::read_to_string(package.join("bundle.js")).unwrap();
+    assert!(jit_numeric_export(&bundle, "copy", false, &functions[0]).is_some());
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { copy } from 'jit-string-loop'; function main(): void { console.log(copy('a😀c')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "a😀c\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mixed_array_for_of_uses_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-mixed-array-loop-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("jit-mixed-array-loop");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function render(value: number[] | string[] | boolean[]): string;\nexport declare function renderSlice(value: number[] | string[] | boolean[]): string;\nexport declare function size(value: number[] | string[] | boolean[]): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function render(value) { let result = ''; for (const item of value) { result += String(item); } return result; } function renderSlice(value) { let result = ''; for (const item of value.slice()) { result += String(item); } return result; } function size(value) { return value.length; } module.exports = { render, renderSlice, size };\n",
+    )
+    .unwrap();
+    let declarations = std::fs::read_to_string(package.join("package.d.ts")).unwrap();
+    let functions = thaw_bridge::parse_dts(&declarations).unwrap();
+    let bundle = std::fs::read_to_string(package.join("bundle.js")).unwrap();
+    for function in &functions {
+        assert!(
+            jit_export(&bundle, &function.name, false, function).is_some(),
+            "{function:?} did not specialize"
+        );
+    }
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { render, renderSlice, size } from 'jit-mixed-array-loop'; function main(): void { console.log(render([1, 2, 3])); console.log(render(['a', 'b'])); console.log(render([true, false])); console.log(renderSlice([1, 2, 3])); console.log(renderSlice(['a', 'b'])); console.log(renderSlice([true, false])); console.log(size([1, 2, 3])); console.log(size(['a', 'b'])); console.log(size([true, false])); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "123\nab\ntruefalse\n123\nab\ntruefalse\n3\n2\n2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn nested_declared_loop_uses_jit_without_quickjs() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-nested-loop-{}",
@@ -2148,6 +2237,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "export declare function callHelperNestedCatchReturn(value: number, fail: boolean, effects: number[]): string;\n",
         "export declare function callHelperLabeledReturn(values: number[]): string;\n",
         "export declare function callHelperLabeledControl(values: number[]): string;\n",
+        "export declare function callLabeledNumber(values: number[]): number;\n",
     );
     let source = concat!(
         "function makeLiteral(value) { return { unused: Math.random(), first: value, second: value, label: 'helper' }; } ",
@@ -2225,6 +2315,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "module.exports.callHelperNestedCatchReturn = (value, fail, effects) => { const { index, label } = makeHelperNestedCatchReturn(value, fail, effects); return label + ':' + String(index) + ':' + String(effects.length); };",
         "module.exports.callHelperLabeledReturn = values => { const { index, label } = makeHelperLabeledReturn(values); return label + ':' + String(index); };",
         "module.exports.callHelperLabeledControl = values => { const { index, label } = makeHelperLabeledControl(values); return label + ':' + String(index); };",
+        "module.exports.callLabeledNumber = values => { let index = values.length - 3; outer: while (index < 3) { if (index === 0) { index++; continue outer; } if (index === 2) break outer; index++; } return index; };",
     );
     let declarations = thaw_bridge::parse_dts(dts).unwrap();
     for (index, name) in [
@@ -2270,6 +2361,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
         "callHelperNestedCatchReturn",
         "callHelperLabeledReturn",
         "callHelperLabeledControl",
+        "callLabeledNumber",
     ]
         .into_iter()
         .enumerate()
@@ -2296,7 +2388,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
             let expression = expression.unwrap();
             assert!(expression.contains("trystart"));
             assert!(expression.contains("catch"));
-        } else if name == "callHelperLabeledControl" {
+        } else if matches!(name, "callHelperLabeledControl" | "callLabeledNumber") {
             let expression = expression.unwrap();
             assert!(expression.contains("break0"));
             assert!(expression.contains("continue0"));
@@ -2337,7 +2429,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { callArrayAssign, callArrayParts, callControl, callEarly, callHelperCatch, callHelperDoWhileReturn, callHelperFinally, callHelperFinallyReturn, callHelperFor, callHelperForInNumber, callHelperForInString, callHelperForOfReturn, callHelperForOfString, callHelperForReturn, callHelperLabeledControl, callHelperLabeledReturn, callHelperLoop, callHelperNestedCatchReturn, callHelperNestedFinallyReturn, callHelperNestedForInReturn, callHelperNestedForOfReturn, callHelperNestedForReturn, callHelperNestedLoopReturn, callHelperNestedSwitchReturn, callHelperSwitch, callHelperSwitchReturn, callHelperWhileReturn, callLiteral, callLocals, callNestedEarly, callObjectDefault, callObjectParts, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); console.log(callArrayParts(3)); console.log(callArrayAssign(3)); console.log(callObjectParts(3)); console.log(callObjectDefault()); console.log(callControl(3, true)); console.log(callControl(3, false)); console.log(callEarly(3, true)); console.log(callEarly(3, false)); console.log(callNestedEarly(3, true)); console.log(callNestedEarly(3, false)); console.log(callNestedEarly(0, true)); console.log(callHelperLoop(4)); console.log(callHelperFor(4)); console.log(callHelperFinally(5)); console.log(callHelperSwitch(1)); console.log(callHelperSwitch(2)); console.log(callHelperSwitch(3)); console.log(callHelperSwitchReturn([7, 2])); console.log(callHelperSwitchReturn([7, 9])); console.log(callHelperFinallyReturn(3)); const catchOk = [3]; console.log(callHelperCatch(3, false, catchOk)); console.log(catchOk.join(',')); const catchBad = [3]; console.log(callHelperCatch(3, true, catchBad)); console.log(catchBad.join(',')); const catchLow = [-1]; console.log(callHelperCatch(-1, false, catchLow)); console.log(catchLow.join(',')); console.log(callHelperWhileReturn([1, 4, 2])); console.log(callHelperWhileReturn([1, 2])); console.log(callHelperForReturn([1, 4, 2])); console.log(callHelperForReturn([1, 2])); console.log(callHelperDoWhileReturn([1, 4, 2])); console.log(callHelperDoWhileReturn([1, 2])); console.log(callHelperForOfReturn([1, 4, 2])); console.log(callHelperForOfReturn([1, 2])); console.log(callHelperForOfString(['a', 'word'])); console.log(callHelperForOfString(['a'])); console.log(callHelperForInNumber({ low: 1, target: 4 })); console.log(callHelperForInNumber({ low: 1 })); console.log(callHelperForInString({ short: 'a', target: 'word' })); console.log(callHelperForInString({ short: 'a' })); console.log(callHelperNestedLoopReturn([1, 5])); console.log(callHelperNestedLoopReturn([1, 2])); console.log(callHelperNestedForReturn([1, 5])); console.log(callHelperNestedForReturn([1, 2])); console.log(callHelperNestedForOfReturn([1, 5])); console.log(callHelperNestedForOfReturn([1, 2])); console.log(callHelperNestedForInReturn({ low: 1, target: 4 })); console.log(callHelperNestedForInReturn({ low: 1 })); console.log(callHelperNestedSwitchReturn([1, 5])); const finallyFound = []; console.log(callHelperNestedFinallyReturn([1, 4], finallyFound)); const finallyMissing = []; console.log(callHelperNestedFinallyReturn([1, 2], finallyMissing)); const catchNestedOk = []; console.log(callHelperNestedCatchReturn(3, false, catchNestedOk)); const catchNestedBad = []; console.log(callHelperNestedCatchReturn(3, true, catchNestedBad)); console.log(callHelperNestedSwitchReturn([1, 2])); console.log(callHelperLabeledReturn([1, 4])); console.log(callHelperLabeledReturn([1, 2])); console.log(callHelperLabeledControl([1, 0, 4])); console.log(callHelperLabeledControl([1, 4])); console.log(callHelperLabeledControl([0, 1])); console.log(callHelperLabeledControl([0, 4])); }\n",
+        "import { callArrayAssign, callArrayParts, callControl, callEarly, callHelperCatch, callHelperDoWhileReturn, callHelperFinally, callHelperFinallyReturn, callHelperFor, callHelperForInNumber, callHelperForInString, callHelperForOfReturn, callHelperForOfString, callHelperForReturn, callHelperLabeledControl, callHelperLabeledReturn, callLabeledNumber, callHelperLoop, callHelperNestedCatchReturn, callHelperNestedFinallyReturn, callHelperNestedForInReturn, callHelperNestedForOfReturn, callHelperNestedForReturn, callHelperNestedLoopReturn, callHelperNestedSwitchReturn, callHelperSwitch, callHelperSwitchReturn, callHelperWhileReturn, callLiteral, callLocals, callNestedEarly, callObjectDefault, callObjectParts, callSteps, literal, reassign, reassignControl, reassignInsideIf, reassignInsideLoop, reassignInsideTry, reassignTuple, unpack, unpackTuple } from 'jit-nested-object-destructuring';\nfunction main(): void { const value = { count: 3, meta: { label: 'box', enabled: true }, pair: [7, 'pair'] as [number, string], values: [1, 2] }; const alternate = { count: 8, meta: { label: 'alt', enabled: false }, pair: [9, 'other'] as [number, string], values: [4] }; const nested = [[4, 'deep'], { enabled: false, values: [1] }] as [[number, string], { enabled: boolean; values: number[] }]; console.log(unpack(value)); console.log(reassign(value)); console.log(reassignControl(value, true)); console.log(reassignInsideIf(value, alternate, false)); console.log(reassignInsideLoop(value)); console.log(reassignInsideTry(value)); console.log(unpackTuple(nested)); console.log(reassignTuple(nested)); console.log(literal(3)); console.log(callLiteral(3)); console.log(callLocals(3)); console.log(callSteps(3)); console.log(callArrayParts(3)); console.log(callArrayAssign(3)); console.log(callObjectParts(3)); console.log(callObjectDefault()); console.log(callControl(3, true)); console.log(callControl(3, false)); console.log(callEarly(3, true)); console.log(callEarly(3, false)); console.log(callNestedEarly(3, true)); console.log(callNestedEarly(3, false)); console.log(callNestedEarly(0, true)); console.log(callHelperLoop(4)); console.log(callHelperFor(4)); console.log(callHelperFinally(5)); console.log(callHelperSwitch(1)); console.log(callHelperSwitch(2)); console.log(callHelperSwitch(3)); console.log(callHelperSwitchReturn([7, 2])); console.log(callHelperSwitchReturn([7, 9])); console.log(callHelperFinallyReturn(3)); const catchOk = [3]; console.log(callHelperCatch(3, false, catchOk)); console.log(catchOk.join(',')); const catchBad = [3]; console.log(callHelperCatch(3, true, catchBad)); console.log(catchBad.join(',')); const catchLow = [-1]; console.log(callHelperCatch(-1, false, catchLow)); console.log(catchLow.join(',')); console.log(callHelperWhileReturn([1, 4, 2])); console.log(callHelperWhileReturn([1, 2])); console.log(callHelperForReturn([1, 4, 2])); console.log(callHelperForReturn([1, 2])); console.log(callHelperDoWhileReturn([1, 4, 2])); console.log(callHelperDoWhileReturn([1, 2])); console.log(callHelperForOfReturn([1, 4, 2])); console.log(callHelperForOfReturn([1, 2])); console.log(callHelperForOfString(['a', 'word'])); console.log(callHelperForOfString(['a'])); console.log(callHelperForInNumber({ low: 1, target: 4 })); console.log(callHelperForInNumber({ low: 1 })); console.log(callHelperForInString({ short: 'a', target: 'word' })); console.log(callHelperForInString({ short: 'a' })); console.log(callHelperNestedLoopReturn([1, 5])); console.log(callHelperNestedLoopReturn([1, 2])); console.log(callHelperNestedForReturn([1, 5])); console.log(callHelperNestedForReturn([1, 2])); console.log(callHelperNestedForOfReturn([1, 5])); console.log(callHelperNestedForOfReturn([1, 2])); console.log(callHelperNestedForInReturn({ low: 1, target: 4 })); console.log(callHelperNestedForInReturn({ low: 1 })); console.log(callHelperNestedSwitchReturn([1, 5])); const finallyFound = []; console.log(callHelperNestedFinallyReturn([1, 4], finallyFound)); const finallyMissing = []; console.log(callHelperNestedFinallyReturn([1, 2], finallyMissing)); const catchNestedOk = []; console.log(callHelperNestedCatchReturn(3, false, catchNestedOk)); const catchNestedBad = []; console.log(callHelperNestedCatchReturn(3, true, catchNestedBad)); console.log(callHelperNestedSwitchReturn([1, 2])); console.log(callHelperLabeledReturn([1, 4])); console.log(callHelperLabeledReturn([1, 2])); console.log(callHelperLabeledControl([1, 0, 4])); console.log(callHelperLabeledControl([1, 4])); console.log(callHelperLabeledControl([0, 1])); console.log(callHelperLabeledControl([0, 4])); console.log(callLabeledNumber([1, 0, -1])); console.log(callLabeledNumber([1, 0, 4])); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -2353,7 +2445,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n39\n31\nbox:4\nfallback\nyes:5\nsmall:2\nyes:4\nno:2\nhigh:13\nlow:4\nzero:0\n4\n6\n10\none\ntwo\nother\ntwo:1\nother:1\n4:3,9\nok:3\n3,9\nbad:4\n3,9\nlow:0\n-1,9\nfound:1\nmissing:-1\nfound:1\nmissing:-1\nfound:1\nmissing:-1\nfound:4\nmissing:-1\nword:4\nmissing:0\ntarget:4\nmissing:0\nword:4\nmissing:0\nnested:1\nmissing:-1\nnested-for:1\nmissing:-1\nnested-for-of:5\nmissing:-1\ntarget:5\nmissing:-1\nswitch:1\nfinally:1:2\nmissing:-1:2\nok:3:1\nbad:4:1\nmissing:-1\nlabeled:1\nmissing:-1\nlabeled:2\nlabeled:1\ndone:2\nlabeled:1\n"
+        "box:3:true:7:pair:1,2,7\n3:box:7:pair\n4:box\n8:alt\n3:box\n4:box\ndeep:4:false:1,4\n4:deep:false\nmade:4:3,9\nhelper\n42\n8\n39\n31\nbox:4\nfallback\nyes:5\nsmall:2\nyes:4\nno:2\nhigh:13\nlow:4\nzero:0\n4\n6\n10\none\ntwo\nother\ntwo:1\nother:1\n4:3,9\nok:3\n3,9\nbad:4\n3,9\nlow:0\n-1,9\nfound:1\nmissing:-1\nfound:1\nmissing:-1\nfound:1\nmissing:-1\nfound:4\nmissing:-1\nword:4\nmissing:0\ntarget:4\nmissing:0\nword:4\nmissing:0\nnested:1\nmissing:-1\nnested-for:1\nmissing:-1\nnested-for-of:5\nmissing:-1\ntarget:5\nmissing:-1\nswitch:1\nfinally:1:2\nmissing:-1:2\nok:3:1\nbad:4:1\nmissing:-1\nlabeled:1\nmissing:-1\nlabeled:2\nlabeled:1\ndone:2\nlabeled:1\n2\n2\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
