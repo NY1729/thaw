@@ -20424,20 +20424,21 @@ fn typed_dynamic_declaration(
             thaw_bridge::DtsType::Unsupported(_) => Some((name.clone(), "Json".to_string())),
         })
         .collect::<Option<Vec<_>>>()?;
-    let thaw_bridge::DtsType::Native(ret) = &function.ret else {
-        return None;
+    // An unclassifiable return type (most commonly a class instance --
+    // real example: dayjs's own factory function returning its `Dayjs`
+    // class -- or, same as above, a function value) still crosses the
+    // host boundary as a retained handle rather than aborting the whole
+    // typed declaration; callers can invoke it dynamically
+    // (callDynamicValue/callDynamicValueHandle) or just hold/print it,
+    // even without dedicated support for its own methods/properties.
+    let ret_hir_type = match &function.ret {
+        thaw_bridge::DtsType::Native(
+            thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..),
+        )
+        | thaw_bridge::DtsType::Unsupported(_) => thaw_hir::HirType::JsValue,
+        thaw_bridge::DtsType::Native(ret) => ret.clone(),
     };
-    // JavaScript function values cross the host boundary as retained handles,
-    // not as native Thaw function pointers. Callers can invoke the returned
-    // value through callDynamicValue/callDynamicValueHandle.
-    let ret = if matches!(
-        ret,
-        thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
-    ) {
-        "JsValue".to_string()
-    } else {
-        render_dynamic_type(ret)?
-    };
+    let ret = render_dynamic_type(&ret_hir_type)?;
     let render_params = |arity: usize| {
         params[..arity]
             .iter()
@@ -20457,10 +20458,7 @@ fn typed_dynamic_declaration(
             &params,
             function.required_params,
             napi,
-            match &function.ret {
-                thaw_bridge::DtsType::Native(ret) => ret,
-                thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
-            },
+            &ret_hir_type,
         );
     }
     let wrapper = format!(
@@ -20545,10 +20543,7 @@ fn typed_dynamic_declaration(
         &params,
         function.required_params,
         napi,
-        match &function.ret {
-            thaw_bridge::DtsType::Native(ret) => ret,
-            thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
-        },
+        &ret_hir_type,
     )
 }
 
