@@ -747,6 +747,42 @@ fn error_values_expose_name_message_code_and_stringification() {
 }
 
 #[test]
+fn native_addon_exceptions_preserve_their_tagged_class_name() {
+    // A native addon that throws via napi_create_type_error/napi_throw
+    // records the error's class name in `error_names` (see `alloc_error`);
+    // describe_env_exception (used by take_env_exception and every callback
+    // invocation path) must tag it onto the message the same way
+    // `new Error(...)`/etc. do in thaw-hir, so `.name`/`instanceof` still
+    // work at the catching Thaw code's catch site instead of the addon's
+    // error collapsing to an untagged (default-`Error`) string.
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let message = env.alloc(Value::String("bad promise".into()));
+        let mut error = ptr::null_mut();
+        assert_eq!(
+            napi_create_type_error(env_ptr, ptr::null_mut(), message, &mut error),
+            NAPI_OK
+        );
+        assert_eq!(napi_throw(env_ptr, error), NAPI_OK);
+        assert_eq!(
+            take_env_exception(env_ptr),
+            Err("\u{1}TypeError\u{1}bad promise".to_string())
+        );
+        assert!(env.exception.is_none(), "exception must be taken, not just read");
+
+        // A plain string exception (no napi_create_*_error involved) has no
+        // recorded class name and stays untagged.
+        let plain = env.alloc(Value::String("plain failure".into()));
+        assert_eq!(napi_throw(env_ptr, plain), NAPI_OK);
+        assert_eq!(
+            take_env_exception(env_ptr),
+            Err("plain failure".to_string())
+        );
+    }
+}
+
+#[test]
 fn own_properties_can_be_detected_and_deleted() {
     unsafe {
         let mut env = Env::new();
