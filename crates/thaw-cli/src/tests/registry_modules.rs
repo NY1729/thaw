@@ -6953,3 +6953,57 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "tick\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `export default function name(...): T;` alongside a second, separate
+/// named export in the same `.d.ts` -- real-world example: leven's own
+/// `export default function leven(...): number;` plus its named
+/// `export function closestMatch(...): string | undefined;`.
+/// `commonjs_export_name` used to recognize only CommonJS's `export = x;`,
+/// so a package's "default" binding fell back to working only when the
+/// package had *exactly one* function total -- true for most
+/// single-purpose packages, but not one exporting more than one function
+/// this way, where `import leven from "leven"` had nothing telling it
+/// which of the two `leven` itself actually names.
+#[test]
+fn esm_default_export_alongside_a_second_named_export_resolves_the_default_import() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-esm-default-plus-named-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("distance-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export default function distance(a: string, b: string): number;\n\
+         export function closestMatch(target: string, candidates: string[]): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.distance = function(a, b) { return a === b ? 0 : 1; };\n\
+         module.exports.closestMatch = function(target, candidates) { return candidates[0]; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import distance from "distance-kit";
+function main(): void {
+    console.log(distance("cat", "cat"));
+    console.log(distance("cat", "cow"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
