@@ -785,6 +785,17 @@ fn dts_source_with_reexported_functions(
         &mut visited_references,
     )?);
     let mut seen = std::collections::BTreeSet::new();
+    // `import Name = require("./path")` + a *local* `export { Name as
+    // exported };` (no `from` clause -- `Name` is already a value bound
+    // earlier in this same file, not a re-export of another module's own
+    // export) -- real-world example: semver's `index.d.ts`, which
+    // imports one function per file this way and re-exports them all
+    // together. Each such `Name` resolves through its own file's `export
+    // = X;` to the identifier actually declared there (see
+    // `export_assignment_function_declarations`), so unlike the
+    // `from`-clause case below, the target file can differ per specifier
+    // even within one `export { ... }` statement.
+    let import_equals_targets = import_equals_targets(entry_path, &module);
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
@@ -792,14 +803,12 @@ fn dts_source_with_reexported_functions(
         if export.type_only {
             continue;
         }
-        let Some(source) = &export.src else {
-            continue;
-        };
-        let Some(source) = source.value.as_str() else {
-            continue;
-        };
-        let Some(target_path) = declaration_reexport_path(entry_path, source) else {
-            continue;
+        let target_path = match &export.src {
+            Some(source) => source
+                .value
+                .as_str()
+                .and_then(|source| declaration_reexport_path(entry_path, source)),
+            None => None,
         };
         for specifier in &export.specifiers {
             let ExportSpecifier::Named(named) = specifier else {
@@ -823,12 +832,16 @@ fn dts_source_with_reexported_functions(
             if seen.contains(&exported) {
                 continue;
             }
-            let mut visited = std::collections::BTreeSet::new();
-            let declarations = reexported_function_declarations(
-                &target_path,
-                &original,
-                &mut visited,
-            )?;
+            let declarations = match &target_path {
+                Some(target_path) => {
+                    let mut visited = std::collections::BTreeSet::new();
+                    reexported_function_declarations(target_path, &original, &mut visited)?
+                }
+                None => match import_equals_targets.get(&original) {
+                    Some(target_path) => export_assignment_function_declarations(target_path)?,
+                    None => continue,
+                },
+            };
             if !declarations.is_empty() {
                 seen.insert(exported.clone());
             }
@@ -1115,6 +1128,81 @@ fn reexported_function_declarations(
         }
     }
     Ok(Vec::new())
+}
+
+/// Every plain (non-exported) `declare function X(...)` overload matching
+/// whatever identifier `path`'s own `export = X;` names -- the shape
+/// `import Name = require("./path")` (a TS import-equals declaration)
+/// binds `Name` to, one file per function, real-world example: semver's
+/// `functions/valid.d.ts` (`declare function valid(...): ...;\nexport =
+/// valid;`). A plain `export = X;` module has no re-export chain of its
+/// own to follow beyond this (unlike `reexported_function_declarations`,
+/// which also handles `export { X } from another`), so this only ever
+/// looks inside `path` itself.
+fn export_assignment_function_declarations(path: &Path) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{Decl, Expr, ModuleDecl, ModuleItem, Stmt};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let source = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read re-exported declarations `{}`: {error}",
+            path.display()
+        )
+    })?;
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let Some(target) = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref() {
+            Expr::Ident(ident) => Some(ident.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }) else {
+        return Ok(Vec::new());
+    };
+    module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item else {
+                return None;
+            };
+            (function.ident.sym.as_ref() == target).then(|| {
+                source_map
+                    .span_to_snippet(function.span())
+                    .map_err(|error| format!("failed to read declaration for `{target}`: {error:?}"))
+            })
+        })
+        .collect()
+}
+
+/// The relative path each `import Name = require("./path")` (a TS
+/// import-equals declaration) in `module` resolves to, keyed by `Name` --
+/// used to follow a *local* `export { Name as exported };` (no `from`
+/// clause: `Name` is already a value imported earlier in this same file,
+/// not a re-export of another module's own export), real-world example:
+/// semver's `index.d.ts`, which imports one function per file this way
+/// and re-exports all of them together.
+fn import_equals_targets(
+    entry_path: &Path,
+    module: &thaw_parser::ast::Module,
+) -> std::collections::HashMap<String, PathBuf> {
+    use thaw_parser::ast::{ModuleDecl, ModuleItem, TsModuleRef};
+
+    module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(import)) = item else {
+                return None;
+            };
+            let TsModuleRef::TsExternalModuleRef(reference) = &import.module_ref else {
+                return None;
+            };
+            let source = reference.expr.value.as_str()?;
+            let target_path = declaration_reexport_path(entry_path, source)?;
+            Some((import.id.sym.to_string(), target_path))
+        })
+        .collect()
 }
 
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {
