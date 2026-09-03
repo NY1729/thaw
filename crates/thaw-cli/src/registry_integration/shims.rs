@@ -2562,7 +2562,16 @@ fn jit_export(
                 .is_some_and(|constructor| constructor == "of" || constructor == "from"),
             _ => false,
         };
-        if !parameter_array && !local_array && !returned_array && !constructed_array {
+        let dictionary_array = match member.obj.as_ref() {
+            Expr::Call(receiver) => object_dictionary_call(receiver, parameters, locals, helpers)
+                .is_some_and(|(operation, _, _)| {
+                    matches!(operation, "dkeys" | "dvalues" | "dentries")
+                }),
+            _ => false,
+        };
+        if !parameter_array && !local_array && !returned_array && !constructed_array
+            && !dictionary_array
+        {
             return None;
         }
         matches!(
