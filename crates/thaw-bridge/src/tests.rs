@@ -595,7 +595,7 @@ fn resolves_conditional_types_after_generic_substitution() {
 #[test]
 fn unresolved_conditional_tests_fall_back() {
     let funcs = parse_dts(
-        r#"export type Unknown = Date extends string ? number : boolean;
+        r#"export type Unknown = unknown extends string ? number : boolean;
             export declare function inspect(value: Unknown): string;"#,
     )
     .unwrap();

@@ -1,6 +1,7 @@
 const PLATFORM_GLOBALS: &str = concat!(
     include_str!("platform_globals/webassembly.js"),
     include_str!("platform_globals/runtime.js"),
+    include_str!("platform_globals/dates.js"),
     include_str!("platform_globals/performance.js"),
     include_str!("platform_globals/workers/structured_clone.js"),
     include_str!("platform_globals/workers/url.js"),

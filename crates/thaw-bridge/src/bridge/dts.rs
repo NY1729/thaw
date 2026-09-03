@@ -2100,6 +2100,22 @@ fn classify_ts_type(
             if ref_name == "JsValue" && ty_ref.type_params.is_none() {
                 return DtsType::Native(HirType::JsValue);
             }
+            // Mirrors `thaw_hir::lower::type_resolution`'s own `Date`
+            // handling exactly: a fixed native object with a single
+            // millisecond-since-epoch `timestamp` field, not a new value
+            // representation. This lets a `.d.ts` `Date` parameter/return
+            // (and, via constraint substitution above, a `<T extends
+            // Date>` type parameter) classify as `Native` instead of
+            // `Unsupported`, so ordinary Object JSON marshaling applies --
+            // QuickJS-side `Date.prototype.toJSON`/the `JSON.parse`
+            // reviver (thaw-quickjs) convert to/from a real JS `Date` at
+            // the call boundary using this same `{"timestamp": ...}` shape.
+            if ref_name == "Date" && ty_ref.type_params.is_none() {
+                return DtsType::Native(HirType::Object(vec![(
+                    "timestamp".to_string(),
+                    HirType::F64,
+                )]));
+            }
             if ref_name == "Readonly" {
                 let Some(inner) = ty_ref
                     .type_params
