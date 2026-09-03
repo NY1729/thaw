@@ -11,7 +11,7 @@
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     let module = thaw_parser::parse_typescript(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
-    Ok(module
+    let mut functions = module
         .body
         .iter()
         .flat_map(extract_fn_decls)
@@ -19,7 +19,19 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
             let name = name.rsplit('.').next().unwrap_or(name);
             lower_dts_function(name, func, &interfaces, &generic_interfaces)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if let Some(target) = export_assignment_interface_name(&module) {
+        functions.extend(
+            module
+                .body
+                .iter()
+                .flat_map(|item| extract_interface_method_decls(item, &target))
+                .map(|(name, method)| {
+                    lower_dts_method_signature(&name, method, &interfaces, &generic_interfaces)
+                }),
+        );
+    }
+    Ok(functions)
 }
 
 pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
@@ -400,6 +412,117 @@ fn extract_fn_decls_from_decl(decl: &Decl) -> Vec<(&str, &Function)> {
                 return Vec::new();
             };
             block.body.iter().flat_map(extract_fn_decls).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The interface name that `export = <ident>;` together with `declare
+/// const <ident>: <TypeRef>;` (`let`/`var` too) resolves to, if the file
+/// uses that shape -- the specific pattern that identifies "this
+/// interface IS the package's own namespace object" for
+/// `extract_interface_method_decls`, as opposed to just some interface
+/// used elsewhere as an ordinary parameter/return type (e.g. a callback
+/// interface that has nothing to do with the package's own exports).
+/// `<TypeRef>` may be namespace-qualified (`_.LoDashStatic`); only the
+/// rightmost segment is used, matching how every interface here is
+/// tracked by its own bare name regardless of which namespace it's
+/// nested in.
+fn export_assignment_interface_name(module: &Module) -> Option<String> {
+    let exported = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+            match export.expr.as_ref() {
+                Expr::Ident(ident) => Some(ident.sym.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    })?;
+    module.body.iter().find_map(|item| {
+        let ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(var_decl))) = item else {
+            return None;
+        };
+        var_decl.decls.iter().find_map(|declarator| {
+            let Pat::Ident(binding) = &declarator.name else {
+                return None;
+            };
+            if binding.id.sym.as_str() != exported {
+                return None;
+            }
+            let annotation = binding.type_ann.as_ref()?;
+            let TsType::TsTypeRef(ty_ref) = annotation.type_ann.as_ref() else {
+                return None;
+            };
+            match &ty_ref.type_name {
+                TsEntityName::Ident(ident) => Some(ident.sym.to_string()),
+                TsEntityName::TsQualifiedName(qualified) => {
+                    Some(qualified.right.sym.to_string())
+                }
+            }
+        })
+    })
+}
+
+/// Every method signature from every declaration (top-level or inside a
+/// `declare namespace` block) of the one interface named `target` --
+/// parallel to `extract_fn_decls`, for an `export = obj` binding whose
+/// declared type is an interface with method members rather than a
+/// plain callable/namespace-function object. Real-world example:
+/// lodash's `declare const _: _.LoDashStatic;` with `interface
+/// LoDashStatic { chunk(...): ...; /* ~300 more */ }`, commonly re-opened
+/// (TS declaration merging) across several files each augmenting the
+/// same interface with a handful of methods -- rather than actually
+/// merging same-named interfaces into one combined type, this just
+/// extracts every declaration's own methods independently, the same
+/// "grab every function-shaped thing, wherever it is" policy
+/// `extract_fn_decls` already applies to plain functions; a name used by
+/// more than one still only needs *a* signature that classifies, and
+/// `Classification::classify_all` already falls back to `Fallback` for a
+/// name with more than one anyway. Restricted to `target` (see
+/// `export_assignment_interface_name`) rather than every interface in
+/// the file: an interface used only as some other value's parameter or
+/// return type (e.g. a callback interface with its own unrelated
+/// methods) must not contribute spurious package-level functions.
+fn extract_interface_method_decls<'a>(
+    item: &'a ModuleItem,
+    target: &str,
+) -> Vec<(String, &'a TsMethodSignature)> {
+    match item {
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => {
+            extract_interface_method_decls_from_decl(decl, target)
+        }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+            extract_interface_method_decls_from_decl(&export.decl, target)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_interface_method_decls_from_decl<'a>(
+    decl: &'a Decl,
+    target: &str,
+) -> Vec<(String, &'a TsMethodSignature)> {
+    match decl {
+        Decl::TsInterface(iface) if iface.id.sym.as_str() == target => iface
+            .body
+            .body
+            .iter()
+            .filter_map(|member| match member {
+                TsTypeElement::TsMethodSignature(method) if !method.computed => {
+                    type_property_name(&method.key).map(|name| (name, method))
+                }
+                _ => None,
+            })
+            .collect(),
+        Decl::TsModule(module_decl) => {
+            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+                return Vec::new();
+            };
+            block
+                .body
+                .iter()
+                .flat_map(|item| extract_interface_method_decls(item, target))
+                .collect()
         }
         _ => Vec::new(),
     }
@@ -824,6 +947,133 @@ fn lower_dts_function(
         .collect::<Vec<_>>();
 
     let ret = match &func.return_type {
+        Some(ann) => classify(&ann.type_ann),
+        None => DtsType::Native(HirType::Void),
+    };
+
+    DtsFunction {
+        name,
+        generic,
+        params,
+        required_params,
+        rest_param,
+        ret,
+    }
+}
+
+/// Like `lower_dts_function`, for an interface's method signature instead
+/// of a plain ambient function declaration -- the same shape of
+/// information (name, optional generics, fixed/rest parameters, return
+/// type), just spread across `TsMethodSignature`'s own AST fields
+/// (`TsFnParam` parameters, `type_ann` for the return) rather than
+/// `Function`'s.
+fn lower_dts_method_signature(
+    name: &str,
+    method: &TsMethodSignature,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> DtsFunction {
+    let name = name.to_string();
+    let generic = method.type_params.as_ref().map(|parameters| DtsGenericFunction {
+        type_params: parameters
+            .params
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name.sym.to_string(),
+                    parameter.constraint.as_deref().map(describe_ts_type),
+                )
+            })
+            .collect(),
+        param_types: method
+            .params
+            .iter()
+            .map(|parameter| match parameter {
+                TsFnParam::Ident(binding) => binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| describe_ts_type(&annotation.type_ann))
+                    .unwrap_or_else(|| "Json".into()),
+                _ => "Json".into(),
+            })
+            .collect(),
+    });
+    let mut substitution = HashMap::new();
+    if let Some(type_params) = &method.type_params {
+        for parameter in &type_params.params {
+            let Some(constraint) = &parameter.constraint else {
+                continue;
+            };
+            if let DtsType::Native(constraint) = resolve_ts_type_with_substitution(
+                constraint,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            ) {
+                substitution.insert(parameter.name.sym.to_string(), constraint);
+            }
+        }
+    }
+    let classify = |ty: &TsType| {
+        resolve_ts_type_with_substitution(
+            ty,
+            &substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )
+    };
+
+    let rest_param = method.params.last().and_then(|param| {
+        let TsFnParam::Rest(rest) = param else {
+            return None;
+        };
+        let name = match rest.arg.as_ref() {
+            Pat::Ident(binding) => binding.id.sym.to_string(),
+            _ => "rest".to_string(),
+        };
+        let ty = match rest.type_ann.as_ref() {
+            Some(annotation) => match annotation.type_ann.as_ref() {
+                TsType::TsArrayType(array) => classify(&array.elem_type),
+                other => DtsType::Unsupported(format!(
+                    "rest parameter must have an array type, found {}",
+                    describe_ts_type(other)
+                )),
+            },
+            None => DtsType::Unsupported("missing rest parameter type annotation".into()),
+        };
+        Some((name, ty))
+    });
+    let fixed_param_count = method.params.len() - usize::from(rest_param.is_some());
+    let required_params = method
+        .params
+        .iter()
+        .take(fixed_param_count)
+        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.optional))
+        .count();
+    let params = method
+        .params
+        .iter()
+        .take(fixed_param_count)
+        .enumerate()
+        .map(|(i, param)| {
+            let TsFnParam::Ident(binding) = param else {
+                let reason =
+                    "unsupported parameter pattern (only simple identifiers are classified yet)"
+                        .to_string();
+                return (format!("arg{i}"), DtsType::Unsupported(reason));
+            };
+            let param_name = binding.id.sym.to_string();
+            let ty = match &binding.type_ann {
+                Some(ann) => classify(&ann.type_ann),
+                None => DtsType::Unsupported("missing type annotation".to_string()),
+            };
+            (param_name, ty)
+        })
+        .collect::<Vec<_>>();
+
+    let ret = match &method.type_ann {
         Some(ann) => classify(&ann.type_ann),
         None => DtsType::Native(HirType::Void),
     };
