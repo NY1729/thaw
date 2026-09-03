@@ -824,3 +824,68 @@ fn a_non_tail_throw_still_skips_the_rest_of_every_caller() {
     );
 }
 
+#[test]
+fn promise_resolve_produces_an_already_fulfilled_promise() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const value = await Promise.resolve(42);
+            console.log(value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "promise_resolve_value"), "42\n");
+}
+
+#[test]
+fn promise_reject_carries_a_tagged_error_through_await() {
+    let source = r#"
+        async function main(): Promise<void> {
+            try {
+                await Promise.reject(new TypeError("bad promise"));
+            } catch (e) {
+                console.log(e.message);
+                console.log(e.name);
+                console.log(e instanceof TypeError);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_reject_tagged_error"),
+        "bad promise\nTypeError\ntrue\n"
+    );
+}
+
+#[test]
+fn promise_resolve_assimilates_an_existing_promise() {
+    let source = r#"
+        async function later(): Promise<number> {
+            return 7;
+        }
+        async function main(): Promise<void> {
+            const value = await Promise.resolve(later());
+            console.log(value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_resolve_assimilates_a_promise"),
+        "7\n"
+    );
+}
+
+#[test]
+fn promise_all_rejects_when_one_element_is_promise_reject() {
+    let source = r#"
+        async function main(): Promise<void> {
+            try {
+                await Promise.all([Promise.resolve(1), Promise.reject<number>("nope")]);
+                console.log("must not print");
+            } catch (e) {
+                console.log("caught: " + e);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_all_with_reject"),
+        "caught: nope\n"
+    );
+}
+
