@@ -640,6 +640,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, class_name, "instanceof class name")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_set_pending_exception_object" => {
+                        let [value] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        if !matches!(self.infer_expr_type(value)?, HirType::Object(_)) {
+                            return Err(format!("{name} expects an object operand"));
+                        }
+                        return Ok(HirType::Void);
+                    }
                     "__thaw_string_char_code_at" => {
                         let [value, index] = args.as_slice() else {
                             return Err("string charCodeAt expects two operands".into());

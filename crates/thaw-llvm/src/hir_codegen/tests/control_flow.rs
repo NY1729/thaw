@@ -952,3 +952,63 @@ fn multi_level_error_subclass_instanceof_matches_every_ancestor() {
     );
 }
 
+#[test]
+fn as_cast_reads_a_caught_errors_field_after_instanceof_narrowing() {
+    let source = r#"
+        class MyError extends Error {
+            code: number;
+            constructor(message: string, code: number) {
+                super(message);
+                this.code = code;
+            }
+        }
+        function main(): void {
+            try {
+                throw new MyError("bad thing", 42);
+            } catch (e) {
+                if (e instanceof MyError) {
+                    console.log((e as MyError).code);
+                }
+                console.log(e.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_error_field_via_as_cast"),
+        "42\nbad thing\n"
+    );
+}
+
+#[test]
+fn instanceof_guard_skips_the_as_cast_for_an_unrelated_thrown_value() {
+    let source = r#"
+        class MyError extends Error {
+            code: number;
+            constructor(message: string, code: number) {
+                super(message);
+                this.code = code;
+            }
+        }
+        function main(): void {
+            try {
+                throw "plain string";
+            } catch (e) {
+                if (e instanceof MyError) {
+                    console.log((e as MyError).code);
+                } else {
+                    console.log("not a MyError");
+                }
+                console.log(e.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(
+            source,
+            "as_cast_guarded_by_instanceof"
+        ),
+        "not a MyError\nplain string\n"
+    );
+}
+
+

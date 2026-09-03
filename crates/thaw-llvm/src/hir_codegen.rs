@@ -84,6 +84,15 @@ const TOP_LEVEL_INIT_GUARD_SYMBOL: &str = "__thaw_top_level_initialized";
 /// generated-module state preserves the existing function ABI (important for
 /// C FFI) while allowing callers to branch to their nearest lexical catch.
 const PENDING_EXCEPTION_SYMBOL: &str = "__thaw_pending_exception";
+/// Parallel, opt-in companion to `PENDING_EXCEPTION_SYMBOL`: null unless the
+/// thrown value was a real (Error-family) class instance, in which case it
+/// holds that object's own pointer so a catch site can read fields beyond
+/// `.message`/`.name` after an explicit `as` cast (see
+/// `docs/design/exceptions.md` section 3). Every other reader of the
+/// exception state (console.log, N-API, Lambda error reporting,
+/// `Promise.reject`) only ever looks at the string channel and stays
+/// completely unaware this one exists.
+const PENDING_EXCEPTION_OBJECT_SYMBOL: &str = "__thaw_pending_exception_object";
 
 /// Byte size of an array's length header (a single `i64`) that precedes its
 /// elements in the arena-allocated buffer. See the module doc for the layout.
@@ -286,6 +295,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_global(ptr_ty, None, PENDING_EXCEPTION_SYMBOL);
         pending.set_linkage(Linkage::Internal);
         pending.set_initializer(&ptr_ty.const_null());
+        let pending_object = self
+            .module
+            .add_global(ptr_ty, None, PENDING_EXCEPTION_OBJECT_SYMBOL);
+        pending_object.set_linkage(Linkage::Internal);
+        pending_object.set_initializer(&ptr_ty.const_null());
     }
 
     fn declare_globals(&mut self, program: &HirProgram) -> Result<(), String> {
@@ -514,6 +528,12 @@ impl<'ctx> HirCompiler<'ctx> {
     fn pending_exception(&self) -> inkwell::values::GlobalValue<'ctx> {
         self.module
             .get_global(PENDING_EXCEPTION_SYMBOL)
+            .expect("exception state is declared before code generation")
+    }
+
+    fn pending_exception_object(&self) -> inkwell::values::GlobalValue<'ctx> {
+        self.module
+            .get_global(PENDING_EXCEPTION_OBJECT_SYMBOL)
             .expect("exception state is declared before code generation")
     }
 
