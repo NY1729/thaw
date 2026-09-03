@@ -157,7 +157,37 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             match value {
                 BasicValueEnum::PointerValue(ptr) => {
-                    self.compile_console_text(ptr, newline, "console_pointer", descriptor)?;
+                    // Every other explicitly-typed case above has already
+                    // taken its own branch, so hir_type is either untracked
+                    // (as it is for a `catch` binding, which codegen only
+                    // ever gives a raw LLVM slot, not an entry in
+                    // `variable_hir_types`) or genuinely `HirType::Str` --
+                    // both were already printed as a plain C string before
+                    // this call existed. A string thrown via
+                    // `new Error(...)`/`new TypeError(...)`/etc. carries its
+                    // class name ahead of the message behind a marker byte
+                    // (see `thaw_hir::lower::expressions::lowering`); this
+                    // strips that back off before printing, so
+                    // `console.log(e)` shows just the message, exactly as
+                    // it did before that tagging existed. An ordinary
+                    // string without the marker passes through unchanged.
+                    let message = self
+                        .builder
+                        .build_call(
+                            self.module.get_function("thaw_error_message").unwrap(),
+                            &[ptr.into()],
+                            "console_error_message",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("thaw_error_message returned no value")?;
+                    self.compile_console_text(
+                        message.into_pointer_value(),
+                        newline,
+                        "console_error_message",
+                        descriptor,
+                    )?;
                 }
                 BasicValueEnum::FloatValue(f) => {
                     self.compile_console_number(f, newline, "console_number", descriptor)?;

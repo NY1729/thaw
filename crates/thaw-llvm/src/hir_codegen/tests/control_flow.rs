@@ -212,13 +212,42 @@ fn compiles_throw_new_error_constructors() {
             try {
                 throw new Error();
             } catch (e) {
-                console.log("[" + e + "]");
+                console.log("[" + e.message + "]");
             }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "throw_new_error"),
         "boom\nwrong type\n[]\n"
+    );
+}
+
+#[test]
+fn caught_errors_expose_message_name_and_instanceof() {
+    let source = r#"
+        function main(): void {
+            try {
+                throw new TypeError("wrong type");
+            } catch (e) {
+                console.log(e.message);
+                console.log(e.name);
+                console.log(e instanceof TypeError);
+                console.log(e instanceof Error);
+                console.log(e instanceof RangeError);
+            }
+            try {
+                throw "plain string";
+            } catch (e) {
+                console.log(e.message);
+                console.log(e.name);
+                console.log(e instanceof Error);
+                console.log(e instanceof TypeError);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_error_properties"),
+        "wrong type\nTypeError\ntrue\ntrue\nfalse\nplain string\nError\ntrue\nfalse\n"
     );
 }
 
@@ -700,6 +729,26 @@ fn frame_split_routes_inner_catch_rethrow_to_outer_catch() {
     assert_eq!(
         compile_and_run(source, "nested_async_catch_rethrow"),
         "inner\nwrapped\nouter-caught\ndone\n"
+    );
+}
+
+#[test]
+fn catch_without_a_binding_still_prints_correctly() {
+    let source = r#"
+        function boom(): number {
+            throw "x";
+        }
+        function main(): void {
+            try {
+                boom();
+            } catch {
+                console.log("missing");
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "catch_without_a_binding_still_prints_correctly"),
+        "missing\n"
     );
 }
 
