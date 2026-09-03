@@ -20500,6 +20500,27 @@ fn typed_dynamic_declaration(
         if napi { "napi" } else { "js" },
         encoded
     );
+    // `argsArray` is this codebase's own reserved convention name for
+    // "this single parameter already holds the whole, pre-packed args
+    // array to spread onto the real call" -- thaw-bridge's own generic
+    // fallback (`generate_shim`, `function {name}(argsArray: Json):
+    // Json { return callDynamic(...); }`) and thaw-registry's hand-
+    // written node built-in shims (`declare function join(argsArray:
+    // any): any;`) both rely on it. Indistinguishable, from a `.d.ts`
+    // signature alone, from an ordinary single-parameter function that
+    // happens to classify the same way (`Unsupported`/`Json`) -- but
+    // this function's own per-parameter JSON packing would wrap it as
+    // one more argument slot rather than spreading it, breaking the
+    // real call's arity (real example: `path.join("a","b")`, which this
+    // would otherwise call as `join(["a","b"])`, joining the array's
+    // own `.toString()` instead of its two path segments). Bails so the
+    // untyped fallback -- which already passes `argsArray` straight
+    // through with no such wrapping -- wins instead.
+    if let [(name, _)] = function.params.as_slice() {
+        if name == "argsArray" && function.rest_param.is_none() {
+            return None;
+        }
+    }
     if function.rest_param.is_some() {
         return typed_dynamic_rest_declaration(
             function,
@@ -20701,14 +20722,49 @@ fn typed_dynamic_declaration(
     // typed declaration; callers can invoke it dynamically
     // (callDynamicValue/callDynamicValueHandle) or just hold/print it,
     // even without dedicated support for its own methods/properties.
+    //
+    // Kept as the *real* `Function`/`CallableFunction` type here (not
+    // collapsed to `JsValue` the way `ret`'s own rendered text below is)
+    // specifically so `typed_dynamic_callable_adapter` can still
+    // recognize and wrap it -- collapsing this one too used to make
+    // every callback-returning Fallback function (real example: nanoid's
+    // `customAlphabet(alphabet, size?): (size?: number) => string`)
+    // silently skip the adapter and hand back a bare, uninvokable
+    // `JsValue` instead of a real callable.
     let ret_hir_type = match &function.ret {
-        thaw_bridge::DtsType::Native(
-            thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..),
-        )
-        | thaw_bridge::DtsType::Unsupported(_) => thaw_hir::HirType::JsValue,
+        // A return type declared literally `any`/`unknown` (as opposed
+        // to one that merely fails to classify -- a class instance, a
+        // conditional type, ...) means "arbitrary JSON-shaped data", the
+        // same as it already does for a *parameter* of that type
+        // (`json_convertible_native_type`'s own reasoning) -- not "an
+        // opaque handle with no defined shape at all". Real example:
+        // thaw-registry's own node built-in shims, `declare function
+        // join(argsArray: any): any;`, whose actual runtime result
+        // (`path.join(...)`, a plain string) callers already round-trip
+        // through ordinary JSON conversions like `String(...)`; those
+        // broke (`String(...)` only accepts `Json`) the moment this
+        // classified as `Unsupported` too and got the same blanket
+        // `JsValue` substitution any other Unsupported return does.
+        // Matched by text since `DtsType::Unsupported` only carries a
+        // diagnostic reason, not the original type -- coupled to
+        // `keyword_name`'s exact wording for `any`/`unknown` in
+        // thaw-bridge's `classify_ts_type`.
+        thaw_bridge::DtsType::Unsupported(reason)
+            if reason == "`any` is not supported" || reason == "`unknown` is not supported" =>
+        {
+            thaw_hir::HirType::Json
+        }
+        thaw_bridge::DtsType::Unsupported(_) => thaw_hir::HirType::JsValue,
         thaw_bridge::DtsType::Native(ret) => ret.clone(),
     };
-    let ret = render_dynamic_type(&ret_hir_type)?;
+    let ret = if matches!(
+        ret_hir_type,
+        thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
+    ) {
+        "JsValue".to_string()
+    } else {
+        render_dynamic_type(&ret_hir_type)?
+    };
     let render_params = |arity: usize| {
         params[..arity]
             .iter()
@@ -20807,18 +20863,34 @@ fn typed_dynamic_arity_dispatch_declaration(
     declarations.push_str(&format!("function {wrapper}({wrapper_params}): {ret} {{\n"));
     for arity in (required_params + 1..=params.len()).rev() {
         // Every optional slot up to `arity`, not just the last one, needs
-        // its own `!== undefined` guard *nested* around this call, not
+        // its own `!= undefined` guard *nested* around this call, not
         // ANDed into one condition: the type-narrowing pass only narrows
-        // the single variable a bare `a !== undefined` guard names, and
-        // recurses into just the left side of an `a !== undefined && b
-        // !== undefined` chain, so joining them with `&&` would leave
-        // every conjunct but the first still statically `Optional(...)`.
+        // the single variable a bare `a != undefined` guard names, and
+        // recurses into just the left side of an `a != undefined && b !=
+        // undefined` chain, so joining them with `&&` would leave every
+        // conjunct but the first still statically `Optional(...)`.
         // Nesting instead gets each one narrowed by its own `if`, and all
         // of them stay narrowed going deeper. Real case: uuid's
         // `v4(options?, buf?, offset?)`, three trailing optional params.
+        //
+        // Loose `!=`, not strict `!==`: identical to strict for a plain
+        // optional parameter (its only two states are exactly `undefined`
+        // or a value, so there's no coercion difference to worry about),
+        // but required when the parameter is *also* nullable
+        // (`position?: number | null`, thaw-registry's own `fs.readvSync`/
+        // `writevSync`) -- the narrowing pass only narrows a `Nullish`
+        // (optional-and-nullable) variable's own strict-equality-checked
+        // sibling comparisons (`==`/`!=`) against `undefined`/`null`, not
+        // `===`/`!==` ones, since strict `!== undefined` alone doesn't
+        // rule out `null` the way loose `!= undefined` does. Left
+        // narrowed to `Optional`/`Nullable`/`Nullish`'s appropriate
+        // wrapper, `!==` here forwarded the *whole* `Nullish` value
+        // unnarrowed into this arity's own fixed (non-optional) parameter
+        // slot, a type mismatch this codebase's own arity-checked calls
+        // don't tolerate.
         let optional_slots = &params[required_params..arity];
         for (name, _) in optional_slots.iter().rev() {
-            declarations.push_str(&format!("    if ({name} !== undefined) {{\n"));
+            declarations.push_str(&format!("    if ({name} != undefined) {{\n"));
         }
         let arguments = params[..arity]
             .iter()
