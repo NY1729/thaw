@@ -20310,26 +20310,7 @@ fn typeof_discriminator(ty: &thaw_hir::HirType) -> Option<&'static str> {
     match ty {
         thaw_hir::HirType::F64 => Some("number"),
         thaw_hir::HirType::Str => Some("string"),
-        // `Bool` deliberately excluded, unlike `F64`/`Str` above: a
-        // Union whose members include `Bool` (real example: lodash's
-        // `random(floating?: boolean): number` vs. `random(max: number,
-        // floating?: boolean): number`) reproducibly corrupts the
-        // `boolean` argument's own value (observed as `5e-324` --
-        // `Number.MIN_VALUE`, the bit pattern for the integer `1`
-        // bit-cast to `f64` instead of converted, suggesting the
-        // packed union payload gets unpacked through the wrong member's
-        // branch somewhere) when compiled *inside* a real npm package's
-        // full-size `.d.ts` -- extensively bisected (isolated
-        // reproductions with up to 2000 filler functions, 200 other
-        // Bool/F64-discriminated overloads, and 280 TypeScript
-        // declaration-merged `interface` blocks all failed to
-        // reproduce it; only real lodash's own multi-thousand-line
-        // `.d.ts` does) without finding the actual mechanism. `F64`/
-        // `Str` discriminators are unaffected (`ms`'s own real package
-        // -- the case this mechanism exists for -- verified correct).
-        // Until root-caused, a `Bool`-discriminated overload set falls
-        // back to plain first-overload-wins instead of risking silent
-        // data corruption.
+        thaw_hir::HirType::Bool => Some("boolean"),
         _ => None,
     }
 }
