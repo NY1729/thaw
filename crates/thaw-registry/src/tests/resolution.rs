@@ -266,6 +266,64 @@ fn installed_package_inlines_default_reexports() {
 }
 
 #[test]
+fn installed_package_inlines_import_equals_reexports() {
+    // `import Name = require("./path")` (a TS import-equals declaration)
+    // followed by a *local* `export { Name as exported };` (no `from`
+    // clause -- `Name` is already a value bound earlier in the same
+    // file) -- real-world example: semver's `index.d.ts`, which imports
+    // one function per file this way and re-exports every one of them
+    // together. `Name` resolves through its own file's `export = X;` to
+    // the identifier actually declared there, one file per function, so
+    // (unlike the `export { default as x } from './x'` shape) each
+    // specifier in the same `export { ... }` can resolve to a different
+    // file.
+    let scratch = temp_registry("installed-dts-import-equals-scratch");
+    let registry = temp_registry("installed-dts-import-equals-registry");
+    let package = scratch.join("node_modules/ver-kit");
+    fs::create_dir_all(package.join("functions")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"ver-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import verValid = require('./functions/valid');\n\
+         import verMajor = require('./functions/major');\n\
+         export { verValid as valid, verMajor as major };\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("functions/valid.d.ts"),
+        "declare function valid(version: string): string | null;\nexport = valid;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("functions/major.d.ts"),
+        "declare function major(version: string): number;\nexport = major;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { valid: function(v) { return v; }, major: function(v) { return 1; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "ver-kit").unwrap();
+    let declarations = resolve(&registry, "ver-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("declare function valid(version: string): string | null"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("function major(version: string): number"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_triple_slash_referenced_declarations() {
     // `/// <reference path="..." />` -- the classic DefinitelyTyped-style
     // split for a package whose real API is spread across many files
