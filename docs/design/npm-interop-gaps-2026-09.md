@@ -108,3 +108,15 @@ zodのAPIは「ジェネリックなスキーマクラス階層 + メソッド�
 4. Fallbackクラスのメソッド呼び出し機構 — 大規模、mime/dayjsを完全に動かす土台。着手前に既存`JsValue`/`callDynamicValueHandle`機構をさらに調査し、設計を1段深める。
 5. chalk — #4完成後に再評価。今回のスコープからは外す。
 6. zod — 対象外。
+
+## 実装結果（2026-09-03）
+
+1〜4を実装・コミット済み（各コミットの本文に詳細）。
+
+- **#1 camelcase**: 想定通り実装。Union型のJSON化を配列要素・オブジェクトフィールドの両階層に追加。
+- **#2 date-fns**: `HirType::Date`の新設ではなく、既存の`date_object_type`（`{timestamp: F64}`のObject）をそのまま`.d.ts`の`Date`型分類に流用する方針に着地（タグ付きJSON封筒案より低リスク）。QuickJS-NG側で`Date.prototype.toJSON`オーバーライドと`JSON.parse`のreviverを追加し、`{"timestamp": N}`を境界での共通ワイヤ形式にした。実装途中で3件の独立したバグ（generic関数の非bare型パラメータ戻り値が無条件`JsValue`になる、生成される宣言がoptional trailing paramを持つ非genericなambient関数になった場合のarity不整合、`Json`にフォールバックした型パラメータへの実引数マッチングがConcrete比較で失敗する、`resolve_value_impl`が`undefined`結果でエラーになる)を発見・修正。**既知の副作用**: date-fns/dayjsのローカル時刻ベースのformatトークン（`HH`等）はホストのOSタイムゾーンに依存する（QuickJS-NGのDateはUTC専用化されていない）。日付計算・UTCアクセサ自体には影響なし。
+- **#3 mime**: `import Mime = require("./Mime")`のような、値の型が別ファイルにあるケースをインライン化。mimeの`Mime`クラス本体はflatten後の`package.d.ts`に載るようになったが、`mime`という値自体は「関数ではなく既製のシングルトンオブジェクト」であるため、素の`JsValue`としてすら現状インポートできない（`mime has no export named default`）。この「シングルトン値エクスポートの公開」は#4の範囲にも含めず、未解決のまま。
+- **#4 Fallbackクラスのメソッド呼び出し**: 当初想定より掘り下げたところ、実際に必要だったのは「QuickJS-NG版のtypedメソッド呼び出しコード生成」（小〜中規模、既存のnapiクラス機構をbackend分岐で共有）に加えて、**「Fallbackのファクトリ関数の戻り値をどのクラスのインスタンスとして追跡するか」**（`function_return_named_types`の新設、`declare namespace`内のクラス抽出漏れの修正、`class_methods.rs`への`FactoryClassRewrite`追跡の追加）という、事前调査時には見えていなかった追加の一段だった。ユーザーに詳細を報告した上で「リスクを承知で実装する」の判断を得て実施。
+  - **できるようになったこと**: `dayjs(...).format(...)`/`.year()`/`.month()`/`.date()`/`.isValid()`など、Fallbackのファクトリ関数が返すクラスインスタンスへの**インスタンスメソッド呼び出し**が実際のdayjsパッケージで動作する。
+  - **意図的に対象外のまま**: mimeのような「関数ではなくpackageが直接エクスポートする既製のシングルトン値」の経路（import走査＋非関数値エクスポートの公開が別途必要）、Fallbackクラスに対する`new ClassName(...)`、static メソッド、プロパティのgetter/setter（QuickJS-NG側のプロパティ取得/設定・コンストラクトの既存プリミティブがJSONではなくハンドルを返す別プロトコルのため）。
+  - **chalk**: #4がインスタンスメソッド呼び出しに留まったため、`.red.bold(...)`のような「プロパティアクセスがハンドルを返す再帰的チェーン」は依然として範囲外。
