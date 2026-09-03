@@ -102,6 +102,18 @@ struct FnSignature {
     generic_param_patterns: Vec<GenericTypePattern>,
     generic_param_optional: Vec<bool>,
     generic_return_type: Option<Box<TsType>>,
+    /// The return type's own `GenericTypePattern`, when the type
+    /// parameters used to build `generic_param_patterns` also cover it --
+    /// used only as a *fallback* source for inferring a type parameter a
+    /// call's arguments never mention at all (e.g. `nanoid<Type extends
+    /// string>(size?: number): Type`, where `Type` appears solely in the
+    /// return position), matched against a call site's own contextual
+    /// expected type (see `infer_generic_type_tuple` and
+    /// `lower_expr_with_expected_type`). `None` wherever this isn't
+    /// computed (every signature but a plain top-level function
+    /// declaration's, for now) -- inference simply never gets this extra
+    /// source there, same as before this existed.
+    generic_return_pattern: Option<GenericTypePattern>,
 }
 
 #[derive(Clone)]

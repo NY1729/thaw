@@ -1109,10 +1109,28 @@ fn infer_generic_type_tuple(
     actual_params: &[HirType],
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
+    expected_return: Option<&HirType>,
 ) -> Result<Vec<HirType>, String> {
     let mut inferred = HashMap::new();
     for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
         match_generic_pattern(pattern, actual, &mut inferred)?;
+    }
+    // A type parameter that appears in no argument at all (e.g. `nanoid
+    // <Type extends string>(size?: number): Type`, where `Type` shows up
+    // solely in the return position) has nothing above to infer it from.
+    // If the call site has a contextual expected type to offer (a
+    // `let`/`const` declaration's own annotation -- see
+    // `lower_expr_with_expected_type`), try matching it against the
+    // return type's own pattern as a last resort before falling through
+    // to the "cannot infer" error below. Never lets this override an
+    // argument that already provided a value: `match_generic_pattern`'s
+    // `Variable` case only *checks* an existing entry for a conflict
+    // rather than overwriting it, and any such conflict here is just
+    // discarded (kept silent, unlike a real argument mismatch) since a
+    // merely-unhelpful contextual type shouldn't turn into a hard error
+    // when the call was otherwise going to succeed without it.
+    if let (Some(expected), Some(pattern)) = (expected_return, &signature.generic_return_pattern) {
+        let _ = match_generic_pattern(pattern, expected, &mut inferred);
     }
     let mut types = Vec::with_capacity(signature.generic_type_params.len());
     let mut substitution = HashMap::new();

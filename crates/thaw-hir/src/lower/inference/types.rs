@@ -1298,6 +1298,7 @@ impl<'a> FnLowerer<'a> {
                                 &actual,
                                 self.interfaces,
                                 self.generic_interfaces,
+                                None,
                             )?;
                             let substitution = sig
                                 .generic_type_params

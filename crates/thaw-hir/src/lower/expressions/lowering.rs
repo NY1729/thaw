@@ -1520,4 +1520,39 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(source_name, source_type, source)])
     }
 
+    /// Lowers `expr` exactly like `lower_expr`, except that if `expr` is
+    /// directly a call expression, `expected` (when given) is offered to
+    /// that call's own generic-type-parameter inference as a fallback for
+    /// any type parameter its arguments alone don't determine -- needed
+    /// for a function like `nanoid<Type extends string>(size?: number):
+    /// Type`, whose only type parameter appears solely in the return
+    /// position, so `const id: string = nanoid()` is the only place
+    /// `Type`'s value (`string`, from this very annotation) is ever
+    /// written down.
+    ///
+    /// Deliberately not threaded generally through `lower_expr` itself --
+    /// this compiler's types are checked by lowering an expression first
+    /// and comparing the result against an expected type after
+    /// (`coerce_to_declared`), and changing that everywhere would be a
+    /// much larger, riskier change than this one narrow addition needs.
+    /// Instead this is called only from the specific "sink" points that
+    /// already know an expected type ahead of lowering (currently: a
+    /// `let`/`const` declaration's own type annotation), via a one-shot
+    /// hint (`expected_return_hint`) that `lower_call` takes (not just
+    /// reads) as its very first action, before lowering this call's own
+    /// arguments -- so it can never leak into a nested call's inference,
+    /// and never lingers if this expression turns out not to be a call
+    /// `lower_call` actually consumes it for.
+    fn lower_expr_with_expected_type(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        if matches!(expr, Expr::Call(_)) {
+            self.expected_return_hint = expected.cloned();
+        }
+        let result = self.lower_expr(expr);
+        self.expected_return_hint = None;
+        result
+    }
 }

@@ -253,7 +253,7 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::FunctionRef(source, signature.params.clone(), ret)
                         }
                     }
-                    _ => self.lower_expr(init)?,
+                    _ => self.lower_expr_with_expected_type(init, annotated.as_ref())?,
                 };
 
                 let ty = match annotated {
