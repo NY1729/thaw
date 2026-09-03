@@ -21041,8 +21041,21 @@ fn observed_identifier_call_arities(
     Ok(finder.arities)
 }
 
+/// The name a package's own bundled `.d.ts` binds as its "default"
+/// export, when there's a single unambiguous one -- `export = x;`
+/// (CommonJS-style, the original shape this covered), but also either
+/// ESM shape for a *named* default export: `export default x;` (an
+/// existing identifier, resolved to that name) and `export default
+/// function name(...): T;` (the function's own name, exactly what
+/// `parse_dts`'s `extract_fn_decls` already registers it under -- see
+/// its own doc comment). Without this, a package exporting more than one
+/// function this way (real example: `leven`'s default `leven` alongside
+/// its named `closestMatch`) had no way to resolve which one `import
+/// leven from "leven"` actually means: the only other source for
+/// `external_exports`'s `"default"` key is a package with *exactly one*
+/// function total, a fallback this bypasses entirely once it names one.
 fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
-    use thaw_parser::ast::{Expr, ModuleDecl, ModuleItem};
+    use thaw_parser::ast::{DefaultDecl, Expr, ModuleDecl, ModuleItem};
 
     let module = thaw_parser::parse_typescript(source)?;
     Ok(module.body.iter().find_map(|item| match item {
@@ -21053,6 +21066,17 @@ fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
                 None
             }
         }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(export)) => {
+            if let Expr::Ident(identifier) = export.expr.as_ref() {
+                Some(identifier.sym.to_string())
+            } else {
+                None
+            }
+        }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
+            DefaultDecl::Fn(fn_expr) => fn_expr.ident.as_ref().map(|ident| ident.sym.to_string()),
+            _ => None,
+        },
         _ => None,
     }))
 }
