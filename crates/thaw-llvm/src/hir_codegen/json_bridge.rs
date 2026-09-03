@@ -225,6 +225,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     preserve_undefined,
                 );
             }
+            HirType::Union(elements) => {
+                return self.compile_json_object_set_union(
+                    json,
+                    key,
+                    value.into_struct_value(),
+                    elements,
+                    preserve_undefined,
+                );
+            }
             HirType::Undefined => return Ok(()),
             HirType::Null => value = self.compile_json_null()?,
             _ => {}
@@ -279,6 +288,85 @@ impl<'ctx> HirCompiler<'ctx> {
                 "set_dynamic_object_field",
             )
             .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Sets a `Union`-typed object field's JSON value -- the same
+    /// per-member tag dispatch as `compile_json_array_push_union` (see
+    /// its own doc comment), just recursing into
+    /// `compile_json_object_set_native_with_undefined` for the same
+    /// `key` instead of pushing onto an array. Real-world example:
+    /// camelcase's own `Options` fields being read out and marshaled
+    /// for a dynamic call, several of which are themselves optional
+    /// unions once resolved.
+    fn compile_json_object_set_union(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        key: PointerValue<'ctx>,
+        value: StructValue<'ctx>,
+        elements: &[HirType],
+        preserve_undefined: bool,
+    ) -> Result<(), String> {
+        if elements.is_empty() {
+            return Err("cannot serialize an empty union to JSON".into());
+        }
+        let tag = self
+            .builder
+            .build_extract_value(value, 0, "json_object_union_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(value, 1, "json_object_union_payload")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let function = self.current_function();
+        let merge = self.context.append_basic_block(function, "json_object_union_set");
+        for (index, member) in elements.iter().enumerate() {
+            let matched = self
+                .context
+                .append_basic_block(function, "json_object_union_member");
+            if index + 1 == elements.len() {
+                self.builder
+                    .build_unconditional_branch(matched)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                let next = self
+                    .context
+                    .append_basic_block(function, "json_object_union_next");
+                let is_match = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        tag,
+                        self.context.i8_type().const_int(index as u64, false),
+                        "json_object_union_tag_match",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_conditional_branch(is_match, matched, next)
+                    .map_err(|error| error.to_string())?;
+            }
+            self.builder.position_at_end(matched);
+            let member_value = self.unpack_union_payload(payload, member)?;
+            self.compile_json_object_set_native_with_undefined(
+                json,
+                key,
+                member_value,
+                member,
+                preserve_undefined,
+            )?;
+            self.builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| error.to_string())?;
+            if index + 1 != elements.len() {
+                let next = matched
+                    .get_next_basic_block()
+                    .ok_or("union JSON dispatch lost its next comparison block")?;
+                self.builder.position_at_end(next);
+            }
+        }
+        self.builder.position_at_end(merge);
         Ok(())
     }
 
@@ -642,6 +730,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     preserve_undefined,
                 );
             }
+            HirType::Union(elements) => {
+                return self.compile_json_array_push_union(
+                    json,
+                    value.into_struct_value(),
+                    elements,
+                    preserve_undefined,
+                );
+            }
             HirType::Null | HirType::Undefined => {
                 value = self.compile_json_null()?;
             }
@@ -686,7 +782,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Null | HirType::Undefined => "thaw_json_array_push_json",
             other => {
                 return Err(format!(
-                    "console.log cannot serialize collection element {other:?}"
+                    "cannot serialize collection element {other:?} to JSON"
                 ))
             }
         };
@@ -697,6 +793,84 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_array_push",
             )
             .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Pushes a `Union` value onto a JSON array (or, by the same
+    /// mechanism, packs one into a dynamic call's own JSON argument
+    /// array -- both share this function through
+    /// `compile_json_array_push_native_with_undefined`): reads the
+    /// value's own runtime tag and, exactly like `compile_console_union`
+    /// does to print one, dispatches to whichever member is actually
+    /// active, unpacks its payload (`unpack_union_payload`, the same
+    /// helper `HirExpr::UnionValue`'s own codegen uses), and recurses
+    /// into this same push logic with that member's real type -- so a
+    /// union nested inside another union, or one whose active member is
+    /// itself an array/object/etc., serializes correctly too. Real-world
+    /// example: camelcase's own `camelCase(input: string | readonly
+    /// string[], options?): string`.
+    fn compile_json_array_push_union(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        value: StructValue<'ctx>,
+        elements: &[HirType],
+        preserve_undefined: bool,
+    ) -> Result<(), String> {
+        if elements.is_empty() {
+            return Err("cannot serialize an empty union to JSON".into());
+        }
+        let tag = self
+            .builder
+            .build_extract_value(value, 0, "json_union_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(value, 1, "json_union_payload")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let function = self.current_function();
+        let merge = self.context.append_basic_block(function, "json_union_pushed");
+        for (index, member) in elements.iter().enumerate() {
+            let matched = self.context.append_basic_block(function, "json_union_member");
+            if index + 1 == elements.len() {
+                self.builder
+                    .build_unconditional_branch(matched)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                let next = self.context.append_basic_block(function, "json_union_next");
+                let is_match = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        tag,
+                        self.context.i8_type().const_int(index as u64, false),
+                        "json_union_tag_match",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_conditional_branch(is_match, matched, next)
+                    .map_err(|error| error.to_string())?;
+            }
+            self.builder.position_at_end(matched);
+            let member_value = self.unpack_union_payload(payload, member)?;
+            self.compile_json_array_push_native_with_undefined(
+                json,
+                member_value,
+                member,
+                preserve_undefined,
+            )?;
+            self.builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| error.to_string())?;
+            if index + 1 != elements.len() {
+                let next = matched
+                    .get_next_basic_block()
+                    .ok_or("union JSON dispatch lost its next comparison block")?;
+                self.builder.position_at_end(next);
+            }
+        }
+        self.builder.position_at_end(merge);
         Ok(())
     }
 
