@@ -7066,3 +7066,71 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "foo\na_b\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function whose parameter/return type is `Date`, generic
+/// over it (`<DateType extends Date>`) -- real-world example: date-fns's
+/// `format<DateType extends Date>(date: DateType | number | string,
+/// formatStr: string): string` and `addDays<DateType extends Date>(date:
+/// ..., amount: number): DateType`. Exercises the whole round trip: a
+/// Thaw-native `Date` (an object with a `timestamp` field) argument must
+/// arrive on the QuickJS-NG side as a real `instanceof Date` (this fake
+/// package's `format`/`addDays` both throw/misbehave otherwise), and a
+/// real `Date` returned from QuickJS-NG must come back as that same
+/// native shape, usable as a plain `Date` argument to a later call. Only
+/// UTC-based formatting is asserted (never a local-time token like `HH`)
+/// so this doesn't depend on the host's time zone.
+#[test]
+fn fallback_function_with_a_generic_date_argument_and_return_builds_and_runs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-date-generic-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("temporal-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function format<DateType extends Date>(date: DateType | number | string, formatStr: string): string;\n\
+         export declare function addDays<DateType extends Date>(date: DateType | number | string, amount: number): DateType;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function pad(n) { return n < 10 ? '0' + n : '' + n; }\n\
+         module.exports.format = function(date, formatStr) {\n\
+             if (!(date instanceof Date)) throw new Error('Invalid time value');\n\
+             return date.getUTCFullYear() + '-' + pad(date.getUTCMonth() + 1) + '-' + pad(date.getUTCDate());\n\
+         };\n\
+         module.exports.addDays = function(date, amount) {\n\
+             if (!(date instanceof Date)) throw new Error('Invalid time value');\n\
+             return new Date(date.getTime() + amount * 86400000);\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { format, addDays } from "temporal-kit";
+function main(): void {
+    const d = new Date(2024, 0, 15);
+    console.log(format(d, "yyyy-MM-dd"));
+    const later: Date = addDays(d, 10);
+    console.log(format(later, "yyyy-MM-dd"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2024-01-15\n2024-01-25\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

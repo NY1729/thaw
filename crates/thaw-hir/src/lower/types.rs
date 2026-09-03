@@ -1093,6 +1093,20 @@ fn match_generic_pattern(
             }
             Ok(())
         }
+        // A parameter whose type parameter got substituted away into a
+        // plain `Json` fallback (a generic Fallback declaration doing the
+        // same "can't classify it precisely, pass it through as Json"
+        // substitution `typed_dynamic_declaration` already does for
+        // ordinary parameters -- see thaw-cli's shims.rs) still accepts
+        // any real argument type here, the same way `coerce_to_declared`
+        // itself accepts any JSON-convertible value into a `Json`
+        // parameter later. Real example: date-fns's `addDays<DateType
+        // extends Date>(date: DateType | number | string, amount:
+        // number): DateType`, whose `date` union becomes `Concrete(Json)`
+        // once generated, but `DateType` is still inferred from the
+        // return position (a `let`/`const` annotation) -- a real `Date`
+        // argument there must not fail this unrelated pattern check.
+        (GenericTypePattern::Concrete(HirType::Json), _) => Ok(()),
         (GenericTypePattern::Concrete(expected), actual)
             if *expected == HirType::Dynamic || expected == actual =>
         {
