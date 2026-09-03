@@ -62,6 +62,22 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
         Some(_) => return None,
         None => hex,
     };
+    // Distinguishes two ambient declarations that must decode to the
+    // *same* runtime symbol (so both dispatch through the one real JS
+    // function at the far end) but need different Rust/LLVM-level names
+    // because their parameter/return types genuinely differ -- real
+    // example: `ms`'s two overloads, `(value: number, options?): string`
+    // and `(value: string): number`, both really just `ms`. Purely a
+    // disambiguator for thaw-hir's own declaration table; stripped
+    // before hex-decoding and carries no meaning afterward.
+    let hex = match hex.rsplit_once("__overload_") {
+        Some((hex, overload))
+            if !overload.is_empty() && overload.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            hex
+        }
+        _ => hex,
+    };
     if hex.len() % 2 != 0 {
         return None;
     }
