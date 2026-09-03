@@ -19969,10 +19969,166 @@ fn supported_json_collection_element(ty: &thaw_hir::HirType) -> bool {
     }
 }
 
+/// `typed_dynamic_declaration`'s handling for a Fallback function whose
+/// `.d.ts` signature ends in a rest parameter (`...inputs: T[]`, real
+/// example: `clsx(...inputs: ClassValue[]): string`). There's no fixed
+/// arity to declare an extern signature for, so this leans on the same
+/// call-site arity *observation* `generate_napi_class_method_overloads`
+/// already uses for a native addon method's own rest parameters: one
+/// extern declaration per distinct total argument count actually seen in
+/// the user's own call expressions, dispatched by the wrapper (a real,
+/// non-extern function, so its own `...inputs: Json[]` rest parameter
+/// gets the ordinary `native_rest` treatment and really collects every
+/// loose trailing argument into one array) branching on `inputs.length` --
+/// deliberately not the `!== undefined` idiom the optional-parameter
+/// wrapper uses, since a plain length comparison needs no type-narrowing
+/// at all. Every rest slot -- and any unclassifiable fixed parameter, for
+/// the same reason as `typed_dynamic_declaration`'s main path -- is
+/// rendered as `Json`: the real element type (`ClassValue` above) is
+/// often a recursive/aggregate union with no direct FFI ABI anyway, and
+/// the dynamic call already marshals every argument through JSON.
+fn typed_dynamic_rest_declaration(
+    function: &thaw_bridge::DtsFunction,
+    napi: bool,
+    encoded: &str,
+    base_symbol: &str,
+    observed_call_arities: &std::collections::BTreeSet<usize>,
+) -> Option<(String, String)> {
+    if function.generic.is_some() {
+        return None;
+    }
+    let fixed_params = function
+        .params
+        .iter()
+        .map(|(name, ty)| match ty {
+            thaw_bridge::DtsType::Native(ty) => {
+                render_dynamic_type(ty).map(|ty| (name.clone(), ty))
+            }
+            thaw_bridge::DtsType::Unsupported(_) => Some((name.clone(), "Json".to_string())),
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let thaw_bridge::DtsType::Native(ret_ty) = &function.ret else {
+        return None;
+    };
+    let ret = if matches!(
+        ret_ty,
+        thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
+    ) {
+        "JsValue".to_string()
+    } else {
+        render_dynamic_type(ret_ty)?
+    };
+
+    let fixed_count = fixed_params.len();
+    let mut arities: Vec<usize> = observed_call_arities
+        .iter()
+        .copied()
+        .filter(|count| *count >= function.required_params)
+        .collect();
+    if arities.is_empty() {
+        // No statically-visible call to key arities off of (e.g. every
+        // call site spreads a runtime-length array) -- fall back to just
+        // the all-fixed, zero-rest-element shape so at least that much
+        // stays callable.
+        arities.push(fixed_count);
+    }
+    arities.sort_unstable();
+    arities.dedup();
+
+    let render_fixed_params = |total: usize| {
+        fixed_params[..total.min(fixed_count)]
+            .iter()
+            .map(|(name, ty)| format!("{name}: {ty}"))
+            .collect::<Vec<_>>()
+    };
+    let render_arguments = |total: usize| {
+        let mut args = fixed_params[..total.min(fixed_count)]
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let rest_name = function
+            .rest_param
+            .as_ref()
+            .map(|(name, _)| name.as_str())
+            .unwrap_or("__thaw_rest");
+        for index in 0..total.saturating_sub(fixed_count) {
+            args.push(format!("{rest_name}[{index}]"));
+        }
+        args
+    };
+
+    let mut declarations = String::new();
+    for &total in &arities {
+        let mut params_rendered = render_fixed_params(total);
+        for index in 0..total.saturating_sub(fixed_count) {
+            params_rendered.push(format!("__thaw_rest_{index}: Json"));
+        }
+        declarations.push_str(&format!(
+            "declare function {base_symbol}__arity_{total}({}): {ret};\n",
+            params_rendered.join(", ")
+        ));
+    }
+
+    let wrapper = format!(
+        "__thaw_typed_wrapper_{}_{}",
+        if napi { "napi" } else { "js" },
+        encoded
+    );
+    let rest_name = function
+        .rest_param
+        .as_ref()
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| "__thaw_rest".to_string());
+    let fixed_wrapper_params = fixed_params
+        .iter()
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            format!(
+                "{name}{}: {ty}",
+                if index >= function.required_params {
+                    "?"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let wrapper_params = if fixed_wrapper_params.is_empty() {
+        format!("...{rest_name}: Json[]")
+    } else {
+        format!("{fixed_wrapper_params}, ...{rest_name}: Json[]")
+    };
+    declarations.push_str(&format!("function {wrapper}({wrapper_params}): {ret} {{\n"));
+    for &total in arities.iter().rev() {
+        let rest_count = total.saturating_sub(fixed_count);
+        let arguments = render_arguments(total).join(", ");
+        declarations.push_str(&format!(
+            "    if ({rest_name}.length === {rest_count}) return {base_symbol}__arity_{total}({arguments});\n"
+        ));
+    }
+    let smallest = *arities.first().expect("arities always has at least one entry");
+    let arguments = render_arguments(smallest).join(", ");
+    declarations.push_str(&format!(
+        "    return {base_symbol}__arity_{smallest}({arguments});\n}}\n"
+    ));
+
+    typed_dynamic_callable_adapter(
+        encoded,
+        wrapper,
+        declarations,
+        &fixed_params,
+        function.required_params,
+        napi,
+        ret_ty,
+    )
+}
+
 fn typed_dynamic_declaration(
     package: &str,
     function: &thaw_bridge::DtsFunction,
     napi: bool,
+    observed_call_arities: &std::collections::BTreeSet<usize>,
 ) -> Option<(String, String)> {
     let runtime_key = if napi {
         function.name.clone()
@@ -19989,6 +20145,15 @@ fn typed_dynamic_declaration(
         if napi { "napi" } else { "js" },
         encoded
     );
+    if function.rest_param.is_some() {
+        return typed_dynamic_rest_declaration(
+            function,
+            napi,
+            &encoded,
+            &base_symbol,
+            observed_call_arities,
+        );
+    }
     if let Some(generic) = &function.generic {
         if !generic.param_types.iter().all(|ty| {
             generic.type_params.iter().any(|(name, _)| name == ty)
@@ -20035,7 +20200,20 @@ fn typed_dynamic_declaration(
             thaw_bridge::DtsType::Native(ty) => {
                 render_dynamic_type(ty).map(|ty| (name.clone(), ty))
             }
-            thaw_bridge::DtsType::Unsupported(_) => None,
+            // An individual parameter's real .d.ts type isn't classifiable
+            // (`unknown`, an unresolved type reference, a literal
+            // `undefined`/`null` type used only to disambiguate a sibling
+            // overload, etc.) -- it's still a perfectly callable
+            // positional argument at runtime, so pass it through as
+            // `Json` (every dynamic call already marshals its arguments
+            // through JSON, and `coerce_to_declared` knows how to box any
+            // JSON-convertible native value into one) instead of giving
+            // up on a typed wrapper for the *whole* function. Real
+            // examples: uuid's `v4(options?, buf?: undefined, offset?:
+            // number)`, where `buf`'s `undefined` literal type exists
+            // only to steer TS overload resolution, and its
+            // `validate(uuid: unknown): boolean`.
+            thaw_bridge::DtsType::Unsupported(_) => Some((name.clone(), "Json".to_string())),
         })
         .collect::<Option<Vec<_>>>()?;
     let thaw_bridge::DtsType::Native(ret) = &function.ret else {
@@ -20106,15 +20284,31 @@ fn typed_dynamic_declaration(
         .join(", ");
     declarations.push_str(&format!("function {wrapper}({wrapper_params}): {ret} {{\n"));
     for arity in (function.required_params + 1..=params.len()).rev() {
-        let condition = &params[arity - 1].0;
+        // Every optional slot up to `arity`, not just the last one, needs
+        // its own `!== undefined` guard *nested* around this call, not
+        // ANDed into one condition: the type-narrowing pass only narrows
+        // the single variable a bare `a !== undefined` guard names, and
+        // recurses into just the left side of an `a !== undefined && b
+        // !== undefined` chain, so joining them with `&&` would leave
+        // every conjunct but the first still statically `Optional(...)`.
+        // Nesting instead gets each one narrowed by its own `if`, and all
+        // of them stay narrowed going deeper. Real case: uuid's
+        // `v4(options?, buf?, offset?)`, three trailing optional params.
+        let optional_slots = &params[function.required_params..arity];
+        for (name, _) in optional_slots.iter().rev() {
+            declarations.push_str(&format!("    if ({name} !== undefined) {{\n"));
+        }
         let arguments = params[..arity]
             .iter()
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
         declarations.push_str(&format!(
-            "    if ({condition} !== undefined) return {base_symbol}__arity_{arity}({arguments});\n"
+            "    return {base_symbol}__arity_{arity}({arguments});\n"
         ));
+        for _ in optional_slots {
+            declarations.push_str("    }\n");
+        }
     }
     let arguments = params[..function.required_params]
         .iter()
@@ -20596,6 +20790,43 @@ fn observed_member_call_arities(
     Ok(finder.arities)
 }
 
+/// Like `observed_member_call_arities`, but for a plain call through a bare
+/// identifier (`clsx(...)`) rather than `obj.method(...)` -- the shape a
+/// package's own top-level Fallback function is actually called through
+/// once imported. Keyed by that bare name only, same limitation as the
+/// member version: two same-named imports from different packages share
+/// one observed-arity set.
+fn observed_identifier_call_arities(
+    source: &str,
+) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{CallExpr, Callee, Expr};
+
+    #[derive(Default)]
+    struct Finder {
+        arities: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+    }
+
+    impl Visit for Finder {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Ident(name) = callee.as_ref() {
+                    self.arities
+                        .entry(name.sym.to_string())
+                        .or_default()
+                        .insert(call.args.len());
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let module = thaw_parser::parse_typescript(source)?;
+    let mut finder = Finder::default();
+    module.visit_with(&mut finder);
+    Ok(finder.arities)
+}
+
 fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
     use thaw_parser::ast::{Expr, ModuleDecl, ModuleItem};
 
@@ -20629,6 +20860,7 @@ fn generate_registry_shims(
     user_source: &str,
 ) -> Result<RegistryShims, String> {
     let observed_arities = observed_member_call_arities(user_source)?;
+    let observed_identifier_arities = observed_identifier_call_arities(user_source)?;
     let mut resolved = Vec::new();
     for name in use_packages {
         let package = if name.starts_with("node:") {
@@ -21025,15 +21257,33 @@ fn generate_registry_shims(
                     .as_ref()
                     .map(|operation| jit_numeric_declaration(&pkg.name, function, operation))
                     .or_else(|| {
+                        let empty_arities = std::collections::BTreeSet::new();
+                        let call_arities = observed_identifier_arities
+                            .get(&function.name)
+                            .unwrap_or(&empty_arities);
                         typed_dynamic_declaration(
-                        &pkg.name,
-                        function,
-                        pkg.native_addon.is_some() && pkg.bundle_js.is_none(),
-                    )
+                            &pkg.name,
+                            function,
+                            pkg.native_addon.is_some() && pkg.bundle_js.is_none(),
+                            call_arities,
+                        )
                     });
                 if let Some((symbol, declaration)) = declaration {
                     shim.push_str(&declaration);
-                    typed_targets.insert((pkg.name.clone(), function.name.clone()), symbol);
+                    // First successful overload wins, matching TS's own
+                    // overload-resolution convention of preferring the
+                    // first declared match: an overloaded `.d.ts` name
+                    // (see `Classification::classify_all`'s doc comment)
+                    // can have *several* overloads each independently
+                    // produce a typed declaration here -- e.g. `ms`'s
+                    // `(value: number, options?)` and `(value: string)`
+                    // both do -- and they don't share a call convention,
+                    // so blindly keeping the last one silently discards
+                    // an earlier, already-correct (and possibly more
+                    // general) wrapper.
+                    typed_targets
+                        .entry((pkg.name.clone(), function.name.clone()))
+                        .or_insert(symbol);
                     if jit_operation.is_some() {
                         jit_targets.insert((pkg.name.clone(), function.name.clone()));
                     }

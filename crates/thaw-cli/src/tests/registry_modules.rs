@@ -6543,3 +6543,181 @@ fn object_from_entries_with_a_literal_array_of_pairs_uses_jit_without_quickjs() 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "10,20,2\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function (forced by an unclassifiable `unknown`-typed
+/// parameter, real-world example: uuid's `v4`/`validate`) with several
+/// *trailing optional* parameters. Regression coverage for two bugs found
+/// together while getting uuid itself to build: `typed_dynamic_declaration`
+/// used to give up on a typed wrapper entirely the moment any one parameter
+/// was unclassifiable, and even once that was fixed, its generated wrapper
+/// only guarded the *last* optional slot with `!== undefined`, so the
+/// type-narrowing pass left every earlier optional parameter still
+/// `Optional(...)` where the underlying call needed it unwrapped.
+#[test]
+fn fallback_function_with_multiple_optional_unknown_params_builds_and_runs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-multi-optional-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("id-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function make(prefix?: unknown, suffix?: unknown, length?: number): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.make = function(prefix, suffix, length) {\n\
+             var p = prefix === undefined ? '' : String(prefix);\n\
+             var s = suffix === undefined ? '' : String(suffix);\n\
+             var n = length === undefined ? 0 : length;\n\
+             return p + 'id' + s + ':' + n;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { make } from "id-kit";
+function main(): void {
+    console.log(make());
+    console.log(make("a"));
+    console.log(make("a", "b"));
+    console.log(make("a", "b", 5));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "id:0\naid:0\naidb:0\naidb:5\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Two `.d.ts` overloads for the same Fallback name (real-world example:
+/// `ms`'s `(value: number, options?)` / `(value: string)`) can each
+/// independently produce a valid typed wrapper. Regression coverage for a
+/// bug introduced alongside the fix above: broadening which parameter types
+/// count as classifiable meant a second, narrower overload could newly
+/// succeed too and silently clobber the first (and better -- it covers both
+/// arities) overload's registration, since call-site rewriting just kept
+/// whichever overload was processed last.
+#[test]
+fn first_matching_overload_wins_for_a_fallback_function() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-overload-order-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("format-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function format(value: number, upper?: boolean): string;\n\
+         export declare function format(value: string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.format = function(value, upper) {\n\
+             if (typeof value === 'string') { return '[' + value + ']'; }\n\
+             var text = String(value) + 'px';\n\
+             return upper ? text.toUpperCase() : text;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { format } from "format-kit";
+function main(): void {
+    console.log(format(12));
+    console.log(format(12, true));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // If the second (narrower, single required-param) overload had won
+    // instead, `format(12, true)` -- 2 arguments -- would be a compile
+    // error, since that overload's own wrapper only ever accepts 1.
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "12px\n12PX\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A Fallback function whose `.d.ts` signature ends in a rest parameter
+/// (real-world example: `clsx(...inputs: ClassValue[]): string`).
+/// `typed_dynamic_declaration` used to ignore `rest_param` entirely and
+/// declare a fixed 0-argument extern signature, so any real (non-empty)
+/// call became an arity-mismatch compile error. Regression coverage for
+/// `typed_dynamic_rest_declaration`, which instead declares one extern
+/// signature per call-site argument count actually observed in the user's
+/// own source and dispatches on the wrapper's own `...rest` array length.
+#[test]
+fn fallback_function_with_a_rest_parameter_builds_and_runs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-rest-param-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("join-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function joinValues(...inputs: unknown[]): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.joinValues = function() {\n\
+             var parts = [];\n\
+             for (var i = 0; i < arguments.length; i++) {\n\
+                 if (arguments[i]) { parts.push(String(arguments[i])); }\n\
+             }\n\
+             return parts.join(' ');\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { joinValues } from "join-kit";
+function main(): void {
+    console.log(joinValues("a", "b"));
+    console.log(joinValues("a", false, "b", null, "c"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "a b\na b c\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
