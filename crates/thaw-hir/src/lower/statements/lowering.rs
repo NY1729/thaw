@@ -834,7 +834,23 @@ impl<'a> FnLowerer<'a> {
                 lowered
             }
 
-            Stmt::Throw(throw_stmt) => Ok(vec![HirStmt::Throw(self.lower_expr(&throw_stmt.arg)?)]),
+            Stmt::Throw(throw_stmt) => {
+                // The exception channel is a single tagged string end to
+                // end (see `new Error(...)`'s lowering and
+                // `thaw_runtime::split_error_tag`); a thrown non-string
+                // value used to be stored into that `i8*` slot as whatever
+                // raw bit pattern it happened to have (an f64's bits
+                // reinterpreted as a pointer for `throw 42`, say), which
+                // every reader then dereferenced as a C string --
+                // undefined behavior, not merely a wrong answer. Coercing
+                // every thrown value to its string form here keeps that
+                // one representation honest; unsupported types (a thrown
+                // `Promise`, function, `Map`/`Set`, etc.) are a compile
+                // error instead of memory corruption.
+                let value = self.lower_expr(&throw_stmt.arg)?;
+                let value = self.coerce_primitive_to_string(value)?;
+                Ok(vec![HirStmt::Throw(value)])
+            }
 
             Stmt::Try(try_stmt) => {
                 if try_stmt.handler.is_none() && try_stmt.finalizer.is_none() {
