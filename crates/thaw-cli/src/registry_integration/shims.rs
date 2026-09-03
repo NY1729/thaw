@@ -2577,8 +2577,19 @@ fn jit_export(
                 }),
             _ => false,
         };
-        if !parameter_array && !local_array && !returned_array && !constructed_array
+        let split_array = match member.obj.as_ref() {
+            Expr::Call(receiver) => string_method(receiver, parameters, locals)
+                .is_some_and(|(operation, _)| operation == "split"),
+            _ => false,
+        };
+        let literal_array = matches!(member.obj.as_ref(), Expr::Array(_));
+        if !parameter_array
+            && !local_array
+            && !returned_array
+            && !constructed_array
             && !dictionary_array
+            && !split_array
+            && !literal_array
         {
             return None;
         }
@@ -16826,7 +16837,7 @@ fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
 
 fn array_prefix(expression: &[String]) -> Option<&'static str> {
     expression.iter().rev().find_map(|token| {
-        if matches!(token.as_str(), "strarray" | "dkeys") {
+        if matches!(token.as_str(), "strarray" | "dkeys" | "split") {
             return Some("rs");
         }
         if token == "rsmaplength" {
