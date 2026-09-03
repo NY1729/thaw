@@ -6089,3 +6089,46 @@ fn recursion_and_dictionary_aliasing_edge_cases_use_jit_without_quickjs() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn array_methods_chained_directly_on_array_from_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-array-from-chain-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("from-chain-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function codeUnitLengths(s: string): number[];\nexport declare function evens(values: number[]): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.codeUnitLengths = (s) => Array.from(s).map((c) => c.length); module.exports.evens = (values) => Array.from(values).filter((v) => v % 2 === 0);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { codeUnitLengths, evens } from 'from-chain-kit';\nfunction main(): void { const emoji = \"\\uD83D\\uDE00x\"; console.log(codeUnitLengths(emoji).join(',')); console.log(evens([1, 2, 3, 4, 5, 6]).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2,1\n2,4,6\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

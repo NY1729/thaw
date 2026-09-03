@@ -2502,6 +2502,7 @@ fn jit_export(
         call: &'a CallExpr,
         parameters: &std::collections::HashMap<String, String>,
         locals: &std::collections::HashMap<String, Vec<String>>,
+        helpers: &std::collections::HashMap<String, NumericCallable<'_>>,
     ) -> Option<(&'a str, &'a Expr)> {
         if call.args.iter().any(|argument| argument.spread.is_some()) {
             return None;
@@ -2535,8 +2536,8 @@ fn jit_export(
                         || jit_typed_array_union_untag(token).is_some())
             });
         let returned_array = match member.obj.as_ref() {
-            Expr::Call(receiver) => array_method(receiver, parameters, locals).is_some_and(
-                |(method, _)| {
+            Expr::Call(receiver) => array_method(receiver, parameters, locals, helpers)
+                .is_some_and(|(method, _)| {
                     matches!(
                         method,
                         "slice"
@@ -2553,11 +2554,15 @@ fn jit_export(
                             | "filter"
                             | "map"
                     )
-                },
-            ),
+                }),
             _ => false,
         };
-        if !parameter_array && !local_array && !returned_array {
+        let constructed_array = match member.obj.as_ref() {
+            Expr::Call(receiver) => array_constructor(receiver, parameters, locals, helpers)
+                .is_some_and(|constructor| constructor == "of" || constructor == "from"),
+            _ => false,
+        };
+        if !parameter_array && !local_array && !returned_array && !constructed_array {
             return None;
         }
         matches!(
@@ -4625,8 +4630,10 @@ fn jit_export(
                     .into(),
                 );
             }
-            Expr::Call(call) if array_method(call, parameters, locals).is_some() => {
-                let (method, receiver) = array_method(call, parameters, locals)?;
+            Expr::Call(call)
+                if array_method(call, parameters, locals, context.helpers).is_some() =>
+            {
+                let (method, receiver) = array_method(call, parameters, locals, context.helpers)?;
                 let mut encoded = Vec::new();
                 encode_expression(receiver, parameters, locals, context, &mut encoded)?;
                 if encoded.len() == 1 {
