@@ -1004,6 +1004,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("error instanceof check returned no value".into());
             }
+            "__thaw_set_pending_exception_object" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let value = self.compile_expr(value)?;
+                self.builder
+                    .build_store(self.pending_exception_object().as_pointer_value(), value)
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
             "__thaw_date_set_full_year"
             | "__thaw_date_set_month"
             | "__thaw_date_set_date"

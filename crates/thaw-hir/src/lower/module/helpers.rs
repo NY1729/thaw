@@ -10,6 +10,38 @@ fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
     collector.0
 }
 
+/// One of the built-in error classes `Error`/etc. accept as a base even
+/// though (unlike a real declared class) they have no entry of their own in
+/// `declarations`/`interfaces` (see `module/classes.rs`'s synthetic
+/// base-layout branch).
+fn is_error_family_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "SyntaxError"
+            | "ReferenceError"
+            | "EvalError"
+            | "URIError"
+    )
+}
+
+/// Whether an object type's identity chain (see `module/classes.rs`) makes
+/// it an `Error`-family instance -- the built-ins themselves, or any user
+/// class transitively `extends`ing one of them.
+fn object_type_is_error_family(ty: &HirType) -> bool {
+    let HirType::Object(fields) = ty else {
+        return false;
+    };
+    fields.first().is_some_and(|(marker, ty)| {
+        *ty == HirType::Bool
+            && marker
+                .strip_prefix("__thaw_class_identity_")
+                .is_some_and(|chain| chain.split('$').any(is_error_family_name))
+    })
+}
+
 fn class_property_name(name: &PropName) -> Result<Symbol, String> {
     match name {
         PropName::Ident(name) => Ok(name.sym.to_string()),
