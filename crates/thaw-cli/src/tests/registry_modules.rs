@@ -6721,3 +6721,110 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A generic Fallback function (any single param/return referencing its
+/// own unconstrained type parameter classifies Fallback, since that's an
+/// unresolved reference as far as `classify` is concerned) declared as
+/// returning `void`. The generic branch of `typed_dynamic_declaration`
+/// used to render `return {base_symbol}__arity_N(...);` unconditionally,
+/// but thaw-hir rejects `return <a void call>;` for a `void`-declared
+/// function (only a bare `return;`), so any real call was a compile
+/// error. Regression coverage for splitting the call and the return into
+/// separate statements when the declared return is `void`.
+#[test]
+fn generic_fallback_function_with_void_return_builds_and_runs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-generic-void-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("seen-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function markSeen<T>(value: T): void;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "var seen = [];\nmodule.exports.markSeen = function(value) { seen.push(value); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { markSeen } from "seen-kit";
+function main(): void {
+    markSeen("a");
+    markSeen(1);
+    console.log("done");
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "done\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A generic Fallback function with a parameter type this classifier
+/// can't resolve at all (a reference to a type alias never declared
+/// anywhere in the file, e.g. because it lives in some other file a
+/// simpler package never pulled in -- real-world example: lodash's
+/// `uniq<T>(array: List<T> | null | undefined): T[]`, `List` being one
+/// of lodash's own internal aliases). The generic branch used to reject
+/// the whole declaration outright whenever any parameter didn't already
+/// render as one of a few known-safe forms, falling all the way back to
+/// the bare `(argsArray: Json): Json` passthrough shim -- silently wrong
+/// for an ordinary single-argument call like `firstOf(someArray)`, whose
+/// real argument would be passed as the whole *args array* instead.
+/// Regression coverage for substituting `Json` for just that one
+/// parameter instead of giving up on the whole function.
+#[test]
+fn generic_fallback_function_with_unresolvable_param_type_passes_it_through_as_json() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-generic-json-passthrough-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("first-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function firstOf<T>(items: List<T> | null): T;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.firstOf = function(items) { return items && items.length ? items[0] : null; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { firstOf } from "first-kit";
+function main(): void {
+    const items: Json = JSON.parse("[10, 20, 30]");
+    console.log(firstOf(items));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "10\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
