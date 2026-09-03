@@ -7402,3 +7402,81 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n12\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `Bool`/`F64`-discriminated overload set (real example: lodash's
+/// `random(floating?: boolean): number` / `random(max: number,
+/// floating?: boolean): number`) whose generated dispatcher's shared
+/// first-parameter variable is named after the primary overload's own
+/// parameter (`max`) -- which, in a real package like lodash, collides
+/// with an unrelated top-level function *also* named `max` (`_.max`)
+/// declared elsewhere in the same `.d.ts`. `typeof`-lowering
+/// (`UnaryOp::TypeOf` in thaw-hir) resolved a bare identifier's operand
+/// type by checking `self.signatures` (the top-level function table)
+/// *before* checking whether the name was actually a local variable in
+/// `self.scope` -- so inside the dispatcher, `typeof max === "boolean"`
+/// resolved `max`'s type from the unrelated top-level `max` function's
+/// *signature* instead of the dispatcher's own `boolean | number`
+/// parameter, folding the whole comparison to the constant string
+/// `"function"` and permanently skipping the boolean branch. Every call
+/// then fell through to the number branch, reinterpreting the packed
+/// union payload's raw bits for a `boolean` argument as an `f64` --
+/// observed as `5e-324` (`Number.MIN_VALUE`, the bit pattern of integer
+/// `1`) and a SIGSEGV on repeated calls. Fixed by having the operand
+/// type resolution check `self.scope` first, since a local
+/// variable/parameter must shadow a same-named top-level function. This
+/// only reproduced with a real, large `.d.ts` (lodash's) because that's
+/// what supplied the colliding same-named top-level function --
+/// isolated `Bool`-discriminator tests without one never hit it.
+#[test]
+fn bool_discriminated_overload_dispatch_is_not_corrupted_by_a_same_named_top_level_function() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-bool-overload-name-collision-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("stat-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function random(floating?: boolean): number;\n\
+         export declare function random(max: number, floating?: boolean): number;\n\
+         export declare function max(a: number, b: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.random = function(a, b) {\n\
+             if (typeof a === 'boolean') { return a ? 1 : 0; }\n\
+             return a + (b ? 0.5 : 0);\n\
+         };\n\
+         module.exports.max = function(a, b) { return a > b ? a : b; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { random, max } from "stat-kit";
+function main(): void {
+    console.log(random(true));
+    console.log(random(false));
+    console.log(random(5));
+    console.log(random(5, true));
+    console.log(max(3, 7));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1\n0\n5\n5.5\n7\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
