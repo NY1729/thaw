@@ -6215,3 +6215,43 @@ fn array_methods_chained_directly_on_object_keys_values_use_jit_without_quickjs(
     assert_eq!(String::from_utf8_lossy(&result.stdout), "2,3\n2,4\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn string_methods_chained_directly_on_from_char_code_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-fromcharcode-chain-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("str-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function upper(code: number): string;\nexport declare function fromPoint(point: number): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.upper = (code) => String.fromCharCode(code).toUpperCase(); module.exports.fromPoint = (point) => String.fromCodePoint(point).trim();\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { upper, fromPoint } from 'str-kit';\nfunction main(): void { console.log(upper(97)); console.log(fromPoint(98)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "A\nb\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

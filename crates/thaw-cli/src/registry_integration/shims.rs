@@ -2351,6 +2351,14 @@ fn jit_export(
                     };
                     return argument.spread.is_none();
                 }
+                if !parameters.contains_key("String")
+                    && matches!(callee.as_ref(), Expr::Member(member)
+                        if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "String")
+                            && matches!(&member.prop, MemberProp::Ident(property)
+                                if matches!(property.sym.as_ref(), "fromCharCode" | "fromCodePoint")))
+                {
+                    return call.args.iter().all(|argument| argument.spread.is_none());
+                }
                 let Expr::Member(member) = callee.as_ref() else {
                     return false;
                 };
