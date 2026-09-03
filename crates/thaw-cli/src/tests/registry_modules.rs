@@ -6898,18 +6898,28 @@ function main(): void {
 }
 
 /// A Fallback function whose *return* type can't be classified at all --
-/// real-world example: dayjs's own factory function, `declare function
-/// dayjs(date?: dayjs.ConfigType): dayjs.Dayjs`, returning its own
-/// `Dayjs` class. `typed_dynamic_declaration` used to give up on the
-/// whole declaration the moment the return type alone didn't classify
-/// (even though every parameter already passes through as `Json` for
-/// exactly this reason), falling all the way back to the bare untyped
-/// `(argsArray: Json): Json` passthrough shim -- silently wrong for any
-/// call that isn't already packing its own arguments into one array
-/// itself, the same failure mode as an unclassifiable parameter.
-/// Regression coverage for treating an unclassifiable return the same
-/// way a callback-typed return already was: a `JsValue` handle, usable
-/// even without dedicated support for whatever real shape it holds.
+/// real-world example: mime's `getType(path: string): string | null`
+/// alongside a hypothetical sibling overload whose return type this
+/// crude a classifier can't yet describe, modeled here with a `Promise`
+/// return (still explicitly out of scope -- see `classify_ts_type`'s
+/// `TsTypeRef` doc comment). `typed_dynamic_declaration` used to give up
+/// on the whole declaration the moment the return type alone didn't
+/// classify (even though every parameter already passes through as
+/// `Json` for exactly this reason), falling all the way back to the
+/// bare untyped `(argsArray: Json): Json` passthrough shim -- silently
+/// wrong for any call that isn't already packing its own arguments into
+/// one array itself, the same failure mode as an unclassifiable
+/// parameter. Regression coverage for treating an unclassifiable return
+/// the same way a callback-typed return already was: a `JsValue`
+/// handle, usable even without dedicated support for whatever real
+/// shape it holds.
+///
+/// (Not namespace-qualified, unlike this test's original form: a
+/// namespace-qualified reference to an interface/type-alias, even an
+/// empty one, now resolves -- see `extract_interface_decls`/
+/// `extract_type_alias_decls` and `classify_ts_type`'s own doc comment
+/// on `TsQualifiedName` -- so it no longer demonstrates "unresolvable"
+/// at all.)
 #[test]
 fn fallback_function_with_an_unresolvable_return_type_builds_and_runs() {
     let dir = std::env::temp_dir().join(format!(
@@ -6921,8 +6931,7 @@ fn fallback_function_with_an_unresolvable_return_type_builds_and_runs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function clock(seed?: clock.Seed): clock.Clock;\n\
-         declare namespace clock { interface Seed {} interface Clock {} }\n",
+        "export declare function clock(seed?: unknown): Promise<unknown>;\n",
     )
     .unwrap();
     std::fs::write(
@@ -7206,5 +7215,77 @@ function main(): void {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&result.stdout), "H:3\n8\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A Fallback function with two overloads whose *type-disjoint* first
+/// parameter picks between genuinely different calling conventions --
+/// real-world example: `ms`'s own `ms(value: number, options?: { long:
+/// boolean }): string` and `ms(value: ms.StringValue): number` (the
+/// same function either formats a millisecond count as a string or
+/// parses a duration string into a millisecond count). `typed_dynamic_
+/// declaration`'s "first successful overload wins" rule (needed to
+/// avoid emitting two conflicting ambient declarations under the same
+/// name) used to pick only the first-declared overload, silently
+/// breaking every call shaped like the other -- `ms("2 days")` failed
+/// with a type error demanding a `number`. Also exercises two
+/// prerequisites this needed: a namespace-qualified type reference
+/// (`ms.StringValue`) resolving through `declare namespace ms { ... }`
+/// at all (`extract_type_alias_decls`), and a template literal type
+/// resolving to `Str` (ms's own `StringValue` is a union of them).
+#[test]
+fn fallback_function_with_type_disjoint_overloads_dispatches_by_typeof() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-overload-dispatch-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("duration-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "declare function duration(value: number, options?: { long: boolean }): string;\n\
+         declare function duration(value: duration.StringValue): number;\n\
+         declare namespace duration {\n\
+             type StringValue = `${number}` | `${number} days`;\n\
+         }\n\
+         export = duration;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = function(value, options) {\n\
+             if (typeof value === 'number') {\n\
+                 return options && options.long ? value + ' milliseconds' : value + 'ms';\n\
+             }\n\
+             var days = parseInt(value, 10);\n\
+             return days * 86400000;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import duration from "duration-kit";
+function main(): void {
+    console.log(duration("2 days"));
+    console.log(duration(60000));
+    console.log(duration(60000, { long: true }));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "172800000\n60000ms\n60000 milliseconds\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

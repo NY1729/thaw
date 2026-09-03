@@ -587,25 +587,58 @@ fn extract_interface_method_decls_from_decl<'a>(
     }
 }
 
-fn extract_interface_decl(item: &ModuleItem) -> Option<&TsInterfaceDecl> {
+/// Like `extract_fn_decls`/`extract_class_decls`, but for an `interface`
+/// declaration -- including one nested inside a `declare namespace X {
+/// ... }` block, real-world example: `ms`'s own namespace carrying its
+/// `Unit`/`UnitAnyCase`/`StringValue` helper types alongside its
+/// `ms(...)` overloads. Without this, a namespace-nested interface (or,
+/// via `extract_type_alias_decls`, type alias) was invisible to
+/// `resolve_interfaces` entirely -- any reference to it anywhere, even a
+/// same-namespace-qualified one (`ms.StringValue`), stayed permanently
+/// `Unsupported`.
+fn extract_interface_decls(item: &ModuleItem) -> Vec<&TsInterfaceDecl> {
     match item {
-        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::TsInterface(iface))) => Some(iface),
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
-            Decl::TsInterface(iface) => Some(iface),
-            _ => None,
-        },
-        _ => None,
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => extract_interface_decls_from_decl(decl),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+            extract_interface_decls_from_decl(&export.decl)
+        }
+        _ => Vec::new(),
     }
 }
 
-fn extract_type_alias_decl(item: &ModuleItem) -> Option<&swc_ecma_ast::TsTypeAliasDecl> {
+fn extract_interface_decls_from_decl(decl: &Decl) -> Vec<&TsInterfaceDecl> {
+    match decl {
+        Decl::TsInterface(iface) => vec![iface],
+        Decl::TsModule(module_decl) => {
+            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+                return Vec::new();
+            };
+            block.body.iter().flat_map(extract_interface_decls).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_type_alias_decls(item: &ModuleItem) -> Vec<&swc_ecma_ast::TsTypeAliasDecl> {
     match item {
-        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::TsTypeAlias(alias))) => Some(alias),
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
-            Decl::TsTypeAlias(alias) => Some(alias),
-            _ => None,
-        },
-        _ => None,
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => extract_type_alias_decls_from_decl(decl),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+            extract_type_alias_decls_from_decl(&export.decl)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_type_alias_decls_from_decl(decl: &Decl) -> Vec<&swc_ecma_ast::TsTypeAliasDecl> {
+    match decl {
+        Decl::TsTypeAlias(alias) => vec![alias],
+        Decl::TsModule(module_decl) => {
+            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+                return Vec::new();
+            };
+            block.body.iter().flat_map(extract_type_alias_decls).collect()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -629,7 +662,7 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
     let mut raw: HashMap<String, &TsInterfaceDecl> = HashMap::new();
     let mut names = Vec::new();
     let mut generic = GenericInterfaces::default();
-    for iface in module.body.iter().filter_map(extract_interface_decl) {
+    for iface in module.body.iter().flat_map(extract_interface_decls) {
         let name = iface.id.sym.to_string();
         if iface.type_params.is_some() {
             generic.interfaces.insert(name, iface);
@@ -643,7 +676,7 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
     for alias in module
         .body
         .iter()
-        .filter_map(extract_type_alias_decl)
+        .flat_map(extract_type_alias_decls)
         .filter(|alias| alias.type_params.is_some())
     {
         generic.aliases.insert(alias.id.sym.to_string(), alias);
@@ -656,7 +689,7 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
     let aliases = module
         .body
         .iter()
-        .filter_map(extract_type_alias_decl)
+        .flat_map(extract_type_alias_decls)
         .filter(|alias| alias.type_params.is_none())
         .collect::<Vec<_>>();
     for _ in 0..raw.len() + aliases.len() {
@@ -1826,6 +1859,16 @@ fn classify_ts_type(
             TsLit::Number(_) => DtsType::Native(HirType::F64),
             TsLit::Str(_) => DtsType::Native(HirType::Str),
             TsLit::Bool(_) => DtsType::Native(HirType::Bool),
+            // A template literal type (`` `${number}${Unit}` ``) is,
+            // structurally, always a plain string at runtime -- there's
+            // no way to validate the actual interpolated pattern
+            // without a real type checker, but erasing it to `Str` (the
+            // same approach a plain string-literal type already gets)
+            // is the same "best-effort classify, don't validate the
+            // literal value" choice this whole match already makes.
+            // Real example: `ms`'s own `StringValue = \`${number}\` |
+            // \`${number}${UnitAnyCase}\` | ...`.
+            TsLit::Tpl(_) => DtsType::Native(HirType::Str),
             _ => DtsType::Unsupported("unsupported literal type".into()),
         },
 
@@ -2116,13 +2159,21 @@ fn classify_ts_type(
         }
 
         TsType::TsTypeRef(ty_ref) => {
+            // A qualified reference (`ms.StringValue`) is tracked by its
+            // own bare rightmost identifier only, matching how every
+            // interface/alias/class/function here already is regardless
+            // of which namespace declares it (see
+            // `export_assignment_interface_name`'s doc comment, and
+            // `extract_interface_decls`/`extract_type_alias_decls`,
+            // which populate `interfaces`/`generic_interfaces` this same
+            // namespace-agnostic way) -- real example: `ms`'s own
+            // `declare namespace ms { type StringValue = ...; }`,
+            // referenced from its sibling overload as `ms.StringValue`.
+            // Falls through to the ordinary "not classified" case below
+            // exactly as before when no such name is known at all.
             let ref_name = match &ty_ref.type_name {
                 TsEntityName::Ident(id) => id.sym.to_string(),
-                TsEntityName::TsQualifiedName(_) => {
-                    return DtsType::Unsupported(
-                        "qualified type names are not supported yet".to_string(),
-                    )
-                }
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
             };
 
             // A name matching a resolved (non-generic) `interface` --
