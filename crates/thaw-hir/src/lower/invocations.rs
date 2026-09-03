@@ -1139,6 +1139,93 @@ impl<'a> FnLowerer<'a> {
             return self.lower_promise_static_call(&callee_name, call);
         }
 
+        if callee_name == "Promise.resolve" || callee_name == "Promise.reject" {
+            // Desugars to the executor form (`new Promise((resolve, reject)
+            // => resolve(value))` / `=> reject(message)`) instead of adding
+            // a dedicated HIR node, reusing PromiseNew's already-tested
+            // codegen untouched. `reject`'s payload is coerced through the
+            // same string conversion `throw`/`String(value)` use, since the
+            // rejection channel (like the exception channel it shares) is
+            // still string-only; `resolve` keeps the value's own type,
+            // assimilating an already-Promise value exactly as a bare
+            // `return somePromise` inside an executor would.
+            let is_reject = callee_name == "Promise.reject";
+            let [argument] = call.args.as_slice() else {
+                return Err(format!("`{callee_name}` expects exactly one argument"));
+            };
+            if argument.spread.is_some() {
+                return Err(format!("`{callee_name}` does not support a spread argument"));
+            }
+            let value = self.lower_expr(&argument.expr)?;
+            let (resolved, assimilates, settled_value) = if is_reject {
+                let resolved = match &call.type_args {
+                    Some(type_args) => {
+                        let [resolved] = type_args.params.as_slice() else {
+                            return Err(
+                                "`Promise.reject` accepts at most one type argument".into()
+                            );
+                        };
+                        lower_ts_type(resolved, self.interfaces, self.generic_interfaces)?
+                    }
+                    None => HirType::Void,
+                };
+                (resolved, false, self.coerce_primitive_to_string(value)?)
+            } else {
+                match self.infer_expr_type(&value)? {
+                    HirType::Promise(inner) => (*inner, true, value),
+                    other => (other, false, value),
+                }
+            };
+            let resolve_params = if assimilates {
+                vec![HirType::Promise(Box::new(resolved.clone()))]
+            } else if resolved == HirType::Void {
+                Vec::new()
+            } else {
+                vec![resolved.clone()]
+            };
+            let resolve_ty = HirType::Function(resolve_params, Box::new(HirType::Void));
+            let reject_ty = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
+
+            let mut referenced = BTreeSet::new();
+            collect_referenced_bindings(&settled_value, &mut referenced);
+            let captures = referenced
+                .into_iter()
+                .filter_map(|name| {
+                    self.scope
+                        .get(&name)
+                        .cloned()
+                        .map(|ty| HirParam { name, ty })
+                })
+                .collect();
+
+            let (params, callee) = if is_reject {
+                (
+                    vec![
+                        HirParam {
+                            name: "__thaw_promise_resolve".to_string(),
+                            ty: resolve_ty,
+                        },
+                        HirParam {
+                            name: "__thaw_promise_reject".to_string(),
+                            ty: reject_ty,
+                        },
+                    ],
+                    "__thaw_promise_reject",
+                )
+            } else {
+                (
+                    vec![HirParam {
+                        name: "__thaw_promise_resolve".to_string(),
+                        ty: resolve_ty,
+                    }],
+                    "__thaw_promise_resolve",
+                )
+            };
+            let body = HirExpr::Call(Box::new(HirExpr::Var(callee.to_string())), vec![settled_value]);
+            let executor = HirExpr::Lambda(captures, params, HirType::Void, Box::new(body));
+            return Ok(HirExpr::PromiseNew(Box::new(executor), resolved, assimilates));
+        }
+
         // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete
         // value. Unlike `console.log` (whose codegen can disambiguate its
         // argument by LLVM value shape -- f64 vs. pointer), `Str`/`Array`/
