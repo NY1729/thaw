@@ -974,12 +974,32 @@ fn lowers_number_conversion_through_native_object_stringification() {
 fn rejects_indexed_assignment_into_a_non_array() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {
-            const data = JSON.parse("[]");
+            const data: string = "not an array";
             data[0] = 1;
         }"#,
     )
     .unwrap();
     assert!(lower_module(&module).is_err());
+}
+
+/// `JSON.parse` produces a `Json` value, and assigning a plain native value
+/// into one of its indices used to be rejected outright (`coerce_to_declared`
+/// had no general native-to-`Json` coercion, so the assigned `1` never
+/// matched the declared `Json` element type) even though it's completely
+/// ordinary JS. `coerce_to_declared`'s `Json` branch now boxes any
+/// `json_convertible_native_type` value the same way `JSON.stringify`
+/// already does for its own argument (`wrap_native_value_as_json`), so this
+/// compiles like real JS would expect.
+#[test]
+fn assigns_a_native_value_into_a_json_indexed_slot() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const data = JSON.parse("[]");
+            data[0] = 1;
+        }"#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_ok());
 }
 
 #[test]
