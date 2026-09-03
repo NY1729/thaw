@@ -12,6 +12,15 @@ struct ResolvedPackage {
     native_lib: Option<PathBuf>,
     native_addon: Option<PathBuf>,
     bundle_js: Option<String>,
+    /// `(factory function name) -> (this package's own class name)` for
+    /// every function whose declared return type names one of `classes`
+    /// -- real example: dayjs's `declare function dayjs(...):
+    /// dayjs.Dayjs`, linking factory function `dayjs` to class `Dayjs`.
+    /// Lets a Fallback factory call be tracked as producing a class
+    /// instance the same way `new ClassName(...)` already is (see
+    /// `class_methods.rs`'s `constructed_class`), even though nothing
+    /// about the call itself says `new`.
+    factory_class_returns: std::collections::HashMap<String, String>,
 }
 
 enum JitExport {
@@ -20854,11 +20863,31 @@ fn generate_napi_class_property_setter(
     Some((symbol, ty.clone()))
 }
 
+/// Generates one `declare function __thaw_typed_{napi,js}_<hex>(...)`
+/// ambient declaration per callable overload/arity of `class`'s instance
+/// or static methods (matching `method.is_static == is_static`), and
+/// returns the `(method_name, symbol, argument_count, has_callback,
+/// parameter_types)` tuples `class_method_rewrites`/
+/// `static_class_method_rewrites` need to rewrite ordinary
+/// `instance.method(...)` call syntax into a call to the right one.
+///
+/// `napi` selects which backend the generated declaration's symbol
+/// resolves to at lower time (`__thaw_typed_napi_`/`DynamicBackend::Napi`
+/// vs. `__thaw_typed_js_`/`DynamicBackend::QuickJs`, decoded by
+/// `dynamic_symbol`) -- the runtime-key scheme itself (`$method$Class
+/// $name$overloadN$arityM`, read back by `compile_typed_napi_method`,
+/// which despite the name now serves both backends) is identical either
+/// way, so this one generator covers a native addon's class (`napi:
+/// true`) and a Fallback/QuickJS-NG one (`napi: false`, real example:
+/// dayjs's `Dayjs`) alike. A trailing callback parameter is excluded for
+/// the QuickJS-NG backend, which doesn't marshal one yet (see
+/// `compile_typed_napi_method`'s explicit guard).
 fn generate_napi_class_method_overloads(
     class: &thaw_bridge::DtsClass,
     is_static: bool,
     observed_arities: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
     shim: &mut String,
+    napi: bool,
 ) -> Vec<(String, String, usize, bool, Vec<thaw_hir::HirType>)> {
     let mut generated = Vec::new();
     let mut method_names = std::collections::HashSet::new();
@@ -20880,6 +20909,13 @@ fn generate_napi_class_method_overloads(
             .filter(|candidate| {
                 candidate.params.iter().enumerate().all(|(index, (_, ty))| {
                     supported_class_method_param(ty, index, candidate.params.len())
+                        // The QuickJS-NG (Fallback) backend doesn't marshal
+                        // a callback parameter for a class method yet (see
+                        // `compile_typed_napi_method`'s explicit guard) --
+                        // excluded here rather than left to silently lose
+                        // the `has_callback` bit below, which would still
+                        // generate a declaration nothing can call safely.
+                        && (napi || !matches!(ty, thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(_, _))))
                 }) && candidate
                     .rest_param
                     .as_ref()
@@ -20967,7 +21003,10 @@ fn generate_napi_class_method_overloads(
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
-                let symbol = format!("__thaw_typed_napi_{encoded}");
+                let symbol = format!(
+                    "__thaw_typed_{}_{encoded}",
+                    if napi { "napi" } else { "js" }
+                );
                 shim.push_str(&format!(
                     "declare function {symbol}({params}): {return_type};\n"
                 ));
@@ -20995,8 +21034,18 @@ type RegistryShims = (
     Vec<ClassSetterRewrite>,
     Vec<StaticClassGetterRewrite>,
     Vec<StaticClassSetterRewrite>,
+    Vec<FactoryClassRewrite>,
     ExternalExports,
 );
+
+/// `(factory function name, class name)` -- a Fallback factory function
+/// call (real example: dayjs's `dayjs(...)`) that should be tracked as
+/// producing an instance of that class, the same way `new ClassName(...)`
+/// already is (see `class_methods.rs`'s `constructed_class`), even
+/// though the call itself doesn't say `new`. No qualifier: matched by
+/// bare callee name only, same simplification `ClassConstructorRewrite`
+/// already makes for a bare `new ClassName(...)`.
+type FactoryClassRewrite = (String, String);
 
 /// The identifier a user writes as the object in `pkg.name(...)`
 /// qualified-call syntax for a `--use`d package. A scoped package's real
@@ -21208,6 +21257,10 @@ fn generate_registry_shims(
         let native_lib_available = package.native_lib.is_some() || is_native_builtin(&package.name);
         let classifications =
             thaw_bridge::effective_classifications(&functions, native_lib_available);
+        let factory_class_returns = thaw_bridge::function_return_named_types(&package.dts_source)
+            .into_iter()
+            .filter(|(_, class_name)| classes.iter().any(|class| &class.name == class_name))
+            .collect();
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             commonjs_export_name,
@@ -21217,6 +21270,7 @@ fn generate_registry_shims(
             native_lib: package.native_lib,
             native_addon: package.native_addon,
             bundle_js: package.bundle_js,
+            factory_class_returns,
         });
     }
 
@@ -21318,6 +21372,14 @@ fn generate_registry_shims(
     let mut class_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     let mut class_rewrites = Vec::new();
+    let factory_class_rewrites: Vec<FactoryClassRewrite> = resolved
+        .iter()
+        .flat_map(|pkg| {
+            pkg.factory_class_returns
+                .iter()
+                .map(|(function, class)| (function.clone(), class.clone()))
+        })
+        .collect();
     let mut class_method_rewrites = Vec::new();
     let mut static_class_method_rewrites = Vec::new();
     let mut class_getter_rewrites = Vec::new();
@@ -21349,7 +21411,13 @@ fn generate_registry_shims(
                 ));
 
                 for (method, symbol, argument_count, has_callback, parameter_types) in
-                    generate_napi_class_method_overloads(class, false, &observed_arities, &mut shim)
+                    generate_napi_class_method_overloads(
+                        class,
+                        false,
+                        &observed_arities,
+                        &mut shim,
+                        true,
+                    )
                 {
                     class_method_rewrites.push((
                         class.name.clone(),
@@ -21544,10 +21612,54 @@ fn generate_registry_shims(
                     }
                 }
                 for (method, symbol, argument_count, has_callback, parameter_types) in
-                    generate_napi_class_method_overloads(class, true, &observed_arities, &mut shim)
+                    generate_napi_class_method_overloads(
+                        class,
+                        true,
+                        &observed_arities,
+                        &mut shim,
+                        true,
+                    )
                 {
                     static_class_method_rewrites.push((
                         qualifier_by_package[&pkg.name].clone(),
+                        class.name.clone(),
+                        method,
+                        symbol,
+                        argument_count,
+                        has_callback,
+                        parameter_types,
+                    ));
+                }
+            }
+        } else {
+            // A Fallback (QuickJS-NG) package's classes never went
+            // through any of this before -- `pkg.classes` was parsed but
+            // simply never consulted here, so a class instance (real
+            // example: dayjs's factory function returning its own
+            // `Dayjs`) stayed a permanently opaque `JsValue` with no way
+            // to call its methods. Reuses the exact same declaration
+            // generator and `class_method_rewrites` consumer as the
+            // native-addon branch above (`napi: false` picks the
+            // QuickJS-NG symbol/backend instead) -- only instance
+            // methods, not constructors/static methods/getters/setters,
+            // which the QuickJS-NG side of `compile_typed_napi_method`
+            // and friends don't support yet, and which neither of this
+            // fix's real targets (dayjs, mime) need: dayjs's `Dayjs`
+            // instances come from calling its factory function, not
+            // `new Dayjs(...)`, and mime's `Mime` instance is a
+            // ready-made package export, not constructed by user code
+            // either.
+            for class in &pkg.classes {
+                for (method, symbol, argument_count, has_callback, parameter_types) in
+                    generate_napi_class_method_overloads(
+                        class,
+                        false,
+                        &observed_arities,
+                        &mut shim,
+                        false,
+                    )
+                {
+                    class_method_rewrites.push((
                         class.name.clone(),
                         method,
                         symbol,
@@ -21749,6 +21861,7 @@ fn generate_registry_shims(
         class_setter_rewrites,
         static_class_getter_rewrites,
         static_class_setter_rewrites,
+        factory_class_rewrites,
         external_exports,
     ))
 }

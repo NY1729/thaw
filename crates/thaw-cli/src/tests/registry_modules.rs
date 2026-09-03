@@ -7134,3 +7134,77 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback (QuickJS-NG, no native addon) package whose factory
+/// function returns an instance of one of its own classes -- real-world
+/// example: dayjs's `declare function dayjs(...): dayjs.Dayjs`, `Dayjs`
+/// declared inside `declare namespace dayjs { class Dayjs {...} }`
+/// rather than at the top level. Item 4 of
+/// docs/design/npm-interop-gaps-2026-09.md: `pkg.classes` used to be
+/// bridged only for a native-addon package (`generate_native_addon_shim`
+/// gated on `pkg.native_addon.is_some()`); a Fallback class's instance
+/// stayed a permanently opaque, method-less `JsValue`, and a factory
+/// function's return value in particular had no linkage back to which
+/// class it even was (a namespace-qualified return type like
+/// `dayjs.Dayjs` classifies `Unsupported` and loses the name).
+/// Exercises the whole chain: `thaw_bridge::function_return_named_types`
+/// linking the factory to its class, `parse_dts_classes` now descending
+/// into `declare namespace` blocks to find the class at all, thaw-cli's
+/// shims.rs generating a QuickJS-NG-backed (`__thaw_typed_js_`) instance
+/// method declaration via the same generator a native addon's class
+/// already used, `compile_typed_napi_method` (thaw-llvm) now dispatching
+/// that declaration's backend to `thaw_js_call_method_result` instead of
+/// only ever `thaw_napi_call_method_typed_result`, and class_methods.rs
+/// tracking the factory call's result as a class instance the same way
+/// `new ClassName(...)` already is.
+#[test]
+fn fallback_factory_function_result_supports_instance_method_calls() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-factory-class-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("clock-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeClock(hour: number): clock.Clock;\n\
+         declare namespace clock {\n\
+             class Clock {\n\
+                 format(): string;\n\
+                 hourAt(offset: number): number;\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Clock(hour) { this.hour = hour; }\n\
+         Clock.prototype.format = function() { return 'H:' + this.hour; };\n\
+         Clock.prototype.hourAt = function(offset) { return this.hour + offset; };\n\
+         module.exports.makeClock = function(hour) { return new Clock(hour); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeClock } from "clock-kit";
+function main(): void {
+    const c = makeClock(3);
+    console.log(c.format());
+    console.log(c.hourAt(5));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "H:3\n8\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

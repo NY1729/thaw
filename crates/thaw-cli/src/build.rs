@@ -111,6 +111,7 @@ fn build_with_link_mode(
         class_setter_rewrites,
         static_class_getter_rewrites,
         static_class_setter_rewrites,
+        factory_class_rewrites,
         external_exports,
     ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
@@ -136,6 +137,7 @@ fn build_with_link_mode(
         &class_setter_rewrites,
         &static_class_getter_rewrites,
         &static_class_setter_rewrites,
+        &factory_class_rewrites,
     )?;
     let user_source =
         rewrite_external_class_constructors(&user_source, &class_constructor_rewrites)?;

@@ -34,13 +34,50 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     Ok(functions)
 }
 
+/// For every top-level function declaration in `source` (see
+/// `extract_fn_decls`) whose return type is a plain or namespace-
+/// qualified type reference, `name -> <the reference's own bare
+/// identifier>` -- independent of whether that reference ever resolves
+/// to a `Native` `DtsType` at all (`classify_ts_type` still calls a
+/// qualified name like `dayjs.Dayjs` `Unsupported`, since qualified
+/// names aren't resolved). Lets a caller elsewhere (thaw-cli's
+/// shims.rs) link a Fallback factory function's return value to one of
+/// this same file's own classes (`parse_dts_classes`) without widening
+/// `DtsFunction`'s own already very widely constructed shape for it.
+/// Real example: dayjs's `declare function dayjs(...): dayjs.Dayjs`,
+/// linking the `dayjs` factory function to its `Dayjs` class.
+pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
+    let Ok(module) = thaw_parser::parse_typescript(source) else {
+        return HashMap::new();
+    };
+    module
+        .body
+        .iter()
+        .flat_map(extract_fn_decls)
+        .filter_map(|(name, function)| {
+            let ann = function.return_type.as_ref()?;
+            let TsType::TsTypeRef(ty_ref) = ann.type_ann.as_ref() else {
+                return None;
+            };
+            let type_name = match &ty_ref.type_name {
+                TsEntityName::Ident(ident) => ident.sym.to_string(),
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
+            };
+            Some((
+                name.rsplit('.').next().unwrap_or(name).to_string(),
+                type_name,
+            ))
+        })
+        .collect()
+}
+
 pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
     let module = thaw_parser::parse_typescript(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let mut classes = module
         .body
         .iter()
-        .filter_map(extract_class_decl)
+        .flat_map(extract_class_decls)
         .map(|(name, class)| lower_dts_class(name, class, &interfaces, &generic_interfaces))
         .collect::<Vec<_>>();
     let declared = classes
@@ -126,23 +163,45 @@ fn inherited_class_members(
     (methods, properties)
 }
 
-fn extract_class_decl(item: &ModuleItem) -> Option<(&str, &Class)> {
+/// Like `extract_fn_decls`/`extract_fn_decls_from_decl`, but for a class
+/// declaration -- including one nested inside a `declare namespace X {
+/// ... }` block, real-world example: dayjs's own `Dayjs` class, declared
+/// inside `declare namespace dayjs { class Dayjs {...} } ` rather than
+/// at the top level (its factory function `dayjs(...)`, by contrast, is
+/// a genuinely top-level `declare function`). Without this, a
+/// namespace-nested class was silently invisible to `parse_dts_classes`
+/// entirely -- structurally parseable as a *type* (an ordinary
+/// `TsTypeRef` resolves it via `resolve_interfaces` same as a top-level
+/// one), but never bridgeable as a *class* since nothing here ever
+/// extracted its own methods/constructors.
+fn extract_class_decls(item: &ModuleItem) -> Vec<(&str, &Class)> {
     match item {
-        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Class(class))) => {
-            Some((class.ident.sym.as_str(), &class.class))
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => extract_class_decls_from_decl(decl),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+            extract_class_decls_from_decl(&export.decl)
         }
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
-            Decl::Class(class) => Some((class.ident.sym.as_str(), &class.class)),
-            _ => None,
-        },
         ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
             DefaultDecl::Class(class) => class
                 .ident
                 .as_ref()
-                .map(|ident| (ident.sym.as_str(), class.class.as_ref())),
-            _ => None,
+                .map(|ident| vec![(ident.sym.as_str(), class.class.as_ref())])
+                .unwrap_or_default(),
+            _ => Vec::new(),
         },
-        _ => None,
+        _ => Vec::new(),
+    }
+}
+
+fn extract_class_decls_from_decl(decl: &Decl) -> Vec<(&str, &Class)> {
+    match decl {
+        Decl::Class(class) => vec![(class.ident.sym.as_str(), &class.class)],
+        Decl::TsModule(module_decl) => {
+            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+                return Vec::new();
+            };
+            block.body.iter().flat_map(extract_class_decls).collect()
+        }
+        _ => Vec::new(),
     }
 }
 

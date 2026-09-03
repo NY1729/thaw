@@ -4,7 +4,9 @@ fn rewrite_external_class_methods(
     classes: &[ClassConstructorRewrite],
     methods: &[ClassMethodRewrite],
 ) -> Result<String, String> {
-    rewrite_external_class_methods_with_static(source, classes, methods, &[], &[], &[], &[], &[])
+    rewrite_external_class_methods_with_static(
+        source, classes, methods, &[], &[], &[], &[], &[], &[],
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -17,6 +19,7 @@ fn rewrite_external_class_methods_with_static(
     setters: &[ClassSetterRewrite],
     static_getters: &[StaticClassGetterRewrite],
     static_setters: &[StaticClassSetterRewrite],
+    factories: &[FactoryClassRewrite],
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
@@ -36,6 +39,7 @@ fn rewrite_external_class_methods_with_static(
         && setters.is_empty()
         && static_getters.is_empty()
         && static_setters.is_empty()
+        && factories.is_empty()
     {
         return Ok(source.to_string());
     }
@@ -65,9 +69,37 @@ fn rewrite_external_class_methods_with_static(
         }
     }
 
+    /// A bare call to a registered Fallback factory function (real
+    /// example: dayjs's `dayjs(...)`, whose declared return type
+    /// `dayjs.Dayjs` names its own `Dayjs` class) -- tracked as
+    /// producing a class instance the same way `constructed_class`
+    /// tracks `new ClassName(...)`, even though nothing about the call
+    /// syntax itself says `new`. Matched by bare callee name only, same
+    /// simplification `constructed_class` already makes for a bare `new
+    /// ClassName(...)` (no import/qualifier resolution).
+    fn factory_call_class<'a>(
+        expression: &'a Expr,
+        factories: &'a [FactoryClassRewrite],
+    ) -> Option<&'a str> {
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Ident(function) = callee.as_ref() else {
+            return None;
+        };
+        factories
+            .iter()
+            .find(|(name, _)| name == function.sym.as_str())
+            .map(|(_, class)| class.as_str())
+    }
+
     fn source_instance_class(
         expression: &Expr,
         classes: &[ClassConstructorRewrite],
+        factories: &[FactoryClassRewrite],
         variables: &std::collections::HashMap<String, String>,
     ) -> Option<String> {
         match expression {
@@ -76,13 +108,17 @@ fn rewrite_external_class_methods_with_static(
                 .map(|(root, path)| instance_path_key(&root, &path))
                 .and_then(|key| variables.get(&key).cloned()),
             Expr::Paren(parenthesized) => {
-                source_instance_class(&parenthesized.expr, classes, variables)
+                source_instance_class(&parenthesized.expr, classes, factories, variables)
             }
-            Expr::TsAs(assertion) => source_instance_class(&assertion.expr, classes, variables),
+            Expr::TsAs(assertion) => {
+                source_instance_class(&assertion.expr, classes, factories, variables)
+            }
             Expr::TsTypeAssertion(assertion) => {
-                source_instance_class(&assertion.expr, classes, variables)
+                source_instance_class(&assertion.expr, classes, factories, variables)
             }
-            _ => constructed_class(expression, classes).map(str::to_owned),
+            _ => constructed_class(expression, classes)
+                .or_else(|| factory_call_class(expression, factories))
+                .map(str::to_owned),
         }
     }
 
@@ -153,6 +189,7 @@ fn rewrite_external_class_methods_with_static(
         expression: &Expr,
         prefix: &str,
         classes: &[ClassConstructorRewrite],
+        factories: &[FactoryClassRewrite],
         variables: &std::collections::HashMap<String, String>,
         additions: &mut Vec<(String, String)>,
     ) {
@@ -190,10 +227,10 @@ fn rewrite_external_class_methods_with_static(
                 _ => continue,
             };
             let key = format!("{prefix}\u{1f}{name}");
-            if let Some(class) = source_instance_class(value, classes, variables) {
+            if let Some(class) = source_instance_class(value, classes, factories, variables) {
                 additions.push((key.clone(), class));
             }
-            collect_object_instance_classes(value, &key, classes, variables, additions);
+            collect_object_instance_classes(value, &key, classes, factories, variables, additions);
         }
     }
 
@@ -1413,6 +1450,7 @@ fn rewrite_external_class_methods_with_static(
 
     struct Finder<'a> {
         classes: &'a [ClassConstructorRewrite],
+        factories: &'a [FactoryClassRewrite],
         methods: &'a [ClassMethodRewrite],
         static_methods: &'a [StaticClassMethodRewrite],
         getters: &'a [ClassGetterRewrite],
@@ -1747,9 +1785,12 @@ fn rewrite_external_class_methods_with_static(
             if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
             {
                 invalidate_instance_path(&mut self.variables, binding.id.sym.as_str());
-                if let Some(class) =
-                    source_instance_class(initializer, self.classes, &self.variables)
-                {
+                if let Some(class) = source_instance_class(
+                    initializer,
+                    self.classes,
+                    self.factories,
+                    &self.variables,
+                ) {
                     self.variables.insert(binding.id.sym.to_string(), class);
                 }
                 let mut property_classes = Vec::new();
@@ -1757,6 +1798,7 @@ fn rewrite_external_class_methods_with_static(
                     initializer,
                     binding.id.sym.as_str(),
                     self.classes,
+                    self.factories,
                     &self.variables,
                     &mut property_classes,
                 );
@@ -2018,7 +2060,14 @@ fn rewrite_external_class_methods_with_static(
                 })
                 .flatten();
             let assigned_class = (assignment.op == AssignOp::Assign)
-                .then(|| source_instance_class(&assignment.right, self.classes, &self.variables))
+                .then(|| {
+                    source_instance_class(
+                        &assignment.right,
+                        self.classes,
+                        self.factories,
+                        &self.variables,
+                    )
+                })
                 .flatten();
             let AssignTarget::Simple(target) = &assignment.left else {
                 return;
@@ -2120,6 +2169,7 @@ fn rewrite_external_class_methods_with_static(
     }
     let mut finder = Finder {
         classes,
+        factories,
         methods,
         static_methods,
         getters,
