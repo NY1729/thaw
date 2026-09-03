@@ -796,6 +796,10 @@ fn dts_source_with_reexported_functions(
     // `from`-clause case below, the target file can differ per specifier
     // even within one `export { ... }` statement.
     let import_equals_targets = import_equals_targets(entry_path, &module);
+    output.push_str(&inline_import_equals_value_type(
+        &module,
+        &import_equals_targets,
+    )?);
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
@@ -1213,6 +1217,94 @@ fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf>
     [path.with_extension("d.ts"), path.join("index.d.ts")]
         .into_iter()
         .find(|candidate| candidate.is_file())
+}
+
+/// The name of the *type* that `export = X;`'s `X` is declared with in
+/// `module` -- e.g. mime's `export = mime;` alongside `declare const
+/// mime: Mime;` resolves to `"Mime"`. Mirrors
+/// `export_assignment_function_declarations`'s own `export = X` lookup,
+/// but reads the type annotation of a `declare const` binding rather
+/// than a function body: `X` here names a *value* whose class lives
+/// entirely in a different file (see `import_equals_targets`), not a
+/// function declared locally.
+fn export_assignment_value_type_name(module: &thaw_parser::ast::Module) -> Option<String> {
+    use thaw_parser::ast::{Decl, Expr, ModuleDecl, ModuleItem, Pat, Stmt, TsEntityName, TsType};
+
+    let target = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+            match export.expr.as_ref() {
+                Expr::Ident(ident) => Some(ident.sym.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    })?;
+    module.body.iter().find_map(|item| {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl))) = item else {
+            return None;
+        };
+        var_decl.decls.iter().find_map(|declarator| {
+            let Pat::Ident(binding) = &declarator.name else {
+                return None;
+            };
+            if binding.id.sym.as_str() != target {
+                return None;
+            }
+            let annotation = binding.type_ann.as_ref()?;
+            let TsType::TsTypeRef(ty_ref) = annotation.type_ann.as_ref() else {
+                return None;
+            };
+            match &ty_ref.type_name {
+                TsEntityName::Ident(ident) => Some(ident.sym.to_string()),
+                TsEntityName::TsQualifiedName(_) => None,
+            }
+        })
+    })
+}
+
+/// Inlines the file backing a `declare const x: Name;` value's *type*
+/// (`Name`) when `Name` isn't declared anywhere in this same file but
+/// resolves through this file's own `import Name = require("./path")`
+/// (see `import_equals_targets`) -- real-world example: mime's
+/// `import Mime = require("./Mime"); ... declare const mime: Mime;
+/// export = mime;`, `Mime` itself living in `./Mime.d.ts`, a *type*
+/// reference across files rather than the *value* re-export
+/// `import_equals_targets`'s other callers already follow. Conceptually
+/// the same "read the referenced file and splice its declarations in"
+/// pattern as `inline_triple_slash_references`, just reached through an
+/// import-equals value binding's type annotation instead of a `///
+/// <reference path="..." />` comment.
+///
+/// `Mime.d.ts` itself is a plain ES module (`export default class Mime
+/// {...}`, with its own `import { TypeMap } from "./index"` back to the
+/// entry file) rather than an ambient declaration -- only the `export
+/// default class Name` prefix is rewritten to `declare class Name`
+/// (the DefinitelyTyped convention for a single-class module); anything
+/// else in the file, notably that `import`, is inlined unchanged since
+/// thaw-bridge's own `.d.ts` processing already ignores any top-level
+/// item it doesn't specifically look for.
+fn inline_import_equals_value_type(
+    module: &thaw_parser::ast::Module,
+    import_equals_targets: &std::collections::HashMap<String, PathBuf>,
+) -> Result<String, String> {
+    let Some(type_name) = export_assignment_value_type_name(module) else {
+        return Ok(String::new());
+    };
+    let Some(target_path) = import_equals_targets.get(&type_name) else {
+        return Ok(String::new());
+    };
+    let source = fs::read_to_string(target_path).map_err(|error| {
+        format!(
+            "failed to read `{}`'s imported type `{type_name}`: {error}",
+            target_path.display()
+        )
+    })?;
+    let source = source.replacen(
+        &format!("export default class {type_name}"),
+        &format!("declare class {type_name}"),
+        1,
+    );
+    Ok(format!("\n{source}\n"))
 }
 
 fn npm_install(scratch: &Path, package: &str) -> Result<(), String> {
