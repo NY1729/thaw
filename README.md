@@ -2419,6 +2419,10 @@ and chained `typeof` inspection/narrowing inside JIT expressions and loop branch
 without embedding QuickJS. Homogeneous primitive arrays and dictionaries can
 join those conditional results through the same tagged handle, including
 different array/dictionary element types and mixtures with primitive values.
+`for...of` over a tagged union of homogeneous primitive arrays (for example
+`number[] | string[] | boolean[]`) keeps the array tag in the JIT loop, using
+native length and element access without a QuickJS round trip; each iteration
+is still represented as a tagged primitive for normal JavaScript coercion.
 An export whose declared union is wider than its fixed array or dictionary
 implementation also adds the required aggregate tag at its JIT boundary.
 Optional chaining may return primitive arrays and dictionaries directly; both
@@ -2614,6 +2618,9 @@ Primitive-array `for...of` loops use the same early aggregate path. The native
 source handle is reused when it is already materialized, and the hidden index
 plus number, boolean, or string element slots remain stable across both return
 paths.
+String `for...of` loops use the same path after converting the input string to
+the native Unicode-code-point array representation, so concatenation and other
+string accumulation remain QuickJS-free as well.
 Primitive-dictionary `for...in` loops can likewise return a fixed aggregate
 early. Their native source handle is reused, while an explicit typed key slot
 supports computed number, boolean, or string dictionary reads in the returned
@@ -2639,8 +2646,9 @@ counted result, catch values retain their typed native representation, and the
 shared finalizer runs once on either path.
 Labels that wrap an aggregate-returning statement or loop are transparent to
 the same JIT extraction, so the label itself no longer forces QuickJS when no
-labeled jump targets it. Multi-level labeled `break` and `continue` still need
-dedicated JIT loop-depth operands.
+labeled jump targets it. Labeled `break` and `continue` in typed JIT loops are
+lowered to loop-depth operands; dynamic or otherwise unsupported loop bodies
+continue to use the existing fallback path.
 Return-only `switch` cases with a final `default` can return fixed aggregates
 directly. The discriminant is materialized once, each case test uses typed strict
 comparison in source order, and matching case leaves join through the same
@@ -3115,7 +3123,9 @@ selected branch can call stateful JIT helpers or mutate primitive arrays.
   pre-teardown removal.
   `napi_run_script` evaluates JavaScript in the embedded persistent QuickJS
   context, converts JSON-representable results into host values and reports
-  JavaScript exceptions through the pending-exception channel.
+  JavaScript exceptions through the pending-exception channel. Strict JSON
+  literal scripts use a native fast path and avoid entering QuickJS; scripts
+  containing JavaScript syntax retain the persistent-engine behavior.
   Node-API v9 syntax errors and the process-wide `Symbol.for` registry are
   exposed through their `node_api_*` entry points.
   Node-API v10 can create zero-copy Buffer views over bounded ArrayBuffer

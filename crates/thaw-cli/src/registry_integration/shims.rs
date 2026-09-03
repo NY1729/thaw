@@ -3823,6 +3823,12 @@ fn jit_export(
                         let operation = match jit_expression_kind(&receiver)?.0 {
                             JitKind::String => "strlen",
                             JitKind::Array => "arraylen",
+                            JitKind::Dynamic
+                                if receiver.len() == 1
+                                    && jit_dynamic_array_argument(&receiver[0]) =>
+                            {
+                                "dynarraylen"
+                            }
                             _ => return None,
                         };
                         output.extend(receiver);
@@ -6114,12 +6120,16 @@ fn jit_export(
             .into_iter()
             .flat_map(str::bytes)
         {
-            available.insert(match kind {
+            let kind = match kind {
                 b'n' => JitKind::Number,
                 b'b' => JitKind::Boolean,
                 b's' => JitKind::String,
-                _ => unreachable!(),
-            });
+                // Uppercase tags describe aggregate union members. They do
+                // not participate in a primitive `typeof` narrowing, but
+                // must not make the JIT extractor panic either.
+                _ => continue,
+            };
+            available.insert(kind);
         }
         if available.is_empty() {
             available.extend(if source
@@ -10311,6 +10321,23 @@ fn jit_export(
             }
             Some(())
         }
+        if let Stmt::Labeled(labeled) = statement {
+            let target = context.loop_depth;
+            context
+                .loop_labels
+                .push((labeled.label.sym.to_string(), target));
+            let result = encode_loop_effects(
+                labeled.body.as_ref(),
+                parameters,
+                locals,
+                mutable,
+                (kinds, loop_control, finalizers),
+                context,
+                output,
+            );
+            context.loop_labels.pop();
+            return result;
+        }
         if let Stmt::Block(block) = statement {
             let mut block_locals = locals.clone();
             let mut block_mutable = mutable.clone();
@@ -10451,8 +10478,7 @@ fn jit_export(
                 parameters,
                 locals,
                 context.helpers,
-            )
-            {
+            ) {
                 output.push("guard".into());
                 encode_loop_effects(
                     branch.cons.as_ref(),
@@ -10506,6 +10532,28 @@ fn jit_export(
             }.into());
             return Some(());
         }
+        if let Stmt::Break(statement) = statement {
+            let label = statement.label.as_ref()?.sym.to_string();
+            let target = context
+                .loop_labels
+                .iter()
+                .rev()
+                .find(|(name, _)| name == &label)
+                .map(|(_, depth)| *depth)?;
+            let distance = context
+                .loop_depth
+                .checked_sub(target.checked_add(1)?)?;
+            encode_finalizers(
+                finalizers,
+                loop_control.break_finalizer_depth,
+                (parameters, locals, mutable, kinds),
+                loop_control,
+                context,
+                output,
+            )?;
+            output.push(format!("break{distance}"));
+            return Some(());
+        }
         if matches!(statement, Stmt::Continue(statement) if statement.label.is_none()) {
             encode_finalizers(
                 finalizers,
@@ -10516,6 +10564,28 @@ fn jit_export(
                 output,
             )?;
             output.push("continue".into());
+            return Some(());
+        }
+        if let Stmt::Continue(statement) = statement {
+            let label = statement.label.as_ref()?.sym.to_string();
+            let target = context
+                .loop_labels
+                .iter()
+                .rev()
+                .find(|(name, _)| name == &label)
+                .map(|(_, depth)| *depth)?;
+            let distance = context
+                .loop_depth
+                .checked_sub(target.checked_add(1)?)?;
+            encode_finalizers(
+                finalizers,
+                loop_control.continue_finalizer_depth,
+                (parameters, locals, mutable, kinds),
+                loop_control,
+                context,
+                output,
+            )?;
+            output.push(format!("continue{distance}"));
             return Some(());
         }
         if let Stmt::Switch(statement) = statement {
@@ -10756,7 +10826,8 @@ fn jit_export(
                 insert_jit_error_checks(output, start);
             }
             output.push("while".into());
-            encode_loop_effects(
+            context.loop_depth += 1;
+            let body_result = encode_loop_effects(
                 loop_statement.body.as_ref(),
                 parameters,
                 locals,
@@ -10768,13 +10839,16 @@ fn jit_export(
                 ),
                 context,
                 output,
-            )?;
+            );
+            context.loop_depth -= 1;
+            body_result?;
             output.push("loopend".into());
             return Some(());
         }
         if let Stmt::DoWhile(loop_statement) = statement {
             output.push("loop".into());
-            encode_loop_effects(
+            context.loop_depth += 1;
+            let body_result = encode_loop_effects(
                 loop_statement.body.as_ref(),
                 parameters,
                 locals,
@@ -10786,7 +10860,9 @@ fn jit_export(
                 ),
                 context,
                 output,
-            )?;
+            );
+            context.loop_depth -= 1;
+            body_result?;
             output.push("looptail".into());
             let start = output.len();
             encode_condition(loop_statement.test.as_ref(), parameters, locals, context, output)?;
@@ -10847,7 +10923,8 @@ fn jit_export(
                 ]);
             }
             output.push("while".into());
-            encode_loop_effects(
+            context.loop_depth += 1;
+            let body_result = encode_loop_effects(
                 loop_statement.body.as_ref(),
                 parameters,
                 &nested_locals,
@@ -10859,7 +10936,9 @@ fn jit_export(
                 ),
                 context,
                 output,
-            )?;
+            );
+            context.loop_depth -= 1;
+            body_result?;
             output.push("looptail".into());
             if let Some(update) = loop_statement.update.as_deref() {
                 let start = output.len();
@@ -10903,8 +10982,10 @@ fn jit_export(
                     source.push(untag.into());
                 }
             }
-            if jit_expression_kind(&source)?.0 != JitKind::Array {
-                return None;
+            match jit_expression_kind(&source)?.0 {
+                JitKind::String => source.push("strarray".into()),
+                JitKind::Array => {}
+                _ => return None,
             }
             let array = array_prefix(&source)?;
             let element_kind = match array {
@@ -10992,7 +11073,8 @@ fn jit_export(
                 format!("{array}get"),
                 format!("setl{element_index}"),
             ]);
-            encode_loop_effects(
+            context.loop_depth += 1;
+            let body_result = encode_loop_effects(
                 loop_statement.body.as_ref(),
                 parameters,
                 &nested_locals,
@@ -11004,7 +11086,9 @@ fn jit_export(
                 ),
                 context,
                 output,
-            )?;
+            );
+            context.loop_depth -= 1;
+            body_result?;
             output.extend([
                 "looptail".into(),
                 index_local,
@@ -11023,7 +11107,8 @@ fn jit_export(
             let mut nested_locals = locals.clone();
             let mut nested_mutable = mutable.clone();
             let mut nested_kinds = kinds.clone();
-            encode_for_in_loop(
+            context.loop_depth += 1;
+            let body_result = encode_for_in_loop(
                 loop_statement,
                 parameters,
                 &mut nested_locals,
@@ -11031,7 +11116,9 @@ fn jit_export(
                 (&mut nested_kinds, loop_control, finalizers),
                 context,
                 output,
-            )?;
+            );
+            context.loop_depth -= 1;
+            body_result?;
             output.extend(std::iter::repeat_n(
                 "drop".into(),
                 nested_kinds.len().checked_sub(kinds.len())?,
@@ -12080,20 +12167,41 @@ fn jit_export(
                 source.push(untag.into());
             }
         }
-        if jit_expression_kind(&source)?.0 != JitKind::Array {
-            return None;
+        let dynamic_array = (source.len() == 1 && jit_dynamic_array_argument(&source[0]))
+            || jit_dynamic_array_result(&source);
+        match jit_expression_kind(&source)?.0 {
+            JitKind::String => source.push("strarray".into()),
+            JitKind::Array => {}
+            JitKind::Dynamic if dynamic_array => {}
+            _ => return None,
         }
-        let array = array_prefix(&source)?;
+        let array = if dynamic_array {
+            "dynamic"
+        } else {
+            array_prefix(&source)?
+        };
         let element_kind = match array {
             "rn" => JitKind::Number,
             "rb" => JitKind::Boolean,
             "rs" => JitKind::String,
+            "dynamic" => JitKind::Dynamic,
             _ => return None,
         };
         let source_index = kinds.len();
         output.extend(source);
-        kinds.insert(format!("\0forof-source-{source_index}"), JitKind::Array);
-        let source_local = format!("{array}l{source_index}");
+        kinds.insert(
+            format!("\0forof-source-{source_index}"),
+            if dynamic_array {
+                JitKind::Dynamic
+            } else {
+                JitKind::Array
+            },
+        );
+        let source_local = if dynamic_array {
+            format!("ld{source_index}")
+        } else {
+            format!("{array}l{source_index}")
+        };
 
         let index = kinds.len();
         output.push(format!("c{:016x}", 0.0f64.to_bits()));
@@ -12122,6 +12230,10 @@ fn jit_export(
                             output.push("asbool".into());
                         }
                     }
+                    JitKind::Dynamic => {
+                        output.push(format!("c{:016x}", 0.0f64.to_bits()));
+                        output.push("tagnum".into());
+                    }
                     _ => return None,
                 }
                 let element_index = kinds.len();
@@ -12129,6 +12241,7 @@ fn jit_export(
                     JitKind::Number => "ln",
                     JitKind::Boolean => "lb",
                     JitKind::String => "ls",
+                    JitKind::Dynamic => "ld",
                     _ => return None,
                 };
                 let element_local = format!("{prefix}{element_index}");
@@ -12154,14 +12267,24 @@ fn jit_export(
         };
 
         output.push("loop".into());
-        output.extend([index_local.clone(), source_local.clone(), "arraylen".into(), "<".into()]);
-        output.push("while".into());
         output.extend([
-            source_local.clone(),
             index_local.clone(),
-            format!("{array}get"),
-            format!("setl{element_index}"),
+            source_local.clone(),
+            if dynamic_array {
+                "dynarraylen".into()
+            } else {
+                "arraylen".into()
+            },
+            "<".into(),
         ]);
+        output.push("while".into());
+        output.extend([source_local.clone(), index_local.clone()]);
+        output.push(if dynamic_array {
+            "dynarrayat".into()
+        } else {
+            format!("{array}get")
+        });
+        output.push(format!("setl{element_index}"));
         encode_loop_effects(
             loop_statement.body.as_ref(),
             parameters,
@@ -12270,7 +12393,8 @@ fn jit_export(
                 [Stmt::Block(_)
                     | Stmt::If(_)
                     | Stmt::Switch(_)
-                    | Stmt::Try(_), ..]
+                    | Stmt::Try(_)
+                    | Stmt::Labeled(_), ..]
                 )
         );
         let mut control_callable_candidates = std::collections::HashMap::new();
@@ -12893,7 +13017,8 @@ fn jit_export(
             | Stmt::DoWhile(_)
             | Stmt::For(_)
             | Stmt::ForOf(_)
-            | Stmt::ForIn(_)), rest @ ..] = statements
+            | Stmt::ForIn(_)
+            | Stmt::Labeled(_)), rest @ ..] = statements
         {
             let kinds = callable_runtime_kinds(locals)?;
             if !kinds.is_empty() {
@@ -16302,7 +16427,8 @@ fn jit_export(
         return None;
     }
     let starts_loop = matches!(body, NumericBody::Statements(statements)
-        if matches!(statements.first(), Some(Stmt::While(_) | Stmt::For(_) | Stmt::DoWhile(_) | Stmt::ForIn(_) | Stmt::ForOf(_))));
+        if matches!(statements.first(), Some(Stmt::While(_) | Stmt::For(_) | Stmt::DoWhile(_) | Stmt::ForIn(_) | Stmt::ForOf(_)))
+            || statements.first().is_some_and(|statement| matches!(statement, Stmt::Labeled(labeled) if matches!(labeled.body.as_ref(), Stmt::While(_) | Stmt::For(_) | Stmt::DoWhile(_) | Stmt::ForIn(_) | Stmt::ForOf(_)))));
     if !starts_loop
         && matches!(
             &function.ret,
@@ -16605,6 +16731,32 @@ fn jit_dynamic_array_argument(token: &str) -> bool {
     jit_dynamic_argument(token).is_some_and(|(_, kinds)| {
         kinds.bytes().all(|kind| matches!(kind, b'N' | b'B' | b'S'))
     })
+}
+
+fn jit_dynamic_array_result(tokens: &[String]) -> bool {
+    let Some(token) = tokens.last().map(String::as_str) else {
+        return false;
+    };
+    matches!(
+        token,
+        "dynarrayslice"
+            | "dynarrayconcat"
+            | "dynarrayappend"
+            | "dynarrayreversed"
+            | "dynarrayreverse"
+            | "dynarraysorted"
+            | "dynarraysort"
+            | "dynarrayfill"
+            | "dynarraycopywithin"
+            | "dynarraywith"
+            | "dynarraysplice"
+            | "dynarraytospliced"
+            | "dynarrayfiltertruthy"
+            | "dynarraymaptonumber"
+            | "dynarraymaptoboolean"
+            | "dynarraymaptostring"
+            | "dynarraymapidentity"
+    ) || token.starts_with("dynarraymapjit")
 }
 
 fn jit_typed_array_union_untag(token: &str) -> Option<&'static str> {
@@ -17875,6 +18027,11 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             });
         } else if token == "strlen" {
             if stack.pop()? != JitKind::String {
+                return None;
+            }
+            stack.push(JitKind::Number);
+        } else if token == "dynarraylen" {
+            if stack.pop()? != JitKind::Dynamic {
                 return None;
             }
             stack.push(JitKind::Number);

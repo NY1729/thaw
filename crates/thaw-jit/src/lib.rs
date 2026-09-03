@@ -2523,6 +2523,22 @@ extern "C" fn dynamic_array_at(value: f64, index: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn dynamic_array_length(value: f64) -> f64 {
+    let Some(dynamic) = dynamic_primitive(value, None) else {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    };
+    if !matches!(
+        dynamic.tag,
+        DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG
+    ) {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
+    array_length(f64::from_bits(dynamic.payload))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn number_array_get(value: f64, index: f64) -> f64 {
     unsafe { array_get(value, index, 0) }
 }
@@ -5560,6 +5576,7 @@ enum NumericValue {
     StringLastIndexOfAt,
     StringLength,
     ArrayLength,
+    DynamicArrayLength,
     IsArray,
     IsNotArray,
     DynamicIsArray,
@@ -5949,6 +5966,7 @@ impl NumericProgram {
                     "lastindexof2" => Some(NumericValue::StringLastIndexOfAt),
                     "strlen" => Some(NumericValue::StringLength),
                     "arraylen" => Some(NumericValue::ArrayLength),
+                    "dynarraylen" => Some(NumericValue::DynamicArrayLength),
                     "isarray" => Some(NumericValue::IsArray),
                     "isnotarray" => Some(NumericValue::IsNotArray),
                     "dynisarray" => Some(NumericValue::DynamicIsArray),
@@ -9180,6 +9198,16 @@ impl NumericProgram {
                         return None;
                     }
                     emit_unary_call(&mut code, array_length as *const () as u64, depth - 1);
+                }
+                NumericValue::DynamicArrayLength => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    emit_unary_call(
+                        &mut code,
+                        dynamic_array_length as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::IsArray | NumericValue::IsNotArray => {
                     if depth == 0 {

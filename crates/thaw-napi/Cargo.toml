@@ -6,8 +6,12 @@ edition.workspace = true
 [lib]
 crate-type = ["staticlib", "rlib"]
 
+[features]
+default = ["quickjs"]
+quickjs = ["dep:thaw-quickjs"]
+
 [dependencies]
 libc = "0.2"
 serde_json = "1"
 tempfile = "3"
-thaw-quickjs = { path = "../thaw-quickjs" }
+thaw-quickjs = { path = "../thaw-quickjs", optional = true }

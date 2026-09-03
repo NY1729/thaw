@@ -899,6 +899,7 @@ fn element_apis_operate_on_objects_and_descriptors() {
     }
 }
 
+#[cfg(feature = "quickjs")]
 #[test]
 fn run_script_evaluates_values_and_reports_exceptions() {
     unsafe {
@@ -908,13 +909,28 @@ fn run_script_evaluates_values_and_reports_exceptions() {
         assert_eq!(
             napi_create_string_utf8(
                 env_ptr,
-                c"globalThis.__thawNapiProbe = 40; ({ answer: __thawNapiProbe + 2 })".as_ptr(),
+                c"{\"answer\":42}".as_ptr(),
                 NAPI_AUTO_LENGTH,
                 &mut script,
             ),
             NAPI_OK
         );
         let mut result = ptr::null_mut();
+        assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
+        assert_eq!(
+            json_from_value(result).unwrap(),
+            serde_json::json!({"answer": 42.0})
+        );
+
+        assert_eq!(
+            napi_create_string_utf8(
+                env_ptr,
+                c"globalThis.__thawNapiProbe = 40; ({ answer: __thawNapiProbe + 2 })".as_ptr(),
+                NAPI_AUTO_LENGTH,
+                &mut script,
+            ),
+            NAPI_OK
+        );
         assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
         assert_eq!(
             json_from_value(result).unwrap(),
@@ -956,5 +972,47 @@ fn run_script_evaluates_values_and_reports_exceptions() {
         assert!(
             matches!(value_ref(result), Ok(Value::Error(message)) if message.contains("script failed"))
         );
+    }
+}
+
+#[cfg(not(feature = "quickjs"))]
+#[test]
+fn run_script_without_quickjs_accepts_json_only() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut script = ptr::null_mut();
+        assert_eq!(
+            napi_create_string_utf8(
+                env_ptr,
+                c"{\"answer\":42}".as_ptr(),
+                NAPI_AUTO_LENGTH,
+                &mut script,
+            ),
+            NAPI_OK
+        );
+        let mut result = ptr::null_mut();
+        assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
+        assert_eq!(
+            json_from_value(result).unwrap(),
+            serde_json::json!({"answer": 42.0})
+        );
+
+        assert_eq!(
+            napi_create_string_utf8(env_ptr, c"1 + 1".as_ptr(), NAPI_AUTO_LENGTH, &mut script),
+            NAPI_OK
+        );
+        assert_eq!(
+            napi_run_script(env_ptr, script, &mut result),
+            NAPI_PENDING_EXCEPTION
+        );
+        let mut pending = false;
+        assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);
+        assert!(pending);
+        assert_eq!(
+            napi_get_and_clear_last_exception(env_ptr, &mut result),
+            NAPI_OK
+        );
+        assert!(matches!(value_ref(result), Ok(Value::Error(message)) if message.contains("QuickJS feature")));
     }
 }
