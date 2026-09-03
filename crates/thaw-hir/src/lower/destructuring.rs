@@ -510,7 +510,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_union_tuple_index_read(
-        &self,
+        &mut self,
         value: HirExpr,
         elements: &[HirType],
         index: usize,
@@ -594,7 +594,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_union_tuple_rest(
-        &self,
+        &mut self,
         value: HirExpr,
         elements: &[HirType],
         start: usize,
@@ -1161,7 +1161,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_union_object_rest(
-        &self,
+        &mut self,
         value: HirExpr,
         elements: &[HirType],
         used: &BTreeSet<Symbol>,

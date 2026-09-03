@@ -1,8 +1,17 @@
 impl<'a> FnLowerer<'a> {
     /// Coerces a value into its declared native layout.
-    fn coerce_to_declared(&self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+    fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         if *declared == HirType::Dynamic {
             return Ok(value);
+        }
+        if *declared == HirType::Json {
+            let actual = self.infer_expr_type(&value)?;
+            if actual == HirType::Json {
+                return Ok(value);
+            }
+            if json_convertible_native_type(&actual) {
+                return self.wrap_native_value_as_json(value, actual);
+            }
         }
         if let Some(adapted) = self.adapt_named_function_to_callable(declared, &value)? {
             return Ok(adapted);

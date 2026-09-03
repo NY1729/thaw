@@ -1,6 +1,6 @@
 impl<'a> FnLowerer<'a> {
     fn lower_union_property_read(
-        &self,
+        &mut self,
         object: HirExpr,
         elements: &[HirType],
         property: &str,
@@ -147,21 +147,18 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_flattened_property_return(
-        &self,
+        &mut self,
         value: HirExpr,
         ty: &HirType,
         result: &HirType,
     ) -> Result<Vec<HirStmt>, String> {
-        let absent_return = |value: HirExpr| -> Result<Vec<HirStmt>, String> {
-            Ok(vec![HirStmt::Return(Some(
-                self.coerce_to_declared(result, value)?,
-            ))])
-        };
         match ty {
             HirType::Optional(payload) => {
                 let mut statements = vec![HirStmt::If(
                     HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone()),
-                    absent_return(HirExpr::Lit(HirLit::Undefined))?,
+                    vec![HirStmt::Return(Some(
+                        self.coerce_to_declared(result, HirExpr::Lit(HirLit::Undefined))?,
+                    ))],
                     Vec::new(),
                 )];
                 statements.extend(self.lower_flattened_property_return(
@@ -174,7 +171,9 @@ impl<'a> FnLowerer<'a> {
             HirType::Nullable(payload) => {
                 let mut statements = vec![HirStmt::If(
                     HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone()),
-                    absent_return(HirExpr::Lit(HirLit::Null))?,
+                    vec![HirStmt::Return(Some(
+                        self.coerce_to_declared(result, HirExpr::Lit(HirLit::Null))?,
+                    ))],
                     Vec::new(),
                 )];
                 statements.extend(self.lower_flattened_property_return(
@@ -188,7 +187,9 @@ impl<'a> FnLowerer<'a> {
                 let mut statements = vec![
                     HirStmt::If(
                         HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone()),
-                        absent_return(HirExpr::Lit(HirLit::Null))?,
+                        vec![HirStmt::Return(Some(
+                            self.coerce_to_declared(result, HirExpr::Lit(HirLit::Null))?,
+                        ))],
                         Vec::new(),
                     ),
                     HirStmt::If(
@@ -196,7 +197,9 @@ impl<'a> FnLowerer<'a> {
                             Box::new(value.clone()),
                             payload.as_ref().clone(),
                         ),
-                        absent_return(HirExpr::Lit(HirLit::Undefined))?,
+                        vec![HirStmt::Return(Some(
+                            self.coerce_to_declared(result, HirExpr::Lit(HirLit::Undefined))?,
+                        ))],
                         Vec::new(),
                     ),
                 ];
@@ -234,7 +237,9 @@ impl<'a> FnLowerer<'a> {
                 }
                 Ok(statements)
             }
-            _ => absent_return(value),
+            _ => Ok(vec![HirStmt::Return(Some(
+                self.coerce_to_declared(result, value)?,
+            ))]),
         }
     }
 }

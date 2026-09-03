@@ -567,7 +567,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_optional_undefined_equality(
-        &self,
+        &mut self,
         lhs: HirExpr,
         rhs: HirExpr,
     ) -> Result<Option<HirExpr>, String> {
