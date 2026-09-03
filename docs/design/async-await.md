@@ -9,7 +9,19 @@
   async関数の集約型・タプル戻り値、式内の複数await、深いif/while/try、
   Promise値のローカル・引数・オブジェクトfield経由の受け渡しも実装済み。
   Lambda Runtime APIの`Lambda-Runtime-Deadline-Ms`に基づく実行タイムアウト
-  検出と、完了Promiseの強制reject・pending state破棄も実装済み（詳細は4.7節）
+  検出と、完了Promiseの強制reject・pending state破棄も実装済み（詳細は4.7節）。
+  **訂正(コード検証済み)**: 「V2」は4章が当初計画した`llvm.coro.*`
+  intrinsics(`coro.id`/`coro.begin`/`coro.suspend`等)を実際には一つも
+  使っていない -- コードベース全体を検索して確認済み。代わりに
+  [thaw-llvm/hir_codegen/async_frames](../../crates/thaw-llvm/src/hir_codegen/async_frames)
+  (8ファイル・約2550行)が、ramp/resume関数・状態番号によるswitch分岐・
+  frame slotという4.3節と同じ概念を、LLVMのコルーチン分割パスに頼らず
+  自前で実装している。`hir_codegen.rs`にある`coro-early,coro-split,
+  coro-cleanup`パスパイプラインの登録は、変換対象のcoroutine IRが
+  存在しないため実質no-opの残骸。目指していた実質(シングルスレッドでの
+  真のサスペンド/レジューム、並行Promise結合子、ノンブロッキングI/O)は
+  この自前実装で達成されており、4章の「本物のLLVMコルーチン」計画を
+  改めて実装する動機は無いと判断している。
 - 前提: [thaw-hir](../../crates/thaw-hir), [thaw-llvm/hir_codegen](../../crates/thaw-llvm/src/hir_codegen.rs), [thaw-runtime](../../crates/thaw-runtime) の現状（Phase 0〜2一部）を前提にする
 
 ## 1. 目的とスコープ
