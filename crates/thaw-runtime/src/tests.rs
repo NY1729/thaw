@@ -1445,7 +1445,10 @@ fn posts_uncaught_handler_exception_to_the_lambda_error_endpoint() {
     server.join().unwrap();
     let request = rx.recv().unwrap();
     assert!(request.starts_with("POST /2018-06-01/runtime/invocation/req-error/error"));
-    assert!(request.contains(r#"{"errorMessage":"handler exploded","errorType":"ThawError"}"#));
+    // An untagged exception string (a plain `throw "..."`, or here the test's
+    // own raw error slot) has no class name of its own and defaults to
+    // `Error`, matching real JavaScript's own default `Error.prototype.name`.
+    assert!(request.contains(r#"{"errorMessage":"handler exploded","errorType":"Error"}"#));
 }
 
 static mut TEST_TIMEOUT_EXCEPTION: *const c_char = std::ptr::null();

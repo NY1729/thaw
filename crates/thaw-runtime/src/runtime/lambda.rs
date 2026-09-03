@@ -75,17 +75,22 @@ fn handle_one_invocation(
     }
     let result_ptr = handler(event_cstring.as_ptr());
     if result_ptr.is_null() {
-        let message = if error_slot.is_null() || unsafe { (*error_slot).is_null() } {
-            "handler failed with an uncaught Thaw exception".to_string()
+        let (error_type, message) = if error_slot.is_null() || unsafe { (*error_slot).is_null() }
+        {
+            (
+                "ThawError".to_string(),
+                "handler failed with an uncaught Thaw exception".to_string(),
+            )
         } else {
-            unsafe { CStr::from_ptr(*error_slot) }
-                .to_string_lossy()
-                .into_owned()
+            let raw = unsafe { CStr::from_ptr(*error_slot) }.to_string_lossy();
+            let (name, message) = split_error_tag(&raw);
+            (name.to_string(), message.to_string())
         };
         let error_path = format!("/2018-06-01/runtime/invocation/{request_id}/error");
         let body = format!(
-            "{{\"errorMessage\":{},\"errorType\":\"ThawError\"}}",
-            json_string(&message)
+            "{{\"errorMessage\":{},\"errorType\":{}}}",
+            json_string(&message),
+            json_string(&error_type)
         );
         http_request(runtime_api, "POST", &error_path, Some(&body))?;
         return Ok(());
