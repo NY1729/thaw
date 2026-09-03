@@ -620,6 +620,156 @@ fn add_installed_inner(
     })
 }
 
+/// Follows `/// <reference path="..." />` directives (the classic
+/// DefinitelyTyped-style split for a package whose real API is spread
+/// across many files, e.g. lodash's `index.d.ts` referencing a dozen files
+/// under `common/`), inlining each referenced file's content -- since
+/// thaw-registry discards every individual `.d.ts` source file except the
+/// one flattened `package.d.ts` it writes out, a reference to a file about
+/// to disappear needs to be followed now or never.
+///
+/// A referenced file commonly augments the *entry* file's own exported
+/// namespace via `declare module "<path back to the entry file>" { ... }`
+/// (TS module augmentation) rather than declaring its own top-level types
+/// -- lodash's `common/array.d.ts` opens with `declare module "../index" {
+/// interface LoDashStatic { chunk(...): ...; } }`. When that module
+/// specifier resolves back to `entry_path` itself, and `entry_path` exports
+/// a namespace via `export as namespace <name>;`, the augmentation is
+/// rewritten to `declare namespace <name> { ... }` so the (repeated, once
+/// per referenced file) `interface LoDashStatic { ... }` blocks land in the
+/// same namespace the entry file's own declaration lives in, matching how
+/// a real TS compiler resolves the augmentation. An augmentation targeting
+/// some other module is inlined as its own `declare module "..." { ... }`,
+/// unresolved but harmless.
+fn inline_triple_slash_references(
+    entry_path: &Path,
+    source: &str,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<String, String> {
+    use thaw_parser::ast::{Decl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let namespace = export_as_namespace_name(source)?;
+    let mut output = String::new();
+    for reference in triple_slash_reference_paths(source) {
+        let Some(target_path) = entry_path
+            .parent()
+            .map(|dir| dir.join(&reference))
+            .filter(|path| path.is_file())
+        else {
+            continue;
+        };
+        let canonical = target_path
+            .canonicalize()
+            .unwrap_or_else(|_| target_path.clone());
+        if !visited.insert(canonical) {
+            continue;
+        }
+        let referenced_source = fs::read_to_string(&target_path).map_err(|error| {
+            format!(
+                "failed to read referenced declarations `{}`: {error}",
+                target_path.display()
+            )
+        })?;
+        let (referenced_module, source_map) =
+            thaw_parser::parse_typescript_with_source_map(&referenced_source)?;
+        let canonical_entry = entry_path
+            .canonicalize()
+            .unwrap_or_else(|_| entry_path.to_path_buf());
+        for item in &referenced_module.body {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
+                continue;
+            };
+            let TsModuleName::Str(target) = &module_decl.id else {
+                continue;
+            };
+            let Some(target_specifier) = target.value.as_str() else {
+                continue;
+            };
+            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+                continue;
+            };
+            let targets_entry = declaration_reexport_path(&target_path, target_specifier)
+                .map(|resolved| resolved.canonicalize().unwrap_or(resolved))
+                .is_some_and(|resolved| resolved == canonical_entry);
+            let snippets = block
+                .body
+                .iter()
+                .map(|item| {
+                    source_map.span_to_snippet(item.span()).map_err(|error| {
+                        format!("failed to read module augmentation body: {error:?}")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if targets_entry {
+                // A self-targeting augmentation with no exported namespace
+                // to merge it into has nothing sensible to attach to;
+                // drop it rather than leaving a dangling, unresolvable
+                // reference to a namespace that was never declared.
+                if let Some(namespace) = &namespace {
+                    output.push_str(&format!("\ndeclare namespace {namespace} {{\n"));
+                    for snippet in &snippets {
+                        output.push_str(snippet);
+                        output.push('\n');
+                    }
+                    output.push_str("}\n");
+                }
+            } else {
+                output.push_str(&format!("\ndeclare module \"{target_specifier}\" {{\n"));
+                for snippet in &snippets {
+                    output.push_str(snippet);
+                    output.push('\n');
+                }
+                output.push_str("}\n");
+            }
+        }
+        // A referenced file can itself carry further references (not
+        // exercised by any package tested so far, but the DefinitelyTyped
+        // convention allows it).
+        output.push_str(&inline_triple_slash_references(
+            &target_path,
+            &referenced_source,
+            visited,
+        )?);
+    }
+    Ok(output)
+}
+
+/// The `/// <reference path="..." />` directives in a `.d.ts` source --
+/// these are ordinary comments as far as the parser is concerned (and,
+/// per the TS convention this follows, only recognized at the very top of
+/// the file), so this scans the raw text rather than the AST.
+fn triple_slash_reference_paths(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .take_while(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("///") || trimmed.is_empty()
+        })
+        .filter_map(|line| {
+            let start = line.find("path=\"")? + "path=\"".len();
+            let end = start + line[start..].find('"')?;
+            Some(line[start..end].to_string())
+        })
+        .collect()
+}
+
+/// `export as namespace <name>;` -- the name a `.d.ts` file's own exported
+/// value is additionally reachable under as a global namespace, and (for
+/// `inline_triple_slash_references`'s purposes) the namespace a referenced
+/// file's self-targeting module augmentation actually means to extend.
+fn export_as_namespace_name(source: &str) -> Result<Option<String>, String> {
+    use thaw_parser::ast::{ModuleDecl, ModuleItem};
+
+    let module = thaw_parser::parse_typescript(source)?;
+    Ok(module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsNamespaceExport(export)) => {
+            Some(export.id.sym.to_string())
+        }
+        _ => None,
+    }))
+}
+
 fn dts_source_with_reexported_functions(
     entry_path: &Path,
     entry_source: &str,
@@ -628,6 +778,12 @@ fn dts_source_with_reexported_functions(
 
     let module = thaw_parser::parse_typescript(entry_source)?;
     let mut output = entry_source.to_string();
+    let mut visited_references = std::collections::BTreeSet::new();
+    output.push_str(&inline_triple_slash_references(
+        entry_path,
+        entry_source,
+        &mut visited_references,
+    )?);
     let mut seen = std::collections::BTreeSet::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
@@ -678,11 +834,7 @@ fn dts_source_with_reexported_functions(
             }
             for mut snippet in declarations {
                 if exported != original {
-                    snippet = snippet.replacen(
-                        &format!("function {original}"),
-                        &format!("function {exported}"),
-                        1,
-                    );
+                    snippet = rename_declared_function(snippet, &exported);
                 }
                 output.push('\n');
                 output.push_str(&snippet);
@@ -718,6 +870,33 @@ fn dts_source_with_reexported_functions(
         seen.extend(names);
     }
     Ok(output)
+}
+
+/// Renames a single function declaration snippet's own declared name to
+/// `exported`, wherever it actually is -- rather than assuming it matches
+/// whatever name it was originally looked up under. That assumption holds
+/// for a plain `export { original as exported }`, but not when `original`
+/// was `"default"`: the snippet `reexported_function_declarations` returns
+/// for a `default` lookup is resolved through `export default <ident>;` (or
+/// an inline `export default function <ident>(...) {}`) and keeps that
+/// real `<ident>`, which need not equal the literal string `"default"`.
+fn rename_declared_function(snippet: String, exported: &str) -> String {
+    let Some(function_index) = snippet.find("function ") else {
+        return snippet;
+    };
+    let name_start = function_index + "function ".len();
+    let name_end = snippet[name_start..]
+        .find(|character: char| !(character.is_alphanumeric() || character == '_' || character == '$'))
+        .map(|offset| name_start + offset)
+        .unwrap_or(snippet.len());
+    if name_start == name_end || &snippet[name_start..name_end] == exported {
+        return snippet;
+    }
+    let mut renamed = String::with_capacity(snippet.len());
+    renamed.push_str(&snippet[..name_start]);
+    renamed.push_str(exported);
+    renamed.push_str(&snippet[name_end..]);
+    renamed
 }
 
 fn all_reexported_function_declarations(
@@ -802,11 +981,7 @@ fn all_reexported_function_declarations(
                         &mut named_visited,
                     )? {
                         if exported != original {
-                            snippet = snippet.replacen(
-                                &format!("function {original}"),
-                                &format!("function {exported}"),
-                                1,
-                            );
+                            snippet = rename_declared_function(snippet, &exported);
                         }
                         declarations.push((exported.clone(), snippet));
                     }
@@ -856,6 +1031,52 @@ fn reexported_function_declarations(
     }
     if !declarations.is_empty() {
         return Ok(declarations);
+    }
+    // `export { default as v4 } from './v4.js'` (a barrel re-exporting
+    // another file's *default* export under a name, the common shape for
+    // packages that split one function per file, e.g. `uuid`) resolves to
+    // `name == "default"` here, but a `.d.ts` file never declares a
+    // function literally named `default` -- it either exports an inline
+    // `export default function v4(...) {}` or (more commonly, so multiple
+    // overloads can share one export) declares `function v4(...)` one or
+    // more times as a plain top-level statement and separately writes
+    // `export default v4;`. Resolve that indirection before giving up.
+    if name == "default" {
+        for item in &module.body {
+            match item {
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(default_expr)) => {
+                    let thaw_parser::ast::Expr::Ident(ident) = default_expr.expr.as_ref() else {
+                        continue;
+                    };
+                    let resolved = ident.sym.as_ref();
+                    for item in &module.body {
+                        let ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Fn(function))) =
+                            item
+                        else {
+                            continue;
+                        };
+                        if function.ident.sym.as_ref() == resolved {
+                            declarations.push(source_map.span_to_snippet(function.span()).map_err(
+                                |error| format!("failed to read declaration for `{resolved}`: {error:?}"),
+                            )?);
+                        }
+                    }
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default_decl)) => {
+                    if let thaw_parser::ast::DefaultDecl::Fn(fn_expr) = &default_decl.decl {
+                        if fn_expr.ident.is_some() {
+                            declarations.push(source_map.span_to_snippet(default_decl.span()).map_err(
+                                |error| format!("failed to read default function declaration: {error:?}"),
+                            )?);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !declarations.is_empty() {
+            return Ok(declarations);
+        }
     }
     for item in module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
@@ -1127,6 +1348,13 @@ fn fetch_types_package_dts(scratch: &Path, package: &str) -> Result<(String, Str
     })?;
     let source = fs::read_to_string(&abs)
         .map_err(|e| format!("failed to read `{rel}` from `{types_package}`: {e}"))?;
+    // Same flattening a same-package `.d.ts` already gets (barrel
+    // re-exports inlined, `/// <reference path="...">` files -- common in
+    // an older, multi-file DefinitelyTyped package like `@types/lodash`
+    // -- inlined too): this file is about to be the *only* one thaw-registry
+    // keeps around for `package`, so anything it reaches now needs
+    // following before that scratch checkout disappears.
+    let source = dts_source_with_reexported_functions(&abs, &source)?;
 
     Ok((format!("{types_package}/{rel}"), source))
 }
