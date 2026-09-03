@@ -20099,19 +20099,30 @@ fn typed_dynamic_rest_declaration(
     } else {
         format!("{fixed_wrapper_params}, ...{rest_name}: Json[]")
     };
+    // A `void`-returning extern call can't itself be the operand of
+    // `return` (thaw-hir rejects `return f();` for a `void`-declared
+    // `f`, only a bare `return;`), so those need their call and return
+    // as separate statements -- real example: lodash's `noop(): void`.
+    let call_and_return = |call: String| -> String {
+        if ret == "void" {
+            format!("{call}; return;")
+        } else {
+            format!("return {call};")
+        }
+    };
     declarations.push_str(&format!("function {wrapper}({wrapper_params}): {ret} {{\n"));
     for &total in arities.iter().rev() {
         let rest_count = total.saturating_sub(fixed_count);
         let arguments = render_arguments(total).join(", ");
+        let call = call_and_return(format!("{base_symbol}__arity_{total}({arguments})"));
         declarations.push_str(&format!(
-            "    if ({rest_name}.length === {rest_count}) return {base_symbol}__arity_{total}({arguments});\n"
+            "    if ({rest_name}.length === {rest_count}) {{ {call} }}\n"
         ));
     }
     let smallest = *arities.first().expect("arities always has at least one entry");
     let arguments = render_arguments(smallest).join(", ");
-    declarations.push_str(&format!(
-        "    return {base_symbol}__arity_{smallest}({arguments});\n}}\n"
-    ));
+    let call = call_and_return(format!("{base_symbol}__arity_{smallest}({arguments})"));
+    declarations.push_str(&format!("    {call}\n}}\n"));
 
     typed_dynamic_callable_adapter(
         encoded,
@@ -20121,6 +20132,91 @@ fn typed_dynamic_rest_declaration(
         function.required_params,
         napi,
         ret_ty,
+    )
+}
+
+/// Whether `text` (a `describe_ts_type` rendering of a generic type
+/// parameter's `extends` constraint) is safe to splice verbatim into this
+/// declaration's own generated source. `describe_ts_type` is built for a
+/// human-readable Fallback *reason*, not re-parseable syntax -- besides
+/// its outright placeholder strings (`"a conditional type"`, `"{ ... }"`
+/// for a non-empty object literal, `"<qualified name>"`, ...), even a
+/// *syntactically* valid rendering like `List<T>` or a bare interface
+/// name refers to a type that exists in the original `.d.ts`'s own scope,
+/// not in this shim's -- nothing here carries the rest of that package's
+/// type aliases/interfaces along with it. Restricting to plain TS
+/// keywords sidesteps both problems at once: every one of them means
+/// exactly what it says with no external name to resolve, and
+/// `describe_ts_type` only ever renders one verbatim (`keyword_name`).
+/// Whether a callback-shaped param type string (e.g. `(value: T) =>
+/// TResult`, from a generic interface method's `func: (value: T) =>
+/// TResult` parameter) mentions any of the function's own generic type
+/// parameters anywhere inside it -- a bare top-level `value: T` parameter
+/// is proven to work (`specializes_generic_dynamic_ambient_arguments_per_call`),
+/// but a type parameter used *inside* a nested callback signature (its
+/// own parameter or return type) isn't substituted the same way and
+/// produces an unresolvable bare name once compiled, so this rejects the
+/// whole declaration rather than emit one that can't build. Checked as a
+/// substring with word boundaries (not a real parser -- these strings
+/// are already-rendered `describe_ts_type` output, not AST), since a
+/// real occurrence is always a bare identifier, never part of a longer
+/// one.
+fn mentions_any_type_param(text: &str, generic: &thaw_bridge::DtsGenericFunction) -> bool {
+    generic
+        .type_params
+        .iter()
+        .any(|(name, _)| contains_word(text, name))
+}
+
+/// Whether `word` occurs in `text` as a standalone identifier (not part
+/// of a longer one) -- these strings are already-rendered
+/// `describe_ts_type` output, not AST, so this is a substring scan with
+/// word-boundary checks rather than a real parse.
+fn contains_word(text: &str, word: &str) -> bool {
+    let is_word_byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$';
+    let bytes = text.as_bytes();
+    let needle = word.as_bytes();
+    text.match_indices(word).any(|(index, _)| {
+        let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
+        let after = index + needle.len();
+        let after_ok = after == bytes.len() || !is_word_byte(bytes[after]);
+        before_ok && after_ok
+    })
+}
+
+/// Whether a callback-shaped param type string (e.g. `(oldValue: any) =>
+/// any`, from a generic interface method's own callback parameter) is
+/// safe to splice verbatim: it must not mention any of the function's
+/// own generic type parameters (see `mentions_any_type_param`'s doc
+/// comment), and every bare keyword inside it must be one thaw-hir's own
+/// callback-type lowering actually accepts (`number`/`string`/`boolean`/
+/// `void` only -- the crude renderer readily produces `any`/`unknown`/
+/// `object`/etc, which are fine as a *top-level* `extends` constraint
+/// (see `is_reparseable_ts_type`) but rejected outright inside a nested
+/// function-type signature).
+fn is_safe_callback_param_type(text: &str, generic: &thaw_bridge::DtsGenericFunction) -> bool {
+    if mentions_any_type_param(text, generic) {
+        return false;
+    }
+    !["any", "unknown", "object", "bigint", "symbol", "never", "undefined", "null"]
+        .into_iter()
+        .any(|keyword| contains_word(text, keyword))
+}
+
+fn is_reparseable_ts_type(text: &str) -> bool {
+    matches!(
+        text,
+        "any" | "unknown"
+            | "object"
+            | "string"
+            | "number"
+            | "boolean"
+            | "bigint"
+            | "symbol"
+            | "void"
+            | "undefined"
+            | "null"
+            | "never"
     )
 }
 
@@ -20155,16 +20251,62 @@ fn typed_dynamic_declaration(
         );
     }
     if let Some(generic) = &function.generic {
-        if !generic.param_types.iter().all(|ty| {
-            generic.type_params.iter().any(|(name, _)| name == ty)
-                || ty.starts_with('(')
-                || matches!(ty.as_str(), "number" | "string" | "boolean" | "Json" | "JsValue")
-        }) {
+        // `describe_ts_type` is built for a human-readable Fallback
+        // *reason* ("a conditional type", "{ ... }" for a non-empty
+        // object literal, ...), not for re-parseable syntax -- a
+        // constraint it can't fully render would otherwise get spliced
+        // into this declaration's actual source text verbatim. Found
+        // via a real interface method's `T extends { __trapAny: any }`
+        // constraint producing the literal placeholder text `{ ... }`.
+        if !generic
+            .type_params
+            .iter()
+            .filter_map(|(_, constraint)| constraint.as_deref())
+            .all(is_reparseable_ts_type)
+        {
             return None;
         }
+        // A parameter type this crude a renderer can't classify as one
+        // of the forms below still passes through as `Json` (matching
+        // the non-generic path's own Unsupported -> Json substitution)
+        // rather than aborting the whole declaration -- real example:
+        // lodash's `uniq<T>(array: List<T> | null | undefined): T[]`,
+        // where `List<T>` is one of lodash's own unresolved type
+        // aliases. Without this, a function like `uniq` fell all the
+        // way to the bare untyped `(argsArray: Json): Json` fallback,
+        // which expects its caller to already have packed every real
+        // argument into one array -- silently wrong for a genuine
+        // single-array-argument call like `uniq(someArray)`, which
+        // instead spread `someArray`'s own elements as the args.
+        let param_types = generic
+            .param_types
+            .iter()
+            .map(|ty| {
+                if generic.type_params.iter().any(|(name, _)| name == ty)
+                    || (ty.starts_with('(') && is_safe_callback_param_type(ty, generic))
+                    || matches!(ty.as_str(), "number" | "string" | "boolean" | "Json" | "JsValue")
+                {
+                    ty.clone()
+                } else {
+                    "Json".to_string()
+                }
+            })
+            .collect::<Vec<_>>();
+        // A type parameter substituted out of every parameter that used
+        // to carry it (the case just above) is no longer inferable from
+        // any call argument -- thaw-hir requires inferring every
+        // declared type parameter from *some* argument, with no
+        // contextual/return-type-driven inference, so keeping it
+        // declared here would make every real call an inference error
+        // even though nothing downstream actually needed it: the return
+        // stays hardcoded `JsValue` either way, never the original
+        // `.d.ts` return type (which could itself have been that same
+        // type parameter, as in `uniq<T>(...): T[]`). Dropped from the
+        // declaration entirely rather than kept as dead syntax.
         let type_params = generic
             .type_params
             .iter()
+            .filter(|(name, _)| param_types.iter().any(|ty| ty == name))
             .map(|(name, constraint)| match constraint {
                 Some(constraint) => format!("{name} extends {constraint}"),
                 None => name.clone(),
@@ -20174,7 +20316,7 @@ fn typed_dynamic_declaration(
         let params = function
             .params
             .iter()
-            .zip(&generic.param_types)
+            .zip(&param_types)
             .enumerate()
             .map(|(index, ((name, _), ty))| {
                 format!(
@@ -20188,9 +20330,14 @@ fn typed_dynamic_declaration(
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let generics = if type_params.is_empty() {
+            String::new()
+        } else {
+            format!("<{type_params}>")
+        };
         return Some((
             base_symbol.clone(),
-            format!("declare function {base_symbol}<{type_params}>({params}): JsValue;\n"),
+            format!("declare function {base_symbol}{generics}({params}): JsValue;\n"),
         ));
     }
     let params = function
@@ -20282,6 +20429,17 @@ fn typed_dynamic_declaration(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    // A `void`-returning extern call can't itself be the operand of
+    // `return` (thaw-hir rejects `return f();` for a `void`-declared
+    // `f`, only a bare `return;`), so those need their call and return
+    // as separate statements.
+    let call_and_return = |call: String| -> String {
+        if ret == "void" {
+            format!("{call}; return;")
+        } else {
+            format!("return {call};")
+        }
+    };
     declarations.push_str(&format!("function {wrapper}({wrapper_params}): {ret} {{\n"));
     for arity in (function.required_params + 1..=params.len()).rev() {
         // Every optional slot up to `arity`, not just the last one, needs
@@ -20303,9 +20461,8 @@ fn typed_dynamic_declaration(
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        declarations.push_str(&format!(
-            "    return {base_symbol}__arity_{arity}({arguments});\n"
-        ));
+        let call = call_and_return(format!("{base_symbol}__arity_{arity}({arguments})"));
+        declarations.push_str(&format!("    {call}\n"));
         for _ in optional_slots {
             declarations.push_str("    }\n");
         }
@@ -20315,10 +20472,11 @@ fn typed_dynamic_declaration(
         .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    declarations.push_str(&format!(
-        "    return {base_symbol}__arity_{}({arguments});\n}}\n",
+    let call = call_and_return(format!(
+        "{base_symbol}__arity_{}({arguments})",
         function.required_params
     ));
+    declarations.push_str(&format!("    {call}\n}}\n"));
     typed_dynamic_callable_adapter(
         &encoded,
         wrapper,
@@ -21268,22 +21426,27 @@ fn generate_registry_shims(
                             call_arities,
                         )
                     });
-                if let Some((symbol, declaration)) = declaration {
+                // First successful overload wins, matching TS's own
+                // overload-resolution convention of preferring the first
+                // declared match: an overloaded `.d.ts` name (see
+                // `Classification::classify_all`'s doc comment) can have
+                // *several* overloads each independently produce a typed
+                // declaration here -- e.g. `ms`'s `(value: number,
+                // options?)` and `(value: string)` both do, and they
+                // don't share a call convention, so blindly keeping the
+                // last one silently discards an earlier, already-correct
+                // (and possibly more general) wrapper. Every overload's
+                // declaration text uses the *same* symbol name (derived
+                // only from `package::name`, not the overload), so a
+                // later one isn't just an unused, harmlessly-discarded
+                // alternative if it's emitted too -- it's a duplicate
+                // declaration of that same name with a different
+                // signature, which thaw-hir has no defined behavior for.
+                // Real case: lodash's `random` (5 overloads).
+                let already_bound = typed_targets.contains_key(&(pkg.name.clone(), function.name.clone()));
+                if let Some((symbol, declaration)) = declaration.filter(|_| !already_bound) {
                     shim.push_str(&declaration);
-                    // First successful overload wins, matching TS's own
-                    // overload-resolution convention of preferring the
-                    // first declared match: an overloaded `.d.ts` name
-                    // (see `Classification::classify_all`'s doc comment)
-                    // can have *several* overloads each independently
-                    // produce a typed declaration here -- e.g. `ms`'s
-                    // `(value: number, options?)` and `(value: string)`
-                    // both do -- and they don't share a call convention,
-                    // so blindly keeping the last one silently discards
-                    // an earlier, already-correct (and possibly more
-                    // general) wrapper.
-                    typed_targets
-                        .entry((pkg.name.clone(), function.name.clone()))
-                        .or_insert(symbol);
+                    typed_targets.insert((pkg.name.clone(), function.name.clone()), symbol);
                     if jit_operation.is_some() {
                         jit_targets.insert((pkg.name.clone(), function.name.clone()));
                     }
