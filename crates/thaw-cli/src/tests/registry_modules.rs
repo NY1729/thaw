@@ -5955,3 +5955,51 @@ fn numeric_comparison_edge_cases_use_jit_without_quickjs() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn bitwise_int32_boundary_edge_cases_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-bitwise-edge-cases-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("bits-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function bits(a: number): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.bits = (a) => [a | 0, a >>> 0, ~a, a << 1, a >>> 1];\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { bits } from 'bits-kit';\nfunction main(): void { const nan = 0 / 0; console.log(bits(-1).join(',')); console.log(bits(nan).join(',')); console.log(bits(4294967295).join(',')); console.log(bits(2147483648).join(',')); console.log(bits(5.9).join(',')); console.log(bits(-5.9).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "-1,4294967295,0,-2,2147483647\n\
+         0,0,-1,0,0\n\
+         -1,4294967295,0,-2,2147483647\n\
+         -2147483648,2147483648,2147483647,0,1073741824\n\
+         5,5,-6,10,2\n\
+         -5,4294967291,4,-10,2147483645\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
