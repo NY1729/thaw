@@ -6175,3 +6175,43 @@ fn array_from_and_of_chains_generalize_across_methods_without_quickjs() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn array_methods_chained_directly_on_object_keys_values_use_jit_without_quickjs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jit-object-keys-chain-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("obj-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function keyLengths(o: Record<string, number>): number[];\nexport declare function doubledValues(o: Record<string, number>): number[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.keyLengths = (o) => Object.keys(o).map((k) => k.length); module.exports.doubledValues = (o) => Object.values(o).map((v) => v * 2);\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { keyLengths, doubledValues } from 'obj-kit';\nfunction main(): void { console.log(keyLengths({ ab: 1, cde: 2 }).join(',')); console.log(doubledValues({ ab: 1, cde: 2 }).join(',')); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "2,3\n2,4\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
