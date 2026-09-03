@@ -6896,3 +6896,60 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n5\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function whose *return* type can't be classified at all --
+/// real-world example: dayjs's own factory function, `declare function
+/// dayjs(date?: dayjs.ConfigType): dayjs.Dayjs`, returning its own
+/// `Dayjs` class. `typed_dynamic_declaration` used to give up on the
+/// whole declaration the moment the return type alone didn't classify
+/// (even though every parameter already passes through as `Json` for
+/// exactly this reason), falling all the way back to the bare untyped
+/// `(argsArray: Json): Json` passthrough shim -- silently wrong for any
+/// call that isn't already packing its own arguments into one array
+/// itself, the same failure mode as an unclassifiable parameter.
+/// Regression coverage for treating an unclassifiable return the same
+/// way a callback-typed return already was: a `JsValue` handle, usable
+/// even without dedicated support for whatever real shape it holds.
+#[test]
+fn fallback_function_with_an_unresolvable_return_type_builds_and_runs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-unresolvable-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("clock-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function clock(seed?: clock.Seed): clock.Clock;\n\
+         declare namespace clock { interface Seed {} interface Clock {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.clock = function(seed) {\n\
+             return { toString: function() { return 'tick'; } };\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { clock } from "clock-kit";
+function main(): void {
+    console.log(clock());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "tick\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
