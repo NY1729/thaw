@@ -212,7 +212,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         // to `None`, and `compile_console_values` mishandled
                         // an argument with no known type -- not just wrong
                         // output, but observed to segfault.
-                        "getDynamicValue" | "constructDynamicValue" => {
+                        "getDynamicValue" | "constructDynamicValue" | "callDynamicMethodHandle" => {
                             return Some(HirType::JsValue)
                         }
                         "readDynamicValue" | "callDynamicMethod" | "callDynamicValueMixed" => {

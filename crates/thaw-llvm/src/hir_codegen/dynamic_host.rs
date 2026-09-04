@@ -1046,6 +1046,65 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| "thaw_json_parse returned no value".into())
     }
 
+    /// Like `compile_call_dynamic_method`, but for a method whose own
+    /// result is itself a `JsValue` (e.g. a schema instance's chained
+    /// method returning another schema instance) rather than plain data:
+    /// retains the result as a handle via `thaw_js_call_method_handle_result`
+    /// instead of JSON-decoding it. See `callDynamicMethodHandle`'s doc
+    /// comment (thaw-hir's `inference/types.rs`) for how a call chooses
+    /// between the two.
+    fn compile_call_dynamic_method_handle(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let [handle, name, call_args] = args else {
+            return Err("callDynamicMethodHandle expects exactly three arguments".into());
+        };
+        let handle = self.compile_expr(handle)?;
+        let name = self.compile_expr(name)?;
+        let call_args = self.compile_expr(call_args)?;
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[call_args.into()],
+                "dynamic_method_handle_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_call_method_handle_result")
+                    .unwrap(),
+                &[handle.into(), name.into(), args_json.into()],
+                "dynamic_method_handle_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "dynamic_method_handle_value")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "dynamic_method_handle_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+
     fn compile_read_dynamic_value(
         &mut self,
         args: &[HirExpr],
