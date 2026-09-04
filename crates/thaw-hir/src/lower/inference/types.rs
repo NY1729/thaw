@@ -1247,6 +1247,11 @@ impl<'a> FnLowerer<'a> {
                     "getDynamicProperty" => return Ok(HirType::JsValue),
                     "setDynamicProperty" => return Ok(HirType::Bool),
                     "callDynamicMethod" => return Ok(HirType::Json),
+                    // Sibling of `callDynamicMethod` for a method whose
+                    // own result is itself a `JsValue` rather than plain
+                    // data -- see `lower_dynamic_value_method_call`'s doc
+                    // comment for how a call chooses between the two.
+                    "callDynamicMethodHandle" => return Ok(HirType::JsValue),
                     "readDynamicValue" => return Ok(HirType::Json),
                     "callDynamicValueMixed" => return Ok(HirType::Json),
                     "constructDynamicValue" => return Ok(HirType::JsValue),

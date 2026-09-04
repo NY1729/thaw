@@ -55,31 +55,52 @@ impl<'a> FnLowerer<'a> {
 
     /// Lowers `receiver.property(args...)` where `receiver`'s own type is
     /// `HirType::JsValue` -- an opaque handle with no compiled class/method
-    /// table -- into a call to `callDynamicMethod`, an existing low-level
-    /// intrinsic (`getDynamicValue`/`callDynamicValueHandle`'s sibling)
-    /// that calls a named method on a retained JS value by hex-decoding
-    /// nothing at all: it just takes the handle, the method name, and a
-    /// JSON-encoded argument array, and returns a JSON-encoded result (see
-    /// `compile_call_dynamic_method` in thaw-llvm's `dynamic_host.rs`).
-    /// Building that argument array reuses `coerce_to_declared`'s existing
-    /// native-value-to-`Json` laundering twice: once per argument (so a
-    /// `JsValue` argument -- e.g. passing one schema into another's
-    /// method -- flows through the same handle-id placeholder this
-    /// session's earlier fix already wired up), then once more over the
-    /// whole homogeneous-`Json` array literal (so it becomes one real JSON
-    /// array value, not a native Thaw array of boxed `Json` pointers).
-    /// Real example: zod's `schema.safeParse({ name: "Alice", age: 30 })`.
+    /// table -- into a call to `callDynamicMethod` (or its sibling
+    /// `callDynamicMethodHandle`, see below), existing low-level
+    /// intrinsics (`getDynamicValue`/`callDynamicValueHandle`'s siblings)
+    /// that call a named method on a retained JS value by hex-decoding
+    /// nothing at all: they just take the handle, the method name, and a
+    /// JSON-encoded argument array (see `compile_call_dynamic_method`/
+    /// `compile_call_dynamic_method_handle` in thaw-llvm's
+    /// `dynamic_host.rs`). Building that argument array reuses
+    /// `coerce_to_declared`'s existing native-value-to-`Json` laundering
+    /// twice: once per argument (so a `JsValue` argument -- e.g. passing
+    /// one schema into another's method -- flows through the same
+    /// handle-id placeholder this session's earlier fix already wired
+    /// up), then once more over the whole homogeneous-`Json` array
+    /// literal (so it becomes one real JSON array value, not a native
+    /// Thaw array of boxed `Json` pointers).
+    ///
+    /// A dynamic method's own result could itself be plain data (real
+    /// example: zod's `schema.safeParse({ name: "Alice", age: 30 })`,
+    /// returning `{ success, data/error }`) or another live `JsValue`
+    /// (a hypothetical chained schema-builder method returning another
+    /// schema instance) -- thaw has no compiled knowledge of a dynamic
+    /// method's real shape either way, so it can't tell which just from
+    /// the call site. Resolved the same way an ambiguous `let`/`const`
+    /// declaration's own initializer already is elsewhere: `expected`,
+    /// this call's own expected-type hint (`None` unless the immediate
+    /// enclosing declaration carries an explicit `: JsValue` annotation),
+    /// picks `callDynamicMethodHandle` when it says so and
+    /// `callDynamicMethod` (the JSON-returning default, matching every
+    /// caller before this existed) otherwise.
     fn lower_dynamic_value_method_call(
         &mut self,
         receiver_expr: &Expr,
         property: &str,
         args: &[swc_ecma_ast::ExprOrSpread],
+        expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
         if args.iter().any(|argument| argument.spread.is_some()) {
             return Err(format!(
                 "dynamic value method `{property}` does not support spread arguments"
             ));
         }
+        let intrinsic = if expected == Some(&HirType::JsValue) {
+            "callDynamicMethodHandle"
+        } else {
+            "callDynamicMethod"
+        };
         let receiver = self.lower_expr(receiver_expr)?;
         let json_args = args
             .iter()
@@ -90,7 +111,7 @@ impl<'a> FnLowerer<'a> {
             .collect::<Result<Vec<_>, String>>()?;
         let array = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?;
         Ok(HirExpr::Call(
-            Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+            Box::new(HirExpr::Var(intrinsic.to_string())),
             vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string())), array],
         ))
     }
@@ -883,6 +904,7 @@ impl<'a> FnLowerer<'a> {
                         &member.obj,
                         &property,
                         &call.args,
+                        expected_return_hint.as_ref(),
                     );
                 }
             }

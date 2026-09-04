@@ -2009,6 +2009,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string());
             }
             "callDynamicMethod" => return self.compile_call_dynamic_method(args),
+            "callDynamicMethodHandle" => return self.compile_call_dynamic_method_handle(args),
             "readDynamicValue" => return self.compile_read_dynamic_value(args),
             "callDynamicValueMixed" => return self.compile_call_dynamic_value_mixed(args),
             "constructDynamicValue" => return self.compile_construct_dynamic_value(args),

@@ -698,6 +698,50 @@ pub extern "C" fn thaw_js_set_property_result(
     }
 }
 
+fn invoke_method<'js>(
+    ctx: &Ctx<'js>,
+    handle: u64,
+    name: &str,
+    args_json: &str,
+) -> Result<Value<'js>, String> {
+    let object = value_for_handle(ctx, handle)?
+        .into_object()
+        .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
+    let method: Function = object.get(name).map_err(|error| match error {
+        rquickjs::Error::Exception => describe_exception(ctx),
+        error => error.to_string(),
+    })?;
+    let json: Object = ctx
+        .globals()
+        .get("JSON")
+        .map_err(|error| error.to_string())?;
+    let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+    // See the matching comment in `invoke_raw`: revives a `JsValue`
+    // wherever `compile_dynamic_value_placeholder` had to leave a
+    // `{"__thaw_js_handle_id__": N}` placeholder for a method argument
+    // (or a `Date`), not just a plain top-level dynamic call's own
+    // arguments.
+    let reviver: Function = ctx
+        .globals()
+        .get("__thaw_json_date_reviver")
+        .map_err(|error| error.to_string())?;
+    let arguments: Array = parse
+        .call((args_json, reviver))
+        .map_err(|error| error.to_string())?;
+    let mut call_args = Args::new_unsized(ctx.clone());
+    call_args.this(object).map_err(|error| error.to_string())?;
+    for index in 0..arguments.len() {
+        let argument: Value = arguments.get(index).map_err(|error| error.to_string())?;
+        call_args
+            .push_arg(argument)
+            .map_err(|error| error.to_string())?;
+    }
+    method.call_arg(call_args).map_err(|error| match error {
+        rquickjs::Error::Exception => describe_exception(ctx),
+        error => error.to_string(),
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_js_call_method_result(
     handle: u64,
@@ -707,33 +751,7 @@ pub extern "C" fn thaw_js_call_method_result(
     let name = to_str(name);
     let args_json = to_str(args_json);
     let result = with_context(|ctx| {
-        let object = value_for_handle(&ctx, handle)?
-            .into_object()
-            .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
-        let method: Function = object.get(name.as_str()).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
-            error => error.to_string(),
-        })?;
-        let json: Object = ctx
-            .globals()
-            .get("JSON")
-            .map_err(|error| error.to_string())?;
-        let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
-        let arguments: Array = parse
-            .call((args_json.as_str(),))
-            .map_err(|error| error.to_string())?;
-        let mut call_args = Args::new_unsized(ctx.clone());
-        call_args.this(object).map_err(|error| error.to_string())?;
-        for index in 0..arguments.len() {
-            let argument: Value = arguments.get(index).map_err(|error| error.to_string())?;
-            call_args
-                .push_arg(argument)
-                .map_err(|error| error.to_string())?;
-        }
-        let value: Value = method.call_arg(call_args).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
-            error => error.to_string(),
-        })?;
+        let value = invoke_method(&ctx, handle, &name, &args_json)?;
         resolve_value_impl(ctx, value, &format!("JavaScript method `{name}`"))
     });
     match result {
@@ -743,6 +761,37 @@ pub extern "C" fn thaw_js_call_method_result(
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+/// Like [`thaw_js_call_method_result`], but for a method whose own result
+/// is itself a `JsValue` -- a live JS value with no JSON representation --
+/// rather than plain data: retains the result as a handle instead of
+/// JSON-encoding it. Real example: a schema instance's own chained
+/// method returning another schema instance, as opposed to
+/// `.safeParse(...)`'s plain data result (which stays on the
+/// `thaw_js_call_method_result` path).
+#[no_mangle]
+pub extern "C" fn thaw_js_call_method_handle_result(
+    handle: u64,
+    name: *const c_char,
+    args_json: *const c_char,
+) -> ThawHandleResult {
+    let name = to_str(name);
+    let args_json = to_str(args_json);
+    let result: Result<u64, String> = with_context(|ctx| {
+        let value = invoke_method(&ctx, handle, &name, &args_json)?;
+        retain_value(&ctx, value)
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
             error: CString::new(error).unwrap_or_default().into_raw(),
         },
     }
