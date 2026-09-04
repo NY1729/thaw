@@ -9235,3 +9235,78 @@ fn bare_and_qualified_calls_with_no_import_reach_a_typed_multi_argument_fallback
     assert_eq!(String::from_utf8_lossy(&result.stdout), "3.5\n3\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A two-level member chain (`ns.coerce.number(...)`) through a nested-
+/// namespace re-export (`export * as coerce from "...";`) -- real-world
+/// example: zod v4's `z.coerce.number()`/`z.iso.datetime()`. Reuses the
+/// package.d.ts shape thaw-registry's own flattening produces (see
+/// `thaw_bridge::nested_namespace_members`'s doc comment): a synthesized
+/// top-level function (`__thaw_ns_coerce_number`, deliberately sharing no
+/// name with the package's own top-level `number`, exactly like real
+/// zod's `coerce.number` vs. top-level `number`) plus a `declare
+/// namespace coerce { export { ... }; }` block recording the real member
+/// name it should be reachable under.
+///
+/// `bundle.js`'s runtime shape is the harder-to-get-right half of this:
+/// `coerce.number` is a real *nested* object property (`module.exports =
+/// { ..., coerce: { number: fn } }`), not a bare top-level one -- found
+/// necessary because a function value reached only through a two-level
+/// property chain (`module.exports.coerce.number`), when captured via a
+/// *separate*, later `loadScript` call the way an ordinary cross-package
+/// collision alias already is, becomes silently uninvokable through the
+/// native `callDynamic` FFI boundary (no thrown exception, the whole
+/// program just exits 1 with no output at all) despite remaining
+/// perfectly callable from JS itself -- confirmed via a minimal, package-
+/// agnostic repro. The fix captures a nested-namespace member from
+/// *inside* the bundle's own wrapped script instead (right where the
+/// ordinary `module.exports` -> `globalThis` copy loop already runs),
+/// which this test exercises end to end.
+#[test]
+fn a_two_level_member_chain_through_a_nested_namespace_reexport_calls_correctly() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-nested-namespace-chain-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("case-kit6");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "import * as ns from \"./lib\";\n\
+         export * from \"./lib\";\n\
+         export { ns, ns as default };\n\
+         \n\
+         export declare function number(): number;\n\
+         export declare function __thaw_ns_coerce_number(): number;\n\
+         declare namespace coerce {\n\
+         \x20\x20\x20\x20export { __thaw_ns_coerce_number as number };\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { number: function() { return 0; }, coerce: { number: function() { return 42; } } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { ns } from "case-kit6";
+function main(): void {
+    console.log(ns.number());
+    console.log(ns.coerce.number());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

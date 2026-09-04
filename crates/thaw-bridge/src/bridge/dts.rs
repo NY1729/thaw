@@ -130,6 +130,80 @@ pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Every `declare namespace NAME { export { A as B, C as D, ... }; }`
+/// block thaw-registry's own flattening emits for a real nested-
+/// namespace re-export (`export * as NAME from "...";` -- e.g. zod's
+/// `z.coerce`, `z.core`, `z.iso`; see thaw-registry's
+/// `dts_source_with_reexported_functions`, whose doc comment this
+/// mirrors). Maps `NAME -> { member name -> the real, already-flattened
+/// top-level function name to call }`, so a caller (thaw-cli's
+/// `shims.rs`/`module_graph.rs`) can rewrite a two-level member access
+/// (`z.coerce.number(...)`) straight to the flattened function it
+/// actually names.
+///
+/// Deliberately narrow, matching exactly what thaw-registry emits: a
+/// bare (non-exported) `declare namespace NAME { ... }` whose entire
+/// body is `export { ... };` specifiers with no `from` clause. A real
+/// npm package's own hand-written `declare namespace X { function
+/// foo(...): T; }` is a structurally different use of the same syntax
+/// (already handled by `parse_dts`'s own namespace recursion, which
+/// flattens straight to a bare name) and isn't recognized here.
+pub fn nested_namespace_members(source: &str) -> HashMap<String, HashMap<String, String>> {
+    use thaw_parser::ast::{ExportSpecifier, ModuleExportName, Stmt, TsModuleName};
+
+    let Ok(module) = thaw_parser::parse_typescript(source) else {
+        return HashMap::new();
+    };
+    module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
+                return None;
+            };
+            let TsModuleName::Ident(name) = &module_decl.id else {
+                return None;
+            };
+            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+                return None;
+            };
+            let mut members = HashMap::new();
+            for member in &block.body {
+                let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = member else {
+                    continue;
+                };
+                if export.type_only || export.src.is_some() {
+                    continue;
+                }
+                for specifier in &export.specifiers {
+                    let ExportSpecifier::Named(named) = specifier else {
+                        continue;
+                    };
+                    if named.is_type_only {
+                        continue;
+                    }
+                    let export_name = |name: &ModuleExportName| match name {
+                        ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                        ModuleExportName::Str(_) => None,
+                    };
+                    let Some(target) = export_name(&named.orig) else {
+                        continue;
+                    };
+                    let Some(member_name) = named.exported.as_ref().and_then(export_name) else {
+                        continue;
+                    };
+                    members.insert(member_name, target);
+                }
+            }
+            if members.is_empty() {
+                None
+            } else {
+                Some((name.sym.to_string(), members))
+            }
+        })
+        .collect()
+}
+
 pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
     let Ok(module) = thaw_parser::parse_typescript(source) else {
         return HashMap::new();

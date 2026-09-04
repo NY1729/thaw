@@ -251,6 +251,13 @@ fn source_location(path: &Path, source: &str, specifier: &str) -> String {
 struct RenameReferences<'a> {
     names: &'a HashMap<String, String>,
     namespaces: &'a HashMap<String, HashMap<String, String>>,
+    /// `local namespace alias -> { nested namespace name -> { member name
+    /// -> real flattened target } }` -- lets a *two*-level member chain
+    /// (`z.coerce.number(...)`) rewrite straight to the flattened function
+    /// it names, the way `namespaces` already does for one level
+    /// (`z.number(...)`). See `thaw_bridge::nested_namespace_members`'s
+    /// own doc comment; real example: zod's `z.coerce`, `z.core`, `z.iso`.
+    nested_namespaces: &'a HashMap<String, HashMap<String, HashMap<String, String>>>,
     import_meta_url: &'a str,
     import_meta_main: bool,
     module_path: &'a Path,
@@ -376,6 +383,35 @@ impl VisitMut for RenameReferences<'_> {
         let Expr::Member(member) = expr else {
             return;
         };
+        // A *two*-level member chain (`z.coerce.number(...)`) -- `z.coerce`
+        // isn't itself a real bound value, so this must match the whole
+        // chain at once rather than resolving `z.coerce` to something and
+        // then reading `.number` off it (see `nested_namespaces`'s own doc
+        // comment). Checked before the single-level case just below, which
+        // wouldn't match here anyway (`member.obj` is a `Member`, not an
+        // `Ident`).
+        if let thaw_parser::ast::MemberProp::Ident(property) = &member.prop {
+            if let Expr::Member(inner) = member.obj.as_ref() {
+                if let (Expr::Ident(namespace), thaw_parser::ast::MemberProp::Ident(sub)) =
+                    (inner.obj.as_ref(), &inner.prop)
+                {
+                    if !self.shadowed.contains(namespace.sym.as_ref()) {
+                        if let Some(target) = self
+                            .nested_namespaces
+                            .get(namespace.sym.as_ref())
+                            .and_then(|namespaces| namespaces.get(sub.sym.as_ref()))
+                            .and_then(|members| members.get(property.sym.as_ref()))
+                        {
+                            *expr = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
+                                target.clone().into(),
+                                member.span,
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         if let (Expr::Ident(namespace), thaw_parser::ast::MemberProp::Ident(property)) =
             (member.obj.as_ref(), &member.prop)
         {
@@ -634,11 +670,46 @@ pub fn external_specifiers(
     Ok(result)
 }
 
+/// `nested`'s members name a package's own flattened `.d.ts` function
+/// (e.g. `__thaw_ns_coerce_number`, straight from `thaw_bridge::
+/// nested_namespace_members`) -- not necessarily the *real* generated
+/// wrapper function that name ultimately dispatches through
+/// (`dependency_exports`, built the same way `namespaces` resolves an
+/// ordinary single-level member, applies a Fallback classification's own
+/// package-prefixed rename, e.g. `zod___thaw_ns_coerce_number`). Re-keys
+/// every member through `dependency_exports` the same way an ordinary
+/// named import already does, falling back to the unresolved name only if
+/// `dependency_exports` somehow doesn't have it (shouldn't happen for a
+/// real registry package, but leaves a plain rename as harmless rather
+/// than silently dropping the member).
+fn resolve_nested_namespaces(
+    nested: &HashMap<String, HashMap<String, String>>,
+    dependency_exports: &HashMap<String, String>,
+) -> HashMap<String, HashMap<String, String>> {
+    nested
+        .iter()
+        .map(|(namespace, members)| {
+            let resolved = members
+                .iter()
+                .map(|(member, target)| {
+                    let resolved_target = dependency_exports
+                        .get(target)
+                        .cloned()
+                        .unwrap_or_else(|| target.clone());
+                    (member.clone(), resolved_target)
+                })
+                .collect();
+            (namespace.clone(), resolved)
+        })
+        .collect()
+}
+
 pub fn bundle(
     entry: &Path,
     entry_source: &str,
     external_exports: &HashMap<String, HashMap<String, String>>,
     external_namespace_aliases: &HashMap<String, HashSet<String>>,
+    external_nested_namespaces: &HashMap<String, HashMap<String, HashMap<String, String>>>,
     external_resolutions: &HashMap<String, String>,
 ) -> Result<Module, String> {
     let entry = entry
@@ -663,6 +734,7 @@ pub fn bundle(
         let is_entry = index == entry_index;
         let mut names = HashMap::new();
         let mut namespaces = HashMap::new();
+        let mut nested_namespaces = HashMap::new();
         let import_meta_url = file_url(&modules[index].path);
         for name in declared_names(&modules[index].module) {
             let replacement = if is_entry && matches!(name.as_str(), "main" | "handler") {
@@ -712,6 +784,12 @@ pub fn bundle(
                                 namespace.local.sym.to_string(),
                                 dependency_exports.clone(),
                             );
+                            if let Some(nested) = external_nested_namespaces.get(specifier) {
+                                nested_namespaces.insert(
+                                    namespace.local.sym.to_string(),
+                                    resolve_nested_namespaces(nested, dependency_exports),
+                                );
+                            }
                             continue;
                         }
                     };
@@ -743,6 +821,12 @@ pub fn bundle(
                             .get(specifier)
                             .is_some_and(|aliases| aliases.contains(&requested))
                     {
+                        if let Some(nested) = external_nested_namespaces.get(specifier) {
+                            nested_namespaces.insert(
+                                local.clone(),
+                                resolve_nested_namespaces(nested, dependency_exports),
+                            );
+                        }
                         namespaces.insert(local, dependency_exports.clone());
                         continue;
                     }
@@ -766,6 +850,11 @@ pub fn bundle(
                     })?;
                     names.insert(local.clone(), target.clone());
                     if is_external_default {
+                        if let Some(nested) = external_nested_namespaces.get(specifier) {
+                            let resolved = resolve_nested_namespaces(nested, dependency_exports);
+                            nested_namespaces.insert(local.clone(), resolved.clone());
+                            nested_namespaces.insert(target.clone(), resolved);
+                        }
                         namespaces.insert(local, dependency_exports.clone());
                         namespaces.insert(target.clone(), dependency_exports.clone());
                     }
@@ -784,6 +873,7 @@ pub fn bundle(
                     statement.visit_mut_with(&mut RenameReferences {
                         names: &names,
                         namespaces: &namespaces,
+                        nested_namespaces: &nested_namespaces,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -799,6 +889,7 @@ pub fn bundle(
                     export.decl.visit_mut_with(&mut RenameReferences {
                         names: &names,
                         namespaces: &namespaces,
+                        nested_namespaces: &nested_namespaces,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -923,6 +1014,7 @@ pub fn bundle(
                             function.function.visit_mut_with(&mut RenameReferences {
                                 names: &names,
                                 namespaces: &namespaces,
+                                nested_namespaces: &nested_namespaces,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -953,6 +1045,7 @@ pub fn bundle(
                             class.class.visit_mut_with(&mut RenameReferences {
                                 names: &names,
                                 namespaces: &namespaces,
+                                nested_namespaces: &nested_namespaces,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -984,6 +1077,7 @@ pub fn bundle(
                             interface.visit_mut_with(&mut RenameReferences {
                                 names: &names,
                                 namespaces: &namespaces,
+                                nested_namespaces: &nested_namespaces,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -1013,6 +1107,7 @@ pub fn bundle(
                     export.expr.visit_mut_with(&mut RenameReferences {
                         names: &names,
                         namespaces: &namespaces,
+                        nested_namespaces: &nested_namespaces,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
