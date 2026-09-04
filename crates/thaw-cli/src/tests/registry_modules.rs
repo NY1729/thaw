@@ -7992,6 +7992,75 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A bare `undefined` literal passed directly as a dynamic-call argument
+/// (real example: zod's own `schema.safeParse(undefined)`, e.g. against
+/// a `z.undefined()` schema) used to be a hard compile error ("value has
+/// type Undefined, expected Json") -- JSON has no `undefined` at all,
+/// only the case a nested *field* can omit itself entirely (already
+/// handled elsewhere), which doesn't apply to a standalone value with no
+/// field to omit. Fixed in `coerce_to_declared` (thaw-hir) by encoding it
+/// as the same `{"$__thaw_napi_undefined$": true}` sentinel a NAPI
+/// return value already uses for the identical problem, reviving it back
+/// to the real literal on the QuickJS side (`__thaw_json_date_reviver`,
+/// the same reviver `Date`/`JsValue` already go through). Distinguishes
+/// a real `undefined` from `null` and from any other JSON value to rule
+/// out an accidental "map to null" shortcut, which would be wrong: real
+/// zod's `ZodUndefined` schema rejects `null`.
+#[test]
+fn a_bare_undefined_literal_can_be_passed_as_a_dynamic_call_argument() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-undefined-argument-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("undef-arg-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.makeThing = function() {\n\
+             return {\n\
+                 check: function(value) {\n\
+                     if (value === undefined) return 'real-undefined';\n\
+                     if (value === null) return 'null';\n\
+                     return 'other:' + JSON.stringify(value);\n\
+                 }\n\
+             };\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "undef-arg-kit";
+function main(): void {
+    const thing = makeThing();
+    console.log(thing.check(undefined));
+    console.log(thing.check(null));
+    console.log(thing.check(5));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"real-undefined\"\n\"null\"\n\"other:5\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Same underlying gap as
 /// `a_js_value_can_be_passed_as_a_bare_argument_to_another_dynamic_call`,
 /// but for a `JsValue` nested inside an object-literal field and inside

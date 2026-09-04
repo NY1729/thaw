@@ -22,6 +22,47 @@ impl<'a> FnLowerer<'a> {
             if actual == HirType::JsValue {
                 return Ok(value);
             }
+            // A bare `undefined` literal (`schema.safeParse(undefined)`,
+            // real zod) has no JSON representation either -- JSON has no
+            // `undefined`, only the case a nested field can omit itself
+            // entirely (already handled: see `compile_json_object_set_
+            // native_with_undefined`'s own `HirType::Undefined => Ok(())`
+            // arm), which doesn't apply to a *standalone* value with no
+            // field to omit. Encoded instead as the same `{"$__thaw_
+            // napi_undefined$": true}` sentinel `compile_napi_undefined_
+            // json` already uses for a NAPI return value -- a shared,
+            // already-recognized-in-principle shape rather than a new
+            // one, even though this crosses a different boundary
+            // (`callDynamic`'s JSON argument array, not a NAPI result).
+            // `__thaw_json_date_reviver` (QuickJS-NG, `dates.js`) is
+            // taught to convert it back to the real literal on the far
+            // side, the same way it already does for `Date`/`JsValue`.
+            // Built via `HirExpr::JsonObjectLit` -- an existing, already-
+            // exercised construct (a dictionary literal, `Bool` element
+            // type covers the one `true` field) -- rather than new
+            // codegen, avoiding the same int-value-kind ambiguity with
+            // `JsValue`'s own placeholder detection (both would compile
+            // to a plain integer at the LLVM level) a bare pass-through
+            // like the `JsValue` case above would risk. `value` itself
+            // is still evaluated once for any side effect it might have
+            // (`wrap_call_argument_bindings`), even though `Undefined`
+            // has only one possible runtime value and the result doesn't
+            // reference it.
+            if actual == HirType::Undefined {
+                let temp = format!("__thaw_json_undefined_source_{}", self.next_binding);
+                self.next_binding += 1;
+                let sentinel = HirExpr::JsonObjectLit(
+                    vec![(
+                        "$__thaw_napi_undefined$".to_string(),
+                        HirExpr::Lit(HirLit::Bool(true)),
+                    )],
+                    HirType::Bool,
+                );
+                return self.wrap_call_argument_bindings(
+                    sentinel,
+                    &[(temp, HirType::Undefined, value)],
+                );
+            }
             if json_convertible_native_type(&actual) {
                 return self.wrap_native_value_as_json(value, actual);
             }
