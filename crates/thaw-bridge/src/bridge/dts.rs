@@ -46,6 +46,90 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
 /// `DtsFunction`'s own already very widely constructed shape for it.
 /// Real example: dayjs's `declare function dayjs(...): dayjs.Dayjs`,
 /// linking the `dayjs` factory function to its `Dayjs` class.
+/// Every name a package's own `.d.ts` re-exports as a self-referential
+/// namespace alias for its *own* already-flattened export table -- real
+/// example: zod v4's own `index.d.cts`, `import * as z from "./v4/
+/// classic/external.cjs"; export * from "./v4/classic/external.cjs";
+/// export { z, z as default };`. `z` (and `default`) here don't name a
+/// function, class, or interface at all -- they're bound purely by the
+/// `import *`, so a plain `import { z } from "zod"` (as common in real
+/// zod code as `import * as z from "zod"`, since both reach the exact
+/// same object) has nothing in `parse_dts`'s own function table to
+/// resolve `z` against, and fails outright ("`zod` has no export named
+/// `z`") even though `import * as z from "zod"` -- a genuine namespace
+/// import, needing no special per-name knowledge at all -- already
+/// works. Returns every such alias name (here, `["z", "default"]`) so a
+/// caller (thaw-cli's `shims.rs`) can mark them for the module graph to
+/// treat a *named* import of one exactly like a namespace import: the
+/// whole package's own export table, not a single symbol.
+///
+/// Deliberately narrow: only a bare `export { X[, X as Y] };` (no
+/// `from` clause -- `X` must already be bound in this same file) whose
+/// original name `X` is bound by a top-level `import * as X from
+/// "...";` counts. A `declare namespace X { ... }` block re-exported
+/// the same way is a structurally different (and still unsupported)
+/// shape -- its members are declared *inside* it, not a star-import of
+/// an already-flattened sibling module -- and isn't recognized here.
+pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_typescript(source) else {
+        return HashSet::new();
+    };
+    let namespace_imports: HashSet<String> = module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+                return None;
+            };
+            Some(import.specifiers.iter().filter_map(|specifier| {
+                match specifier {
+                    swc_ecma_ast::ImportSpecifier::Namespace(namespace) => {
+                        Some(namespace.local.sym.to_string())
+                    }
+                    _ => None,
+                }
+            }))
+        })
+        .flatten()
+        .collect();
+    module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+                return None;
+            };
+            if export.type_only || export.src.is_some() {
+                return None;
+            }
+            Some(export.specifiers.iter().filter_map(|specifier| {
+                let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else {
+                    return None;
+                };
+                if named.is_type_only {
+                    return None;
+                }
+                let export_name = |name: &swc_ecma_ast::ModuleExportName| match name {
+                    swc_ecma_ast::ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                    swc_ecma_ast::ModuleExportName::Str(_) => None,
+                };
+                let original = export_name(&named.orig)?;
+                if !namespace_imports.contains(&original) {
+                    return None;
+                }
+                Some(
+                    named
+                        .exported
+                        .as_ref()
+                        .and_then(export_name)
+                        .unwrap_or(original),
+                )
+            }))
+        })
+        .flatten()
+        .collect()
+}
+
 pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
     let Ok(module) = thaw_parser::parse_typescript(source) else {
         return HashMap::new();

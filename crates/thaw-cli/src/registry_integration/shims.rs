@@ -21,6 +21,15 @@ struct ResolvedPackage {
     /// `class_methods.rs`'s `constructed_class`), even though nothing
     /// about the call itself says `new`.
     factory_class_returns: std::collections::HashMap<String, String>,
+    /// Every name this package's own `.d.ts` re-exports as a self-
+    /// referential namespace alias for its own already-flattened export
+    /// table -- see `thaw_bridge::self_referential_namespace_aliases`'s
+    /// own doc comment. Real example: zod's own `z` (and `default`),
+    /// letting `import { z } from "zod"` resolve the same way `import *
+    /// as z from "zod"` already does, rather than failing with "`zod`
+    /// has no export named `z`" (neither is a function/class/interface
+    /// at all -- both are bound purely by an `import *`).
+    namespace_self_aliases: std::collections::HashSet<String>,
 }
 
 enum JitExport {
@@ -21517,6 +21526,12 @@ fn generate_napi_class_method_overloads(
     generated
 }
 type ExternalExports = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
+/// `package name -> names that package's own `.d.ts` re-exports as a
+/// self-referential namespace alias for its own export table` -- see
+/// `thaw_bridge::self_referential_namespace_aliases`'s own doc comment.
+/// Only ever populated for a package that actually has one (most
+/// packages don't, so this stays empty for them).
+type ExternalNamespaceAliases = std::collections::HashMap<String, std::collections::HashSet<String>>;
 type RegistryShims = (
     String,
     Vec<PathBuf>,
@@ -21530,6 +21545,7 @@ type RegistryShims = (
     Vec<StaticClassSetterRewrite>,
     Vec<FactoryClassRewrite>,
     ExternalExports,
+    ExternalNamespaceAliases,
 );
 
 /// `(factory function name, class name)` -- a Fallback factory function
@@ -21755,6 +21771,8 @@ fn generate_registry_shims(
             .into_iter()
             .filter(|(_, class_name)| classes.iter().any(|class| &class.name == class_name))
             .collect();
+        let namespace_self_aliases =
+            thaw_bridge::self_referential_namespace_aliases(&package.dts_source);
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             commonjs_export_name,
@@ -21765,6 +21783,7 @@ fn generate_registry_shims(
             native_addon: package.native_addon,
             bundle_js: package.bundle_js,
             factory_class_returns,
+            namespace_self_aliases,
         });
     }
 
@@ -22431,7 +22450,12 @@ fn generate_registry_shims(
     shim.push_str(&thaw_bridge::generate_native_addon_init(&native_addons));
 
     let mut external_exports = ExternalExports::new();
+    let mut external_namespace_aliases: ExternalNamespaceAliases = std::collections::HashMap::new();
     for pkg in &resolved {
+        if !pkg.namespace_self_aliases.is_empty() {
+            external_namespace_aliases
+                .insert(pkg.name.clone(), pkg.namespace_self_aliases.clone());
+        }
         let mut package_exports = std::collections::HashMap::new();
         for (name, classification) in &pkg.classifications {
             let target = if matches!(classification, thaw_bridge::Classification::Fallback { .. }) {
@@ -22476,5 +22500,6 @@ fn generate_registry_shims(
         static_class_setter_rewrites,
         factory_class_rewrites,
         external_exports,
+        external_namespace_aliases,
     ))
 }
