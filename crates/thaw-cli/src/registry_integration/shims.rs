@@ -20530,6 +20530,7 @@ fn typed_dynamic_bare_alias(
     bare_name: &str,
     symbol: &str,
     function: &thaw_bridge::DtsFunction,
+    is_jit_backed: bool,
 ) -> Option<String> {
     if function.rest_param.is_some() || function.generic.is_some() {
         return None;
@@ -20545,11 +20546,11 @@ fn typed_dynamic_bare_alias(
             Some((name.clone(), rendered))
         })
         .collect::<Option<Vec<_>>>()?;
-    // Same "Unsupported -> Json/JsValue, callback -> JsValue" mapping
-    // `typed_dynamic_declaration` itself uses for a return type -- kept
-    // as a separate small copy rather than shared, since the two are
-    // independent, narrow leaves (not worth the churn of threading a
-    // shared helper through an already-large, working function for this).
+    // Same "Unsupported -> Json/JsValue" mapping `typed_dynamic_declaration`
+    // itself uses for a return type -- kept as a separate small copy
+    // rather than shared, since the two are independent, narrow leaves
+    // (not worth the churn of threading a shared helper through an
+    // already-large, working function for this).
     let ret_hir_type = match &function.ret {
         thaw_bridge::DtsType::Unsupported(reason)
             if reason == "`any` is not supported" || reason == "`unknown` is not supported" =>
@@ -20559,10 +20560,73 @@ fn typed_dynamic_bare_alias(
         thaw_bridge::DtsType::Unsupported(_) => thaw_hir::HirType::JsValue,
         thaw_bridge::DtsType::Native(ret) => ret.clone(),
     };
-    let ret = if matches!(
+    // Unlike a plain value return, a *callback*-returning function's
+    // `symbol` here isn't necessarily the plain, `JsValue`-returning base
+    // declaration `typed_dynamic_declaration` starts from -- when the
+    // callback's own return type is one `typed_dynamic_callable_adapter`
+    // can convert (`string`/`number`/`boolean`/`Json`), `symbol` is
+    // *that* adapter instead, which really does hand back a callable
+    // matching the original `.d.ts` signature (see its own doc comment).
+    // Matches its exact success condition so this wrapper's own declared
+    // return type agrees with what `symbol` actually returns either way
+    // -- getting this wrong doesn't just misdeclare the wrapper, it makes
+    // `return symbol(...);` itself a type error inside its own body
+    // (a real function value where the declaration said `JsValue`).
+    let callback_adapter_applies = match &ret_hir_type {
+        thaw_hir::HirType::Function(_, ret) => {
+            matches!(
+                ret.as_ref(),
+                thaw_hir::HirType::Str
+                    | thaw_hir::HirType::F64
+                    | thaw_hir::HirType::Bool
+                    | thaw_hir::HirType::Json
+            )
+        }
+        thaw_hir::HirType::CallableFunction(_, _, None, ret) => {
+            matches!(
+                ret.as_ref(),
+                thaw_hir::HirType::Str
+                    | thaw_hir::HirType::F64
+                    | thaw_hir::HirType::Bool
+                    | thaw_hir::HirType::Json
+            )
+        }
+        _ => false,
+    };
+    // A JIT-backed `symbol` (`jit_numeric_declaration`) renders its own
+    // return type with a special, parenthesized convention for an
+    // `Optional`-wrapped tagged union -- `(A | B) | undefined`, not the
+    // generic `render_dynamic_type`'s flat `A | B | undefined` -- so
+    // that thaw-hir's type parser reconstructs the same `Optional(Union
+    // (...))` shape from the text instead of collapsing it into a flat,
+    // explicit-`Undefined`-member union (see `jit_numeric_declaration`'s
+    // own `optional_union_ret`). This wrapper's own declared return type
+    // must match whichever convention `symbol` actually used, or `return
+    // symbol(...);` is a type error inside the wrapper's own body even
+    // though both sides describe the same value -- getting it backwards
+    // the other way (parenthesizing for a *non*-JIT symbol) is just as
+    // wrong: the ordinary dynamic-call path (`typed_dynamic_declaration`)
+    // always uses the flat form for this same shape, and re-parses the
+    // parenthesized text into a genuinely different `HirType` its own
+    // marshaling doesn't expect.
+    let jit_optional_tagged_union_ret = is_jit_backed
+        .then(|| match &ret_hir_type {
+            thaw_hir::HirType::Optional(payload) => match payload.as_ref() {
+                thaw_hir::HirType::Union(elements) if jit_tagged_union(elements) => {
+                    render_dynamic_type(payload).map(|inner| format!("({inner}) | undefined"))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .flatten();
+    let ret = if let Some(rendered) = jit_optional_tagged_union_ret {
+        rendered
+    } else if matches!(
         ret_hir_type,
         thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
-    ) {
+    ) && !callback_adapter_applies
+    {
         "JsValue".to_string()
     } else {
         render_dynamic_type(&ret_hir_type)?
@@ -22225,7 +22289,9 @@ fn generate_registry_shims(
                     // is disambiguated *through*, unlike the plain bare
                     // name below.
                     if let Some(q) = qualified.iter().find(|q| q.name == function.name) {
-                        if let Some(alias) = typed_dynamic_bare_alias(&q.alias, &symbol, function) {
+                        if let Some(alias) =
+                            typed_dynamic_bare_alias(&q.alias, &symbol, function, jit_operation.is_some())
+                        {
                             shim.push_str(&alias);
                             bare_aliased.insert(function.name.clone());
                         }
@@ -22238,7 +22304,12 @@ fn generate_registry_shims(
                     // `--use` happened to declare it, so it's skipped for
                     // exactly the same names.
                     if !colliding.contains(&function.name) {
-                        if let Some(alias) = typed_dynamic_bare_alias(&function.name, &symbol, function) {
+                        if let Some(alias) = typed_dynamic_bare_alias(
+                            &function.name,
+                            &symbol,
+                            function,
+                            jit_operation.is_some(),
+                        ) {
                             shim.push_str(&alias);
                             bare_aliased.insert(function.name.clone());
                         }
@@ -22254,6 +22325,7 @@ fn generate_registry_shims(
             shim.push_str(&thaw_bridge::generate_native_addon_shim(
                 &pkg.functions,
                 qualified,
+                &bare_aliased,
             ));
         } else {
             shim.push_str(&thaw_bridge::generate_shim(
