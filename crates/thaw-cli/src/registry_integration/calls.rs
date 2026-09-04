@@ -71,6 +71,19 @@ fn rewrite_external_class_constructors(
 /// compiler. `rewrites` is empty when there were no collisions at all,
 /// in which case this returns `source` untouched without even parsing it.
 ///
+/// Skips any `pkg.name(...)` where `pkg` is *also* a real import binding
+/// in this file (`import * as pkg`/`import pkg`/`import { x as pkg }`,
+/// from any specifier) -- this convenience syntax exists for calling a
+/// `--use`d package's function with no import at all, and must not
+/// shadow a genuine `import * as semver from "semver"` whose alias
+/// happens to match the package's own qualifier (the natural, idiomatic
+/// choice): that case has real member-call support of its own
+/// (`module_graph`'s namespace-export rewriting, which resolves to the
+/// same typed wrapper a named import gets), and this text-level rewrite
+/// firing instead sent every argument to the untyped `argsArray`-based
+/// Fallback alias unwrapped -- e.g. `semver.major("1.2.3")` crashed with
+/// "args_json is not a valid JSON array" instead of returning `1`.
+///
 /// Uses `swc_ecma_visit`'s `Visit` to walk the whole AST (a call can be
 /// nested arbitrarily deep in an expression), unlike the top-level-only
 /// walks elsewhere in this project (thaw-registry also uses a full AST walk
@@ -84,7 +97,7 @@ fn rewrite_qualified_calls(
     rewrites: &[QualifiedCallRewrite],
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp};
+    use thaw_parser::ast::{CallExpr, Callee, Expr, ImportSpecifier, MemberProp, ModuleDecl, ModuleItem};
     use thaw_parser::common::Spanned;
 
     if rewrites.is_empty() {
@@ -93,6 +106,7 @@ fn rewrite_qualified_calls(
 
     struct Finder<'a> {
         rewrites: &'a [(String, String, String)],
+        imported_names: std::collections::HashSet<String>,
         matches: Vec<(u32, u32, String)>,
     }
     impl Visit for Finder<'_> {
@@ -102,11 +116,15 @@ fn rewrite_qualified_calls(
                     if let (Expr::Ident(obj), MemberProp::Ident(prop)) =
                         (&*member.obj, &member.prop)
                     {
-                        if let Some((_, _, alias)) = self.rewrites.iter().find(|(pkg, name, _)| {
-                            pkg.as_str() == &*obj.sym && name.as_str() == &*prop.sym
-                        }) {
-                            let span = member.span();
-                            self.matches.push((span.lo.0, span.hi.0, alias.clone()));
+                        if !self.imported_names.contains(obj.sym.as_str()) {
+                            if let Some((_, _, alias)) =
+                                self.rewrites.iter().find(|(pkg, name, _)| {
+                                    pkg.as_str() == &*obj.sym && name.as_str() == &*prop.sym
+                                })
+                            {
+                                let span = member.span();
+                                self.matches.push((span.lo.0, span.hi.0, alias.clone()));
+                            }
                         }
                     }
                 }
@@ -116,8 +134,22 @@ fn rewrite_qualified_calls(
     }
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
+    let mut imported_names = std::collections::HashSet::new();
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+            for specifier in &import.specifiers {
+                let local = match specifier {
+                    ImportSpecifier::Named(named) => &named.local,
+                    ImportSpecifier::Default(default) => &default.local,
+                    ImportSpecifier::Namespace(namespace) => &namespace.local,
+                };
+                imported_names.insert(local.sym.to_string());
+            }
+        }
+    }
     let mut finder = Finder {
         rewrites,
+        imported_names,
         matches: Vec::new(),
     };
     module.visit_with(&mut finder);
