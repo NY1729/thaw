@@ -2061,6 +2061,67 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         if signature.backend == DynamicBackend::QuickJs && signature.ret == HirType::JsValue {
             self.uses_quickjs_handles = true;
+            // `napi_constructor_export_name` is plain `"$new$Class..."`
+            // runtime-key parsing, not actually NAPI-specific despite the
+            // name -- reused here for a Fallback (QuickJS-NG) class's own
+            // `new Class(...)` construction (real example: hono's
+            // `Hono`), the same way the `DynamicBackend::Napi` branch
+            // above uses it for a native addon's.
+            if let Some(constructor_name) = napi_constructor_export_name(&signature.symbol) {
+                let constructor_name = self
+                    .builder
+                    .build_global_string_ptr(constructor_name, "typed_dynamic_constructor_name")
+                    .map_err(|error| error.to_string())?;
+                let constructor = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_js_get_global").unwrap(),
+                        &[constructor_name.as_pointer_value().into()],
+                        "typed_dynamic_constructor",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                let args_json = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_stringify").unwrap(),
+                        &[array.into()],
+                        "typed_dynamic_construct_args",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_js_construct_handle_result")
+                            .unwrap(),
+                        &[constructor.into(), args_json.into()],
+                        "typed_dynamic_construct_result",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_struct_value();
+                let value = self
+                    .builder
+                    .build_extract_value(result, 0, "typed_dynamic_constructed_value")
+                    .map_err(|error| error.to_string())?;
+                let error = self
+                    .builder
+                    .build_extract_value(result, 1, "typed_dynamic_construct_error")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(self.pending_exception().as_pointer_value(), error)
+                    .map_err(|error| error.to_string())?;
+                self.branch_on_pending_exception()?;
+                return Ok(value);
+            }
             let callable = self
                 .builder
                 .build_call(
