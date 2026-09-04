@@ -201,6 +201,30 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_bool_to_number"
                         | "__thaw_parse_int"
                         | "__thaw_parse_float" => return Some(HirType::F64),
+                        // The manual dynamic-value escape hatches
+                        // (thaw-hir's `infer_expr_type` special-cases these
+                        // same names identically, in
+                        // `lower/inference/types.rs`) -- previously missing
+                        // here entirely, so an un-bound inline call to one
+                        // of these (e.g. `console.log(schema.safeParse(x))`,
+                        // which `lower_dynamic_value_method_call` lowers to
+                        // an inline `callDynamicMethod` call) fell through
+                        // to `None`, and `compile_console_values` mishandled
+                        // an argument with no known type -- not just wrong
+                        // output, but observed to segfault.
+                        "getDynamicValue" | "constructDynamicValue" => {
+                            return Some(HirType::JsValue)
+                        }
+                        "readDynamicValue" | "callDynamicMethod" | "callDynamicValueMixed" => {
+                            return Some(HirType::Json)
+                        }
+                        "loadNativeAddon" | "loadNativeAddonEmbedded" => {
+                            return Some(HirType::Bool)
+                        }
+                        "callNativeAddon" | "callNativeAddonWithCallback" => {
+                            return Some(HirType::Json)
+                        }
+                        "pollNativeAddonEvents" => return Some(HirType::F64),
                         _ => {}
                     }
                     if name == "__thaw_string_to_array" {
