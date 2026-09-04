@@ -7632,3 +7632,140 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n3.5\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Constructing a Fallback (pure-JS, QuickJS-NG-dispatched) class
+/// instance via `new Class(...)` -- real-world example: hono's `new
+/// Hono()`. Two bugs, found and fixed together:
+///
+/// 1. `generate_napi_class_constructors` (despite the name, also used
+///    for a Fallback class's constructor -- see its own `napi`
+///    parameter) always emitted `__thaw_typed_napi_...` symbols, which
+///    `dynamic_symbol` always decodes as `DynamicBackend::Napi`. For a
+///    Fallback class that's the wrong backend outright, and
+///    `compile_typed_dynamic_call`'s own construct-a-value branch (LLVM
+///    codegen) only existed for `DynamicBackend::Napi` at all -- there
+///    was no QuickJS-NG equivalent using `thaw_js_get_global` +
+///    `thaw_js_construct_handle_result` (both already existed, wired to
+///    nothing).
+/// 2. Separately: a package whose *only* export is a class (no
+///    top-level Fallback functions at all -- exactly hono's shape) never
+///    got its `bundle.js` loaded via `__thaw_module_init` in the first
+///    place, since the "does this package need `loadScript`-ing"
+///    condition checked only `fallback_names` (top-level functions),
+///    never `pkg.classes` -- so even the class's own name was never
+///    bound onto `globalThis` at all, regardless of the constructor
+///    codegen gap above.
+///
+/// Also exercises the constructor's own optional-parameter arity
+/// dispatch (`new Widget()` vs. `new Widget("hi")`), and that instance
+/// methods keep working on a Fallback-constructed instance the same way
+/// they already did on one obtained a different way (dayjs's factory
+/// function, mime's ready-made export).
+#[test]
+fn fallback_class_is_constructible_via_new() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-class-new-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("widget-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Widget {\n\
+             constructor(name?: string);\n\
+             describe(): string;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Widget(name) { this.name = name || 'default'; }\n\
+         Widget.prototype.describe = function() { return 'Widget:' + this.name; };\n\
+         module.exports.Widget = Widget;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Widget } from "widget-kit";
+function main(): void {
+    const named = new Widget("hi");
+    console.log(named.describe());
+    const defaulted = new Widget();
+    console.log(defaulted.describe());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "Widget:hi\nWidget:default\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A package whose *only* export is a class (no top-level function at
+/// all) still gets its `bundle.js` loaded and its exports bound to
+/// `globalThis` -- see `fallback_class_is_constructible_via_new`'s doc
+/// comment, point 2. This is really the same root cause, but written
+/// as its own minimal test (a class exported via a getter-defined
+/// property, `Object.defineProperty(module.exports, ..., { get, ...
+/// })`, the shape a real esbuild/tsc-bundled package like hono actually
+/// uses -- not a plain `module.exports.X = X` assignment) so a future
+/// regression here is diagnosable without needing to reason through the
+/// constructor-codegen half at all.
+#[test]
+fn a_class_only_package_still_loads_its_bundle() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-class-only-package-loads-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("getter-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Widget {\n\
+             constructor(name?: string);\n\
+             describe(): string;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Widget(name) { this.name = name || 'default'; }\n\
+         Widget.prototype.describe = function() { return 'Widget:' + this.name; };\n\
+         Object.defineProperty(module.exports, 'Widget', { get: function() { return Widget; }, enumerable: true });\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Widget } from "getter-kit";
+function main(): void {
+    const widget = new Widget("hi");
+    console.log(widget.describe());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "Widget:hi\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

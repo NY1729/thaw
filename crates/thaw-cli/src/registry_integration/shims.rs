@@ -21055,22 +21055,38 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
     )
 }
 
+/// `napi` picks which backend the generated declaration's symbol resolves
+/// to at lower time -- `__thaw_typed_napi_`/`DynamicBackend::Napi` for a
+/// real native addon class, `__thaw_typed_js_`/`DynamicBackend::QuickJs`
+/// for a Fallback one (real example: hono's `Hono`) -- decoded by
+/// `dynamic_symbol`, the same convention `generate_napi_class_method_
+/// overloads` already uses. The `$new$Class$arityN` runtime-key scheme
+/// itself is identical either way; `napi_constructor_export_name`/its
+/// QuickJS-NG counterpart both strip the same prefix back off.
 fn generate_napi_class_constructors(
     class: &thaw_bridge::DtsClass,
+    napi: bool,
     shim: &mut String,
 ) -> Vec<(usize, String, Vec<thaw_hir::HirType>)> {
     if !class.constructible {
         return Vec::new();
     }
+    let prefix = if napi { "napi" } else { "js" };
     let mut helpers = Vec::new();
     for (overload_index, constructor) in class.constructors.iter().enumerate() {
-        if !constructor.params.iter().all(|(_, ty)| {
-            matches!(ty, thaw_bridge::DtsType::Native(native) if render_dynamic_type(native).is_some())
-        }) {
-            continue;
-        }
+        // Checked per arity, not once for the whole constructor: an
+        // optional trailing parameter with an unsupported type (real
+        // example: hono's `constructor(options?: HonoOptions<E>)`)
+        // shouldn't block the *lower* arities that never need to render
+        // it at all -- only `new Class()` (arity 0) needs to work for
+        // `options` to never come up.
         for arity in constructor.required_params..=constructor.params.len() {
             let params = &constructor.params[..arity];
+            if !params.iter().all(|(_, ty)| {
+                matches!(ty, thaw_bridge::DtsType::Native(native) if render_dynamic_type(native).is_some())
+            }) {
+                continue;
+            }
             let parameter_types = params
                 .iter()
                 .filter_map(|(_, ty)| match ty {
@@ -21104,7 +21120,7 @@ fn generate_napi_class_constructors(
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
-            let symbol = format!("__thaw_typed_napi_{encoded}");
+            let symbol = format!("__thaw_typed_{prefix}_{encoded}");
             shim.push_str(&format!(
                 "declare function {symbol}({rendered}): JsValue;\n"
             ));
@@ -21118,7 +21134,7 @@ fn generate_napi_class_constructors(
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let symbol = format!("__thaw_typed_napi_{encoded}");
+        let symbol = format!("__thaw_typed_{prefix}_{encoded}");
         shim.push_str(&format!(
             "declare function {symbol}(): JsValue;\n"
         ));
@@ -21712,7 +21728,7 @@ fn generate_registry_shims(
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
         if pkg.native_addon.is_some() {
             for class in &pkg.classes {
-                let helpers = generate_napi_class_constructors(class, &mut shim);
+                let helpers = generate_napi_class_constructors(class, true, &mut shim);
                 if helpers.is_empty() {
                     continue;
                 }
@@ -21957,15 +21973,28 @@ fn generate_registry_shims(
             // generator and `class_method_rewrites` consumer as the
             // native-addon branch above (`napi: false` picks the
             // QuickJS-NG symbol/backend instead) -- only instance
-            // methods, not constructors/static methods/getters/setters,
-            // which the QuickJS-NG side of `compile_typed_napi_method`
-            // and friends don't support yet, and which neither of this
-            // fix's real targets (dayjs, mime) need: dayjs's `Dayjs`
-            // instances come from calling its factory function, not
-            // `new Dayjs(...)`, and mime's `Mime` instance is a
-            // ready-made package export, not constructed by user code
-            // either.
+            // methods and (see `generate_napi_class_constructors`'s own
+            // `napi` parameter) constructors, not static methods/
+            // getters/setters, which the QuickJS-NG side of
+            // `compile_typed_napi_method` and friends don't support yet.
+            // Real targets: dayjs/mime never needed constructor support
+            // (dayjs's `Dayjs` instances come from calling its factory
+            // function, mime's `Mime` instance is a ready-made package
+            // export), but hono's `Hono` -- constructed directly via
+            // `new Hono()` -- does.
             for class in &pkg.classes {
+                let helpers = generate_napi_class_constructors(class, false, &mut shim);
+                if !helpers.is_empty() {
+                    class_targets.insert(
+                        (pkg.name.clone(), class.name.clone()),
+                        helpers[0].1.clone(),
+                    );
+                    class_rewrites.push((
+                        qualifier_by_package[&pkg.name].clone(),
+                        class.name.clone(),
+                        helpers,
+                    ));
+                }
                 for (method, symbol, argument_count, has_callback, parameter_types) in
                     generate_napi_class_method_overloads(
                         class,
@@ -22143,7 +22172,21 @@ fn generate_registry_shims(
                 .iter()
                 .map(|q| (q.name.clone(), q.qualified_key.clone()))
                 .collect();
-            if !fallback_names.is_empty() || pkg.native_addon.is_some() {
+            // A package whose *only* export is a class (real example:
+            // hono, whose main export is the `Hono` class with no
+            // top-level functions at all) previously never got its
+            // bundle loaded at all: `fallback_names` only tracks
+            // top-level Fallback functions, never `pkg.classes`, so a
+            // class-only package's `!fallback_names.is_empty()` check
+            // was always false and its `loadScript` never ran --
+            // silently leaving every export (the class included)
+            // missing from `globalThis`, since that's set up by the
+            // generic `for (var k in module.exports)` copy loop this
+            // same `loadScript` call also carries (`generation.rs`'s
+            // `wrap_as_commonjs_module`), which never got a chance to
+            // run either.
+            if !fallback_names.is_empty() || pkg.native_addon.is_some() || !pkg.classes.is_empty()
+            {
                 bundles.push((
                     pkg.name.clone(),
                     bundle_js.clone(),
