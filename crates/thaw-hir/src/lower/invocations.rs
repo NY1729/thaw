@@ -53,6 +53,48 @@ impl<'a> FnLowerer<'a> {
         Ok(result)
     }
 
+    /// Lowers `receiver.property(args...)` where `receiver`'s own type is
+    /// `HirType::JsValue` -- an opaque handle with no compiled class/method
+    /// table -- into a call to `callDynamicMethod`, an existing low-level
+    /// intrinsic (`getDynamicValue`/`callDynamicValueHandle`'s sibling)
+    /// that calls a named method on a retained JS value by hex-decoding
+    /// nothing at all: it just takes the handle, the method name, and a
+    /// JSON-encoded argument array, and returns a JSON-encoded result (see
+    /// `compile_call_dynamic_method` in thaw-llvm's `dynamic_host.rs`).
+    /// Building that argument array reuses `coerce_to_declared`'s existing
+    /// native-value-to-`Json` laundering twice: once per argument (so a
+    /// `JsValue` argument -- e.g. passing one schema into another's
+    /// method -- flows through the same handle-id placeholder this
+    /// session's earlier fix already wired up), then once more over the
+    /// whole homogeneous-`Json` array literal (so it becomes one real JSON
+    /// array value, not a native Thaw array of boxed `Json` pointers).
+    /// Real example: zod's `schema.safeParse({ name: "Alice", age: 30 })`.
+    fn lower_dynamic_value_method_call(
+        &mut self,
+        receiver_expr: &Expr,
+        property: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<HirExpr, String> {
+        if args.iter().any(|argument| argument.spread.is_some()) {
+            return Err(format!(
+                "dynamic value method `{property}` does not support spread arguments"
+            ));
+        }
+        let receiver = self.lower_expr(receiver_expr)?;
+        let json_args = args
+            .iter()
+            .map(|argument| {
+                let value = self.lower_expr(&argument.expr)?;
+                self.coerce_to_declared(&HirType::Json, value)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let array = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+            vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string())), array],
+        ))
+    }
+
     fn lower_primitive_conversion(
         &mut self,
         callee_name: &str,
@@ -788,10 +830,10 @@ impl<'a> FnLowerer<'a> {
                     }
                     _ => None,
                 };
-                if let Some(receiver_type) =
-                    receiver_type.filter(|ty| class_name_from_type(ty).is_some())
+                if let Some(class_receiver_type) =
+                    receiver_type.clone().filter(|ty| class_name_from_type(ty).is_some())
                 {
-                    let class_name = class_name_from_type(&receiver_type)
+                    let class_name = class_name_from_type(&class_receiver_type)
                         .expect("the receiver was classified as a native class");
                     let symbol = class_method_symbol(class_name, &property);
                     if self.signatures.contains_key(&symbol) {
@@ -819,6 +861,29 @@ impl<'a> FnLowerer<'a> {
                     return Err(format!(
                         "class `{class_name}` has no native method `{property}`"
                     ));
+                }
+                // A receiver typed `JsValue` (an opaque handle -- a
+                // Fallback function's return value that couldn't be
+                // classified as anything JSON-representable, e.g. zod's
+                // `z.object(...)` returning a live `ZodObject` schema
+                // instance) has no known class/method table the way the
+                // branch above needs, but calling a method on it by name
+                // is still meaningful: the value really is a live JS
+                // object on the other side of the QuickJS boundary, it's
+                // just one thaw has no compiled knowledge of the shape
+                // of. Real example: that same schema's own
+                // `.safeParse(data)`. Routes through `callDynamicMethod`
+                // (an existing low-level intrinsic, previously only a
+                // manual escape hatch a user could call directly)
+                // instead of erroring the way an unrecognized *class*
+                // method above does, since there's no fixed method list
+                // to have missed from.
+                if matches!(receiver_type, Some(HirType::JsValue)) {
+                    return self.lower_dynamic_value_method_call(
+                        &member.obj,
+                        &property,
+                        &call.args,
+                    );
                 }
             }
         }

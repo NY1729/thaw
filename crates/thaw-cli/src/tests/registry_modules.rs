@@ -8060,3 +8060,132 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "[hi]\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `JsValue` receiver (a Fallback return value with no compiled class
+/// behind it, e.g. zod's `z.object(...)` returning a live `ZodObject`)
+/// couldn't have any of its own methods called at all --
+/// `schema.safeParse(data)` failed to even build ("call to unknown
+/// function `schema.safeParse`"), since thaw-hir's member-call lowering
+/// only recognized a receiver typed as a known native *class*, erroring
+/// for anything else instead of falling through to `callDynamicMethod`
+/// (an existing low-level intrinsic for calling a named method on a
+/// retained value by handle -- previously only a manual escape hatch,
+/// never actually wired up to ordinary `.method(...)` syntax).
+/// `lower_dynamic_value_method_call` (thaw-hir) fixes this, reusing the
+/// same `Json`-laundering `coerce_to_declared` already does everywhere
+/// else to build the method's argument array. Exercises both a bound
+/// and a fully inline (unbound, chained straight into a property
+/// access) call -- the inline shape needs its own fix too, see
+/// `console_log_does_not_crash_on_an_inline_dynamic_method_call` below.
+#[test]
+fn a_method_can_be_called_on_a_jsvalue_returned_by_a_fallback_function() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jsvalue-method-call-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("method-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(name: string): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeThing(name) {\n\
+             return {\n\
+                 describe: function() { return { text: 'thing:' + name }; },\n\
+                 rename: function(next) { return { text: 'renamed:' + next }; }\n\
+             };\n\
+         }\n\
+         module.exports.makeThing = makeThing;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "method-kit";
+function main(): void {
+    const thing = makeThing("gadget");
+    const described = thing.describe();
+    console.log(described.text);
+    console.log(thing.rename("widget").text);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"thing:gadget\"\n\"renamed:widget\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `console.log`'s own argument-type lookup (`expr_hir_type`, thaw-llvm)
+/// had no entry for `callDynamicMethod` or its sibling manual dynamic-
+/// value intrinsics (`getDynamicValue`, `constructDynamicValue`, ...) --
+/// thaw-hir's `infer_expr_type` already special-cased these same names,
+/// but thaw-llvm's own, separate copy of that classification didn't, so
+/// it fell through to `None`. Printing a *bound* result
+/// (`const r = thing.describe(); console.log(r);`) worked fine, but
+/// passing the call *inline* (no binding) crashed with a segfault --
+/// `compile_console_values` mishandling a value it thought had no type.
+/// Only reachable at all once `lower_dynamic_value_method_call` (the
+/// fix above) started actually generating an inline `callDynamicMethod`
+/// call from ordinary `.method()` syntax for the first time.
+#[test]
+fn console_log_does_not_crash_on_an_inline_dynamic_method_call() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-inline-dynamic-method-console-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("inline-method-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeThing() {\n\
+             return { describe: function() { return 'no-args-ok'; } };\n\
+         }\n\
+         module.exports.makeThing = makeThing;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "inline-method-kit";
+function main(): void {
+    const thing = makeThing();
+    console.log(thing.describe());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"no-args-ok\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
