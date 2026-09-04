@@ -509,11 +509,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     || Self::expr_awaits_frame_source(b, frame_functions)
                     || Self::expr_awaits_frame_source(c, frame_functions)
             }
-            HirExpr::JsonSet(object, key, value, _) | HirExpr::JsonIndexSet(object, key, value) => {
-                [object, key, value]
-                    .iter()
-                    .any(|value| Self::expr_awaits_frame_source(value, frame_functions))
-            }
+            HirExpr::JsonSet(object, key, value, _, _)
+            | HirExpr::JsonIndexSet(object, key, value) => [object, key, value]
+                .iter()
+                .any(|value| Self::expr_awaits_frame_source(value, frame_functions)),
             HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => fields
                 .iter()
                 .any(|(_, value)| Self::expr_awaits_frame_source(value, frame_functions)),

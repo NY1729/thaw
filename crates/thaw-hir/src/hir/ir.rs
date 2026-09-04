@@ -163,8 +163,26 @@ pub enum HirExpr {
     JsonGet(Box<HirExpr>, Symbol),
     /// A JSON object lookup with a runtime string key.
     JsonKey(Box<HirExpr>, Box<HirExpr>),
-    /// Mutates a homogeneous runtime-keyed object and evaluates to the assigned value.
-    JsonSet(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>, HirType),
+    /// Mutates a homogeneous runtime-keyed object and evaluates to the
+    /// assigned value. The trailing `bool` is `preserve_undefined`,
+    /// mirroring `compile_json_object_set_native_with_undefined`'s own
+    /// flag: when the value's declared type is `Optional`/`Nullable`/
+    /// `Nullish` and it's actually absent/undefined at runtime, `false`
+    /// (the ordinary case -- a real object-literal field legitimately
+    /// omits itself from the resulting JSON, matching `JSON.stringify`'s
+    /// own behavior for an `undefined`-valued property) omits the key
+    /// entirely, while `true` writes the same `{"$__thaw_napi_undefined$":
+    /// true}` sentinel a bare `Undefined` argument uses (see
+    /// `coerce_to_declared`) instead of losing the distinction -- needed
+    /// by `wrap_native_value_as_json`, which uses this node to encode a
+    /// *standalone* value (not a real object literal's own field, where
+    /// omission would be correct) as its own temporary object's one
+    /// field, then reads that same field straight back out: omitting it
+    /// there would make the read-back see a plain *missing* key (which
+    /// `thaw_json_get` reports as JSON `null`), silently turning a real
+    /// `undefined` argument into `null` -- wrong for something like
+    /// zod's own `ZodUndefined`, which rejects `null`.
+    JsonSet(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>, HirType, bool),
     JsonIndexSet(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>),
     /// Deletes a runtime-keyed JSON/dictionary property and returns `true`.
     JsonDelete(Box<HirExpr>, Box<HirExpr>),
