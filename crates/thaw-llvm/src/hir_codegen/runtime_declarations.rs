@@ -1231,6 +1231,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_register_native_callback",
+            handle_result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_jit_call_f64",
             self.context
                 .struct_type(&[self.context.f64_type().into(), i8_ptr.into()], false)
