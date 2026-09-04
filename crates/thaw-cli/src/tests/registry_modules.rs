@@ -9388,3 +9388,85 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A dynamic-call argument that's itself a method call chained off a
+/// `JsValue` receiver, with no intermediate `const` binding at all --
+/// real-world example: zod's `z.string().pipe(z.string().min(3))`,
+/// where `.min(3)`'s own result (chained off `z.string()`) is passed
+/// straight into `.pipe(...)`'s own argument position. Found via
+/// bug-hunting after the native-callback-bridge work: `z.string().
+/// pipe(z.string().min(3)).safeParse(...)` silently crashed (exit 1, no
+/// output at all -- the same failure shape a missing `JsValue` capture
+/// always produces here).
+///
+/// Root cause: `lower_dynamic_value_method_call`'s own argument-lowering
+/// loop called plain `lower_expr` on each argument, with no expected-
+/// type hint at all -- so an argument that's itself a further dynamic
+/// method call defaulted to the ordinary JSON-decoding snapshot
+/// behavior (a content-free `{}`), discarding its real handle, the
+/// exact same failure mode `lower_object_lit_field_value` was fixed for
+/// at a *different* sink point (an object-literal field, not a method-
+/// call argument) earlier in [[project_npm_interop_gaps_2]]. Fixed by
+/// giving each argument the same one-shot `Some(&HirType::JsValue)`
+/// hint the receiver itself already gets.
+///
+/// `combine`'s own JS implementation calls a *method* (`.describe()`)
+/// on its argument, not just reads a plain data field -- a JSON-
+/// stringified snapshot would still carry plain fields like `.tag`
+/// correctly (methods just don't serialize), so reading a field alone
+/// wouldn't have caught the bug; calling a method the snapshot doesn't
+/// have is what actually distinguishes a real live handle from a JSON
+/// snapshot here. Confirmed to fail with the pre-fix silent-crash
+/// symptom via a temporary revert.
+#[test]
+fn a_dynamic_call_argument_that_is_itself_a_chained_method_call_stays_live() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-chained-arg-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("chain-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(): Thing;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function build(n) { \
+         return { \
+         tag: n, \
+         combine: function(other) { return build(this.tag + \":\" + other.describe()); }, \
+         describe: function() { return this.tag; } \
+         }; \
+         } \
+         module.exports = { makeThing: function() { return build(\"root\"); } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "chain-kit";
+function main(): void {
+    const a: JsValue = makeThing();
+    const b: JsValue = a.combine(makeThing().combine(makeThing()));
+    console.log(b.describe());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"root:root:root\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
