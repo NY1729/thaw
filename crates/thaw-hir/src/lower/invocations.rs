@@ -195,10 +195,24 @@ impl<'a> FnLowerer<'a> {
         // receiver is itself the *method call* `z.string().min(2)`, which
         // needs this same hint recursively for its own receiver in turn.
         let receiver = self.lower_expr_with_expected_type(receiver_expr, Some(&HirType::JsValue))?;
+        // Each argument gets the same one-shot `JsValue` hint the receiver
+        // just did, for the identical reason: an argument that's itself a
+        // method call chained off a `JsValue` receiver (`z.string().pipe(
+        // z.string().min(3))`, real zod) would otherwise lower with no
+        // hint at all, defaulting to the JSON-decoding snapshot behavior
+        // (a content-free `{}`, the same failure mode `lower_object_lit_
+        // field_value` was fixed for -- an object-literal field, not a
+        // method-call argument, a different sink point for the identical
+        // bug). A no-op for any argument that isn't itself a call
+        // (`lower_expr_with_expected_type` only sets the hint for
+        // `Expr::Call`, consumed and cleared the moment that call is
+        // lowered), so this can't affect an ordinary literal/variable
+        // argument.
         let json_args = args
             .iter()
             .map(|argument| {
-                let value = self.lower_expr(&argument.expr)?;
+                let value =
+                    self.lower_expr_with_expected_type(&argument.expr, Some(&HirType::JsValue))?;
                 self.coerce_to_declared(&HirType::Json, value)
             })
             .collect::<Result<Vec<_>, String>>()?;
