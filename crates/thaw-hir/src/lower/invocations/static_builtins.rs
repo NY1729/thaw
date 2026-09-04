@@ -139,6 +139,18 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Lit(HirLit::Str("value".to_string()))),
                 Box::new(var(&value_name)),
                 value_type.clone(),
+                // This is a *standalone* value being round-tripped
+                // through a temporary object's one field and read
+                // straight back out, not a real object literal whose
+                // field can legitimately omit itself -- omitting it
+                // here would make the read-back below see a plain
+                // *missing* key (`thaw_json_get` reports that as JSON
+                // `null`), silently turning a real `undefined` (an
+                // absent `Optional`/`Nullable`/`Nullish` value) into
+                // `null` instead. Irrelevant for any other `value_type`
+                // (nothing to preserve without an absent/undefined tag
+                // to begin with), so always `true` here is safe.
+                true,
             )),
             HirStmt::Return(Some(HirExpr::JsonGet(
                 Box::new(var(&obj_name)),
