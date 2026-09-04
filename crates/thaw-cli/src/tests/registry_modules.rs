@@ -9470,3 +9470,108 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `superRefine`-shaped native callback -- real-world example: zod's
+/// `z.object({...}).superRefine((val, ctx) => { ctx.addIssue(...); })` --
+/// exercising four gaps found and fixed together while bug-hunting after
+/// the basic native-callback-bridge work (item 10) landed:
+///
+/// 1. A callback parameter explicitly typed `JsValue` (`ctx`) -- the
+///    bridge previously only marshaled plain JSON-representable
+///    parameters into a callback; `compile_json_value_to_native`'s new
+///    `HirType::JsValue` case, paired with a `jsvalue_param_mask`
+///    thaw-llvm now threads through `thaw_js_register_native_callback`,
+///    retains exactly the marked argument positions as a live handle
+///    (encoded as the same `{"__thaw_js_handle_id__": N}` marker used
+///    for the opposite direction) instead of naively `JSON.stringify`-
+///    ing them.
+/// 2. A *generic* top-level function's return value used as an inline
+///    method-call receiver with no intermediate `const` at all
+///    (`object({...}).superRefine(...)`) -- `infer_member_receiver_type`
+///    used to exclude *every* generic callee's declared return type
+///    (correct when substitution genuinely matters, e.g. `identity<T>(x:
+///    T): T`), even when that declared return type was already `JsValue`
+///    and thus substitution-independent (an unresolved interface
+///    reference like `Schema<T>` can never become JSON-representable
+///    no matter what `T` is).
+/// 3. A `void`-returning callback (`(val, ctx) => { ctx.addIssue(...); }`,
+///    no `return` at all) -- `compile_napi_value_callback`'s adapter used
+///    to unconditionally require a real return value.
+/// 4. A dynamic call made *from inside* a native callback that was
+///    itself invoked *by* an outer dynamic call still on the stack
+///    (`ctx.addIssue(...)`, called while the outer `.validate(...)` call
+///    that triggered the callback hasn't returned yet) -- `with_context`
+///    panicked ("RefCell already borrowed") on the second, reentrant
+///    call. Fixed by reusing the `ActiveNapiContext` guard `install_
+///    napi_bridge`'s own reentrant call already relies on (despite the
+///    "napi" name, a generic "currently active `Ctx`" mechanism, not
+///    N-API-specific) via a new `with_active_or_context` (thaw-quickjs).
+///
+/// `val`'s own numeric fields are read via `Json`/`Number(...)`, not
+/// `JsValue` -- deliberately: `val` is plain, JSON-representable data
+/// here (matching real zod's own `RefinementCtx` usage, where the
+/// *validated value* is ordinary data and only `ctx` itself is a live
+/// object with methods), confirming the fix doesn't force every
+/// parameter to go through the handle path.
+#[test]
+fn a_superrefine_shaped_native_callback_with_a_jsvalue_context_parameter_works() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-superrefine-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("super-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function object<T>(shape: T): Schema<T>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeSchema() { \
+         return { \
+         superRefine: function(check) { \
+         return { \
+         validate: function(val) { \
+         var ctx = { issues: [], addIssue: function(msg) { this.issues.push(msg); } }; \
+         check(val, ctx); \
+         return ctx.issues; \
+         } \
+         }; \
+         } \
+         }; \
+         } \
+         module.exports = { object: function(shape) { return makeSchema(); } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { object } from "super-kit";
+function main(): void {
+    const s: JsValue = object({ a: 1, b: 2 }).superRefine((val: Json, ctx: JsValue) => {
+        if (Number(val.a) > Number(val.b)) {
+            ctx.addIssue("a must be <= b");
+        }
+    });
+    console.log(JSON.stringify(s.validate({ a: 1, b: 2 })));
+    console.log(JSON.stringify(s.validate({ a: 3, b: 2 })));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[]\n[\"a must be <= b\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

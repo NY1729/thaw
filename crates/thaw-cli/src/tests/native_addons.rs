@@ -1109,7 +1109,13 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
 /// `.pipe(z.string().min(3))`, a dynamic-call argument that's itself a
 /// method call chained off a `JsValue` receiver with no intermediate
 /// binding at all (see `a_dynamic_call_argument_that_is_itself_a_
-/// chained_method_call_stays_live` for the synthetic version).
+/// chained_method_call_stays_live` for the synthetic version) -- and
+/// `.superRefine((val, ctx) => { ctx.addIssue(...); })`, a `JsValue`-
+/// typed callback parameter whose own method call reenters the dynamic-
+/// call machinery from inside a native callback (see thaw-cli's own
+/// `a_superrefine_shaped_native_callback_with_a_jsvalue_context_
+/// parameter_works` for the synthetic version, and its own doc comment
+/// for the four gaps this exercises together).
 #[test]
 fn registry_add_validates_zod_schemas_end_to_end_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -1135,6 +1141,13 @@ function main(): void {
     console.log(JSON.stringify(z.string().transform((s: string) => s.length).parse("hello")));
     console.log(z.string().pipe(z.string().min(3)).safeParse("hi").success);
     console.log(z.string().pipe(z.string().min(3)).safeParse("hello").success);
+    const withCtx: JsValue = z.object({ a: z.number(), b: z.number() }).superRefine((val: Json, ctx: JsValue) => {
+        if (Number(val.a) > Number(val.b)) {
+            ctx.addIssue({ code: "custom", message: "a must be <= b" });
+        }
+    });
+    console.log(withCtx.safeParse({ a: 1, b: 2 }).success);
+    console.log(withCtx.safeParse({ a: 3, b: 2 }).success);
 }"#,
     )
     .unwrap();
@@ -1148,7 +1161,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\nfalse\ntrue\nfalse\ntrue\nfalse\n5\nfalse\ntrue\n"
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\n5\nfalse\ntrue\ntrue\nfalse\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -836,3 +836,32 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
         context.with(f)
     })
 }
+
+/// Like [`with_context`], but reuses the currently-active `Ctx` (see
+/// `ActiveNapiContext`) instead of calling `with_context` again when one
+/// is already active -- needed for a native callback invoked *by* a
+/// dynamic call (real example: zod's `.superRefine((val, ctx) => { ctx.
+/// addIssue(...); })`) that itself makes a further dynamic call from
+/// inside its own body: the *outer* dynamic call is still on the stack
+/// at that point (its own `with_context`'s `RefCell` borrow, and
+/// `Context::with`'s own internal runtime lock, both still held), so a
+/// second top-level `with_context` call would panic ("RefCell already
+/// borrowed") rather than deadlock or corrupt anything -- confirmed via
+/// a real repro. Bypassing `with_context`/`Context::with` entirely on
+/// the reentrant path (reusing the already-active `Ctx` directly, not
+/// re-locking anything) avoids both.
+fn with_active_or_context<R>(f: impl for<'js> FnOnce(Ctx<'js>) -> R) -> R {
+    ACTIVE_NAPI_CONTEXT.with(|active| {
+        let active = active.get();
+        if active.is_null() {
+            with_context(f)
+        } else {
+            // SAFETY: `active` was set by `ActiveNapiContext::enter`,
+            // called with a `Ctx` still alive on the stack of the outer
+            // call currently reentering into us -- it hasn't been
+            // dropped, only reborrowed here for the duration of `f`.
+            let ctx = unsafe { (*(active as *const Ctx<'static>)).clone() };
+            f(ctx)
+        }
+    })
+}
