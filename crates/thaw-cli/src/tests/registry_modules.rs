@@ -7996,3 +7996,67 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// End-to-end regression for the bug that turned out to be blocking real
+/// zod, not the two generic-declaration gaps fixed just above: zod
+/// exports a schema-builder function literally named `undefined`
+/// (`z.undefined()`), and `wrap_as_commonjs_module`'s `module.exports`
+/// -> `globalThis` copy loop (thaw-bridge) used to abort entirely the
+/// moment one key's assignment threw (`globalThis.undefined` is
+/// non-writable) -- silently dropping every export enumerated after it
+/// too, `after` included, even though it has nothing to do with
+/// `undefined`. See
+/// `a_key_that_cannot_bind_to_globalthis_does_not_block_later_exports`
+/// (thaw-bridge's own tests) for the unit-level regression coverage;
+/// this is the same bug reproduced with a real `--use`d package and a
+/// real import, the shape that actually surfaced it. Both functions
+/// return `JsValue` (an opaque, un-JSON-representable handle, matching
+/// real zod's own schema-builder return shape) rather than a plain
+/// string -- a `Fallback` function simple enough to synthesize a
+/// numeric/string result gets JIT-compiled directly by thaw itself
+/// (`jit_export`) and so never actually loads `bundle.js` into QuickJS
+/// at all, which would silently skip the very code path this test
+/// means to exercise.
+#[test]
+fn an_export_literally_named_undefined_does_not_block_later_exports() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-undefined-export-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("undef-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function undefined(): JsValue;\n\
+         export declare function after(name: string): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "exports.undefined = function() { return { toString: function() { return 'u'; } }; };\n\
+         exports.after = function(name) { return { toString: function() { return '[' + name + ']'; } }; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { after } from "undef-kit";
+function main(): void {
+    const r = after("hi");
+    console.log(r);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "[hi]\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

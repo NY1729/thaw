@@ -315,6 +315,20 @@ pub struct ModuleBundle<'a> {
 /// always sets `module.exports.default`, matching real `import x from
 /// 'y'` interop semantics, rather than replacing `module.exports`
 /// outright the way a plain CommonJS `module.exports = foo` does.
+///
+/// The `module.exports` -> `globalThis` copy loop skips (rather than
+/// aborts on) a key it can't assign: `for...in` enumerates own AND
+/// inherited enumerable keys in insertion order, so one key throwing
+/// (in strict mode -- this bundle runs with `"use strict"`) used to
+/// silently drop *every* key enumerated after it too, not just that one
+/// -- real example: zod, which exports a schema-builder function
+/// literally named `undefined` (`z.undefined()`), and `globalThis`'s own
+/// `undefined` property is non-writable, so assigning it throws
+/// `TypeError: 'undefined' is read-only`; every other export enumerated
+/// after `undefined` in zod's own property order (`optional`, `object`,
+/// ...) silently never reached `globalThis` at all before this fix,
+/// even though none of them have anything to do with `undefined`
+/// itself.
 fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String {
     // `name` is always a valid JS identifier here: it's a function name
     // SWC already parsed out of a `.d.ts` `declare function` statement,
@@ -419,7 +433,7 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          }}\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
-         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
+         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ globalThis[k] = module.exports[k]; }} catch (e) {{}} }} }}\n\
          {bind_default_exports}\
          }};\n\
          if (globalThis.__thaw_module_ready && typeof globalThis.__thaw_module_ready.then === 'function') {{ globalThis.__thaw_module_ready.then(__thaw_bind_module_exports); }}\n\

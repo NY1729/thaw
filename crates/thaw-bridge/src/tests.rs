@@ -2105,6 +2105,41 @@ fn binds_esm_default_export_under_the_fallback_name() {
     assert_eq!(result, "\"[hi]\"");
 }
 
+/// A key whose assignment to `globalThis` throws (e.g. a schema-builder
+/// function literally named `undefined`, `z.undefined()` -- real zod
+/// exports exactly this, and `globalThis.undefined` is non-writable, so
+/// `globalThis["undefined"] = ...` throws `TypeError: 'undefined' is
+/// read-only` in strict mode) used to abort the whole `module.exports`
+/// -> `globalThis` copy loop, since `for...in` enumerates in insertion
+/// order and one throw stopped the loop entirely -- every export
+/// enumerated *after* the offending key, including ones with nothing to
+/// do with it, silently never reached `globalThis` at all. Runs through
+/// real QuickJS-NG (not just checking the generated text) to confirm a
+/// later, unrelated export actually stays callable.
+#[test]
+fn a_key_that_cannot_bind_to_globalthis_does_not_block_later_exports() {
+    use std::ffi::{CStr, CString};
+
+    let js_source = "module.exports.undefined = function() { return 'nope'; };\n\
+                      module.exports.after = function(s) { return '[' + s + ']'; };";
+    let wrapped = wrap_as_commonjs_module(js_source, &["after".to_string()]);
+
+    let source = CString::new(wrapped).unwrap();
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        1,
+        "failed to load"
+    );
+
+    let func = CString::new("after").unwrap();
+    let args = CString::new("[\"hi\"]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(result, "\"[hi]\"");
+}
+
 #[test]
 fn bare_global_function_bundle_is_unaffected_by_commonjs_wrapping() {
     // A hand-authored bundle with no `module.exports` at all (this
