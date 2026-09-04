@@ -209,6 +209,39 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// Lowers `receiver.property` (a plain property *read*, no call at
+    /// all) where `receiver` (already lowered by the caller -- see its
+    /// own doc comment for why re-lowering it here would risk double-
+    /// evaluating a side-effecting receiver expression) is already known
+    /// to be `HirType::JsValue`-typed. Reuses the existing
+    /// `getDynamicProperty` intrinsic (`thaw_js_get_property_result`,
+    /// thaw-quickjs), previously only a manual escape hatch nobody
+    /// actually wired up to ordinary `.property` syntax, the same way
+    /// `callDynamicMethod` was before it got wired up to `.method()`.
+    /// Reads the property by plain lookup, not by enumeration --
+    /// correctly finds a non-enumerable own property real zod's own
+    /// `ZodError.issues` deliberately is (an *unannotated* method call's
+    /// own default JSON-snapshot behavior, by contrast, would silently
+    /// lose it, since a JSON encode can only ever capture enumerable
+    /// properties).
+    ///
+    /// Unlike a method call, `getDynamicProperty` always hands back a
+    /// real handle -- there's no JSON-decoding sibling to choose between
+    /// based on an expected-type hint, so this doesn't need one either.
+    /// A chained property read off *this* one (`bad.error.issues`)
+    /// recurses back into this same lowering for free, since the result
+    /// here is already `JsValue`-typed.
+    fn lower_dynamic_value_property_read(
+        &mut self,
+        receiver: HirExpr,
+        property: &str,
+    ) -> Result<HirExpr, String> {
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicProperty".to_string())),
+            vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string()))],
+        ))
+    }
+
     fn lower_primitive_conversion(
         &mut self,
         callee_name: &str,
