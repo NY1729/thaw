@@ -253,7 +253,21 @@ impl<'ctx> HirCompiler<'ctx> {
                         .into();
                     "thaw_json_object_set_bool"
                 }
-                HirType::Json | HirType::Dictionary(_) => "thaw_json_object_set_json",
+                HirType::Json | HirType::Dictionary(_) => {
+                    // A field whose *declared* type is the generic `Json`
+                    // (an unresolvable/fallback npm parameter type, e.g.
+                    // zod's `optional`) can still carry a real `JsValue`
+                    // handle at runtime -- thaw-hir's `coerce_to_declared`
+                    // passes one through unchanged rather than erroring
+                    // (see its own doc comment). `Json`/`Dictionary` are
+                    // always pointers (see `basic_type`); a `JsValue` is
+                    // always an `i64`, so this is an unambiguous way to
+                    // tell the two apart here.
+                    if value.is_int_value() {
+                        value = self.compile_dynamic_value_placeholder(value)?;
+                    }
+                    "thaw_json_object_set_json"
+                }
                 HirType::Array(element) => {
                     value = self.compile_native_array_to_json_with_undefined(
                         value.into_pointer_value(),
@@ -279,6 +293,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_json_object_set_json"
                 }
                 HirType::Null => "thaw_json_object_set_json",
+                HirType::JsValue => {
+                    value = self.compile_dynamic_value_placeholder(value)?;
+                    "thaw_json_object_set_json"
+                }
                 other => return Err(format!("unsupported dynamic object field {other:?}")),
             };
         self.builder
@@ -289,6 +307,71 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// Encodes a `JsValue` (an opaque, permanent id into QuickJS's own
+    /// retained-value table -- there is no JSON representation of "a live
+    /// JS object") as a `{"__thaw_js_handle_id__": <id>}` placeholder
+    /// object, which the QuickJS-side JSON reviver (see its doc comment in
+    /// `dates.js`) splices back into the real value the moment the args
+    /// JSON this placeholder sits in gets parsed on the other end -- bare,
+    /// or nested inside an object/array literal at any depth, the same way
+    /// that reviver already reconstructs a `Date`. Unlike a per-call
+    /// index into a side channel, the handle's own id is permanent and
+    /// meaningful on its own, so no extra plumbing back to the call site
+    /// is needed here. Only meaningful while compiling a QuickJS-backed
+    /// dynamic call's own arguments (`compile_typed_dynamic_call` sets
+    /// `compiling_quickjs_dynamic_arguments` before marshaling them);
+    /// anywhere else -- console.log formatting, a `Dictionary` literal, an
+    /// N-API call (which has no such reviver) -- there is no receiving end
+    /// for this placeholder, so this fails clearly instead of silently
+    /// discarding the live value. Real-world example: zod's
+    /// `z.object({ name: z.string() })`, whose `z.string()` argument is
+    /// itself a `JsValue` (a live `ZodString` schema instance) nested
+    /// inside the object-literal argument passed to `z.object`.
+    fn compile_dynamic_value_placeholder(
+        &mut self,
+        handle: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if !self.compiling_quickjs_dynamic_arguments {
+            return Err(
+                "a dynamic (JsValue) value can only be passed as an argument to another QuickJS-backed dynamic call"
+                    .into(),
+            );
+        }
+        let handle = self
+            .builder
+            .build_unsigned_int_to_float(
+                handle.into_int_value(),
+                self.context.f64_type(),
+                "dynamic_handle_id",
+            )
+            .map_err(|error| error.to_string())?;
+        let placeholder = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_object_new").unwrap(),
+                &[],
+                "dynamic_handle_placeholder",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let key = self
+            .builder
+            .build_global_string_ptr("__thaw_js_handle_id__", "dynamic_handle_placeholder_key")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_json_object_set_number")
+                    .unwrap(),
+                &[placeholder.into(), key.as_pointer_value().into(), handle.into()],
+                "dynamic_handle_placeholder_id",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(placeholder)
     }
 
     /// Sets a `Union`-typed object field's JSON value -- the same
@@ -758,7 +841,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into();
                 "thaw_json_array_push_bool"
             }
-            HirType::Json | HirType::Dictionary(_) => "thaw_json_array_push_json",
+            HirType::Json | HirType::Dictionary(_) => {
+                // See the identical check in
+                // `compile_json_object_set_native_with_undefined`: a
+                // `Json`-declared slot can carry a real `JsValue` handle at
+                // runtime (an unambiguous `i64` vs. pointer distinction).
+                if value.is_int_value() {
+                    value = self.compile_dynamic_value_placeholder(value)?;
+                }
+                "thaw_json_array_push_json"
+            }
             HirType::Array(nested) => {
                 value = self.compile_native_array_to_json_with_undefined(
                     value.into_pointer_value(),
@@ -780,6 +872,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 "thaw_json_array_push_json"
             }
             HirType::Null | HirType::Undefined => "thaw_json_array_push_json",
+            HirType::JsValue => {
+                value = self.compile_dynamic_value_placeholder(value)?;
+                "thaw_json_array_push_json"
+            }
             other => {
                 return Err(format!(
                     "cannot serialize collection element {other:?} to JSON"

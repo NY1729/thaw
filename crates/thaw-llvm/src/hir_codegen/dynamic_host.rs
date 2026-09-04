@@ -1933,6 +1933,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        // Saved and restored around the loop (rather than just cleared
+        // afterward) because `compile_expr(arg)` below can itself recurse
+        // into another dynamic call (e.g. zod's `optional(string())`,
+        // where `string()`'s own call is compiled while marshaling
+        // `optional`'s argument list) -- without this, that nested call
+        // (or one for an unrelated backend) would leave the flag in
+        // whatever state its own call left it, rather than this call's.
+        // See `compile_dynamic_value_placeholder` (json_bridge.rs), which
+        // reads the flag while marshaling each argument below.
+        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        self.compiling_quickjs_dynamic_arguments = signature.backend == DynamicBackend::QuickJs;
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
             if function_argument
                 .first()
@@ -1944,6 +1955,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("typed dynamic argument {}: {error}", index + 1))?;
         }
+        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
         let name = self
             .builder
             .build_global_string_ptr(&signature.symbol, "dynamic_symbol")

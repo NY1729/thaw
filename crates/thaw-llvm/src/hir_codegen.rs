@@ -203,6 +203,15 @@ pub struct HirCompiler<'ctx> {
     uses_napi: bool,
     uses_quickjs: bool,
     uses_quickjs_handles: bool,
+    /// True while compiling a QuickJS-backed dynamic call's own JSON-shaped
+    /// arguments (set/restored around that one argument-marshaling loop in
+    /// `compile_typed_dynamic_call`, so a nested dynamic call compiled
+    /// while marshaling an outer one's arguments doesn't see this as
+    /// already on). Lets `compile_dynamic_value_placeholder` (json_bridge.rs)
+    /// tell that context apart from one where embedding a live JS value
+    /// handle has no meaning and should be rejected instead (console.log
+    /// formatting, a `Dictionary` literal, an N-API call).
+    compiling_quickjs_dynamic_arguments: bool,
 }
 
 impl<'ctx> HirCompiler<'ctx> {
@@ -224,6 +233,7 @@ impl<'ctx> HirCompiler<'ctx> {
             uses_napi: false,
             uses_quickjs: false,
             uses_quickjs_handles: false,
+            compiling_quickjs_dynamic_arguments: false,
         }
     }
 
