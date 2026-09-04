@@ -113,6 +113,7 @@ fn build_with_link_mode(
         static_class_setter_rewrites,
         factory_class_rewrites,
         external_exports,
+        external_namespace_aliases,
     ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     let qualifier_by_package =
@@ -169,6 +170,7 @@ fn build_with_link_mode(
         input,
         &user_source,
         &external_exports,
+        &external_namespace_aliases,
         &external_resolutions,
     )?;
     if !shim_source.is_empty() {

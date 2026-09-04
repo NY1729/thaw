@@ -19,7 +19,7 @@
 //! enough that sharing code would mean threading a mode flag through
 //! `lower_ts_type` for one caller.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use swc_ecma_ast::{
     Accessibility, Class, ClassMember, Decl, DefaultDecl, Expr, Function, MethodKind, Module,
