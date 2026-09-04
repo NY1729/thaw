@@ -108,7 +108,20 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         // produce this shape for that case anymore, so this check
         // staying strict is a real safety net, not just an unfixed gap.
         HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
-        HirType::Array(inner) => **inner == HirType::F64,
+        // Recurses the same way `Tuple`/`Object` already do just below,
+        // rather than staying hardcoded to `F64` only -- real example:
+        // zod's own `union<T extends readonly core.SomeType[]>(options:
+        // T): ZodUnion<T>`, called with `[z.string(), z.number()]`, an
+        // array of plain `JsValue` schema instances (each element is a
+        // *plain function call*, not a method call defaulting to `Json`
+        // the way an object-literal field's unannotated method call
+        // could -- see the `Json` note above -- so this doesn't reopen
+        // that same risk). Confirmed directly first: a plain, non-
+        // generic `JsValue[]` parameter already marshals correctly as an
+        // ordinary Fallback argument, so this is genuinely just an
+        // unnecessarily narrow check, not a masked gap the way the
+        // `Object`/`Json` case above turned out to be.
+        HirType::Array(inner) => supports_generic_native_layout(inner),
         HirType::Tuple(elements) => elements.iter().all(supports_generic_native_layout),
         HirType::Object(fields) => fields
             .iter()

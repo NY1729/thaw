@@ -32,6 +32,14 @@ impl<'a> FnLowerer<'a> {
             )),
             HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
             HirType::Null | HirType::Undefined => Ok(false_lit()),
+            // Only ever seen here for a still-unresolved generic type
+            // parameter placeholder during signature analysis, never a
+            // real runtime value inside a fully-lowered statement body --
+            // matches `expect_type`'s own long-standing `actual ==
+            // HirType::Dynamic` bypass (this function's callers used to
+            // route through that check instead, before `if`/`while`/
+            // `do`/`for` conditions started calling this directly).
+            HirType::Dynamic => Ok(value),
             HirType::Array(_)
             | HirType::Tuple(_)
             | HirType::Object(_)
