@@ -237,7 +237,9 @@ impl<'ctx> HirCompiler<'ctx> {
         };
 
         let symbol = Self::llvm_symbol_for(&func.name);
-        Ok(self.module.add_function(&symbol, fn_type, None))
+        Ok(self
+            .module
+            .add_function(&symbol, fn_type, Some(Linkage::Internal)))
     }
 
     /// Declares an ambient (`declare function`) signature as an `extern
