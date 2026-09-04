@@ -1,4 +1,46 @@
 impl<'a> FnLowerer<'a> {
+    /// Lowers an object literal's own `key: value` field value -- almost
+    /// always just `lower_expr`, with one narrow exception: a method
+    /// call whose *receiver* is already known to be `JsValue`-typed
+    /// (`infer_member_receiver_type`) gets `Some(&HirType::JsValue)` as
+    /// its own expected-type hint, the same one-shot mechanism a `let`/
+    /// `const` declaration's explicit annotation already resolves
+    /// elsewhere (see `lower_expr_with_expected_type`'s own doc
+    /// comment) -- and the same heuristic this session's chained-
+    /// method-call fix already established for a method call used as
+    /// *another* method call's own receiver ("more of the same object"
+    /// for a builder-style chain). Without this, the field defaults to
+    /// the plain JSON-decoding behavior no hint gives it, discarding the
+    /// real handle -- real example: zod's own `object({ nickname:
+    /// string().optional() })`, where `.optional()`'s receiver
+    /// (`string()`) is a `JsValue` schema instance and `.optional()`
+    /// itself returns *another* one, not plain data -- an object-literal
+    /// field is exactly as much a "sink" for this value as a further
+    /// chained method call, just spelled differently. Silently
+    /// swallowing the real handle here doesn't just misdeclare
+    /// anything -- it hands whatever `object`'s own generic type
+    /// inference decides on (a `Json` snapshot of a value with no
+    /// serializable content, since a schema instance's own state lives
+    /// behind methods) into real zod's own shape-validation logic on the
+    /// far side, which throws on its own once it doesn't recognize the
+    /// field as a real Zod schema.
+    fn lower_object_lit_field_value(&mut self, value: &Expr) -> Result<HirExpr, String> {
+        let Expr::Call(call) = value else {
+            return self.lower_expr(value);
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return self.lower_expr(value);
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return self.lower_expr(value);
+        };
+        if self.infer_member_receiver_type(&member.obj) == Some(HirType::JsValue) {
+            self.lower_expr_with_expected_type(value, Some(&HirType::JsValue))
+        } else {
+            self.lower_expr(value)
+        }
+    }
+
     fn lower_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
         struct AwaitFinder(bool);
         impl Visit for AwaitFinder {
@@ -77,7 +119,7 @@ impl<'a> FnLowerer<'a> {
                             },
                             _ => return Err("unsupported object literal key".to_string()),
                         };
-                        vec![(name, self.lower_expr(value)?)]
+                        vec![(name, self.lower_object_lit_field_value(value)?)]
                     }
                     Prop::Shorthand(ident) => vec![(
                         ident.sym.to_string(),

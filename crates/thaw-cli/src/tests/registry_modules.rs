@@ -8494,6 +8494,95 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An unannotated method call used as an *object literal field value*
+/// (not bound to a `const`, not itself chained further) needs the exact
+/// same "keep the real handle" default as a chained-method-call
+/// receiver already gets -- real example: zod's own `object({ ...,
+/// nickname: string().optional() })`. Before this fix, `.optional()`'s
+/// receiver being `JsValue`-typed didn't matter: with no annotation and
+/// no further chaining, the field defaulted to the plain JSON-decoding
+/// behavior (see `a_method_can_return_a_jsvalue_when_the_call_site_
+/// asks_for_one` above), discarding the real handle. That produced an
+/// object literal with a field typed plain `Json` holding a content-
+/// free snapshot (a schema-builder instance's own state lives behind
+/// methods, not serializable fields) -- which a *generic* Fallback
+/// function receiving it as part of its inferred type parameter can't
+/// specialize for at all (`supports_generic_native_layout` has no case
+/// for `Json`, by design: confirmed by direct experiment that loosening
+/// it just trades this clean compile error for real zod's own internal
+/// validation throwing on the far side of the dynamic call once it
+/// doesn't recognize the snapshot as a real schema -- a silent,
+/// message-less `exit(1)`).
+///
+/// Fixed in `lower_object_lit_field_value` (thaw-hir): a field value
+/// that's a method call whose receiver is already known to be
+/// `JsValue`-typed gets `Some(&HirType::JsValue)` as its own expected-
+/// type hint, the same way this session's chained-method-call fix
+/// already does for a method call used as *another* method call's own
+/// receiver. Verified end-to-end: the field's real handle (with its own
+/// methods) survives being embedded in an object literal, passed
+/// through a generic Fallback function, and read back out later.
+#[test]
+fn an_unannotated_method_call_used_as_an_object_literal_field_keeps_its_real_handle() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-object-lit-field-jsvalue-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("shape-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function str(): JsValue;\n\
+         export declare function build<T>(shape: T): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.str = function() {\n\
+             return {\n\
+                 optional: function() {\n\
+                     return { toString: function() { return 'optional-str'; } };\n\
+                 }\n\
+             };\n\
+         };\n\
+         module.exports.build = function(shape) {\n\
+             return {\n\
+                 describeNickname: function() {\n\
+                     return shape.nickname && typeof shape.nickname.toString === 'function'\n\
+                         ? shape.nickname.toString()\n\
+                         : 'lost:' + JSON.stringify(shape.nickname);\n\
+                 }\n\
+             };\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { build, str } from "shape-kit";
+function main(): void {
+    const shape = build({ nickname: str().optional() });
+    console.log(shape.describeNickname());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"optional-str\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A method called directly on the result of *another* method call, with
 /// no intermediate `const` binding at all -- `z.string().min(2).max(10)
 /// .safeParse(...)`, `dayjs(...).add(10, "day").format(...)` -- used to
