@@ -19,6 +19,19 @@
   Date.prototype.toJSON = function () {
     return { timestamp: this.getTime() };
   };
+  // This reviver also recognizes `{"__thaw_js_handle_id__": N}` -- a
+  // `JsValue` (an opaque handle to a live QuickJS object, e.g. a schema
+  // instance returned by a Fallback function like zod's `z.string()`)
+  // crossing a `callDynamic` JSON argument boundary the same way a `Date`
+  // does: there's no JSON encoding of "a live JS object", so
+  // `compile_dynamic_value_placeholder` (thaw-llvm's `json_bridge.rs`)
+  // encodes the handle's own (permanent, lookup-table) id as this shape
+  // instead, wherever the value would otherwise sit in the argument JSON
+  // -- bare, or nested inside an object/array literal, at any depth,
+  // since the reviver runs bottom-up over the whole parsed value just
+  // like it already does for `Date`. Reviving it back to the real value
+  // here, rather than a second Rust-side walk, reuses the exact same
+  // hook this file already wires into every JSON-argument parse.
   globalThis.__thaw_json_date_reviver = (key, value) => {
     if (
       value &&
@@ -28,6 +41,20 @@
       typeof value.timestamp === 'number'
     ) {
       return new Date(value.timestamp);
+    }
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      typeof value.__thaw_js_handle_id__ === 'number'
+    ) {
+      const id = value.__thaw_js_handle_id__;
+      const live = globalThis.__thaw_value_handle_live;
+      if (!live || !live[id - 1]) {
+        throw new Error('invalid or released dynamic value handle ' + id);
+      }
+      return globalThis.__thaw_value_handles[id - 1];
     }
     return value;
   };

@@ -396,8 +396,18 @@ fn invoke_raw<'js>(
         .get("JSON")
         .map_err(|error| error.to_string())?;
     let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+    // The reviver (see its own doc comment in `dates.js`) also splices a
+    // `JsValue` back in wherever `compile_dynamic_value_placeholder`
+    // (thaw-llvm's `json_bridge.rs`) had to leave a
+    // `{"__thaw_js_handle_id__": N}` placeholder in the JSON -- real
+    // example: zod's `z.optional(z.string())`, where `z.string()`'s
+    // schema object is a live value, not JSON.
+    let reviver: Function = ctx
+        .globals()
+        .get("__thaw_json_date_reviver")
+        .map_err(|error| error.to_string())?;
     let args_array: Array = parse
-        .call((args_json,))
+        .call((args_json, reviver))
         .map_err(|error| format!("args_json is not a valid JSON array: {error}"))?;
     let mut call_args = Args::new_unsized(ctx.clone());
     for index in 0..args_array.len() {
@@ -499,8 +509,16 @@ pub extern "C" fn thaw_js_construct_handle_result(
             .get("JSON")
             .map_err(|error| error.to_string())?;
         let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+        // See the matching comment in `invoke_raw`: revives a `JsValue`
+        // wherever `compile_dynamic_value_placeholder` had to leave a
+        // `{"__thaw_js_handle_id__": N}` placeholder for a class
+        // constructor argument, not just a `Date`.
+        let reviver: Function = ctx
+            .globals()
+            .get("__thaw_json_date_reviver")
+            .map_err(|error| error.to_string())?;
         let arguments: Array = parse
-            .call((args_json,))
+            .call((args_json, reviver))
             .map_err(|error| error.to_string())?;
         let mut args = Args::new_unsized(ctx.clone());
         for index in 0..arguments.len() {
