@@ -7921,3 +7921,78 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A generic Fallback function whose type parameter is constrained to
+/// some other *named* type (`T extends core.SomeType`) -- an extremely
+/// common TS generics idiom, and zod's own real shape for e.g.
+/// `optional<T extends core.SomeType>(innerType: T): ZodOptional<T>` --
+/// used to make `typed_dynamic_declaration` (thaw-cli's `shims.rs`)
+/// give up on the *whole* declaration, since `is_reparseable_ts_type`'s
+/// constraint allowlist is just a handful of primitive keywords
+/// (`string`, `number`, `Date`, ...), falling all the way back to the
+/// bare untyped `(argsArray: Json): Json` shim -- silently wrong for an
+/// ordinary single-argument call like this one, the same failure mode
+/// as an unresolvable parameter or return type already had its own
+/// fallback for. Fixed by dropping an unparseable constraint (rendering
+/// the type parameter bare) instead of aborting the declaration, and by
+/// teaching `supports_generic_native_layout` (thaw-hir) that `JsValue`
+/// specializes a generic type parameter exactly like any other
+/// fixed-size scalar -- needed here because `T` infers as `JsValue` from
+/// `makeThing`'s own `JsValue`-returning result.
+#[test]
+fn a_generic_function_constrained_to_a_named_type_still_gets_a_typed_declaration() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-named-constraint-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("generic-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(name: string): JsValue;\n\
+         export declare function wrapGeneric<T extends core.SomeType>(inner: T): JsValue;\n\
+         export declare function describe(thing: JsValue): string;\n\
+         declare namespace core { interface SomeType {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeThing(name) {\n\
+             return { toString: function () { return 'thing:' + name; } };\n\
+         }\n\
+         function wrapGeneric(inner) {\n\
+             return { toString: function () { return 'wrapped(' + inner.toString() + ')'; } };\n\
+         }\n\
+         function describe(thing) { return thing.toString(); }\n\
+         module.exports.makeThing = makeThing;\n\
+         module.exports.wrapGeneric = wrapGeneric;\n\
+         module.exports.describe = describe;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing, wrapGeneric, describe } from "generic-kit";
+function main(): void {
+    const thing = makeThing("gadget");
+    const wrapped = wrapGeneric(thing);
+    console.log(describe(wrapped));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "wrapped(thing:gadget)\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

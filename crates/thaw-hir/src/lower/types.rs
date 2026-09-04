@@ -80,7 +80,14 @@ fn validate_trailing_type_parameter_defaults(
 
 fn supports_generic_native_layout(ty: &HirType) -> bool {
     match ty {
-        HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str => true,
+        // `JsValue` is as simple and fixed-size a scalar as `I64`/`Bool`
+        // (a plain `i64` handle -- see thaw-llvm's `basic_type`), so a
+        // generic function specializes for it exactly the same way. Real
+        // example: zod's `optional<T extends core.SomeType>(innerType:
+        // T): ZodOptional<T>`, called with another Fallback function's
+        // own `JsValue`-typed return (`z.string()`'s schema instance) --
+        // `T` infers as `JsValue` from that argument.
+        HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
         HirType::Array(inner) => **inner == HirType::F64,
         HirType::Tuple(elements) => elements.iter().all(supports_generic_native_layout),
         HirType::Object(fields) => fields
