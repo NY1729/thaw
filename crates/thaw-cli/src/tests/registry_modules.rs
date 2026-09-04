@@ -7776,6 +7776,75 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The same self-referential namespace shape as the test above
+/// (`import * as z`), but imported by *name* instead --
+/// `import { z } from "case-kit4";`, real-world shape: zod's own docs
+/// show both `import * as z from "zod"` and `import { z } from "zod"`
+/// as equivalent, since both reach the identical namespace object. Used
+/// to fail outright at the module-graph level (`` `zod` has no export
+/// named `z` ``): a named import resolves a specific key from the
+/// package's flat export table, and `z` was never in it at all --
+/// there's no function/class/interface actually named `z` anywhere in
+/// the flattened `.d.ts` (it's only ever bound by the package's own
+/// internal `import * as z`), unlike a namespace import, which just
+/// hands over the *whole* export table under whatever local name the
+/// user chose, with no per-name lookup needed at all.
+///
+/// Fixed with `thaw_bridge::self_referential_namespace_aliases`
+/// (recognizing `import * as z from "./local"; export { z, z as
+/// default };` in a package's own `.d.ts`) threaded through as a new
+/// `ExternalNamespaceAliases` map (thaw-cli's `shims.rs` / `build.rs` /
+/// `module_graph.rs`): a named import (or a same-file `export { z }
+/// from "pkg";` re-export) of exactly one of these recognized names
+/// now resolves the same way a namespace import already did, instead
+/// of failing the ordinary single-symbol lookup.
+#[test]
+fn a_named_import_of_a_self_referential_namespace_alias_works_like_a_namespace_import() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-named-self-reexported-namespace-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("case-kit4");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "import * as z from \"./lib\";\n\
+         export * from \"./lib\";\n\
+         export { z, z as default };\n\
+         \n\
+         export declare function double(value: number): number;\n\
+         export declare function greet(name: string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { double: function(value) { return value * 2; }, greet: function(name) { return 'hi ' + name; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { z } from "case-kit4";
+function main(): void {
+    console.log(z.double(21));
+    console.log(z.greet("Alice"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nhi Alice\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Constructing a Fallback (pure-JS, QuickJS-NG-dispatched) class
 /// instance via `new Class(...)` -- real-world example: hono's `new
 /// Hono()`. Two bugs, found and fixed together:

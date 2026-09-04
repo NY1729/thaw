@@ -638,6 +638,7 @@ pub fn bundle(
     entry: &Path,
     entry_source: &str,
     external_exports: &HashMap<String, HashMap<String, String>>,
+    external_namespace_aliases: &HashMap<String, HashSet<String>>,
     external_resolutions: &HashMap<String, String>,
 ) -> Result<Module, String> {
     let entry = entry
@@ -720,6 +721,29 @@ pub fn bundle(
                         .and_then(|dependency| namespace_exports[*dependency].get(&requested))
                     {
                         namespaces.insert(local, namespace.clone());
+                        continue;
+                    }
+                    // The external-package equivalent of the local-module
+                    // check just above: `requested` doesn't name a real
+                    // function/class/interface at all here, it's this
+                    // package's own re-export of a self-referential
+                    // namespace alias for its whole export table (real
+                    // example: zod's own `export { z, z as default };`,
+                    // where `z` is bound purely by an `import * as z`
+                    // elsewhere in zod's own `.d.ts`) -- see
+                    // `thaw_bridge::self_referential_namespace_aliases`'s
+                    // own doc comment for why this can't just be another
+                    // entry in `dependency_exports` the way an ordinary
+                    // function/class name is. `import { z } from "zod"`
+                    // then resolves exactly like `import * as z from
+                    // "zod"` already does: the whole package's own export
+                    // table, not a single symbol.
+                    if !modules[index].dependencies.contains_key(specifier)
+                        && external_namespace_aliases
+                            .get(specifier)
+                            .is_some_and(|aliases| aliases.contains(&requested))
+                    {
+                        namespaces.insert(local, dependency_exports.clone());
                         continue;
                     }
                     let target = dependency_exports.get(&requested).ok_or_else(|| {
@@ -817,6 +841,32 @@ pub fn bundle(
                                     if let Some(namespace) = namespaces.get(&original) {
                                         public_namespaces.insert(exported, namespace.clone());
                                         continue;
+                                    }
+                                } else if let Some(exports_table) = source_exports {
+                                    // The re-export equivalent of the
+                                    // named-import check in this same
+                                    // function's `Import` handling above --
+                                    // `export { z } from "zod";` re-
+                                    // exporting a self-referential
+                                    // namespace alias (see
+                                    // `thaw_bridge::self_referential_
+                                    // namespace_aliases`'s own doc
+                                    // comment), not a real function/class
+                                    // name `exports_table` would have.
+                                    let external_specifier = export
+                                        .src
+                                        .as_ref()
+                                        .and_then(|source| source.value.as_str());
+                                    if let Some(specifier) = external_specifier {
+                                        if !modules[index].dependencies.contains_key(specifier)
+                                            && external_namespace_aliases
+                                                .get(specifier)
+                                                .is_some_and(|aliases| aliases.contains(&original))
+                                        {
+                                            public_namespaces
+                                                .insert(exported, exports_table.clone());
+                                            continue;
+                                        }
                                     }
                                 }
                                 let target = source_exports
