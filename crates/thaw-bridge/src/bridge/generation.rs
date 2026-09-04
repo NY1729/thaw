@@ -333,6 +333,26 @@ pub struct ModuleBundle<'a> {
     /// of `--use` order. See `generate_shim`'s `qualified_names` doc
     /// comment for the other half of this.
     pub qualified_aliases: &'a [(String, String)],
+    /// `(namespace.member, qualified_key)` pairs for a nested-namespace
+    /// re-export (`export * as NAME from "...";` -- see
+    /// `thaw_bridge::nested_namespace_members`'s own doc comment; real
+    /// example: zod's `coerce.number`). Captured *inside*
+    /// `wrap_as_commonjs_module`'s own wrapped script, immediately after
+    /// `module.exports` is fully set (the same place/timing the plain
+    /// `for...in` copy loop already runs at) -- unlike `qualified_aliases`
+    /// above, this can't be captured via a *separate*, later `loadScript`
+    /// call: confirmed via a direct experiment that a function value
+    /// reached through a two-level property chain (`module.exports.ns.
+    /// member`) becomes silently uninvokable through the native
+    /// `callDynamic` boundary specifically when captured from a different
+    /// `loadScript`/`eval` call than the one that set `module.exports` in
+    /// the first place -- while remaining perfectly callable from JS, and
+    /// while a same-eval capture of the very same chain works fine. Root
+    /// cause not fully understood (looks like a QuickJS-NG/rquickjs
+    /// engine limitation around cross-`eval` native invocation of a
+    /// property-chain-derived function value), but capturing within the
+    /// same `eval` call that created the object sidesteps it.
+    pub nested_namespace_aliases: &'a [(String, String)],
 }
 
 /// Wraps a real npm package's CommonJS source so it can run inside
@@ -385,7 +405,11 @@ pub struct ModuleBundle<'a> {
 /// ...) silently never reached `globalThis` at all before this fix,
 /// even though none of them have anything to do with `undefined`
 /// itself.
-fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String {
+fn wrap_as_commonjs_module(
+    js_source: &str,
+    fallback_names: &[String],
+    nested_namespace_aliases: &[(String, String)],
+) -> String {
     // `name` is always a valid JS identifier here: it's a function name
     // SWC already parsed out of a `.d.ts` `declare function` statement,
     // not arbitrary text, so splicing it directly as a property-access
@@ -397,6 +421,21 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
                 "if (typeof module.exports === 'function' && typeof globalThis.{name} !== 'function') {{ globalThis.{name} = module.exports; }}\n\
                  else if (typeof module.exports === 'object' && module.exports !== null && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n"
             )
+        })
+        .collect();
+    // Captured *here*, inside the same wrapped script that just set
+    // `module.exports` (not via a separate, later `loadScript` call the
+    // way `ModuleBundle::qualified_aliases` is) -- see
+    // `ModuleBundle::nested_namespace_aliases`'s own doc comment for why
+    // that distinction matters.
+    let bind_nested_namespaces: String = nested_namespace_aliases
+        .iter()
+        .filter_map(|(bare_name, qualified_key)| {
+            let (namespace, member) = bare_name.split_once('.')?;
+            Some(format!(
+                "if (module.exports && typeof module.exports.{namespace} !== 'undefined' && module.exports.{namespace} !== null && typeof module.exports.{namespace}.{member} !== 'undefined') {{ globalThis[\"{}\"] = module.exports.{namespace}.{member}; }}\n",
+                escape_ts_string_literal(qualified_key)
+            ))
         })
         .collect();
     format!(
@@ -490,6 +529,7 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
          \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ globalThis[k] = module.exports[k]; }} catch (e) {{}} }} }}\n\
+         {bind_nested_namespaces}\
          {bind_default_exports}\
          }};\n\
          if (globalThis.__thaw_module_ready && typeof globalThis.__thaw_module_ready.then === 'function') {{ globalThis.__thaw_module_ready.then(__thaw_bind_module_exports); }}\n\
@@ -518,7 +558,11 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
     let mut out = String::from("function __thaw_module_init(): void {\n");
     for bundle in bundles {
         out.push_str(&format!("    // {}\n", bundle.package_name));
-        let wrapped = wrap_as_commonjs_module(bundle.js_source, bundle.fallback_names);
+        let wrapped = wrap_as_commonjs_module(
+            bundle.js_source,
+            bundle.fallback_names,
+            bundle.nested_namespace_aliases,
+        );
         out.push_str(&format!(
             "    loadScript(\"{}\");\n",
             escape_ts_string_literal(&wrapped)

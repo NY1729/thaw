@@ -905,7 +905,117 @@ fn dts_source_with_reexported_functions(
         }
         seen.extend(names);
     }
+    // `export * as NAME from "SOURCE";` -- a *namespace* re-export,
+    // structurally different from both the named (`export { X } from
+    // "..."` above) and wildcard (`export * from "..."` just above) forms:
+    // `NAME` isn't a single symbol, it's every one of `SOURCE`'s own
+    // exports, reachable one level down (`z.coerce.number(...)`). Real-
+    // world example: zod's own re-export barrel declares four of these --
+    // `export * as core from "../core/index.cjs";`, `export * as locales
+    // from "../locales/index.cjs";`, `export * as iso from "./iso.cjs";`,
+    // `export * as coerce from "./coerce.cjs";` -- each exposing its own
+    // handful of functions this way, one file below the entry point's own
+    // (which reaches them only transitively, through its own plain
+    // `export * from "./v4/classic/external.cjs";`) -- so this recurses
+    // through plain wildcard re-exports the same way
+    // `all_reexported_function_declarations` does, via
+    // `collect_namespace_reexports`.
+    //
+    // Flattened the same way a class method or namespace-nested function
+    // elsewhere in this codebase is: each function is renamed to a
+    // synthesized, collision-free top-level name (`coerce` and the
+    // package's own top-level functions can freely share a bare name --
+    // zod's top-level `number()` and `coerce.number()` are unrelated
+    // functions, and simply flattening both to bare `number` would silently
+    // drop one), then a `declare namespace NAME { export { synthesized as
+    // original, ... }; }` block records the mapping back to each function's
+    // real member name -- see `thaw_bridge::nested_namespace_members`,
+    // which parses this exact shape back out of the finished flattened
+    // `.d.ts`.
+    let mut namespace_visited = std::collections::BTreeSet::new();
+    for (alias, target_path) in
+        collect_namespace_reexports(entry_path, &module, &mut namespace_visited)?
+    {
+        let mut visited = std::collections::BTreeSet::new();
+        let declarations = all_reexported_function_declarations(&target_path, &mut visited)?;
+        if declarations.is_empty() {
+            continue;
+        }
+        let mut members = Vec::new();
+        for (name, snippet) in declarations {
+            let synthetic = format!("__thaw_ns_{alias}_{name}");
+            output.push('\n');
+            output.push_str(&rename_declared_function(snippet, &synthetic));
+            members.push(format!("{synthetic} as {name}"));
+        }
+        output.push_str(&format!(
+            "\ndeclare namespace {alias} {{\n    export {{ {} }};\n}}\n",
+            members.join(", ")
+        ));
+    }
     Ok(output)
+}
+
+/// Every `export * as NAME from "SOURCE";` reachable from `entry_path`'s
+/// own `module` -- including one declared in a file only reached
+/// transitively through a plain `export * from "...";` (real zod: the
+/// namespace exports live one file below the package's own entry point).
+/// Doesn't recurse through a *named* re-export (`export { x } from
+/// "...";"`) -- that forwards one specific symbol, not a whole module's
+/// worth of further bindings, and no package seen so far needs it to.
+fn collect_namespace_reexports(
+    entry_path: &Path,
+    module: &thaw_parser::ast::Module,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    use thaw_parser::ast::{ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+
+    if !visited.insert(entry_path.to_path_buf()) {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if !export.type_only => {
+                let Some(source) = export.src.as_ref().and_then(|s| s.value.as_str()) else {
+                    continue;
+                };
+                for specifier in &export.specifiers {
+                    let ExportSpecifier::Namespace(namespace) = specifier else {
+                        continue;
+                    };
+                    let ModuleExportName::Ident(alias) = &namespace.name else {
+                        continue;
+                    };
+                    if let Some(target_path) = declaration_reexport_path(entry_path, source) {
+                        found.push((alias.sym.to_string(), target_path));
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) if !export.type_only => {
+                let Some(source) = export.src.value.as_str() else {
+                    continue;
+                };
+                let Some(target_path) = declaration_reexport_path(entry_path, source) else {
+                    continue;
+                };
+                let target_source = fs::read_to_string(&target_path).map_err(|error| {
+                    format!(
+                        "failed to read re-exported declarations `{}`: {error}",
+                        target_path.display()
+                    )
+                })?;
+                let target_module = thaw_parser::parse_typescript(&target_source)?;
+                found.extend(collect_namespace_reexports(
+                    &target_path,
+                    &target_module,
+                    visited,
+                )?);
+            }
+            _ => {}
+        }
+    }
+    Ok(found)
 }
 
 /// Whether `name` is a full ECMAScript reserved word -- one that can

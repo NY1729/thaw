@@ -386,6 +386,94 @@ fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserve
 }
 
 #[test]
+fn installed_package_flattens_a_nested_namespace_reexport() {
+    // `export * as NAME from "SOURCE";` -- a namespace re-export, real-
+    // world example: zod v4's own re-export barrel, `export * as coerce
+    // from "./coerce.cjs";` (alongside `export * as core from
+    // "../core/index.cjs";`, `export * as iso from "./iso.cjs";`, and
+    // `export * as locales from "../locales/index.cjs";`), reached here
+    // one file below the entry point's own (transitively, through a
+    // plain `export * from "./external";`) -- the shape
+    // `collect_namespace_reexports` recurses through. Each of `coerce`'s
+    // own functions gets flattened under a synthesized, collision-free
+    // top-level name (here `string`/`number` collide with the package's
+    // own top-level `string`/`number` functions, exactly like zod's real
+    // `coerce.number` vs. top-level `number`), plus a `declare namespace
+    // coerce { export { ... }; }` block recording the mapping back --
+    // see `thaw_bridge::nested_namespace_members`, which parses this
+    // exact shape back out.
+    let scratch = temp_registry("installed-dts-nested-namespace-scratch");
+    let registry = temp_registry("installed-dts-nested-namespace-registry");
+    let package = scratch.join("node_modules/case-kit5");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"case-kit5","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "export * from './external';\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("external.d.ts"),
+        "export declare function string(): string;\n\
+         export declare function number(): number;\n\
+         export * as coerce from './coerce';\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("coerce.d.ts"),
+        "export declare function string(): string;\n\
+         export declare function number(): number;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { string: function() { return 'top'; }, number: function() { return 0; }, coerce: { string: function() { return 'coerced'; }, number: function() { return 1; } } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "case-kit5").unwrap();
+    let declarations = resolve(&registry, "case-kit5").unwrap().dts_source;
+    assert!(
+        declarations.contains("function string(): string"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("function number(): number"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("declare namespace coerce {"),
+        "{declarations}"
+    );
+    // The namespace's members are synthesized, collision-free names --
+    // not bare `string`/`number` (those are already taken by the
+    // package's own top-level functions above) -- re-exported back to
+    // their real member name via `export { synthetic as member }`.
+    assert!(
+        declarations.contains("function __thaw_ns_coerce_string(): string"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("function __thaw_ns_coerce_number(): number"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("__thaw_ns_coerce_string as string"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("__thaw_ns_coerce_number as number"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_import_equals_reexports() {
     // `import Name = require("./path")` (a TS import-equals declaration)
     // followed by a *local* `export { Name as exported };` (no `from`
