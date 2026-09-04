@@ -849,6 +849,33 @@ impl<'a> FnLowerer<'a> {
                         )
                         .ok()
                     }
+                    // A call chained directly off another call's return
+                    // value (`dayjs("2024-01-15").format(...)`, no `const`
+                    // binding in between) -- the receiver's real type
+                    // isn't recovered from `self.scope` the way a bound
+                    // variable's is, since there's no variable at all.
+                    // Looks up the callee's own *declared* (not per-call-
+                    // site-substituted) return type directly instead:
+                    // correct for an ordinary, non-generic top-level
+                    // function/ambient declaration -- a genuinely generic
+                    // callee's `ret` here is still its own unsubstituted
+                    // placeholder shape, so those are excluded and fall
+                    // through to `None` exactly as before. Only the
+                    // *type* is inspected here, via the plain AST node
+                    // (`inner.callee`) -- the receiver itself is lowered
+                    // and evaluated exactly once, further down, when it's
+                    // spliced into the synthesized call as `member.obj`.
+                    Expr::Call(inner) => match &inner.callee {
+                        Callee::Expr(callee) => match callee.as_ref() {
+                            Expr::Ident(identifier) => self
+                                .signatures
+                                .get(identifier.sym.as_ref())
+                                .filter(|signature| signature.generic_type_params.is_empty())
+                                .map(|signature| signature.ret.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
                     _ => None,
                 };
                 if let Some(class_receiver_type) =
