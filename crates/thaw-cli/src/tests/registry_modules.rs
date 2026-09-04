@@ -8868,6 +8868,147 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A generic Fallback function whose inferred type parameter is an
+/// *array* of `JsValue` (real example: zod's own `union<T extends
+/// readonly core.SomeType[]>(options: T): ZodUnion<T>`, called with
+/// `[z.string(), z.number()]`, an array literal of two plain schema-
+/// builder function calls) used to fail to specialize outright
+/// ("cannot specialize for native layout Array(JsValue)") --
+/// `supports_generic_native_layout` (thaw-hir) hardcoded its `Array`
+/// case to accept only `F64` elements, unlike `Tuple`/`Object`, which
+/// already recursed into every element/field's own type. Confirmed
+/// first, directly, that a plain non-generic `JsValue[]` parameter
+/// already marshals correctly as an ordinary Fallback argument (unlike
+/// the earlier `Object`/`Json`-field gap, which really did mask an
+/// unimplemented codegen path) -- so this was genuinely just an
+/// unnecessarily narrow check, fixed by making `Array` recurse the same
+/// way `Tuple` already does.
+#[test]
+fn a_generic_call_can_specialize_for_an_array_of_jsvalue_elements() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-array-of-jsvalue-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("union-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function str(): JsValue;\n\
+         export declare function num(): JsValue;\n\
+         export declare function pick<T>(options: T): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.str = function() {\n\
+             return { describe: function() { return 'str'; } };\n\
+         };\n\
+         module.exports.num = function() {\n\
+             return { describe: function() { return 'num'; } };\n\
+         };\n\
+         module.exports.pick = function(options) {\n\
+             return {\n\
+                 describeAll: function() {\n\
+                     return options.map(function(o) { return o.describe(); }).join(',');\n\
+                 }\n\
+             };\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { str, num, pick } from "union-kit";
+function main(): void {
+    const picked = pick([str(), num()]);
+    console.log(picked.describeAll());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"str,num\"\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `if`/`while`/`do`/`for`/the ternary's own test/`!x` all used to
+/// require an exact `boolean` condition, with no truthiness coercion at
+/// all -- real JS lets *any* value be a condition (`truthiness_expr`
+/// already backed `Boolean(x)` and `console.assert(x)`, but these six
+/// spots never routed through it, each calling `expect_type(&HirType::
+/// Bool, ...)` directly instead). Real example: `if (result.success)`
+/// against a dynamic-call result's own `Json`-typed `.success` field
+/// (`schema.safeParse(...).success`, real zod) -- used to fail outright
+/// ("if condition has type Json, expected Bool") even though the exact
+/// same value printed or compared fine on its own. Fixed by routing all
+/// six through a shared `lower_condition_expr`/direct `truthiness_expr`
+/// call instead.
+#[test]
+fn an_if_condition_accepts_a_json_value_via_truthiness_coercion() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-if-condition-truthiness-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("result-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeResult(ok: boolean): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.makeResult = function(ok) {\n\
+             return { check: function() { return { success: ok }; } };\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeResult } from "result-kit";
+function main(): void {
+    const r = makeResult(true).check();
+    if (r.success) {
+        console.log("yes");
+    } else {
+        console.log("no");
+    }
+    if (!r.success) {
+        console.log("negated-yes");
+    } else {
+        console.log("negated-no");
+    }
+    const bad = makeResult(false).check();
+    console.log(bad.success ? "truthy" : "falsy");
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "yes\nnegated-no\nfalsy\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A method called directly on the result of *another* method call, with
 /// no intermediate `const` binding at all -- `z.string().min(2).max(10)
 /// .safeParse(...)`, `dayjs(...).add(10, "day").format(...)` -- used to

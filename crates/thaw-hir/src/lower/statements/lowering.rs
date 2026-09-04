@@ -1,4 +1,20 @@
 impl<'a> FnLowerer<'a> {
+    /// Lowers a control-flow condition (`if`/`while`/`do`/`for`) with the
+    /// same truthiness coercion JS itself applies there -- any value is
+    /// a valid condition, not just a literal `boolean` (`truthiness_expr`
+    /// already backs `!x`, `Boolean(x)`, and `console.assert(x)`; these
+    /// four control-flow conditions just never routed through it, always
+    /// requiring an exact `Bool` instead). Real example: `if (result.
+    /// success)` against a dynamic-call result's own `Json`-typed
+    /// `.success` field (`schema.safeParse(...).success`, real zod) --
+    /// used to fail outright ("if condition has type Json, expected
+    /// Bool") even though the exact same value printed or compared fine.
+    fn lower_condition_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
+        let cond = self.lower_expr(expr)?;
+        let ty = self.infer_expr_type(&cond)?;
+        self.truthiness_expr(cond, &ty)
+    }
+
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         match stmt {
             // Empty statements have no runtime effect. `debugger` only has an
@@ -40,8 +56,7 @@ impl<'a> FnLowerer<'a> {
             Stmt::If(if_stmt) => {
                 let narrowing = self.optional_undefined_narrowing(&if_stmt.test);
                 let union_narrowing = self.union_narrowing(&if_stmt.test);
-                let cond = self.lower_expr(&if_stmt.test)?;
-                self.expect_type(&HirType::Bool, &cond, "if condition")?;
+                let cond = self.lower_condition_expr(&if_stmt.test)?;
                 let then_narrowing = narrowing
                     .as_ref()
                     .filter(|(_, _, present, _)| *present)
@@ -98,15 +113,13 @@ impl<'a> FnLowerer<'a> {
             }
 
             Stmt::While(while_stmt) => {
-                let cond = self.lower_expr(&while_stmt.test)?;
-                self.expect_type(&HirType::Bool, &cond, "while condition")?;
+                let cond = self.lower_condition_expr(&while_stmt.test)?;
                 let body = self.lower_loop_body(&while_stmt.body)?;
                 Ok(vec![HirStmt::While(cond, body)])
             }
 
             Stmt::DoWhile(do_while) => {
-                let cond = self.lower_expr(&do_while.test)?;
-                self.expect_type(&HirType::Bool, &cond, "do/while condition")?;
+                let cond = self.lower_condition_expr(&do_while.test)?;
                 let guard = HirStmt::If(cond, Vec::new(), vec![HirStmt::Break]);
                 let mut body = self.lower_loop_body(&do_while.body)?;
                 body = inject_do_while_guard_before_continue(body, &guard);
@@ -189,11 +202,7 @@ impl<'a> FnLowerer<'a> {
                     }
 
                     let cond = match &for_stmt.test {
-                        Some(test) => {
-                            let cond = self.lower_expr(test)?;
-                            self.expect_type(&HirType::Bool, &cond, "for condition")?;
-                            cond
-                        }
+                        Some(test) => self.lower_condition_expr(test)?,
                         None => HirExpr::Lit(HirLit::Bool(true)),
                     };
 

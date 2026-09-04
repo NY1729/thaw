@@ -583,7 +583,13 @@ impl<'a> FnLowerer<'a> {
                         value
                     }
                     UnaryOp::Bang => {
-                        self.expect_type(&HirType::Bool, &value, "logical not")?;
+                        // Same truthiness coercion `if`/`while`/`do`/`for`
+                        // conditions and the ternary's own test now get
+                        // (`lower_condition_expr`) -- `!x` is just as
+                        // valid for any value in real JS as those are,
+                        // not only a literal `boolean`.
+                        let ty = self.infer_expr_type(&value)?;
+                        let value = self.truthiness_expr(value, &ty)?;
                         HirExpr::BinOp(
                             BinOp::EqEqEq,
                             Box::new(value),
@@ -861,8 +867,7 @@ impl<'a> FnLowerer<'a> {
                     let rhs = self.lower_expr(&conditional.cons)?;
                     return self.lower_undefined_default(lhs, rhs);
                 }
-                let test = self.lower_expr(&conditional.test)?;
-                self.expect_type(&HirType::Bool, &test, "conditional expression test")?;
+                let test = self.lower_condition_expr(&conditional.test)?;
                 let mut consequent = self.lower_expr(&conditional.cons)?;
                 let mut alternate = self.lower_expr(&conditional.alt)?;
                 let consequent_type = self.infer_expr_type(&consequent)?;
