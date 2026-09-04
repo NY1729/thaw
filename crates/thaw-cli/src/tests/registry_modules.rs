@@ -9575,3 +9575,106 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Real-world example: hono's `app.get(path, (c) => c.text(...))` --
+/// registering a route handler that receives a `JsValue` "context" and
+/// returns a live `Response`-shaped object, then reading `.status` off
+/// the result of `app.request(path)` (hono's own synchronous testing
+/// helper, which invokes the registered handler directly).
+///
+/// This previously read back `undefined` instead of `200`, with no
+/// error at all -- the handler's `return c.text(...)` silently lowered
+/// the dynamic method call through the untyped/JSON-decoding dispatch
+/// (`callDynamicMethod`, not `callDynamicMethodHandle`), so hono's mock
+/// router received a content-free `{}` snapshot instead of the real
+/// `Response` handle, and read `.status` off *that*. Two independent
+/// gaps, both in thaw-hir, both fixed here:
+///
+/// 1. `Stmt::Return` (statements/lowering.rs) lowered its argument with
+///    plain `lower_expr`, never passing the function's own declared/
+///    inferred `ret_type` through as an expected-type hint -- so even an
+///    arrow explicitly annotated `(c: JsValue): JsValue => { return c.
+///    text(...); }` failed outright ("value has type Json, expected
+///    JsValue") until fixed to route through `lower_expr_with_expected_
+///    type`.
+/// 2. An arrow with *no* return-type annotation at all (the realistic
+///    hono handler shape, `(c: JsValue) => c.text(...)` or `(c: JsValue)
+///    => { return c.text(...); }`) defaulted its own inferred `ret_type`
+///    to `HirType::Dynamic`, starving fix #1's hint of anything useful
+///    to propagate. Fixed with a new one-shot `expected_arrow_return_
+///    hint`, set by `lower_dynamic_value_method_call`'s own argument-
+///    lowering loop (the same place that already hints a chained-call
+///    argument as `JsValue`) whenever the argument being lowered is
+///    itself an arrow -- letting an unannotated callback passed straight
+///    into a dynamic method call default its own return type to
+///    `JsValue` instead of `Dynamic`, so a bare tail-position dynamic
+///    method call inside it (covering both the braced-body path via fix
+///    #1, and the implicit-return expression-body path, which needed its
+///    own `lower_expr_with_expected_type` call alongside `Stmt::Return`'s)
+///    keeps its real handle.
+///
+/// Exercises all three handler shapes side by side against independent
+/// router instances: an explicit `: JsValue` return annotation, a
+/// braced body with no annotation, and an unannotated implicit-return
+/// expression body -- confirmed via a temporary revert of both fixes to
+/// reproduce the original `undefined` symptom for all three.
+#[test]
+fn a_dynamic_callback_argument_returning_a_jsvalue_keeps_it_live_even_when_unannotated() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-callback-return-jsvalue-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("router-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeRouter(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeRouter() { \
+         var handler = null; \
+         return { \
+         get: function(path, h) { handler = h; }, \
+         request: function(path) { \
+         var ctx = { text: function(body) { return { status: 200, body: body }; } }; \
+         return handler(ctx); \
+         } \
+         }; \
+         } \
+         module.exports = { makeRouter: makeRouter };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeRouter } from "router-kit";
+function main(): void {
+    const appA: JsValue = makeRouter();
+    appA.get('/', (c: JsValue): JsValue => { return c.text('one'); });
+    console.log(appA.request('/').status);
+
+    const appB: JsValue = makeRouter();
+    appB.get('/', (c: JsValue) => { return c.text('two'); });
+    console.log(appB.request('/').status);
+
+    const appC: JsValue = makeRouter();
+    appC.get('/', (c: JsValue) => c.text('three'));
+    console.log(appC.request('/').status);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "200\n200\n200\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

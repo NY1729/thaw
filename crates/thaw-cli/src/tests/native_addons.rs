@@ -1213,12 +1213,14 @@ function main(): void {
 /// exercised this session -- constructs its `Hono` class via `new`.
 /// Pins the constructor half of [[project_npm_interop_gaps_2]]'s hono
 /// arc (commit `9addc760`) against the real package. Deliberately scoped
-/// to construction only, not route registration: `app.get(path,
-/// handler)` hits a separate, unrelated gap (its `Handler` parameter
-/// type is generic-and-rest-parameter-heavy enough that thaw-bridge
-/// can't classify it as callable at all, so it's typed `Json` instead of
-/// a function type, rejecting any real handler value passed to it) --
-/// not attempted this session.
+/// to construction only, not route registration -- see `registry_add_
+/// routes_and_serves_a_real_hono_app_when_enabled` below for that half,
+/// which turned out not to need the separate callable-interface-typing
+/// feature this comment used to describe: hono's real, flattened
+/// `package.d.ts` never actually extracts `HonoBase`'s own methods
+/// (`.get`/`.post`/`.fetch`/`.request`), so every call to them already
+/// goes through the untyped/dynamic dispatch path built for zod, which
+/// doesn't care what `Handler`'s own declared type is at all.
 #[test]
 fn registry_add_constructs_a_hono_app_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -1251,5 +1253,64 @@ function main(): void {
         String::from_utf8_lossy(&result.stdout),
         "hono app created\n"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The route-registration half of the real hono arc left unattempted by
+/// the constructor-only test above: `app.get(path, handler)` followed by
+/// `app.request(path)` (hono's own synchronous testing helper) reading
+/// `.status`/`.text()` off the resulting real `Response`.
+///
+/// This used to read `.status` back as `undefined` with no error at all
+/// -- the handler's `return c.text(...)` silently lowered its dynamic
+/// method call through the untyped/JSON-decoding dispatch instead of
+/// keeping the real handle, so hono's router received a content-free
+/// `{}` snapshot in place of the actual `Response` object. See the
+/// synthetic, network-free reproduction and full root-cause writeup at
+/// `a_dynamic_callback_argument_returning_a_jsvalue_keeps_it_live_even_
+/// when_unannotated` in `registry_modules.rs` -- this test just confirms
+/// the same fix holds against the real, unmodified npm package.
+///
+/// Exercises both an unannotated block-body handler and an unannotated
+/// implicit-return expression-body handler, matching how real hono
+/// handlers are actually written (`Handler`'s own declared return type
+/// is never surfaced through the flattened `.d.ts`, so nobody writing
+/// real hono code annotates a handler's return type at all).
+#[test]
+fn registry_add_routes_and_serves_a_real_hono_app_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-hono-route-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "hono").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Hono } from "hono";
+function main(): void {
+    const appA = new Hono();
+    appA.get('/', (c: JsValue) => { return c.text('hello world'); });
+    const resA: JsValue = appA.request('/');
+    console.log(resA.status);
+
+    const appB = new Hono();
+    appB.get('/', (c: JsValue) => c.text('hello again'));
+    const resB: JsValue = appB.request('/');
+    console.log(resB.status);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "200\n200\n");
     let _ = std::fs::remove_dir_all(dir);
 }

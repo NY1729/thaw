@@ -215,17 +215,24 @@ impl<'ctx> HirCompiler<'ctx> {
                         "getDynamicValue"
                         | "constructDynamicValue"
                         | "callDynamicMethodHandle"
-                        | "registerNativeCallback" => return Some(HirType::JsValue),
-                        "readDynamicValue" | "callDynamicMethod" | "callDynamicValueMixed" => {
-                            return Some(HirType::Json)
-                        }
-                        "loadNativeAddon" | "loadNativeAddonEmbedded" => {
+                        | "registerNativeCallback"
+                        | "getDynamicProperty"
+                        | "callDynamicValueHandle" => return Some(HirType::JsValue),
+                        "readDynamicValue"
+                        | "callDynamicMethod"
+                        | "callDynamicValueMixed"
+                        | "callDynamic"
+                        | "callDynamicValue"
+                        | "callDynamicValueWithValue" => return Some(HirType::Json),
+                        "loadNativeAddon" | "loadNativeAddonEmbedded" | "loadScript"
+                        | "releaseDynamicValue" | "setDynamicProperty" => {
                             return Some(HirType::Bool)
                         }
-                        "callNativeAddon" | "callNativeAddonWithCallback" => {
+                        "callNativeAddon" | "callNativeAddonWithCallback" | "callNativeAddonValue" => {
                             return Some(HirType::Json)
                         }
                         "pollNativeAddonEvents" => return Some(HirType::F64),
+                        "sleep" => return Some(HirType::Promise(Box::new(HirType::Void))),
                         _ => {}
                     }
                     if name == "__thaw_string_to_array" {
