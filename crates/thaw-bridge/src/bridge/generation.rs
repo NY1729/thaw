@@ -12,6 +12,31 @@
 /// needs to know which names require Fallback binding (e.g. thaw-cli's
 /// `ModuleBundle::fallback_names`) both call this rather than
 /// `classify_all` directly, so they can't disagree.
+/// Whether `name` is one of the handful of identifiers thaw-hir gives a
+/// special, *global* meaning to when it's read bare as a value
+/// (`undefined`, `NaN`, `Infinity`) -- see `lower_expr`'s own
+/// `Expr::Ident` arm, which treats a bare reference to one of these
+/// names as the corresponding literal *unless* the compiled program
+/// happens to declare a real top-level signature under that exact name
+/// (a defensive check meant for a user shadowing one of these on
+/// purpose). A Fallback package that genuinely exports something under
+/// one of these names (real example: zod's own `z.undefined()`) is
+/// still always reachable through its properly-typed, mangled symbol --
+/// a plain import, or a namespace/package-qualified alias -- but a
+/// *bare*, unqualified top-level declaration literally named
+/// `undefined` would shadow thaw-hir's own special-casing globally, for
+/// every `!= undefined`/`=== undefined` comparison anywhere in the
+/// *entire* compiled program, not just calls to this one function --
+/// including inside thaw's own generated arity-dispatch wrapper's own
+/// `param != undefined` optional-parameter guard, which has nothing to
+/// do with this function at all. So the bare (non-qualified) form is
+/// skipped for exactly these names; the package-qualified alias
+/// (`pkg_undefined`) is unaffected, since it can never collide with a
+/// bare literal reference.
+pub fn shadows_a_thaw_literal_identifier(name: &str) -> bool {
+    matches!(name, "undefined" | "NaN" | "Infinity")
+}
+
 pub fn effective_classifications(
     functions: &[DtsFunction],
     native_lib_available: bool,
@@ -163,6 +188,9 @@ pub fn generate_shim(
                 if qualified_entry.is_some_and(|q| q.suppress_bare) {
                     continue;
                 }
+                if shadows_a_thaw_literal_identifier(&function) {
+                    continue;
+                }
                 out.push_str(&format!("// Fallback (QuickJS-NG): {reason}\n"));
                 // `argsArray` (not `args`): `callDynamic` expects a JSON
                 // *array* of positional arguments, e.g.
@@ -221,6 +249,9 @@ pub fn generate_native_addon_shim(
             if qualified.suppress_bare {
                 continue;
             }
+        }
+        if shadows_a_thaw_literal_identifier(&function) {
+            continue;
         }
         out.push_str("// Fallback (N-API)\n");
         out.push_str(&format!("function {function}(argsArray: Json): Json {{\n"));
