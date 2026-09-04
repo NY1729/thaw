@@ -8204,6 +8204,94 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A *second*, more insidious bug from the same root cause as the test
+/// above -- found while confirming real zod's own `z.undefined()`
+/// works (it still doesn't; see [[project_npm_interop_gaps_2]] for why
+/// that part is architectural, not fixed here). `typed_dynamic_bare_
+/// alias` (the bare/qualified-call-syntax fix) generates a plain,
+/// bare-named top-level declaration for *every* Fallback function
+/// unconditionally, regardless of whether it's actually imported --
+/// including a function literally named `undefined`. thaw-hir's own
+/// `Expr::Ident` lowering treats a bare reference to `undefined`
+/// specially (the JS literal) *unless* `self.signatures` -- a flat,
+/// whole-program table -- already has a real entry under that exact
+/// name, in which case it's treated as a reference to *that* function
+/// value instead. Since `self.signatures` has no per-call-site
+/// disambiguation, declaring a bare `function undefined(...)` *anywhere*
+/// silently broke `!= undefined`/`=== undefined` comparisons
+/// *everywhere else in the compiled program* -- including inside
+/// thaw's own generated arity-dispatch wrapper's `param != undefined`
+/// optional-parameter guard for a *different*, otherwise-uninvolved
+/// function, which crashed with "numeric conversion is not defined for
+/// native type Optional(...)" the moment it tried comparing a real
+/// argument against what it thought was the `undefined` literal but was
+/// actually a function value.
+///
+/// Fixed by skipping the bare (non-qualified) form entirely for a name
+/// thaw-hir gives this special global meaning to (`undefined`, `NaN`,
+/// `Infinity` -- see `shadows_a_thaw_literal_identifier`'s own doc
+/// comment) in both `typed_dynamic_bare_alias`'s caller and the older,
+/// untyped `generate_shim`/`generate_native_addon_shim` fallback (which
+/// has the exact same risk on its own, independent of the newer bare-
+/// alias machinery). The package-qualified alias is unaffected --
+/// unrelated to this test, since it can never collide with a bare
+/// literal reference.
+///
+/// Exercises exactly the failure shape: a package exports something
+/// under the literal name `undefined` (with an optional parameter, so
+/// its own wrapper needs a `!= undefined` guard) *and* a second,
+/// unrelated function whose own optional-parameter guard needs the
+/// *real* `undefined` literal to keep working, *and* the user's own
+/// code compares an unrelated value against `undefined` directly --
+/// all three used to be silently corrupted by the mere presence of the
+/// `undefined`-named export, even without ever calling it.
+#[test]
+fn an_export_literally_named_undefined_does_not_corrupt_undefined_comparisons_elsewhere() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-undefined-export-comparisons-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("undef-kit2");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Params { message?: string; }\n\
+         export declare function undefined(params?: string | Params): string;\n\
+         export declare function safe(value?: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.undefined = function(params) { return 'ok:' + JSON.stringify(params ?? null); };\n\
+         module.exports.safe = function(value) { return value === undefined ? -1 : value * 2; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import * as nk from "undef-kit2";
+function main(): void {
+    const x: number | undefined = undefined;
+    console.log(x === undefined);
+    console.log(nk.safe());
+    console.log(nk.safe(5));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\n-1\n10\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A `JsValue` receiver (a Fallback return value with no compiled class
 /// behind it, e.g. zod's `z.object(...)` returning a live `ZodObject`)
 /// couldn't have any of its own methods called at all --

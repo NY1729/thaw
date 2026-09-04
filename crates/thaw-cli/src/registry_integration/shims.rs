@@ -22302,8 +22302,15 @@ fn generate_registry_shims(
                     // a typed bare-name wrapper would be just as liable to
                     // silently resolve to whichever colliding package's own
                     // `--use` happened to declare it, so it's skipped for
-                    // exactly the same names.
-                    if !colliding.contains(&function.name) {
+                    // exactly the same names. A name thaw-hir gives its own
+                    // global meaning to as a bare identifier (`undefined`,
+                    // `NaN`, `Infinity`) is skipped for a different reason
+                    // -- see `shadows_a_thaw_literal_identifier`'s own doc
+                    // comment -- but the qualified alias above is unaffected
+                    // either way, so the name stays reachable through it.
+                    if !colliding.contains(&function.name)
+                        && !thaw_bridge::shadows_a_thaw_literal_identifier(&function.name)
+                    {
                         if let Some(alias) = typed_dynamic_bare_alias(
                             &function.name,
                             &symbol,
