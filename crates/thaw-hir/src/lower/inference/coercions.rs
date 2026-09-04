@@ -9,6 +9,19 @@ impl<'a> FnLowerer<'a> {
             if actual == HirType::Json {
                 return Ok(value);
             }
+            // A `JsValue` (an opaque handle to a live QuickJS-retained
+            // object, e.g. zod's `z.string()` returning a `ZodString`
+            // schema instance) has no JSON representation and so is left
+            // untouched here rather than routed through
+            // `wrap_native_value_as_json` -- thaw-llvm's dynamic-call
+            // argument marshaling (`compile_dynamic_value_placeholder` in
+            // json_bridge.rs) recognizes the resulting type mismatch
+            // (a `JsValue` value reaching a `Json`-declared slot) and
+            // threads the real handle to the call alongside the JSON args
+            // instead of trying to serialize it.
+            if actual == HirType::JsValue {
+                return Ok(value);
+            }
             if json_convertible_native_type(&actual) {
                 return self.wrap_native_value_as_json(value, actual);
             }

@@ -7769,3 +7769,155 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "Widget:hi\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `JsValue` (the opaque handle a Fallback function returns when its
+/// TS type can't be classified as anything JSON-representable, e.g.
+/// zod's `z.string()` returning a live `ZodString` schema instance) used
+/// to have nowhere to go once it existed: passing one as an argument to
+/// *another* dynamic call -- even a bare, top-level one, not nested in
+/// anything -- failed at HIR lowering ("value has type JsValue, expected
+/// Json"), because there's no JSON encoding of "a live JS object".
+/// `compile_dynamic_value_placeholder` (thaw-llvm's `json_bridge.rs`)
+/// fixes this by encoding the handle's own permanent id as
+/// `{"__thaw_js_handle_id__": N}` instead of trying to serialize it, and
+/// the QuickJS-side JSON reviver (see `dates.js`'s doc comment) splices
+/// the real value back in the moment that JSON gets parsed on the other
+/// end -- the same mechanism already used to round-trip a `Date`.
+/// Exercises the value being reused twice (proving the handle stays
+/// live/valid across more than one such call, not just one-shot).
+#[test]
+fn a_js_value_can_be_passed_as_a_bare_argument_to_another_dynamic_call() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jsvalue-bare-argument-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("handle-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(name: string): JsValue;\n\
+         export declare function wrapThing(inner: JsValue): JsValue;\n\
+         export declare function describe(thing: JsValue): string;\n\
+         export declare function makeBox(inner: JsValue): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeThing(name) {\n\
+             return { toString: function () { return 'thing:' + name; } };\n\
+         }\n\
+         function wrapThing(inner) {\n\
+             return { toString: function () { return 'wrapped(' + inner.toString() + ')'; } };\n\
+         }\n\
+         function describe(thing) { return thing.toString(); }\n\
+         function makeBox(inner) {\n\
+             return { toString: function () { return 'box(' + inner.toString() + ')'; } };\n\
+         }\n\
+         module.exports.makeThing = makeThing;\n\
+         module.exports.wrapThing = wrapThing;\n\
+         module.exports.describe = describe;\n\
+         module.exports.makeBox = makeBox;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing, wrapThing, describe, makeBox } from "handle-kit";
+function main(): void {
+    const thing = makeThing("gadget");
+    const wrapped = wrapThing(thing);
+    console.log(describe(wrapped));
+    const boxed = makeBox(thing);
+    console.log(describe(boxed));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "wrapped(thing:gadget)\nbox(thing:gadget)\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Same underlying gap as
+/// `a_js_value_can_be_passed_as_a_bare_argument_to_another_dynamic_call`,
+/// but for a `JsValue` nested inside an object-literal field and inside
+/// an array-literal element -- both go through the *same*
+/// `compile_dynamic_value_placeholder` call, just reached via
+/// `compile_json_object_set_native_with_undefined`'s and
+/// `compile_json_array_push_native_with_undefined`'s own `HirType::JsValue`
+/// arms rather than the bare-argument catch-all, and the QuickJS-side
+/// reviver splices each one back in regardless of depth (it runs
+/// bottom-up over the whole parsed value, exactly like it already does
+/// for a nested `Date`). Real-world shape: zod's own `z.object({ name:
+/// z.string() })`, a fixed-shape object literal with one field itself a
+/// live schema value.
+#[test]
+fn a_js_value_can_be_nested_inside_an_object_or_array_literal_argument() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jsvalue-nested-argument-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("handle-kit2");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(name: string): JsValue;\n\
+         export declare function group(shape: { name: JsValue; label: string }): string;\n\
+         export declare function listGroup(items: JsValue[]): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeThing(name) {\n\
+             return { toString: function () { return 'thing:' + name; } };\n\
+         }\n\
+         function group(shape) {\n\
+             return shape.label + '=' + shape.name.toString();\n\
+         }\n\
+         function listGroup(items) {\n\
+             return items.map(function (item) { return item.toString(); }).join(',');\n\
+         }\n\
+         module.exports.makeThing = makeThing;\n\
+         module.exports.group = group;\n\
+         module.exports.listGroup = listGroup;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing, group, listGroup } from "handle-kit2";
+function main(): void {
+    const a = makeThing("alpha");
+    console.log(group({ name: a, label: "x" }));
+    const b = makeThing("beta");
+    console.log(listGroup([a, b]));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "x=thing:alpha\nthing:alpha,thing:beta\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
