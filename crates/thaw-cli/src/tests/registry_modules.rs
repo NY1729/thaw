@@ -8292,6 +8292,75 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A Fallback function literally named `undefined` (real example: zod's
+/// own `z.undefined()`) used to be uncallable outright, in addition to
+/// the comparison-corruption bug the test above fixes: the runtime
+/// dynamic-dispatch mechanism binds every export onto `globalThis` by
+/// its own JS-side key first (`generate_module_init`'s own alias-
+/// capture snippet used to read `globalThis.{bare_name}` directly), and
+/// `globalThis.undefined` can never be reassigned in *any* JS engine --
+/// a real ECMAScript restriction, not a thaw bug -- so the qualified key
+/// the actual dynamic call looks up by never got bound to anything at
+/// all for this one name, no matter what the TS-side declaration looked
+/// like (`callDynamic("pkg::undefined", ...)`'s own runtime lookup found
+/// nothing).
+///
+/// Fixed by reading `globalThis.module.exports.{bare_name}` first
+/// instead -- `globalThis.module` still holds *this* package's own
+/// fresh `{ exports: {} }` at the exact point this capture runs (nothing
+/// else has run in between), so `module.exports.undefined` is a
+/// perfectly ordinary object-property lookup, immune to the
+/// `globalThis.undefined` restriction, regardless of what `bare_name`
+/// is. Falls back to the old `globalThis.{bare_name}` read only when
+/// that property lookup finds nothing (the one shape it doesn't cover:
+/// a CommonJS package whose whole `module.exports`, not a property of
+/// it, is the single exported function).
+#[test]
+fn an_export_literally_named_undefined_is_actually_callable() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-undefined-export-callable-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("undef-kit3");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Params { message?: string; }\n\
+         export declare function undefined(params?: string | Params): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.undefined = function(params) { return 'ok:' + JSON.stringify(params ?? null); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import * as nk from "undef-kit3";
+function main(): void {
+    console.log(nk.undefined());
+    console.log(nk.undefined("hello"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "ok:null\nok:\"hello\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A `JsValue` receiver (a Fallback return value with no compiled class
 /// behind it, e.g. zod's `z.object(...)` returning a live `ZodObject`)
 /// couldn't have any of its own methods called at all --

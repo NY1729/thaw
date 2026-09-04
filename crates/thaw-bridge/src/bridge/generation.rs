@@ -535,8 +535,30 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             // string literal, then the whole JS snippet again for the
             // outer TS string literal `loadScript` takes, same as
             // `wrap_as_commonjs_module`'s own output already is.
+            //
+            // Reads `globalThis.module.exports.{bare_name}` first, not
+            // `globalThis.{bare_name}` directly -- `globalThis.module`
+            // still holds *this* package's own fresh `{ exports: {} }`
+            // at this exact point (nothing else has run in between; see
+            // this loop's own comment above), so `module.exports` is a
+            // perfectly ordinary object property lookup regardless of
+            // what `bare_name` is. `globalThis.{bare_name}` itself can't
+            // work at all for a real ECMAScript reserved word used as an
+            // export name (`undefined` -- zod has one, `z.undefined()`
+            // -- `null`, `NaN`; `globalThis.undefined` can never be
+            // reassigned in any JS engine, so it would always read back
+            // the literal, never the real function). Falls back to the
+            // old `globalThis.{bare_name}` read only when the property
+            // lookup finds nothing, for the one shape it doesn't cover:
+            // a CommonJS package whose *whole* `module.exports` (not a
+            // property of it) is the single exported function --
+            // `wrap_as_commonjs_module`'s own `bind_default_exports`
+            // already binds `globalThis.{bare_name} = module.exports`
+            // directly for exactly that case, with no corresponding
+            // property to read here instead.
             let capture_js = format!(
-                "if (typeof globalThis.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.{bare_name}; }}",
+                "if (typeof globalThis.module !== 'undefined' && globalThis.module && typeof globalThis.module.exports !== 'undefined' && globalThis.module.exports !== null && typeof globalThis.module.exports.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports.{bare_name}; }} else if (typeof globalThis.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.{bare_name}; }}",
+                escape_ts_string_literal(qualified_key),
                 escape_ts_string_literal(qualified_key)
             );
             out.push_str(&format!(
