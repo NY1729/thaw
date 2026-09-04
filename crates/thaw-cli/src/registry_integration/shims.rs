@@ -20568,21 +20568,6 @@ fn typed_dynamic_declaration(
         );
     }
     if let Some(generic) = &function.generic {
-        // `describe_ts_type` is built for a human-readable Fallback
-        // *reason* ("a conditional type", "{ ... }" for a non-empty
-        // object literal, ...), not for re-parseable syntax -- a
-        // constraint it can't fully render would otherwise get spliced
-        // into this declaration's actual source text verbatim. Found
-        // via a real interface method's `T extends { __trapAny: any }`
-        // constraint producing the literal placeholder text `{ ... }`.
-        if !generic
-            .type_params
-            .iter()
-            .filter_map(|(_, constraint)| constraint.as_deref())
-            .all(is_reparseable_ts_type)
-        {
-            return None;
-        }
         // A parameter type this crude a renderer can't classify as one
         // of the forms below still passes through as `Json` (matching
         // the non-generic path's own Unsupported -> Json substitution)
@@ -20643,9 +20628,29 @@ fn typed_dynamic_declaration(
             .filter(|(name, _)| {
                 param_types.iter().any(|ty| ty == name) || *name == generic.return_type
             })
-            .map(|(name, constraint)| match constraint {
-                Some(constraint) => format!("{name} extends {constraint}"),
-                None => name.clone(),
+            .map(|(name, constraint)| match constraint.as_deref() {
+                // `describe_ts_type` is built for a human-readable
+                // Fallback *reason* ("a conditional type", "{ ... }" for
+                // a non-empty object literal, ...), not for re-parseable
+                // syntax -- a constraint it can't fully render would
+                // otherwise get spliced into this declaration's actual
+                // source text verbatim (found via a real interface
+                // method's `T extends { __trapAny: any }` constraint
+                // producing the literal placeholder text `{ ... }`).
+                // Dropped rather than aborting the whole declaration the
+                // way it used to -- a type parameter constrained to some
+                // other named type (`T extends core.SomeType`, zod's own
+                // `optional<T extends core.SomeType>(innerType: T):
+                // ZodOptional<T>`) is an extremely common TS idiom, not a
+                // rare edge case, and the parameter using `T` still ends
+                // up passed through as `JsValue` below regardless of
+                // whether the constraint survives -- thaw-hir infers `T`
+                // from the call site's actual argument either way, same
+                // as it would for a bare, unconstrained type parameter.
+                Some(constraint) if is_reparseable_ts_type(constraint) => {
+                    format!("{name} extends {constraint}")
+                }
+                _ => name.clone(),
             })
             .collect::<Vec<_>>()
             .join(", ");
