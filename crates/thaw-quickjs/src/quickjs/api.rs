@@ -548,6 +548,96 @@ pub extern "C" fn thaw_js_construct_handle_result(
     }
 }
 
+/// The generic ABI every adapter thaw-llvm's `compile_napi_value_callback`
+/// builds shares, regardless of the real (native) closure's own signature
+/// -- the adapter itself already handles all the type-specific arg/return
+/// marshaling internally, exposing only this one uniform shape outward.
+/// `context` is the closure's own captured-environment pointer (opaque
+/// here, passed straight back to the adapter unexamined); the returned
+/// pointer is a NUL-terminated JSON string owned by the adapter's own
+/// caller-frees-nothing convention (mirrors `thaw_js_call`'s own return),
+/// so `to_str` below copies it out immediately and nothing is freed here.
+type NativeCallbackAdapter = unsafe extern "C" fn(*const c_void, *const c_char) -> *const c_char;
+
+/// Wraps a real compiled (native) closure -- already bridged into a
+/// generic `(context, args_json) -> result_json` adapter by thaw-llvm's
+/// `compile_napi_value_callback` -- as a live, retained QuickJS-NG
+/// function value the Fallback dynamic-call path can hand off like any
+/// other `JsValue`. Real example: zod's `z.number().refine((n: number) =>
+/// n > 0, {...})`, whose predicate has nowhere else to go.
+///
+/// `adapter`/`closure` are captured by the returned JS function's own
+/// closure as plain `usize` (not `Send`-problematic raw pointers) --
+/// transmuted back to the real function-pointer type only at call time.
+/// Safe because every adapter `compile_napi_value_callback` ever produces
+/// shares this exact ABI unconditionally; there is no way to construct a
+/// `NativeCallbackAdapter`-typed value here except from that one
+/// generator.
+///
+/// Argument/return marshaling for the *inner* call (JS call args ->
+/// `args_json`, `result_json` -> the JS return value) reuses the exact
+/// same `JSON.stringify`/`JSON.parse`-with-reviver convention every other
+/// dynamic-call boundary here already uses, so a `Date`/`JsValue`/
+/// `undefined` argument or return value round-trips the same way it does
+/// crossing any other dynamic-call boundary.
+#[no_mangle]
+pub extern "C" fn thaw_js_register_native_callback(
+    adapter: *const c_void,
+    closure: *const c_void,
+) -> ThawHandleResult {
+    let adapter = adapter as usize;
+    let closure = closure as usize;
+    let result: Result<u64, String> = with_context(|ctx| {
+        // The Rust-backed half stays a plain `String -> String` closure --
+        // no `Value<'js>` anywhere in its own signature -- deliberately:
+        // an `IntoJsFunc` closure returning a value borrowed from `Ctx<'js>`
+        // needs every `'_` in its own signature unified with the *call-
+        // time* `Ctx<'js>` (not the outer one this function registers it
+        // with), which an ordinary closure literal doesn't infer on its
+        // own here. A thin JS-side wrapper (below) does the real
+        // JSON-encode-args / JSON.parse-with-reviver-result work instead,
+        // exactly the same convention `install_napi_bridge`'s own
+        // string-only closures already use for the identical reason.
+        static NEXT_NATIVE_CALLBACK_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_NATIVE_CALLBACK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let raw = Function::new(ctx.clone(), move |args_json: String| -> String {
+            let args_json = CString::new(args_json).unwrap_or_default();
+            // SAFETY: `adapter` was produced by `compile_napi_value_
+            // callback` and always has exactly this ABI; `closure` is its
+            // matching, still-live captured-environment pointer (the
+            // compiled program keeps the whole closure alive for as long
+            // as this registered callback might be called).
+            let adapter_fn: NativeCallbackAdapter = unsafe { std::mem::transmute(adapter) };
+            let result_json =
+                unsafe { adapter_fn(closure as *const c_void, args_json.as_ptr()) };
+            to_str(result_json)
+        })
+        .map_err(|error| error.to_string())?;
+        let raw_name = format!("__thaw_native_callback_raw_{id}");
+        ctx.globals()
+            .set(raw_name.as_str(), raw)
+            .map_err(|error| error.to_string())?;
+        let wrapper_source = format!(
+            "(function() {{ var raw = globalThis['{raw_name}']; delete globalThis['{raw_name}']; return function() {{ var args = JSON.stringify(Array.prototype.slice.call(arguments)); var result = raw(args); return JSON.parse(result, globalThis.__thaw_json_date_reviver); }}; }})()"
+        );
+        let wrapper: Value = ctx
+            .eval(wrapper_source.as_str())
+            .map_err(|error| error.to_string())?;
+        retain_value(&ctx, wrapper)
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_js_call_handle_handle_result(
     handle: u64,

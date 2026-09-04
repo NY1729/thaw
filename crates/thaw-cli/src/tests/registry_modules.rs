@@ -9310,3 +9310,81 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A real, compiled (native) closure passed as an argument to a dynamic
+/// (`JsValue`) method call -- real-world example: zod's `z.number().
+/// refine((n: number) => n > 0, {...})`/`.transform(...)`, whose
+/// predicate/mapper has no JSON representation at all (`value has type
+/// Function([F64], Bool), expected Json`). `coerce_to_declared` (thaw-hir)
+/// wraps it in a manual `registerNativeCallback` call, which thaw-llvm's
+/// `compile_register_native_callback` turns into a live, retained
+/// QuickJS-NG function value: reuses the existing (N-API-oriented but
+/// backend-agnostic) `compile_napi_value_callback` adapter, then bridges
+/// it into a real callable via a new `thaw_js_register_native_callback`
+/// (thaw-quickjs).
+///
+/// `bundle.js`'s `check` method calls the predicate three times with
+/// different arguments to confirm each call round-trips independently
+/// (not just a one-shot capture), and the mapper case (`test3`-shaped,
+/// folded into this same test) confirms a non-boolean return value
+/// marshals correctly too.
+///
+/// Also confirms a `JsValue` nested inside a *method* call's own argument
+/// array works, not just a top-level function call's (`compile_call_
+/// dynamic_method`/`compile_call_dynamic_method_handle` previously never
+/// set `compiling_quickjs_dynamic_arguments` around their own args
+/// marshaling at all, unlike the typed ambient-declaration dispatch path
+/// -- confirmed to reproduce the pre-fix "a dynamic (JsValue) value can
+/// only be passed as an argument to another QuickJS-backed dynamic call"
+/// error via a temporary revert).
+#[test]
+fn a_native_closure_can_be_passed_as_an_argument_to_a_dynamic_method_call() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-native-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("callback-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeHolder(): Holder;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeHolder: function() { \
+         return { \
+         check: function(pred) { return pred(5) > 0; }, \
+         map: function(pred) { return pred(1) + \",\" + pred(2) + \",\" + pred(3); } \
+         }; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeHolder } from "callback-kit";
+function main(): void {
+    const holder: JsValue = makeHolder();
+    console.log(holder.check((n: number) => n > 0));
+    console.log(holder.check((n: number) => n < 0));
+    console.log(holder.map((n: number) => n * 10));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nfalse\n\"10,20,30\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

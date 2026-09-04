@@ -22,6 +22,30 @@ impl<'a> FnLowerer<'a> {
             if actual == HirType::JsValue {
                 return Ok(value);
             }
+            // A real compiled (native) closure (e.g. `(n: number) => n >
+            // 0` passed to zod's `z.number().refine(...)`) has no JSON
+            // representation either -- but unlike `JsValue` above, it
+            // can't just pass through unchanged: there is no existing
+            // *live* value on the QuickJS side to reference yet, only a
+            // native function pointer thaw-llvm needs to bridge into one.
+            // Wrapped in a manual `registerNativeCallback` call (the same
+            // convention `getDynamicProperty`/`callDynamicMethod`/etc.
+            // already use for a hand-built intrinsic call thaw-llvm
+            // recognizes by name -- see `compile_register_native_
+            // callback`, thaw-llvm's `dynamic_host.rs`), which builds a
+            // native-to-JS adapter (reusing the existing N-API `compile_
+            // napi_value_callback`, itself backend-agnostic) and registers
+            // it as a real, retained QuickJS value -- yielding an ordinary
+            // `JsValue` handle from here on, so everything downstream
+            // (`compile_dynamic_value_placeholder`'s own `is_int_value()`
+            // detection, the args-JSON reviver, ...) treats it exactly
+            // like any other live value crossing into a dynamic call.
+            if let HirType::Function(_, _) = &actual {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("registerNativeCallback".to_string())),
+                    vec![value],
+                ));
+            }
             // A bare `undefined` literal (`schema.safeParse(undefined)`,
             // real zod) has no JSON representation either -- JSON has no
             // `undefined`, only the case a nested field can omit itself

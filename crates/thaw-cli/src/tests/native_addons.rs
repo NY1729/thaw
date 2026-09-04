@@ -1101,6 +1101,11 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
 /// [[project_npm_interop_gaps_2]] as a permanent regression test instead
 /// of leaving it as one-off manual verification nobody would notice
 /// regress.
+///
+/// Also covers `.refine()`/`.transform()` -- a real compiled (native)
+/// closure passed as a dynamic-call argument -- see thaw-cli's own
+/// `a_native_closure_can_be_passed_as_an_argument_to_a_dynamic_method_call`
+/// for the synthetic, network-free version of the same mechanism.
 #[test]
 fn registry_add_validates_zod_schemas_end_to_end_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -1121,6 +1126,9 @@ function main(): void {
     const schema = z.object({ name: z.string(), age: z.number() });
     console.log(schema.safeParse({ name: "Alice", age: 30 }).success);
     console.log(schema.safeParse({ name: "Alice", age: "thirty" }).success);
+    console.log(z.number().refine((n: number) => n > 0, { message: "must be positive" }).safeParse(5).success);
+    console.log(z.number().refine((n: number) => n > 0, { message: "must be positive" }).safeParse(-5).success);
+    console.log(JSON.stringify(z.string().transform((s: string) => s.length).parse("hello")));
 }"#,
     )
     .unwrap();
@@ -1134,7 +1142,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\nfalse\ntrue\nfalse\n"
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\n5\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

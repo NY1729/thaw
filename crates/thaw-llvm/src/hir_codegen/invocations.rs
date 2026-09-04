@@ -2020,6 +2020,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_call_native_addon_with_callback(args)
             }
             "pollNativeAddonEvents" => return self.compile_poll_native_addon_events(args),
+            "registerNativeCallback" => return self.compile_register_native_callback(args),
             _ => {}
         }
 

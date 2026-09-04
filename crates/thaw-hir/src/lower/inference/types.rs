@@ -1260,6 +1260,12 @@ impl<'a> FnLowerer<'a> {
                     "callNativeAddon" => return Ok(HirType::Json),
                     "callNativeAddonWithCallback" => return Ok(HirType::Json),
                     "pollNativeAddonEvents" => return Ok(HirType::F64),
+                    // Wraps a real compiled (native) function value as a
+                    // live, retained QuickJS-callable value -- see
+                    // `coerce_to_declared`'s own doc comment for why this
+                    // is built here instead of a bare pass-through the
+                    // way `JsValue`/`Undefined` are.
+                    "registerNativeCallback" => return Ok(HirType::JsValue),
                     _ => {}
                 }
                 if let Some(HirType::Function(params, ret)) = self.scope.get(name) {
