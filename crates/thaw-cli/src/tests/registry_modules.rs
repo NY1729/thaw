@@ -7218,6 +7218,70 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Same shape as `fallback_factory_function_result_supports_instance_
+/// method_calls`, but the method is called *chained directly* off the
+/// factory call's own return value (`makeClock(3).format()`), with no
+/// `const` binding in between -- real example: dayjs's own `dayjs(
+/// "2024-01-15").format("YYYY-MM-DD")`. Used to fail to build
+/// ("unsupported member call target"): the receiver-type lookup in
+/// thaw-hir's member-call lowering only handled a plain `Ident` (bound
+/// via `const`, recovering its type from `self.scope`), `new`, `this`,
+/// and a few other forms -- a bare `Expr::Call` receiver had no arm at
+/// all and fell through to `None`, so the call's *known* factory return
+/// type (`clock.Clock`) was simply never consulted. Fixed by looking up
+/// the callee's own declared (non-generic) return type directly from
+/// `self.signatures` for exactly this shape; the receiver expression
+/// itself is still only lowered and evaluated once, when it's spliced
+/// into the class-method call the same way a bound receiver's `Ident`
+/// already was.
+#[test]
+fn a_method_can_be_chained_directly_onto_a_fallback_factory_calls_return_value() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-factory-chained-call-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("clock-kit2");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeClock(hour: number): clock.Clock;\n\
+         declare namespace clock {\n\
+             class Clock {\n\
+                 format(): string;\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Clock(hour) { this.hour = hour; }\n\
+         Clock.prototype.format = function() { return 'H:' + this.hour; };\n\
+         module.exports.makeClock = function(hour) { return new Clock(hour); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeClock } from "clock-kit2";
+function main(): void {
+    console.log(makeClock(3).format());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"H:3\"\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Fallback function with two overloads whose *type-disjoint* first
 /// parameter picks between genuinely different calling conventions --
 /// real-world example: `ms`'s own `ms(value: number, options?: { long:
