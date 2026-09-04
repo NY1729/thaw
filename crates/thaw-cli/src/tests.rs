@@ -4750,7 +4750,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
         properties: vec![],
     };
     let mut shim = String::new();
-    let helpers = generate_napi_class_constructors(&class, &mut shim);
+    let helpers = generate_napi_class_constructors(&class, true, &mut shim);
     assert_eq!(
         helpers
             .iter()
@@ -4781,6 +4781,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
             methods: vec![],
             properties: vec![],
         },
+        true,
         &mut default_shim,
     );
     assert_eq!(default_helpers.len(), 1);
@@ -4790,7 +4791,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
     let mut locked_shim = String::new();
     let mut locked = class;
     locked.constructible = false;
-    assert!(generate_napi_class_constructors(&locked, &mut locked_shim).is_empty());
+    assert!(generate_napi_class_constructors(&locked, true, &mut locked_shim).is_empty());
     assert!(locked_shim.is_empty());
 }
 
@@ -4822,7 +4823,7 @@ fn selects_same_arity_napi_constructors_by_argument_type() {
         properties: vec![],
     };
     let mut shim = String::new();
-    let helpers = generate_napi_class_constructors(&class, &mut shim);
+    let helpers = generate_napi_class_constructors(&class, true, &mut shim);
     assert_eq!(helpers.len(), 2);
     let string_helper = helpers
         .iter()
@@ -4861,7 +4862,7 @@ fn generates_typed_napi_tuple_class_shims() {
     .remove(0);
     let tuple = thaw_hir::HirType::Tuple(vec![thaw_hir::HirType::F64, thaw_hir::HirType::Str]);
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(&class, &mut shim);
+    let constructors = generate_napi_class_constructors(&class, true, &mut shim);
     assert_eq!(constructors[0].2, vec![tuple.clone()]);
     let methods = generate_napi_class_method_overloads(
         &class,
@@ -4924,7 +4925,7 @@ fn generates_typed_napi_recursive_array_shims() {
     let strings = thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str));
     let booleans = thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Bool));
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(&class, &mut shim);
+    let constructors = generate_napi_class_constructors(&class, true, &mut shim);
     assert_eq!(constructors[0].2, vec![strings.clone()]);
     let methods = generate_napi_class_method_overloads(
         &class,
@@ -5000,7 +5001,7 @@ fn generates_typed_napi_nullable_shims() {
     .remove(0);
     let nullable = thaw_hir::HirType::Nullable(Box::new(thaw_hir::HirType::Str));
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(&class, &mut shim);
+    let constructors = generate_napi_class_constructors(&class, true, &mut shim);
     assert_eq!(constructors[0].2, vec![nullable.clone()]);
     let methods = generate_napi_class_method_overloads(
         &class,
@@ -5062,7 +5063,7 @@ fn generates_typed_napi_optional_and_nullish_shims() {
     let optional = thaw_hir::HirType::Optional(Box::new(thaw_hir::HirType::Str));
     let nullish = thaw_hir::HirType::Nullish(Box::new(thaw_hir::HirType::Str));
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(&class, &mut shim);
+    let constructors = generate_napi_class_constructors(&class, true, &mut shim);
     assert_eq!(constructors[0].2, vec![optional.clone()]);
     let methods = generate_napi_class_method_overloads(
         &class,
@@ -5172,7 +5173,7 @@ fn rewrites_inherited_external_class_methods() {
         .find(|class| class.name == "Derived")
         .unwrap();
     let mut shim = String::new();
-    let constructors = generate_napi_class_constructors(derived, &mut shim);
+    let constructors = generate_napi_class_constructors(derived, true, &mut shim);
     assert_eq!(constructors.len(), 1);
     assert_eq!(constructors[0].0, 1);
     let generated = generate_napi_class_method_overloads(
