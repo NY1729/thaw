@@ -49,11 +49,18 @@ impl<'ctx> HirCompiler<'ctx> {
         key: &HirExpr,
         value: &HirExpr,
         element: &HirType,
+        preserve_undefined: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let object = self.compile_expr(object)?;
         let key = self.compile_expr(key)?;
         let result = self.compile_expr(value)?;
-        self.compile_json_object_set_native(object, key.into_pointer_value(), result, element)?;
+        self.compile_json_object_set_native_with_undefined(
+            object,
+            key.into_pointer_value(),
+            result,
+            element,
+            preserve_undefined,
+        )?;
         Ok(result)
     }
 

@@ -261,8 +261,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonGet(obj, field) => self.compile_json_get(obj, field),
             HirExpr::JsonIndex(obj, idx) => self.compile_json_index(obj, idx),
             HirExpr::JsonKey(obj, key) => self.compile_json_key(obj, key),
-            HirExpr::JsonSet(obj, key, value, element) => {
-                self.compile_json_set(obj, key, value, element)
+            HirExpr::JsonSet(obj, key, value, element, preserve_undefined) => {
+                self.compile_json_set(obj, key, value, element, *preserve_undefined)
             }
             HirExpr::JsonIndexSet(obj, index, value) => {
                 self.compile_json_index_set(obj, index, value)

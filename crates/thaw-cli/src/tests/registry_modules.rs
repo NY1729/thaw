@@ -8061,6 +8061,84 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An `Optional`-typed variable (`string | undefined`) that actually
+/// holds `undefined` at runtime, passed as a dynamic-call argument
+/// (real example: `schema.safeParse(value)` against real zod's own
+/// `z.undefined()`, where `value: string | undefined` happens to be
+/// `undefined`) needs the exact same real-`undefined` round-trip the
+/// bare-literal case above gets. Exercised through `wrap_native_value_
+/// as_json`'s own temporary-object round trip (`JsonSet` then `JsonGet`)
+/// -- unlike the bare-literal case, this one goes through the tagged
+/// `Optional`/`Nullable`/`Nullish` encoding (`compile_json_object_set_
+/// tagged`), which has its own long-standing `preserve_undefined` flag
+/// for exactly "should an absent value be written as a real `undefined`
+/// sentinel or simply omitted" -- omission is correct for a genuine
+/// object-literal field (matching `JSON.stringify`'s own behavior), but
+/// wrong here: there's no real field to omit, just a temporary one used
+/// to round-trip a *standalone* value back out, and omitting it made
+/// `thaw_json_get`'s own missing-key fallback report plain JSON `null`
+/// instead -- silently turning a real `undefined` argument into `null`,
+/// which real zod's `ZodUndefined` schema correctly rejects (`false`
+/// where `true` was expected). Fixed by threading a `bool` through
+/// `HirExpr::JsonSet` so `wrap_native_value_as_json`'s own use of it can
+/// ask for `true` (preserve) while an ordinary object literal's own
+/// field-by-field construction keeps the old `false` (omit) behavior.
+#[test]
+fn an_optional_variable_holding_undefined_can_be_passed_as_a_dynamic_call_argument() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-optional-undefined-argument-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("opt-undef-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.makeThing = function() {\n\
+             return {\n\
+                 check: function(value) {\n\
+                     if (value === undefined) return 'real-undefined';\n\
+                     if (value === null) return 'null';\n\
+                     return 'other:' + JSON.stringify(value);\n\
+                 }\n\
+             };\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "opt-undef-kit";
+function main(): void {
+    const thing = makeThing();
+    const absent: string | undefined = undefined;
+    console.log(thing.check(absent));
+    const present: string | undefined = "hi";
+    console.log(thing.check(present));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"real-undefined\"\n\"other:\\\"hi\\\"\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Same underlying gap as
 /// `a_js_value_can_be_passed_as_a_bare_argument_to_another_dynamic_call`,
 /// but for a `JsValue` nested inside an object-literal field and inside
