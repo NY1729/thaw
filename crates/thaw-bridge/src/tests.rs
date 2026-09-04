@@ -658,7 +658,7 @@ fn classifies_quoted_keys_inside_generic_interfaces() {
 #[test]
 fn generates_native_addon_wrapper_and_module_initializer() {
     let funcs = parse_dts("export declare function add(args: any): any;").unwrap();
-    let shim = generate_native_addon_shim(&funcs, &[]);
+    let shim = generate_native_addon_shim(&funcs, &[], &Default::default());
     assert!(shim.contains(r#"return callNativeAddon("add", argsArray);"#));
     let init = generate_native_addon_init(&[NativeAddon {
         package_name: "native-add",
