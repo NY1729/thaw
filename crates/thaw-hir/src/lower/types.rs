@@ -88,20 +88,25 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         // own `JsValue`-typed return (`z.string()`'s schema instance) --
         // `T` infers as `JsValue` from that argument.
         //
-        // `Json` is NOT included here despite having the same "single
-        // opaque pointer" `basic_type` representation as `Str`/`JsValue`
-        // -- confirmed by direct experiment that allowing it turns this
-        // clean compile-time error into a silent runtime crash instead
-        // (a generically-specialized object with a `Json`-typed field
-        // built fine, but the schema value it produced later crashed the
-        // process the moment a method was called on it, no error message
-        // at all) for a shape real zod code hits (`object({ ...,
-        // nickname: string().optional() })`, whose unannotated `.optional()`
-        // chain defaults to `Json` -- see `a_method_can_return_a_jsvalue_
-        // when_the_call_site_asks_for_one`'s own doc comment). The actual
-        // gap is in thaw-llvm's generic-specialization codegen for a
-        // `Json` object field, not here; a real fix needs that located
-        // and fixed first, not just this check loosened.
+        // `Json` is deliberately NOT included here, even though it has
+        // the identical "single opaque pointer" `basic_type`
+        // representation as `Str`/`JsValue` -- confirmed by direct
+        // experiment that loosening this to allow it doesn't fix
+        // anything, it just trades this clean compile-time error for a
+        // silent runtime crash (later, real zod code on the far side of
+        // a dynamic call throws once it doesn't recognize a `{}`-shaped
+        // JSON snapshot as a real schema, and that exception surfaces as
+        // a bare, silent `exit(1)` with no message). The actual bug this
+        // was masking lived one layer up, in object-literal field
+        // lowering (`lower_object_lit_field_value`): an unannotated
+        // method call whose receiver is `JsValue`-typed (real example:
+        // `string().optional()`, a schema-builder chain) used to default
+        // to the JSON-decoding behavior when used as a field value,
+        // discarding the real handle and forcing exactly this rejected
+        // `Object([(name, Json)])` shape to begin with. Fixed there
+        // instead -- a correctly-lowered program should never actually
+        // produce this shape for that case anymore, so this check
+        // staying strict is a real safety net, not just an unfixed gap.
         HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
         HirType::Array(inner) => **inner == HirType::F64,
         HirType::Tuple(elements) => elements.iter().all(supports_generic_native_layout),
