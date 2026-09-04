@@ -800,6 +800,7 @@ fn dts_source_with_reexported_functions(
         &module,
         &import_equals_targets,
     )?);
+    let named_import_targets = named_import_targets(entry_path, &module);
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
@@ -843,7 +844,25 @@ fn dts_source_with_reexported_functions(
                 }
                 None => match import_equals_targets.get(&original) {
                     Some(target_path) => export_assignment_function_declarations(target_path)?,
-                    None => continue,
+                    None => match named_import_targets.get(&original) {
+                        Some((target_path, target_name)) => {
+                            let mut visited = std::collections::BTreeSet::new();
+                            let functions = reexported_function_declarations(
+                                target_path,
+                                target_name,
+                                &mut visited,
+                            )?;
+                            if !functions.is_empty() {
+                                functions
+                            } else {
+                                reexported_class_or_interface_declarations(
+                                    target_path,
+                                    target_name,
+                                )?
+                            }
+                        }
+                        None => continue,
+                    },
                 },
             };
             if !declarations.is_empty() {
@@ -898,10 +917,14 @@ fn dts_source_with_reexported_functions(
 /// an inline `export default function <ident>(...) {}`) and keeps that
 /// real `<ident>`, which need not equal the literal string `"default"`.
 fn rename_declared_function(snippet: String, exported: &str) -> String {
-    let Some(function_index) = snippet.find("function ") else {
+    let Some((keyword_index, keyword)) = ["function ", "class ", "interface "]
+        .into_iter()
+        .filter_map(|keyword| snippet.find(keyword).map(|index| (index, keyword)))
+        .min_by_key(|(index, _)| *index)
+    else {
         return snippet;
     };
-    let name_start = function_index + "function ".len();
+    let name_start = keyword_index + keyword.len();
     let name_end = snippet[name_start..]
         .find(|character: char| !(character.is_alphanumeric() || character == '_' || character == '$'))
         .map(|offset| name_start + offset)
@@ -1207,6 +1230,112 @@ fn import_equals_targets(
             Some((import.id.sym.to_string(), target_path))
         })
         .collect()
+}
+
+/// The `(target_path, name_in_target)` each *ordinary* ES import
+/// (`import { X } from "./y"`, `import { X as Local } from "./y"`, or a
+/// default import `import Local from "./y"`) in `module` resolves to,
+/// keyed by the local binding name -- the ES-module counterpart of
+/// `import_equals_targets` above, used the same way: to follow a local
+/// `export { Local };` (no `from` clause) back to whatever `Local` was
+/// actually bound to. Real-world example: hono's `index.d.ts`, which
+/// does `import { Hono } from './hono'; export { Hono };` -- a class,
+/// not a function, split into its own file and re-exported under the
+/// same local name. Only `.`-relative specifiers resolve (matching
+/// `declaration_reexport_path`); a bare-specifier import (a real
+/// dependency, not an internal file split) is left alone.
+fn named_import_targets(
+    entry_path: &Path,
+    module: &thaw_parser::ast::Module,
+) -> std::collections::HashMap<String, (PathBuf, String)> {
+    use thaw_parser::ast::{ImportSpecifier, ModuleDecl, ModuleItem};
+
+    let mut targets = std::collections::HashMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        if import.type_only {
+            continue;
+        }
+        let Some(source) = import.src.value.as_str() else {
+            continue;
+        };
+        let Some(target_path) = declaration_reexport_path(entry_path, source) else {
+            continue;
+        };
+        for specifier in &import.specifiers {
+            match specifier {
+                ImportSpecifier::Named(named) if !named.is_type_only => {
+                    let imported_name = named
+                        .imported
+                        .as_ref()
+                        .and_then(|name| match name {
+                            thaw_parser::ast::ModuleExportName::Ident(id) => {
+                                Some(id.sym.to_string())
+                            }
+                            thaw_parser::ast::ModuleExportName::Str(_) => None,
+                        })
+                        .unwrap_or_else(|| named.local.sym.to_string());
+                    targets.insert(
+                        named.local.sym.to_string(),
+                        (target_path.clone(), imported_name),
+                    );
+                }
+                ImportSpecifier::Default(default) => {
+                    targets.insert(
+                        default.local.sym.to_string(),
+                        (target_path.clone(), "default".to_string()),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    targets
+}
+
+/// Same shape as `reexported_function_declarations`, but for a class or
+/// interface declared directly in `path` under `name` (the counterpart
+/// to that function's `Decl::Fn` handling for `Decl::Class`/
+/// `Decl::TsInterface`) -- doesn't follow further `export ... from`
+/// re-export chains itself, since `named_import_targets` only ever
+/// points at the file a name was *imported* from, which for every
+/// package seen so far declares the class/interface directly rather
+/// than re-exporting it yet again.
+fn reexported_class_or_interface_declarations(
+    path: &Path,
+    name: &str,
+) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let source = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read re-exported declarations `{}`: {error}",
+            path.display()
+        )
+    })?;
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let mut declarations = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = item else {
+            continue;
+        };
+        let matches = match &declaration.decl {
+            Decl::Class(class) => class.ident.sym == name,
+            Decl::TsInterface(interface) => interface.id.sym == name,
+            _ => false,
+        };
+        if matches {
+            declarations.push(
+                source_map
+                    .span_to_snippet(declaration.span())
+                    .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?,
+            );
+        }
+    }
+    Ok(declarations)
 }
 
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {
