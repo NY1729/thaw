@@ -266,6 +266,60 @@ fn installed_package_inlines_default_reexports() {
 }
 
 #[test]
+fn installed_package_inlines_named_import_reexports() {
+    // `import { Name } from './path'; export { Name };` (ordinary ES
+    // import + a *local* re-export, no `from` clause on the export
+    // itself) -- real-world example: hono's `index.d.ts`, which does
+    // exactly this for its `Hono` class (`import { Hono } from './hono';
+    // export { Hono };`). Unlike `export { Name } from './path'` (a
+    // single statement, already handled), the import and export are two
+    // separate statements here, and `Name` can be a class/interface, not
+    // just a function.
+    let scratch = temp_registry("installed-dts-named-import-scratch");
+    let registry = temp_registry("installed-dts-named-import-registry");
+    let package = scratch.join("node_modules/web-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"web-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import { App } from './app';\nimport { route as routeFn } from './route';\nexport { App, routeFn as route };\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("app.d.ts"),
+        "export declare class App<T = unknown> {\n    constructor(base?: string);\n    get(path: string): T;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("route.d.ts"),
+        "export declare function route(path: string): string;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { App: function() {}, route: function(p) { return p; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "web-kit").unwrap();
+    let declarations = resolve(&registry, "web-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("class App"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("function route(path: string): string"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_import_equals_reexports() {
     // `import Name = require("./path")` (a TS import-equals declaration)
     // followed by a *local* `export { Name as exported };` (no `from`
