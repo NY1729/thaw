@@ -323,40 +323,50 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?
             .into_pointer_value();
         let closure_type = self.function_type(params, ret)?;
-        let result = self
+        let call = self
             .builder
             .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("N-API value callback must return a value")?;
-        let result_json = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_array_new").unwrap(),
-                &[],
-                "napi_value_callback_result_array",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap();
-        self.compile_json_array_push_native(result_json, result, ret)?;
-        let result_json = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_index").unwrap(),
-                &[
-                    result_json.into(),
-                    self.context.f64_type().const_zero().into(),
-                    null_key.into(),
-                ],
-                "napi_value_callback_result",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap();
+            .map_err(|error| error.to_string())?;
+        // A `void`-returning closure (real example: zod's own
+        // `superRefine((val, ctx) => { ctx.addIssue(...); })` -- the
+        // predicate mutates `ctx` and returns nothing at all) has no
+        // return value to marshal; encoded as a bare JSON `null` result
+        // instead of running it through the ordinary array-wrap-then-
+        // index dance below, which requires a real value to push.
+        let result_json = if matches!(ret, HirType::Undefined | HirType::Void) {
+            self.compile_json_null()?
+        } else {
+            let result = call
+                .try_as_basic_value()
+                .basic()
+                .ok_or("N-API value callback must return a value")?;
+            let result_json = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_array_new").unwrap(),
+                    &[],
+                    "napi_value_callback_result_array",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap();
+            self.compile_json_array_push_native(result_json, result, ret)?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_index").unwrap(),
+                    &[
+                        result_json.into(),
+                        self.context.f64_type().const_zero().into(),
+                        null_key.into(),
+                    ],
+                    "napi_value_callback_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+        };
         let result = self
             .builder
             .build_call(
@@ -413,14 +423,33 @@ impl<'ctx> HirCompiler<'ctx> {
                 );
             }
         };
+        // Tells the JS-side wrapper (`thaw_js_register_native_callback`,
+        // thaw-quickjs) which argument positions to retain as a live
+        // handle (encoded as the same `{"__thaw_js_handle_id__": N}`
+        // marker `compile_dynamic_value_placeholder` builds for the
+        // opposite direction) instead of naively `JSON.stringify`-ing --
+        // see `compile_json_value_to_native`'s own new `HirType::JsValue`
+        // case, the matching native-side decoder. A `u64` is plenty (32
+        // real params would already be an extraordinary callback), and
+        // JS's own bitwise operators only ever work on 32 bits anyway.
+        let jsvalue_param_mask: u64 = params
+            .iter()
+            .enumerate()
+            .filter(|(_, param)| **param == HirType::JsValue)
+            .map(|(index, _)| 1u64 << index)
+            .sum();
         let (adapter, closure) = self.compile_napi_value_callback(closure_expr, &params, &ret)?;
+        let jsvalue_param_mask = self
+            .context
+            .i64_type()
+            .const_int(jsvalue_param_mask, false);
         let result = self
             .builder
             .build_call(
                 self.module
                     .get_function("thaw_js_register_native_callback")
                     .unwrap(),
-                &[adapter.into(), closure.into()],
+                &[adapter.into(), closure.into(), jsvalue_param_mask.into()],
                 "register_native_callback",
             )
             .map_err(|error| error.to_string())?

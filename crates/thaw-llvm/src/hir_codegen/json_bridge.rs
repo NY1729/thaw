@@ -1221,6 +1221,49 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(json, ty)
             }
+            // A `JsValue`-typed native-callback parameter (e.g. zod's
+            // `.superRefine((val, ctx: JsValue) => { ctx.addIssue(...); })`
+            // -- `ctx`, a live object with methods, has no JSON
+            // representation to decode at all). Unlike every other case
+            // here, this doesn't come from real JSON data: `compile_
+            // register_native_callback`'s own `jsvalue_param_mask` tells
+            // the JS-side wrapper (`thaw_js_register_native_callback`,
+            // thaw-quickjs) to retain exactly the arguments at a
+            // `JsValue`-typed position and encode them as the same
+            // `{"__thaw_js_handle_id__": N}` marker `compile_dynamic_
+            // value_placeholder` already builds for the opposite
+            // direction -- so this position is *guaranteed* to hold that
+            // marker shape, not decoded defensively the way a value from
+            // real user JSON would need to be.
+            HirType::JsValue => {
+                let key = self
+                    .builder
+                    .build_global_string_ptr(
+                        "__thaw_js_handle_id__",
+                        "native_callback_jsvalue_key",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let id = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_get").unwrap(),
+                        &[json.into(), key.as_pointer_value().into()],
+                        "native_callback_jsvalue_marker",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_get did not return a value")?;
+                let id = self.compile_json_as_value(id, "thaw_json_as_number")?;
+                self.builder
+                    .build_float_to_unsigned_int(
+                        id.into_float_value(),
+                        self.context.i64_type(),
+                        "native_callback_jsvalue_arg",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string())
+            }
             other => Err(format!("unsupported dynamic result value {other:?}")),
         }
     }
