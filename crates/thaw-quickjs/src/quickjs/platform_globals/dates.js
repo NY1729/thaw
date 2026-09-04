@@ -56,5 +56,21 @@
       }
       return globalThis.__thaw_value_handles[id - 1];
     }
+    // A bare `undefined` argument (`schema.safeParse(undefined)`, real
+    // zod's own `z.undefined()`) has no JSON encoding either -- `coerce_
+    // to_declared` (thaw-hir) encodes it as this same sentinel shape
+    // `compile_napi_undefined_json` already uses for a NAPI return
+    // value, reused here rather than inventing a second one, even
+    // though it crosses a different boundary (a `callDynamic` JSON
+    // argument, not a NAPI result).
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      value.$__thaw_napi_undefined$ === true
+    ) {
+      return undefined;
+    }
     return value;
   };
