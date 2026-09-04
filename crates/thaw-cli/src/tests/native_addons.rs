@@ -1090,3 +1090,139 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     assert!(event_file.is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// One of the Phase-4 validation targets (see [[project_thaw_overview]]):
+/// a real, `thaw registry add`-fetched zod builds and validates schemas
+/// end-to-end, including a fully inline method chain
+/// (`z.string().min(2).max(10).safeParse(...)`, no intermediate binding
+/// at all) -- exercises `a_method_can_be_chained_directly_onto_another_
+/// methods_call_result`'s fix against the real package, not just a
+/// synthetic double. Pins down the whole "make zod work" arc from
+/// [[project_npm_interop_gaps_2]] as a permanent regression test instead
+/// of leaving it as one-off manual verification nobody would notice
+/// regress.
+#[test]
+fn registry_add_validates_zod_schemas_end_to_end_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-zod-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "zod").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import * as z from "zod";
+function main(): void {
+    console.log(z.string().min(2).max(10).safeParse("hello").success);
+    console.log(z.string().min(2).max(10).safeParse("h").success);
+    const schema = z.object({ name: z.string(), age: z.number() });
+    console.log(schema.safeParse({ name: "Alice", age: 30 }).success);
+    console.log(schema.safeParse({ name: "Alice", age: "thirty" }).success);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["zod".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\nfalse\ntrue\nfalse\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A real, fetched dayjs -- another Phase-4 validation target -- parses
+/// and formats dates through both a single-hop chain (`dayjs(date).
+/// format(...)`) and a double-hop one (`dayjs(date).add(...).format(
+/// ...)`), fully inline with no intermediate `const` anywhere. Both
+/// used to fail to build ("unsupported member call target") before this
+/// session's two chained-call fixes; only UTC-based formatting is
+/// asserted (never a local-time token) so this doesn't depend on the
+/// host's time zone.
+#[test]
+fn registry_add_formats_dates_with_dayjs_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-dayjs-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "dayjs").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import dayjs from "dayjs";
+function main(): void {
+    console.log(dayjs("2024-01-15T00:00:00Z").format("YYYY-MM-DD"));
+    console.log(dayjs("2024-01-15T00:00:00Z").add(10, "day").format("YYYY-MM-DD"));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"2024-01-15\"\n\"2024-01-25\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A real, fetched hono -- the last of the Phase-4 validation targets
+/// exercised this session -- constructs its `Hono` class via `new`.
+/// Pins the constructor half of [[project_npm_interop_gaps_2]]'s hono
+/// arc (commit `9addc760`) against the real package. Deliberately scoped
+/// to construction only, not route registration: `app.get(path,
+/// handler)` hits a separate, unrelated gap (its `Handler` parameter
+/// type is generic-and-rest-parameter-heavy enough that thaw-bridge
+/// can't classify it as callable at all, so it's typed `Json` instead of
+/// a function type, rejecting any real handler value passed to it) --
+/// not attempted this session.
+#[test]
+fn registry_add_constructs_a_hono_app_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-hono-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "hono").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Hono } from "hono";
+function main(): void {
+    const app = new Hono();
+    console.log("hono app created");
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "hono app created\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
