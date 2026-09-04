@@ -7697,6 +7697,85 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Real zod v4's own `package.d.ts` re-exports its whole API two ways
+/// at once: every function flattened to a top-level named export (via
+/// `export * from "./v4/classic/external.cjs"`, already resolved by
+/// `thaw registry add`'s own install-time flattening into plain
+/// `export declare function ...` lines in the same file), *and* the
+/// same module star-imported under a name and re-exported as a
+/// namespace object (`import * as z from "./v4/classic/external.cjs";
+/// export { z, z as default };`) -- so `import { object, string } from
+/// "zod"` and `import * as z from "zod"; z.object(...)` are meant to
+/// reach the exact same declarations. This does *not* exercise a
+/// `declare namespace` block (a genuinely different, still-unsupported
+/// shape -- a namespace whose members are declared *inside* it, not a
+/// star-import of an already-flattened sibling module) -- confirmed
+/// via a synthetic reproduction of zod's literal shape that this one
+/// already works end-to-end: thaw-bridge's parser simply has no
+/// declaration named `z` to classify at all (it's only ever bound by
+/// an `import *`, never a real top-level `function`/`class`/
+/// `interface`), so it's silently skipped, and the *user's own*
+/// `import * as z from "case-kit3"` is an entirely ordinary namespace
+/// import of the package's already-flattened export table -- unrelated
+/// machinery already handles it (see `namespace_import_member_call_is_
+/// not_hijacked_by_the_bare_qualifier_rewrite` above).
+#[test]
+fn a_namespace_reexported_from_the_packages_own_flattened_module_works_like_a_plain_namespace_import()
+ {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-self-reexported-namespace-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("case-kit3");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        // Mirrors real zod's exact `index.d.ts` shape post-flattening:
+        // an unresolved self-referencing `import *`/`export *`/
+        // `export { z, z as default }` trio (the relative path is
+        // never actually followed -- there is no such file here --
+        // exactly like thaw-bridge's single-file parser never follows
+        // it for real zod either), followed by the already-flattened
+        // top-level declarations that path's `export *` used to stand
+        // for.
+        "import * as z from \"./lib\";\n\
+         export * from \"./lib\";\n\
+         export { z, z as default };\n\
+         \n\
+         export declare function double(value: number): number;\n\
+         export declare function greet(name: string): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.double = function(value) { return value * 2; };\n\
+         module.exports.greet = function(name) { return 'hi ' + name; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import * as z from "case-kit3";
+function main(): void {
+    console.log(z.double(21));
+    console.log(z.greet("Alice"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nhi Alice\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Constructing a Fallback (pure-JS, QuickJS-NG-dispatched) class
 /// instance via `new Class(...)` -- real-world example: hono's `new
 /// Hono()`. Two bugs, found and fixed together:
