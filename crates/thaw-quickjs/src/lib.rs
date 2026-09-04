@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};

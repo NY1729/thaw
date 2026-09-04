@@ -23,7 +23,19 @@ impl<'ctx> HirCompiler<'ctx> {
             ));
         };
         let name_val = self.compile_expr(name)?;
-        let args_json_val = self.compile_expr(call_args)?;
+        // See the matching comment on `compile_call_dynamic_method`: a
+        // `JsValue`-typed element nested in `call_args` (e.g. a
+        // `registerNativeCallback` result) needs this flag set while it's
+        // being marshaled, same as the method-call and typed-ambient-
+        // declaration paths -- only meaningful for the QuickJS-NG backend,
+        // N-API has no such reviver.
+        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        if backend_symbol.starts_with("thaw_js_") {
+            self.compiling_quickjs_dynamic_arguments = true;
+        }
+        let args_json_val = self.compile_expr(call_args);
+        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        let args_json_val = args_json_val?;
 
         self.compile_json_backend_values(name_val, args_json_val, backend_symbol)
     }

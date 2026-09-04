@@ -375,6 +375,74 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok((adapter.as_global_value().as_pointer_value(), closure))
     }
 
+    /// Wraps a real compiled (native) closure as a live, retained QuickJS
+    /// value the Fallback dynamic-call path can pass around like any
+    /// other `JsValue` -- real example: zod's `z.number().refine((n:
+    /// number) => n > 0, {...})`, whose predicate has nowhere to go
+    /// without this (`coerce_to_declared`'s own doc comment on the
+    /// thaw-hir side explains why a bare pass-through, the way `JsValue`
+    /// itself gets, doesn't work here: there is no existing *live* QuickJS
+    /// value yet, only a native function pointer that needs bridging into
+    /// one first).
+    ///
+    /// Reuses `compile_napi_value_callback` as-is for the hard part (a
+    /// generic `(context, args_json) -> result_json` adapter around the
+    /// real closure, entirely backend-agnostic despite the name) rather
+    /// than duplicating it -- the *only* new piece is handing that
+    /// `(adapter, closure)` pair to QuickJS-NG (`thaw_js_register_native_
+    /// callback`, thaw-quickjs) instead of to N-API, which wraps it in a
+    /// real `rquickjs::Function` backed by a Rust closure that marshals a
+    /// JS call into exactly the JSON-string-in/JSON-string-out shape the
+    /// adapter expects, then retains and returns it the same way any
+    /// other live value gets a permanent handle.
+    fn compile_register_native_callback(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let [closure_expr] = args else {
+            return Err("registerNativeCallback expects exactly one argument".into());
+        };
+        let (params, ret) = match self.expr_hir_type(closure_expr) {
+            Some(HirType::Function(params, ret)) => (params, *ret),
+            _ => {
+                return Err(
+                    "registerNativeCallback: could not determine the callback's own function type"
+                        .into(),
+                );
+            }
+        };
+        let (adapter, closure) = self.compile_napi_value_callback(closure_expr, &params, &ret)?;
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_register_native_callback")
+                    .unwrap(),
+                &[adapter.into(), closure.into()],
+                "register_native_callback",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "register_native_callback_value")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "register_native_callback_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+
     fn compile_napi_undefined_json(&mut self) -> Result<BasicValueEnum<'ctx>, String> {
         let json = self
             .builder
@@ -996,7 +1064,24 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let handle = self.compile_expr(handle)?;
         let name = self.compile_expr(name)?;
-        let call_args = self.compile_expr(call_args)?;
+        // Set for the same reason `compile_typed_dynamic_call` sets it
+        // around its own args-marshaling: `call_args` (the pre-built
+        // `HirExpr::ArrayLit` of already-Json-coerced arguments -- see
+        // `lower_dynamic_value_method_call`) can itself contain a
+        // `JsValue`-typed element (a live handle nested in the arg array,
+        // not just a bare top-level arg -- real example: zod's `.refine(
+        // (n: number) => n > 0, ...)`, whose predicate becomes a `JsValue`
+        // via `registerNativeCallback`), and `compile_dynamic_value_
+        // placeholder` refuses to encode one unless this flag is set.
+        // Method-call args previously never set it at all (only the typed
+        // ambient-declaration dispatch path did), so a `JsValue` nested in
+        // a method call's own arguments -- as opposed to a top-level
+        // function call's -- failed outright until now.
+        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        self.compiling_quickjs_dynamic_arguments = true;
+        let call_args = self.compile_expr(call_args);
+        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        let call_args = call_args?;
         let args_json = self
             .builder
             .build_call(
@@ -1064,7 +1149,12 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let handle = self.compile_expr(handle)?;
         let name = self.compile_expr(name)?;
-        let call_args = self.compile_expr(call_args)?;
+        // See the matching comment in `compile_call_dynamic_method`.
+        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        self.compiling_quickjs_dynamic_arguments = true;
+        let call_args = self.compile_expr(call_args);
+        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        let call_args = call_args?;
         let args_json = self
             .builder
             .build_call(
