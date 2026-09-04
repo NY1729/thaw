@@ -128,14 +128,32 @@ impl<'a> FnLowerer<'a> {
                 // Correct for a non-generic declaration; a genuinely
                 // generic callee's `ret` here is still its own
                 // unsubstituted placeholder shape, so those are excluded
-                // and fall through to `None` exactly as before.
+                // -- *unless* that unsubstituted shape is already
+                // `JsValue`, which is safe regardless of substitution:
+                // `JsValue` means the declared return type (`ZodObject<T>`,
+                // an unresolved interface reference) could never resolve
+                // to anything JSON-representable no matter what `T`
+                // becomes, since the problem is structural (the interface
+                // itself is unknown), not `T`-dependent. Only a return
+                // type that genuinely varies with `T` (`F64`/`Array(T)`/
+                // etc., or `T` itself, e.g. a hypothetical `identity<T>(x:
+                // T): T`) stays excluded. Real example: zod's own
+                // `object<T extends ...>(shape: T): ZodObject<T>` --
+                // without this, `z.object({...}).refine(...)` (no
+                // intermediate `const` at all) failed outright
+                // ("unsupported member call target"), even though the
+                // exact same expression bound to an explicitly annotated
+                // `const obj: JsValue = z.object({...})` already worked.
                 Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Ident(_)) => {
                     let Expr::Ident(identifier) = callee.as_ref() else {
                         unreachable!()
                     };
                     self.signatures
                         .get(identifier.sym.as_ref())
-                        .filter(|signature| signature.generic_type_params.is_empty())
+                        .filter(|signature| {
+                            signature.generic_type_params.is_empty()
+                                || signature.ret == HirType::JsValue
+                        })
                         .map(|signature| signature.ret.clone())
                 }
                 // The callee is itself a member expression -- this call

@@ -129,7 +129,7 @@ pub extern "C" fn thaw_js_call_result(
 ) -> ThawResult {
     let func_name = to_str(func_name);
     let args_json = to_str(args_json);
-    match with_context(|ctx| call_impl(ctx, &func_name, &args_json)) {
+    match with_active_or_context(|ctx| call_impl(ctx, &func_name, &args_json)) {
         Ok(text) => ThawResult {
             value: CString::new(text).unwrap_or_default().into_raw(),
             error: std::ptr::null(),
@@ -500,7 +500,7 @@ pub extern "C" fn thaw_js_construct_handle_result(
     args_json: *const c_char,
 ) -> ThawHandleResult {
     let args_json = to_str(args_json);
-    match with_context(|ctx| {
+    match with_active_or_context(|ctx| {
         let constructor = value_for_handle(&ctx, handle)?
             .into_constructor()
             .ok_or_else(|| format!("JavaScript value handle {handle} is not a constructor"))?;
@@ -580,10 +580,19 @@ type NativeCallbackAdapter = unsafe extern "C" fn(*const c_void, *const c_char) 
 /// dynamic-call boundary here already uses, so a `Date`/`JsValue`/
 /// `undefined` argument or return value round-trips the same way it does
 /// crossing any other dynamic-call boundary.
+/// Retains a JS value and returns its permanent handle id, exposed to JS
+/// as `__thaw_retain_dynamic_value` for `thaw_js_register_native_
+/// callback`'s own wrapper to call. A plain named function, not a
+/// closure -- see the call site's own comment for why.
+fn retain_dynamic_value_for_js<'js>(ctx: Ctx<'js>, value: Value<'js>) -> u64 {
+    retain_value(&ctx, value).unwrap_or(0)
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_js_register_native_callback(
     adapter: *const c_void,
     closure: *const c_void,
+    jsvalue_param_mask: u64,
 ) -> ThawHandleResult {
     let adapter = adapter as usize;
     let closure = closure as usize;
@@ -601,8 +610,24 @@ pub extern "C" fn thaw_js_register_native_callback(
         static NEXT_NATIVE_CALLBACK_ID: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_NATIVE_CALLBACK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let raw = Function::new(ctx.clone(), move |args_json: String| -> String {
+        let raw = Function::new(ctx.clone(), move |ctx: Ctx<'_>, args_json: String| -> String {
             let args_json = CString::new(args_json).unwrap_or_default();
+            // Enters the same "currently active `Ctx`" guard `install_
+            // napi_bridge`'s own `call`/`handle` closures already use --
+            // needed because the native closure this adapter is about to
+            // invoke may itself call back into another dynamic operation
+            // (a further `callDynamicMethod`/etc., real example: zod's
+            // `.superRefine((val, ctx) => { ctx.addIssue(...); })`), which
+            // would otherwise try to `with_context` a *second* time while
+            // the outer call (the one that invoked *this* callback in the
+            // first place) is still on the stack, panicking ("RefCell
+            // already borrowed") since `with_context`'s own thread-local
+            // slot has no reentrant-borrow support. See `thaw_js_call_
+            // method_result`'s own matching `ACTIVE_NAPI_CONTEXT` check,
+            // the consuming half of this -- despite the "napi" name, this
+            // guard is a generic "currently active Ctx" mechanism, not
+            // N-API-specific.
+            let _active = ActiveNapiContext::enter(&ctx);
             // SAFETY: `adapter` was produced by `compile_napi_value_
             // callback` and always has exactly this ABI; `closure` is its
             // matching, still-live captured-environment pointer (the
@@ -618,8 +643,52 @@ pub extern "C" fn thaw_js_register_native_callback(
         ctx.globals()
             .set(raw_name.as_str(), raw)
             .map_err(|error| error.to_string())?;
+        // Exposes `retain_value` to JS via a plain named function (not a
+        // closure literal): `ctx`/`value` need the *same* `'js`
+        // (`retain_value` requires it), and a closure's own two
+        // independently-elided `'_` params don't unify to one on their
+        // own here -- the same lifetime wall the module doc comment
+        // above hit for a *returned* `Value<'js>`, this time for two
+        // *different* params that must agree. A named function's normal
+        // `for<'js>` generic already satisfies `Function::new`'s own
+        // bound for any 'js, no closure-lifetime inference involved at
+        // all. Reinstalled on every call rather than checked for
+        // idempotently first: cheap, and simpler than threading a "is it
+        // already there" check through this same function.
+        let retain = Function::new(ctx.clone(), retain_dynamic_value_for_js)
+            .map_err(|error| error.to_string())?;
+        ctx.globals()
+            .set("__thaw_retain_dynamic_value", retain)
+            .map_err(|error| error.to_string())?;
+        // Marks exactly the argument positions `compile_register_native_
+        // callback` (thaw-llvm) declared `JsValue`-typed -- real example:
+        // zod's `.superRefine((val, ctx: JsValue) => { ctx.addIssue(...);
+        // })`, whose `ctx` is a live object with methods, not JSON-
+        // representable data. Retained as a handle and encoded as the
+        // same `{"__thaw_js_handle_id__": N}` marker `compile_dynamic_
+        // value_placeholder` builds for the opposite direction, which
+        // `compile_json_value_to_native`'s own new `HirType::JsValue`
+        // case decodes back out on the native side (this marshaling
+        // direction has no JS-side reviver to lean on -- the adapter
+        // parses `args_json` natively, never through QuickJS's own
+        // `JSON.parse`). `1 << i` is a plain 32-bit JS bitwise op --
+        // plenty for any real callback's own arity.
         let wrapper_source = format!(
-            "(function() {{ var raw = globalThis['{raw_name}']; delete globalThis['{raw_name}']; return function() {{ var args = JSON.stringify(Array.prototype.slice.call(arguments)); var result = raw(args); return JSON.parse(result, globalThis.__thaw_json_date_reviver); }}; }})()"
+            "(function() {{ \
+             var raw = globalThis['{raw_name}']; \
+             delete globalThis['{raw_name}']; \
+             var mask = {jsvalue_param_mask}; \
+             return function() {{ \
+             var args = Array.prototype.slice.call(arguments); \
+             for (var i = 0; i < args.length; i++) {{ \
+             if ((mask & (1 << i)) !== 0) {{ \
+             args[i] = {{ __thaw_js_handle_id__: globalThis.__thaw_retain_dynamic_value(args[i]) }}; \
+             }} \
+             }} \
+             var result = raw(JSON.stringify(args)); \
+             return JSON.parse(result, globalThis.__thaw_json_date_reviver); \
+             }}; \
+             }})()"
         );
         let wrapper: Value = ctx
             .eval(wrapper_source.as_str())
@@ -644,7 +713,7 @@ pub extern "C" fn thaw_js_call_handle_handle_result(
     args_json: *const c_char,
 ) -> ThawHandleResult {
     let args_json = to_str(args_json);
-    let result: Result<u64, String> = with_context(|ctx| {
+    let result: Result<u64, String> = with_active_or_context(|ctx| {
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         let result = invoke_raw(ctx.clone(), target, &args_json)?;
@@ -664,7 +733,7 @@ pub extern "C" fn thaw_js_call_handle_handle_result(
 
 #[no_mangle]
 pub extern "C" fn thaw_js_call_handle_value_result(handle: u64, argument: u64) -> ThawResult {
-    let result = with_context(|ctx| {
+    let result = with_active_or_context(|ctx| {
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         let argument = value_for_handle(&ctx, argument)?;
@@ -734,7 +803,7 @@ pub extern "C" fn thaw_js_get_property_result(
     name: *const c_char,
 ) -> ThawHandleResult {
     let name = to_str(name);
-    let result: Result<u64, String> = with_context(|ctx| {
+    let result: Result<u64, String> = with_active_or_context(|ctx| {
         let object = value_for_handle(&ctx, handle)?
             .into_object()
             .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
@@ -763,7 +832,7 @@ pub extern "C" fn thaw_js_set_property_result(
     value_handle: u64,
 ) -> ThawHandleResult {
     let name = to_str(name);
-    let result: Result<u64, String> = with_context(|ctx| {
+    let result: Result<u64, String> = with_active_or_context(|ctx| {
         let object = value_for_handle(&ctx, handle)?
             .into_object()
             .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
@@ -840,7 +909,7 @@ pub extern "C" fn thaw_js_call_method_result(
 ) -> ThawResult {
     let name = to_str(name);
     let args_json = to_str(args_json);
-    let result = with_context(|ctx| {
+    let result = with_active_or_context(|ctx| {
         let value = invoke_method(&ctx, handle, &name, &args_json)?;
         resolve_value_impl(ctx, value, &format!("JavaScript method `{name}`"))
     });
@@ -871,7 +940,7 @@ pub extern "C" fn thaw_js_call_method_handle_result(
 ) -> ThawHandleResult {
     let name = to_str(name);
     let args_json = to_str(args_json);
-    let result: Result<u64, String> = with_context(|ctx| {
+    let result: Result<u64, String> = with_active_or_context(|ctx| {
         let value = invoke_method(&ctx, handle, &name, &args_json)?;
         retain_value(&ctx, value)
     });
@@ -911,7 +980,7 @@ pub extern "C" fn thaw_js_resolve_handle_result(handle: u64) -> ThawResult {
 #[no_mangle]
 pub extern "C" fn thaw_js_call_handle_result(handle: u64, args_json: *const c_char) -> ThawResult {
     let args_json = to_str(args_json);
-    let result = with_context(|ctx| {
+    let result = with_active_or_context(|ctx| {
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         invoke_impl(

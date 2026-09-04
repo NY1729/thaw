@@ -1232,7 +1232,10 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_js_register_native_callback",
-            handle_result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            handle_result_type.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()],
+                false,
+            ),
             Some(Linkage::External),
         );
         self.module.add_function(
