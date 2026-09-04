@@ -170,13 +170,27 @@ impl<'a> FnLowerer<'a> {
             } else {
                 None
             };
+            // One-shot, taken regardless of `is_async` so it never leaks
+            // into a nested arrow's own lowering -- only actually used
+            // below when this arrow is a plain (non-async) callback with
+            // no declared return annotation.
+            let arrow_return_hint = self.expected_arrow_return_hint.take();
             self.ret_type = declared_async_result
                 .clone()
                 .or_else(|| declared_return.clone())
+                .or_else(|| (!arrow.is_async).then(|| arrow_return_hint.clone()).flatten())
                 .unwrap_or(HirType::Dynamic);
             let (body, inferred_return) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
-                    let mut expression = self.lower_expr(expr)?;
+                    // An implicit-return arrow (`(c) => c.text(...)`, no
+                    // braces) is this same body's own tail return
+                    // expression -- give it the identical hint
+                    // `Stmt::Return` gets for the braced form, or a bare
+                    // dynamic method call in tail position here defaults
+                    // to the untyped JSON-snapshot path the exact same
+                    // way.
+                    let ret_type = self.ret_type.clone();
+                    let mut expression = self.lower_expr_with_expected_type(expr, Some(&ret_type))?;
                     let mut inferred = self.infer_expr_type(&expression)?;
                     if arrow.is_async {
                         if let HirExpr::AwaitPromise(promise, resolved) = expression {

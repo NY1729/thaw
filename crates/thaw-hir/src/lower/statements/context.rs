@@ -59,6 +59,7 @@ impl<'a> FnLowerer<'a> {
             class_context: None,
             unbound_this_context: false,
             expected_return_hint: None,
+            expected_arrow_return_hint: None,
         }
     }
 

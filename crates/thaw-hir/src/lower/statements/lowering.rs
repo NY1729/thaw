@@ -24,7 +24,17 @@ impl<'a> FnLowerer<'a> {
             Stmt::Return(ret) => {
                 let value = match &ret.arg {
                     Some(arg) => {
-                        let value = self.lower_expr(arg)?;
+                        // Hint the declared return type through, mirroring
+                        // `lower_expr_with_expected_type`'s other sink
+                        // points (a `let`/`const` annotation, `await`) --
+                        // without it, `return c.text(...)` inside an arrow
+                        // typed `(c: JsValue): JsValue => ...` (real hono
+                        // handler) lowered its dynamic method call with no
+                        // hint at all, defaulting to the untyped/JSON
+                        // dispatch and silently snapshotting the live
+                        // `Response` into JSON instead of returning it live.
+                        let ret_type = self.ret_type.clone();
+                        let value = self.lower_expr_with_expected_type(arg, Some(&ret_type))?;
                         if self.ret_type == HirType::Void {
                             if self.infer_expr_type(&value)? == HirType::Void
                                 && contains_await(&value)

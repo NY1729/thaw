@@ -47,6 +47,19 @@ struct FnLowerer<'a> {
     /// see `lower_expr_with_expected_type`'s doc comment for why this
     /// exists and how it stays scoped to exactly one call.
     expected_return_hint: Option<HirType>,
+    /// Like `expected_return_hint`, but for the *body* of the next arrow
+    /// function `lower_arrow` handles, taken the same one-shot way. An
+    /// arrow with no return-type annotation otherwise defaults its own
+    /// `ret_type` to `HirType::Dynamic`, which starves every `return`
+    /// inside it of a hint -- so a dynamic method call in tail position
+    /// (`return c.text(...)`, a real hono handler passed with no explicit
+    /// `: JsValue` annotation) silently took the untyped JSON-snapshot
+    /// path and handed hono back `{}` instead of the live `Response`.
+    /// Set only when an arrow is lowered as a direct argument to a
+    /// dynamic method call (`lower_dynamic_value_method_call`), the one
+    /// place a callback's *unannotated* return is still known to need to
+    /// stay a live `JsValue`.
+    expected_arrow_return_hint: Option<HirType>,
 }
 
 #[derive(Clone)]
