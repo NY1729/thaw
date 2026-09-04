@@ -87,6 +87,7 @@ pub fn generate_shim(
     functions: &[DtsFunction],
     native_lib_available: bool,
     qualified: &[QualifiedFallback],
+    typed_bare_aliases: &std::collections::HashSet<String>,
 ) -> String {
     let mut out = String::new();
     for (name, classification) in effective_classifications(functions, native_lib_available) {
@@ -115,6 +116,18 @@ pub fn generate_shim(
                 ));
             }
             Classification::Fallback { function, reason } => {
+                // thaw-cli's own `typed_dynamic_bare_alias` already
+                // generated a properly-typed forwarding wrapper under
+                // both this name's package-qualified alias and its bare
+                // name (whichever of those isn't itself suppressed by a
+                // cross-package collision) -- generating the untyped
+                // `(argsArray: Json): Json` shape here too would just be
+                // a second, unreachable-in-practice-but-still-a-
+                // duplicate-declaration-error declaration under the same
+                // name(s).
+                if typed_bare_aliases.contains(&function) {
+                    continue;
+                }
                 let returns_callable = functions
                     .iter()
                     .filter(|candidate| candidate.name == function)

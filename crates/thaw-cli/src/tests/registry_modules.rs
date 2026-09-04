@@ -8262,3 +8262,71 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The "no import at all" bare-name and package-qualified (`pkg.name(...)`)
+/// call syntaxes used to always reach `generate_shim`'s own, always-
+/// untyped `(argsArray: Json): Json` fallback -- fine for a single-
+/// argument function (which happens to already look like `argsArray`),
+/// but broken for any Fallback function taking more than one real
+/// argument, since the untyped shape expects its *one* parameter to
+/// already be a pre-packed JSON array, not real positional arguments.
+/// Real example: `--use semver`, calling bare `semver.major("1.2.3",
+/// true)` (or even just bare `major(...)`) with no import written at
+/// all. `typed_dynamic_bare_alias` fixes this by forwarding both the
+/// bare name and the package-qualified alias to whatever properly-typed
+/// declaration `typed_dynamic_declaration` already produced for a plain
+/// (non-generic, no `...rest`) Fallback function, instead of leaving
+/// them pointed at the untyped fallback. No import anywhere in this
+/// program at all -- both calls resolve purely through `--use`.
+#[test]
+fn bare_and_qualified_calls_with_no_import_reach_a_typed_multi_argument_fallback_function() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-bare-qualifier-typed-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("verkit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function major(version: string, precise?: boolean): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.major = function(version, precise) {\n\
+             var n = parseInt(String(version).split('.')[0], 10);\n\
+             return precise ? n + 0.5 : n;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"function main(): void {
+    console.log(verkit.major("3.5.1", true));
+    console.log(major("3.5.1"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["verkit".to_string()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3.5\n3\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

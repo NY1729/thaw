@@ -281,7 +281,12 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
         // function it declares (unlike `--use`, see
         // `generate_registry_shims`, where thaw-registry knows whether a
         // `native.a` actually exists).
-        shim.push_str(&thaw_bridge::generate_shim(&functions, true, &[]));
+        shim.push_str(&thaw_bridge::generate_shim(
+            &functions,
+            true,
+            &[],
+            &std::collections::HashSet::new(),
+        ));
     }
     Ok(shim)
 }

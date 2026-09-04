@@ -20500,6 +20500,99 @@ fn union_overload_dispatch_declaration(
     Some((dispatcher, declarations))
 }
 
+/// Builds a plain forwarding wrapper under `bare_name` (the Fallback
+/// function's own, un-mangled name, e.g. `"optional"`) that just calls
+/// `symbol` -- whatever typed, correctly-marshaling declaration this
+/// function already resolved to (a bare ambient declaration, an
+/// arity-dispatch wrapper, a callback adapter, or a JIT-compiled native
+/// function; this doesn't need to know or care which, since it only
+/// forwards positionally).
+///
+/// Without this, the "no import at all, `--use`'d package's bare name"
+/// and package-qualified (`pkg.name(...)`, rewritten to `pkg_name(...)`)
+/// call syntaxes both reach only `generate_shim`'s own, always-untyped
+/// `(argsArray: Json): Json` fallback under that exact name (a plain
+/// import, by contrast, gets rewritten straight to the typed `symbol` --
+/// see `module_graph.rs`'s `external_exports` lookup -- so it was never
+/// affected). Real example: `--use semver` with no import, then calling
+/// bare `semver.major("1.2.3", true)`, crashed ("args_json is not a
+/// valid JSON array") the moment `major` took more than the untyped
+/// fallback's own single pre-packed-array parameter.
+///
+/// Not attempted for a generic function (generic-forwarding -- a
+/// wrapper's own still-unresolved type parameter flowing into another
+/// generic ambient call -- isn't supported: confirmed via a direct
+/// experiment that thaw-hir's generic inference sees `Dynamic` for such
+/// a parameter and rejects it against the callee's constraint) or one
+/// with a `...rest` parameter; the caller filters both out before
+/// calling this.
+fn typed_dynamic_bare_alias(
+    bare_name: &str,
+    symbol: &str,
+    function: &thaw_bridge::DtsFunction,
+) -> Option<String> {
+    if function.rest_param.is_some() || function.generic.is_some() {
+        return None;
+    }
+    let params = function
+        .params
+        .iter()
+        .map(|(name, ty)| {
+            let rendered = match ty {
+                thaw_bridge::DtsType::Native(ty) => render_dynamic_type(ty)?,
+                thaw_bridge::DtsType::Unsupported(_) => "Json".to_string(),
+            };
+            Some((name.clone(), rendered))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // Same "Unsupported -> Json/JsValue, callback -> JsValue" mapping
+    // `typed_dynamic_declaration` itself uses for a return type -- kept
+    // as a separate small copy rather than shared, since the two are
+    // independent, narrow leaves (not worth the churn of threading a
+    // shared helper through an already-large, working function for this).
+    let ret_hir_type = match &function.ret {
+        thaw_bridge::DtsType::Unsupported(reason)
+            if reason == "`any` is not supported" || reason == "`unknown` is not supported" =>
+        {
+            thaw_hir::HirType::Json
+        }
+        thaw_bridge::DtsType::Unsupported(_) => thaw_hir::HirType::JsValue,
+        thaw_bridge::DtsType::Native(ret) => ret.clone(),
+    };
+    let ret = if matches!(
+        ret_hir_type,
+        thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
+    ) {
+        "JsValue".to_string()
+    } else {
+        render_dynamic_type(&ret_hir_type)?
+    };
+    let rendered_params = params
+        .iter()
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            format!(
+                "{name}{}: {ty}",
+                if index >= function.required_params { "?" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let args = params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let call = if ret == "void" {
+        format!("{symbol}({args}); return;")
+    } else {
+        format!("return {symbol}({args});")
+    };
+    Some(format!(
+        "function {bare_name}({rendered_params}): {ret} {{\n    {call}\n}}\n"
+    ))
+}
+
 fn typed_dynamic_declaration(
     package: &str,
     function: &thaw_bridge::DtsFunction,
@@ -22055,6 +22148,11 @@ fn generate_registry_shims(
                 typed_targets.insert((pkg.name.clone(), name.to_string()), symbol);
             }
         }
+        // Names for which `typed_dynamic_bare_alias` below actually
+        // emitted a typed forwarding wrapper under the bare name itself
+        // -- `generate_shim` skips its own, always-untyped fallback for
+        // these (see its own `already_typed` parameter).
+        let mut bare_aliased: std::collections::HashSet<String> = std::collections::HashSet::new();
         for function in &pkg.functions {
             let is_fallback = pkg.classifications.iter().any(|(name, classification)| {
                 name == &function.name
@@ -22117,6 +22215,34 @@ fn generate_registry_shims(
                 let already_bound = typed_targets.contains_key(&(pkg.name.clone(), function.name.clone()));
                 if let Some((symbol, declaration)) = declaration.filter(|_| !already_bound) {
                     shim.push_str(&declaration);
+                    // The package-qualified alias (`pkg.name(...)`,
+                    // rewritten to `q.alias` -- see `rewrite_qualified_calls`)
+                    // is unconditionally generated for every Fallback name
+                    // regardless of collision status (see
+                    // `QualifiedFallback`'s own doc comment), so it's
+                    // always worth typing when possible -- qualification
+                    // is exactly the mechanism a cross-package collision
+                    // is disambiguated *through*, unlike the plain bare
+                    // name below.
+                    if let Some(q) = qualified.iter().find(|q| q.name == function.name) {
+                        if let Some(alias) = typed_dynamic_bare_alias(&q.alias, &symbol, function) {
+                            shim.push_str(&alias);
+                            bare_aliased.insert(function.name.clone());
+                        }
+                    }
+                    // Cross-package collisions (`colliding`) already force
+                    // qualified syntax for the *untyped* bare name
+                    // (`suppress_bare`) -- the same reasoning applies here:
+                    // a typed bare-name wrapper would be just as liable to
+                    // silently resolve to whichever colliding package's own
+                    // `--use` happened to declare it, so it's skipped for
+                    // exactly the same names.
+                    if !colliding.contains(&function.name) {
+                        if let Some(alias) = typed_dynamic_bare_alias(&function.name, &symbol, function) {
+                            shim.push_str(&alias);
+                            bare_aliased.insert(function.name.clone());
+                        }
+                    }
                     typed_targets.insert((pkg.name.clone(), function.name.clone()), symbol);
                     if jit_operation.is_some() {
                         jit_targets.insert((pkg.name.clone(), function.name.clone()));
@@ -22134,6 +22260,7 @@ fn generate_registry_shims(
                 &pkg.functions,
                 native_lib_available,
                 qualified,
+                &bare_aliased,
             ));
         }
 
