@@ -1571,11 +1571,35 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
-        if matches!(expr, Expr::Call(_)) {
+        // `Expr::Await` is included alongside `Expr::Call` -- an awaited
+        // expression's own expected type is really about the *resolved*
+        // value the await produces, which for a dynamic method call
+        // (`await app.request(...)`, real hono) is exactly the hint its
+        // own inner `Expr::Call` needs (`lower_call`'s own `.take()` of
+        // this same field, unchanged, still finds it: `Expr::Await`'s
+        // handler in `lower_expr`'s own big match calls plain `lower_
+        // expr` on its argument, not this function, so the hint set here
+        // stays live all the way through since nothing clears it until
+        // this whole call returns). Real trigger: `const res: JsValue =
+        // await app.request('/')` used to fail ("value has type Json,
+        // expected JsValue") since the inner method call had no hint at
+        // all and defaulted to the untyped, JSON-decoding dispatch.
+        if matches!(expr, Expr::Call(_) | Expr::Await(_)) {
             self.expected_return_hint = expected.cloned();
+        }
+        // An arrow function passed directly as a dynamic-call argument
+        // (a callback handed to hono's `app.get`, zod's `.refine`, etc.)
+        // gets the same one-shot treatment, but aimed at its *body*'s
+        // return statements rather than the arrow value itself -- see
+        // `expected_arrow_return_hint`'s own doc comment. Only meaningful
+        // when the hint is `JsValue`, since that's the only expected type
+        // this call site ever passes for a callback argument.
+        if matches!(expr, Expr::Arrow(_)) && expected == Some(&HirType::JsValue) {
+            self.expected_arrow_return_hint = expected.cloned();
         }
         let result = self.lower_expr(expr);
         self.expected_return_hint = None;
+        self.expected_arrow_return_hint = None;
         result
     }
 }

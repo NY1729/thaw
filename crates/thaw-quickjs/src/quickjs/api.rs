@@ -187,18 +187,33 @@ fn invoke_impl<'js>(
     resolve_value_impl(ctx, result, label)
 }
 
-fn resolve_value_impl<'js>(
-    ctx: Ctx<'js>,
+/// Always passes `result` through the realm's Promise resolution
+/// procedure, returning the *resolved* value (not JSON-encoded --
+/// callers that need JSON should go through `resolve_value_impl`
+/// instead, which wraps this). `Value::as_promise` only recognizes
+/// native Promise objects; `Promise.resolve` also assimilates arbitrary
+/// foreign thenables, handles throwing `then` accessors/calls, and obeys
+/// the first-settlement-wins rule required by JavaScript.
+///
+/// Needed anywhere a result gets **retained as a live handle** rather
+/// than JSON-encoded (`callDynamicMethodHandle`'s own native side,
+/// `thaw_js_call_method_handle_result`) -- without this, an async
+/// method's real result (a still-pending Promise, e.g. real hono's own
+/// `app.request(...)`/`.fetch(...)`) would get retained *as the Promise
+/// itself*, not the value it resolves to, and reading a property off it
+/// afterward (`res.status`) silently reads `undefined` off the wrong
+/// object instead of erroring -- confirmed via a direct repro. Thaw's own
+/// `await` keyword doesn't help here either: it's a no-op pass-through
+/// for anything but `sleep(...)` (`compile_await`'s own doc comment --
+/// "User-defined async functions still use the V1 synchronous ABI"),
+/// since it doesn't know a `JsValue` might represent a pending QuickJS-
+/// side Promise at all.
+fn resolve_promise_value<'js>(
+    ctx: &Ctx<'js>,
     result: Value<'js>,
     label: &str,
-) -> Result<String, String> {
+) -> Result<Value<'js>, String> {
     let to_string_err = |e: rquickjs::Error| e.to_string();
-
-    // Always pass the result through the realm's Promise resolution
-    // procedure. `Value::as_promise` only recognizes native Promise objects;
-    // `Promise.resolve` also assimilates arbitrary foreign thenables, handles
-    // throwing `then` accessors/calls, and obeys the first-settlement-wins
-    // rule required by JavaScript.
     let assimilate: Function = ctx
         .eval("(value) => Promise.resolve(value)")
         .map_err(to_string_err)?;
@@ -206,17 +221,25 @@ fn resolve_value_impl<'js>(
         rquickjs::Error::Exception => {
             format!(
                 "`{label}` could not resolve its result: {}",
-                describe_exception(&ctx)
+                describe_exception(ctx)
             )
         }
         e => format!("`{label}` could not resolve its result: {e}"),
     })?;
-    let result = finish_with_platform_events(&ctx, &promise).map_err(|e| match e {
+    finish_with_platform_events(ctx, &promise).map_err(|e| match e {
         rquickjs::Error::Exception => {
-            format!("`{label}`'s promise rejected: {}", describe_exception(&ctx))
+            format!("`{label}`'s promise rejected: {}", describe_exception(ctx))
         }
         e => format!("`{label}`'s promise rejected or stalled: {e}"),
-    })?;
+    })
+}
+
+fn resolve_value_impl<'js>(
+    ctx: Ctx<'js>,
+    result: Value<'js>,
+    label: &str,
+) -> Result<String, String> {
+    let result = resolve_promise_value(&ctx, result, label)?;
 
     // `ctx.json_stringify` (rather than calling the JS `JSON.stringify`
     // function directly and coercing its return value straight to a Rust
@@ -717,6 +740,8 @@ pub extern "C" fn thaw_js_call_handle_handle_result(
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         let result = invoke_raw(ctx.clone(), target, &args_json)?;
+        let result =
+            resolve_promise_value(&ctx, result, &format!("JavaScript value #{handle}"))?;
         retain_value(&ctx, result)
     });
     match result {
@@ -942,6 +967,7 @@ pub extern "C" fn thaw_js_call_method_handle_result(
     let args_json = to_str(args_json);
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let value = invoke_method(&ctx, handle, &name, &args_json)?;
+        let value = resolve_promise_value(&ctx, value, &format!("JavaScript method `{name}`"))?;
         retain_value(&ctx, value)
     });
     match result {
