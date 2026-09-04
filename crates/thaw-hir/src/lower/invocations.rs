@@ -84,6 +84,87 @@ impl<'a> FnLowerer<'a> {
     /// picks `callDynamicMethodHandle` when it says so and
     /// `callDynamicMethod` (the JSON-returning default, matching every
     /// caller before this existed) otherwise.
+    /// Infers a member-call receiver's static type well enough to pick a
+    /// dispatch strategy (a known native class's method table, a
+    /// dynamic-`JsValue` method call, or neither) -- extracted out of
+    /// `lower_call`'s own member-call branch so the `Expr::Call` arm
+    /// below can recurse into itself for a receiver that's *itself* a
+    /// chained method call (see that arm's own doc comment).
+    fn infer_member_receiver_type(&self, expr: &Expr) -> Option<HirType> {
+        match expr {
+            Expr::Ident(receiver) => {
+                let name = self.resolve_binding(receiver.sym.as_ref());
+                self.scope.get(&name).cloned()
+            }
+            Expr::New(construction) => construction
+                .callee
+                .as_ident()
+                .and_then(|class| self.interfaces.get(class.sym.as_ref()).cloned()),
+            Expr::This(_) => self.scope.get(&self.resolve_binding("this")).cloned(),
+            Expr::Member(_) | Expr::Paren(_) | Expr::TsAs(_) | Expr::TsTypeAssertion(_) => {
+                infer_generic_constructor_expr_type(
+                    expr,
+                    self.interfaces,
+                    self.generic_interfaces,
+                    std::slice::from_ref(&self.scope),
+                    &self.generic_call_returns,
+                )
+                .ok()
+            }
+            // A call chained directly off another call's return value
+            // (`dayjs("2024-01-15").format(...)`, no `const` binding in
+            // between) -- the receiver's real type isn't recovered from
+            // `self.scope` the way a bound variable's is, since there's
+            // no variable at all. Only the *type* is inspected here, via
+            // the plain AST node -- the receiver itself is lowered and
+            // evaluated exactly once, further down, when it's spliced
+            // into the synthesized call (or, for the dynamic-`JsValue`
+            // path, re-lowered through `lower_expr_with_expected_type`).
+            Expr::Call(inner) => match &inner.callee {
+                // The callee is an ordinary top-level function/ambient
+                // declaration (`dayjs(...)`, `z.string()` after import
+                // rewriting) -- looks up its own *declared* (not
+                // per-call-site-substituted) return type directly.
+                // Correct for a non-generic declaration; a genuinely
+                // generic callee's `ret` here is still its own
+                // unsubstituted placeholder shape, so those are excluded
+                // and fall through to `None` exactly as before.
+                Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Ident(_)) => {
+                    let Expr::Ident(identifier) = callee.as_ref() else {
+                        unreachable!()
+                    };
+                    self.signatures
+                        .get(identifier.sym.as_ref())
+                        .filter(|signature| signature.generic_type_params.is_empty())
+                        .map(|signature| signature.ret.clone())
+                }
+                // The callee is itself a member expression -- this call
+                // is a chained method call (`z.string().min(2)`, itself
+                // the receiver of a further `.max(10)`). A dynamic
+                // method's real return type has no declared shape to
+                // look up at all (see `lower_dynamic_value_method_call`'s
+                // own doc comment) -- but by the same convention its
+                // *runtime* dispatch already uses (a chained receiver
+                // unconditionally needs a real handle), a method invoked
+                // on a `JsValue` receiver is assumed to also yield
+                // another `JsValue` for chaining purposes: real
+                // zod/dayjs-style builder chains almost universally keep
+                // returning "more of the same" object. Recurses into the
+                // *inner* member's own object so an arbitrarily long
+                // chain (`.a().b().c()`) resolves correctly at every
+                // link.
+                Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Member(inner_member) => self
+                        .infer_member_receiver_type(&inner_member.obj)
+                        .filter(|ty| *ty == HirType::JsValue),
+                    _ => None,
+                },
+                Callee::Super(_) | Callee::Import(_) => None,
+            },
+            _ => None,
+        }
+    }
+
     fn lower_dynamic_value_method_call(
         &mut self,
         receiver_expr: &Expr,
@@ -101,7 +182,19 @@ impl<'a> FnLowerer<'a> {
         } else {
             "callDynamicMethod"
         };
-        let receiver = self.lower_expr(receiver_expr)?;
+        // The receiver must always come back as a genuine handle here,
+        // never a JSON-decoded snapshot -- it's about to be fed straight
+        // into `callDynamicMethod`/`callDynamicMethodHandle`, which needs
+        // the real handle id, not a value. Unlike *this* call's own
+        // `expected` (only `Some(JsValue)` when an outer `let`/`const`
+        // annotation or a further chained call asked for it), the
+        // receiver's need for a real handle is unconditional -- so this
+        // is a second, always-on user of `lower_expr_with_expected_type`'s
+        // one-shot hint (see its own doc comment), not a reuse of
+        // `expected`. Real example: `z.string().min(2).max(10)` -- `.max`'s
+        // receiver is itself the *method call* `z.string().min(2)`, which
+        // needs this same hint recursively for its own receiver in turn.
+        let receiver = self.lower_expr_with_expected_type(receiver_expr, Some(&HirType::JsValue))?;
         let json_args = args
             .iter()
             .map(|argument| {
@@ -829,55 +922,7 @@ impl<'a> FnLowerer<'a> {
                         });
                     }
                 }
-                let receiver_type = match member.obj.as_ref() {
-                    Expr::Ident(receiver) => {
-                        let name = self.resolve_binding(receiver.sym.as_ref());
-                        self.scope.get(&name).cloned()
-                    }
-                    Expr::New(construction) => construction
-                        .callee
-                        .as_ident()
-                        .and_then(|class| self.interfaces.get(class.sym.as_ref()).cloned()),
-                    Expr::This(_) => self.scope.get(&self.resolve_binding("this")).cloned(),
-                    Expr::Member(_) | Expr::Paren(_) | Expr::TsAs(_) | Expr::TsTypeAssertion(_) => {
-                        infer_generic_constructor_expr_type(
-                            &member.obj,
-                            self.interfaces,
-                            self.generic_interfaces,
-                            std::slice::from_ref(&self.scope),
-                            &self.generic_call_returns,
-                        )
-                        .ok()
-                    }
-                    // A call chained directly off another call's return
-                    // value (`dayjs("2024-01-15").format(...)`, no `const`
-                    // binding in between) -- the receiver's real type
-                    // isn't recovered from `self.scope` the way a bound
-                    // variable's is, since there's no variable at all.
-                    // Looks up the callee's own *declared* (not per-call-
-                    // site-substituted) return type directly instead:
-                    // correct for an ordinary, non-generic top-level
-                    // function/ambient declaration -- a genuinely generic
-                    // callee's `ret` here is still its own unsubstituted
-                    // placeholder shape, so those are excluded and fall
-                    // through to `None` exactly as before. Only the
-                    // *type* is inspected here, via the plain AST node
-                    // (`inner.callee`) -- the receiver itself is lowered
-                    // and evaluated exactly once, further down, when it's
-                    // spliced into the synthesized call as `member.obj`.
-                    Expr::Call(inner) => match &inner.callee {
-                        Callee::Expr(callee) => match callee.as_ref() {
-                            Expr::Ident(identifier) => self
-                                .signatures
-                                .get(identifier.sym.as_ref())
-                                .filter(|signature| signature.generic_type_params.is_empty())
-                                .map(|signature| signature.ret.clone()),
-                            _ => None,
-                        },
-                        _ => None,
-                    },
-                    _ => None,
-                };
+                let receiver_type = self.infer_member_receiver_type(&member.obj);
                 if let Some(class_receiver_type) =
                     receiver_type.clone().filter(|ty| class_name_from_type(ty).is_some())
                 {

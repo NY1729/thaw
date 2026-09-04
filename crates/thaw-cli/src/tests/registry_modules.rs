@@ -8406,6 +8406,91 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A method called directly on the result of *another* method call, with
+/// no intermediate `const` binding at all -- `z.string().min(2).max(10)
+/// .safeParse(...)`, `dayjs(...).add(10, "day").format(...)` -- used to
+/// fail to build ("unsupported member call target") past the very first
+/// link. Two gaps, both in thaw-hir's `lower/invocations.rs`, fixed
+/// together:
+///
+/// 1. The member-call receiver-type match had no case at all for a
+///    receiver that's itself `<expr>.method(...)` (a `Call` whose callee
+///    is a `Member`, not a plain `Ident`) -- only a *plain* function call
+///    receiver (`dayjs(...).format(...)`, no further chaining) was
+///    handled. Fixed by extracting the whole match into a proper
+///    recursive method, `infer_member_receiver_type`: when the receiver
+///    is itself a method call, it recurses into *that* call's own
+///    receiver, and (since a dynamic method's real return type has no
+///    declared shape to look up at all) assumes a method invoked on a
+///    `JsValue` receiver also yields another `JsValue` -- matching the
+///    same "more of the same object" convention real builder-style
+///    chains (zod, dayjs) universally follow.
+/// 2. Even once the receiver's *type* was known, its actual *value*
+///    still came back wrong: `lower_dynamic_value_method_call` lowered
+///    its own receiver expression with no expected-type hint, so a
+///    receiver that's itself a dynamic method call defaulted to the
+///    JSON-decoding behavior (see `a_method_can_return_a_jsvalue_when_
+///    the_call_site_asks_for_one` above) instead of a real handle --
+///    silently wrong data, not a build error. Fixed by lowering the
+///    receiver through `lower_expr_with_expected_type(_, Some(&HirType::
+///    JsValue))` instead of the bare `lower_expr`, so every link in the
+///    chain unconditionally asks its own receiver for a real handle,
+///    recursively.
+///
+/// Exercises a three-link-deep fully inline chain (no binding anywhere)
+/// to confirm both fixes recurse correctly through more than one hop.
+#[test]
+fn a_method_can_be_chained_directly_onto_another_methods_call_result() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-chained-dynamic-method-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("chain-kit2");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(name: string): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeThing(name) {\n\
+             return {\n\
+                 append: function(part) {\n\
+                     return makeThing(name + '.' + part);\n\
+                 },\n\
+                 describe: function() { return 'thing:' + name; }\n\
+             };\n\
+         }\n\
+         module.exports.makeThing = makeThing;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "chain-kit2";
+function main(): void {
+    console.log(makeThing("root").append("a").append("b").describe());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"thing:root.a.b\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The "no import at all" bare-name and package-qualified (`pkg.name(...)`)
 /// call syntaxes used to always reach `generate_shim`'s own, always-
 /// untyped `(argsArray: Json): Json` fallback -- fine for a single-
