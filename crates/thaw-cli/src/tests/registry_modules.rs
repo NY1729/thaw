@@ -9009,6 +9009,80 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A plain property *read* (no call at all) on a `JsValue` receiver used
+/// to be entirely unsupported ("unsupported property access `.field` on
+/// a value of type JsValue") -- only a *method call* on a `JsValue` was
+/// wired up to ordinary syntax (`lower_dynamic_value_method_call`, an
+/// earlier session). Real motivating example: real zod's own
+/// `ZodError.issues` is deliberately a *non-enumerable* own property (so
+/// pretty-printing the error via its own lazy `.message` getter doesn't
+/// eagerly serialize every issue) -- meaning an *unannotated* method
+/// call's own default JSON-snapshot behavior (a JSON encode can only
+/// ever capture enumerable properties) silently loses `.issues`
+/// entirely, and there was no other way to reach it at all.
+///
+/// Fixed by wiring `.property` syntax on a `JsValue` receiver to the
+/// existing `getDynamicProperty` intrinsic (`thaw_js_get_property_
+/// result`, thaw-quickjs) -- previously only a manual escape hatch,
+/// unused by ordinary syntax, the same way `callDynamicMethod` was
+/// before *it* got wired up. Reads the property by plain lookup, not by
+/// enumeration, so it finds a non-enumerable property correctly.
+/// `getDynamicProperty` always hands back a real handle (no JSON-
+/// decoding sibling to choose between), so a chained property read
+/// (`bad.error.issues.length`) recurses back into the same lowering for
+/// free once the outermost receiver is annotated `JsValue` -- confirmed
+/// here with only the *outermost* `bad` explicitly annotated, not every
+/// intermediate step.
+#[test]
+fn a_property_can_be_read_on_a_jsvalue_including_a_non_enumerable_one() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jsvalue-property-read-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("prop-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.makeThing = function() {\n\
+             var inner = { visible: 'v', hidden: 'h' };\n\
+             Object.defineProperty(inner, 'hidden', { value: 'h', enumerable: false });\n\
+             return { detail: inner };\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "prop-kit";
+function main(): void {
+    const thing: JsValue = makeThing();
+    console.log(readDynamicValue(thing.detail.visible));
+    console.log(readDynamicValue(thing.detail.hidden));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"v\"\n\"h\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A method called directly on the result of *another* method call, with
 /// no intermediate `const` binding at all -- `z.string().min(2).max(10)
 /// .safeParse(...)`, `dayjs(...).add(10, "day").format(...)` -- used to

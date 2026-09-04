@@ -889,6 +889,9 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
                         element.as_ref(),
                     ),
+                    HirType::JsValue => {
+                        self.lower_dynamic_value_property_read(obj, prop.sym.as_ref())
+                    }
                     other => Err(format!(
                         "unsupported property access `.{}` on a value of type {other:?}",
                         prop.sym
