@@ -193,9 +193,21 @@ pub fn generate_shim(
 pub fn generate_native_addon_shim(
     functions: &[DtsFunction],
     qualified: &[QualifiedFallback],
+    typed_bare_aliases: &std::collections::HashSet<String>,
 ) -> String {
     let mut out = String::new();
     for (function, _) in effective_classifications(functions, false) {
+        // See the matching check (and its own doc comment) in
+        // `generate_shim` -- thaw-cli's own `typed_dynamic_bare_alias`
+        // already generated a properly-typed wrapper under both this
+        // name's forms for a native-addon Fallback function too (they
+        // share the same declaration/symbol machinery, `napi: bool`
+        // just picks the encoded symbol's prefix), so emitting the
+        // untyped shape here as well would be a duplicate declaration
+        // under the same name(s), not just a harmless dead one.
+        if typed_bare_aliases.contains(&function) {
+            continue;
+        }
         if let Some(qualified) = qualified.iter().find(|entry| entry.name == function) {
             out.push_str("// Fallback (N-API), package-qualified alias\n");
             out.push_str(&format!(
