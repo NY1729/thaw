@@ -30,6 +30,13 @@ struct ResolvedPackage {
     /// has no export named `z`" (neither is a function/class/interface
     /// at all -- both are bound purely by an `import *`).
     namespace_self_aliases: std::collections::HashSet<String>,
+    /// Every `NAME -> { member name -> real flattened function name }`
+    /// nested-namespace table this package's own `.d.ts` declares -- see
+    /// `thaw_bridge::nested_namespace_members`'s own doc comment. Real
+    /// example: zod's `coerce` (and `core`, `iso`), letting `z.coerce.
+    /// number(...)` resolve straight to the flattened function it
+    /// actually names, one level down from `z` itself.
+    nested_namespaces: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
 enum JitExport {
@@ -21532,6 +21539,14 @@ type ExternalExports = std::collections::HashMap<String, std::collections::HashM
 /// Only ever populated for a package that actually has one (most
 /// packages don't, so this stays empty for them).
 type ExternalNamespaceAliases = std::collections::HashMap<String, std::collections::HashSet<String>>;
+/// `package name -> { namespace name -> { member name -> real flattened
+/// function name } }` -- see `thaw_bridge::nested_namespace_members`'s
+/// own doc comment. Only ever populated for a package that actually has
+/// one (most packages don't, so this stays empty for them).
+type ExternalNestedNamespaces = std::collections::HashMap<
+    String,
+    std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+>;
 type RegistryShims = (
     String,
     Vec<PathBuf>,
@@ -21546,6 +21561,7 @@ type RegistryShims = (
     Vec<FactoryClassRewrite>,
     ExternalExports,
     ExternalNamespaceAliases,
+    ExternalNestedNamespaces,
 );
 
 /// `(factory function name, class name)` -- a Fallback factory function
@@ -21773,6 +21789,7 @@ fn generate_registry_shims(
             .collect();
         let namespace_self_aliases =
             thaw_bridge::self_referential_namespace_aliases(&package.dts_source);
+        let nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             commonjs_export_name,
@@ -21784,6 +21801,7 @@ fn generate_registry_shims(
             bundle_js: package.bundle_js,
             factory_class_returns,
             namespace_self_aliases,
+            nested_namespaces,
         });
     }
 
@@ -21873,10 +21891,17 @@ fn generate_registry_shims(
         }
     }
 
-    /// `(package_name, js_source, fallback_function_names, qualified_aliases)`
-    /// -- kept as owned data so the borrowed `ModuleBundle`s built from it
-    /// below can outlive the loop that collects it.
-    type PendingBundle = (String, String, Vec<String>, Vec<(String, String)>);
+    /// `(package_name, js_source, fallback_function_names, qualified_aliases,
+    /// nested_namespace_aliases)` -- kept as owned data so the borrowed
+    /// `ModuleBundle`s built from it below can outlive the loop that
+    /// collects it.
+    type PendingBundle = (
+        String,
+        String,
+        Vec<String>,
+        Vec<(String, String)>,
+        Vec<(String, String)>,
+    );
 
     let mut shim = String::new();
     let mut typed_targets: std::collections::HashMap<(String, String), String> =
@@ -22398,9 +22423,31 @@ fn generate_registry_shims(
                     thaw_bridge::Classification::Fallback { .. } => None,
                 })
                 .collect();
-            let qualified_aliases = qualified
+            let qualified_aliases: Vec<(String, String)> = qualified
                 .iter()
                 .map(|q| (q.name.clone(), q.qualified_key.clone()))
+                .collect();
+            // A nested-namespace member (`z.coerce.number`, flattened to
+            // its own synthetic top-level name `__thaw_ns_coerce_number`
+            // by thaw-registry -- see `thaw_bridge::
+            // nested_namespace_members`'s own doc comment) is never
+            // actually a real property of `module.exports` under that
+            // synthetic name; it only exists at its real, qualified
+            // runtime path (`module.exports.coerce.number`). Kept as its
+            // own separate list, *not* folded into `qualified_aliases`
+            // above -- see `thaw_bridge::ModuleBundle::
+            // nested_namespace_aliases`'s own doc comment for why a
+            // dotted path needs a different capture mechanism (inside
+            // the bundle's own wrapped script) than a plain collision
+            // alias (a separate, later `loadScript`) does.
+            let nested_namespace_aliases: Vec<(String, String)> = pkg
+                .nested_namespaces
+                .iter()
+                .flat_map(|(namespace, members)| {
+                    members.iter().map(move |(member, target)| {
+                        (format!("{namespace}.{member}"), target.clone())
+                    })
+                })
                 .collect();
             // A package whose *only* export is a class (real example:
             // hono, whose main export is the `Hono` class with no
@@ -22422,6 +22469,7 @@ fn generate_registry_shims(
                     bundle_js.clone(),
                     fallback_names,
                     qualified_aliases,
+                    nested_namespace_aliases,
                 ));
             }
         }
@@ -22430,11 +22478,14 @@ fn generate_registry_shims(
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()
         .map(
-            |(name, js, fallback_names, qualified_aliases)| thaw_bridge::ModuleBundle {
-                package_name: name.as_str(),
-                js_source: js.as_str(),
-                fallback_names,
-                qualified_aliases,
+            |(name, js, fallback_names, qualified_aliases, nested_namespace_aliases)| {
+                thaw_bridge::ModuleBundle {
+                    package_name: name.as_str(),
+                    js_source: js.as_str(),
+                    fallback_names,
+                    qualified_aliases,
+                    nested_namespace_aliases,
+                }
             },
         )
         .collect();
@@ -22451,10 +22502,14 @@ fn generate_registry_shims(
 
     let mut external_exports = ExternalExports::new();
     let mut external_namespace_aliases: ExternalNamespaceAliases = std::collections::HashMap::new();
+    let mut external_nested_namespaces: ExternalNestedNamespaces = std::collections::HashMap::new();
     for pkg in &resolved {
         if !pkg.namespace_self_aliases.is_empty() {
             external_namespace_aliases
                 .insert(pkg.name.clone(), pkg.namespace_self_aliases.clone());
+        }
+        if !pkg.nested_namespaces.is_empty() {
+            external_nested_namespaces.insert(pkg.name.clone(), pkg.nested_namespaces.clone());
         }
         let mut package_exports = std::collections::HashMap::new();
         for (name, classification) in &pkg.classifications {
@@ -22501,5 +22556,6 @@ fn generate_registry_shims(
         factory_class_rewrites,
         external_exports,
         external_namespace_aliases,
+        external_nested_namespaces,
     ))
 }

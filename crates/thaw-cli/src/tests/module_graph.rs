@@ -544,6 +544,7 @@ fn resolves_and_reports_star_export_ambiguity() {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
     )
     .unwrap_err();
     assert!(
@@ -576,6 +577,7 @@ fn rejects_relative_typescript_import_cycles_with_the_full_chain() {
     let error = module_graph::bundle(
         &dir.join("main.ts"),
         &std::fs::read_to_string(dir.join("main.ts")).unwrap(),
+        &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),

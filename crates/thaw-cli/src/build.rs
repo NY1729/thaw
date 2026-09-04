@@ -114,6 +114,7 @@ fn build_with_link_mode(
         factory_class_rewrites,
         external_exports,
         external_namespace_aliases,
+        external_nested_namespaces,
     ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     let qualifier_by_package =
@@ -171,6 +172,7 @@ fn build_with_link_mode(
         &user_source,
         &external_exports,
         &external_namespace_aliases,
+        &external_nested_namespaces,
         &external_resolutions,
     )?;
     if !shim_source.is_empty() {
