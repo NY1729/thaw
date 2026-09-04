@@ -320,6 +320,72 @@ fn installed_package_inlines_named_import_reexports() {
 }
 
 #[test]
+fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserved_word_alias() {
+    // `declare function _enum(...)` (no `export` prefix at all) followed
+    // by a separate, *same-file* `export { _enum as enum };` -- real-
+    // world example: zod v4's own `schemas.d.cts`, which declares this
+    // exact shape (two overloads) because `enum` is a reserved word and
+    // can't be the function's own declared name. Neither the existing
+    // `import_equals_targets` nor `named_import_targets` lookup covers
+    // this: `_enum` isn't bound via any import at all, just declared
+    // directly in the same file. Also covers the reserved-word alias
+    // itself (`null`) that must be *skipped*, not emitted as invalid
+    // syntax (`declare function null(...)` is a parse error, not just
+    // an unusual name) -- confirmed it doesn't poison the rest of the
+    // file's declarations.
+    let scratch = temp_registry("installed-dts-local-bare-reexport-scratch");
+    let registry = temp_registry("installed-dts-local-bare-reexport-registry");
+    let package = scratch.join("node_modules/case-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"case-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "export * from './schemas';\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("schemas.d.ts"),
+        "declare function _enum(values: readonly string[]): string;\n\
+         declare function _enum(entries: Record<string, string>): string;\n\
+         export { _enum as enum };\n\
+         declare function _null(): string;\n\
+         export { _null as null };\n\
+         export declare function string(): string;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { enum: function() { return 'enum'; }, string: function() { return 'string'; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "case-kit").unwrap();
+    let declarations = resolve(&registry, "case-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("declare function enum(values: readonly string[]): string"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("declare function enum(entries: Record<string, string>): string"),
+        "{declarations}"
+    );
+    assert!(
+        !declarations.contains("function null("),
+        "reserved-word alias should be skipped, not emitted as invalid syntax: {declarations}"
+    );
+    assert!(
+        declarations.contains("function string(): string"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_import_equals_reexports() {
     // `import Name = require("./path")` (a TS import-equals declaration)
     // followed by a *local* `export { Name as exported };` (no `from`
