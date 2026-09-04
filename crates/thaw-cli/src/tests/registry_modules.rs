@@ -7561,3 +7561,74 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "-995\n4\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A real `import * as pkg from "pkg"` namespace import, calling a
+/// two-parameter (one optional) Fallback function through it
+/// (`pkg.major(version, precise?)`), used to be silently hijacked by the
+/// unrelated "bare qualifier, no import needed" convenience syntax
+/// (`rewrite_qualified_calls`) whenever the chosen namespace alias
+/// happened to equal the package's own qualifier -- the natural,
+/// idiomatic choice, exactly what real code (`import * as semver from
+/// "semver"`) does. That rewrite sends the call to the untyped,
+/// single-`argsArray`-parameter Fallback alias instead of the properly
+/// typed, arity-dispatching wrapper a plain `import { major }` gets,
+/// crashing with "args_json is not a valid JSON array" the moment any
+/// argument was passed un-packed. Fixed by having the rewrite skip any
+/// qualifier name that's also bound by a real import in the file.
+#[test]
+fn namespace_import_member_call_is_not_hijacked_by_the_bare_qualifier_rewrite() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-namespace-import-not-hijacked-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("verkit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function major(version: string, precise?: boolean): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.major = function(version, precise) {\n\
+             var n = parseInt(String(version).split('.')[0], 10);\n\
+             return precise ? n + 0.5 : n;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import * as verkit from "verkit";
+function main(): void {
+    console.log(verkit.major("3.2.1"));
+    console.log(verkit.major("3.2.1", true));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    // The bare-qualifier rewrite this test guards against only fires for
+    // an explicitly `--use`d package (see `qualified_call_rewrites`'s
+    // `use_qualifiers` filter in `build_with_link_mode`) -- an
+    // auto-resolved-from-the-import package alone doesn't reproduce it.
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["verkit".to_string()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n3.5\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
