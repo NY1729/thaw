@@ -908,6 +908,58 @@ fn dts_source_with_reexported_functions(
     Ok(output)
 }
 
+/// Whether `name` is a full ECMAScript reserved word -- one that can
+/// never be used as an ordinary binding/declaration name (a function
+/// declared `declare function null(...)` is a syntax error, full stop,
+/// not just an unusual identifier choice). Deliberately excludes a
+/// "future reserved word" like `enum` and a merely-predefined global
+/// like `undefined`, neither of which is actually reserved in this
+/// position -- both parse fine as a function's own name, and real npm
+/// packages rename an internal helper to exactly these words (zod's
+/// `z.enum(...)`, `z.undefined()`) since they're the desired public API
+/// name (see the `enum`/`catch`/`instanceof`/etc. rename-export handling
+/// above, whose alias this guards).
+fn is_ecmascript_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+    )
+}
+
 /// Renames a single function declaration snippet's own declared name to
 /// `exported`, wherever it actually is -- rather than assuming it matches
 /// whatever name it was originally looked up under. That assumption holds
@@ -971,6 +1023,91 @@ fn all_reexported_function_declarations(
                             )
                         })?,
                 ));
+            }
+        }
+    }
+    // A *local*, non-exported `declare function` statement -- collected
+    // up front (by name, supporting more than one overload) so a
+    // same-file, no-`from`-clause rename-export below (`export { _enum
+    // as enum };`) can resolve to one even though it was never itself
+    // `export`-prefixed. Real example: zod's own `schemas.d.cts`
+    // declares `declare function _enum(...)` (two overloads) bare, then
+    // separately does `export { _enum as enum };` -- `enum` being a
+    // reserved word, it can't be the function's own declared name.
+    // Without this, `_enum` (and thus `z.enum(...)`) was silently
+    // missing from the flattened `package.d.ts` entirely, not even
+    // present under its own internal name.
+    let mut local_declarations: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for item in &module.body {
+        if let ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Fn(function))) = item {
+            let snippet = source_map.span_to_snippet(function.span()).map_err(|error| {
+                format!(
+                    "failed to read declaration for `{}`: {error:?}",
+                    function.ident.sym
+                )
+            })?;
+            local_declarations
+                .entry(function.ident.sym.to_string())
+                .or_default()
+                .push(snippet);
+        }
+    }
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+            continue;
+        };
+        if export.type_only || export.src.is_some() {
+            continue;
+        }
+        for specifier in &export.specifiers {
+            let ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            if named.is_type_only {
+                continue;
+            }
+            let export_name = |name: &ModuleExportName| match name {
+                ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                ModuleExportName::Str(_) => None,
+            };
+            let Some(original) = export_name(&named.orig) else {
+                continue;
+            };
+            let exported = named
+                .exported
+                .as_ref()
+                .and_then(export_name)
+                .unwrap_or_else(|| original.clone());
+            let Some(snippets) = local_declarations.get(&original) else {
+                continue;
+            };
+            for snippet in snippets {
+                let snippet = if exported == original {
+                    snippet.clone()
+                } else {
+                    rename_declared_function(snippet.clone(), &exported)
+                };
+                // The exported alias can be any identifier-like text at
+                // all in TS export-specifier syntax, including a real
+                // ECMAScript reserved word (`null`, `void`, `function`,
+                // `catch`, `instanceof`) that can never actually be a
+                // function's own declared name -- real example: zod's
+                // own `export { _null as null };`. Renaming to one of
+                // those would produce text no parser accepts (`declare
+                // function null(...)`), and letting that reach the
+                // flattened file poisons parsing for every other
+                // declaration in it, not just this one -- confirmed via
+                // a standalone repro of each word below. `enum` (a
+                // future-reserved word, not a full keyword) and
+                // `undefined` (not reserved at all, just a predefined
+                // global) are deliberately not in this list -- both are
+                // real, valid function names to this parser, and zod
+                // uses both (`z.enum(...)`, `z.undefined()`).
+                if is_ecmascript_keyword(&exported) {
+                    continue;
+                }
+                declarations.push((exported.clone(), snippet));
             }
         }
     }
