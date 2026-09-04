@@ -8189,3 +8189,76 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `callDynamicMethod` (the fix above routes `.method()` syntax through
+/// it) always treats its result as `Json` -- fine for a method that
+/// returns plain data (zod's own `.safeParse(...)`), but a method that
+/// returns *another* live object (a hypothetical chained schema-builder
+/// method returning another schema instance) used to silently produce
+/// `{}` instead (a function-only object JSON-stringifies to that)
+/// rather than a usable `JsValue`, with no way to ask for the real
+/// handle. Fixed by choosing between `callDynamicMethod` and the new
+/// `callDynamicMethodHandle` (which retains the result as a handle via
+/// `thaw_js_call_method_handle_result` instead of JSON-decoding it)
+/// based on this call's own expected-type hint -- the same mechanism an
+/// ambiguous `let`/`const` initializer's own type annotation already
+/// resolves elsewhere. Exercises both defaults in the same program: an
+/// annotated `const wrapped: JsValue = thing.wrap();` gets the real
+/// handle (and can have a further method called on *that*, recursing
+/// back into the same lowering), while an unannotated call to the same
+/// method keeps the old, unchanged behavior.
+#[test]
+fn a_method_can_return_a_jsvalue_when_the_call_site_asks_for_one() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jsvalue-returning-method-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("chain-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(name: string): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeThing(name) {\n\
+             return {\n\
+                 describe: function() { return 'thing:' + name; },\n\
+                 wrap: function() {\n\
+                     return { describe: function() { return 'wrapped(thing:' + name + ')'; } };\n\
+                 }\n\
+             };\n\
+         }\n\
+         module.exports.makeThing = makeThing;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "chain-kit";
+function main(): void {
+    const thing = makeThing("gadget");
+    const wrapped: JsValue = thing.wrap();
+    console.log(wrapped.describe());
+    const unannotated = thing.wrap();
+    console.log(unannotated);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "\"wrapped(thing:gadget)\"\n{}\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
