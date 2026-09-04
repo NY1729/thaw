@@ -5,7 +5,7 @@ fn fallback_shim_retains_callable_return_values() {
     let functions =
         parse_dts("export declare function make(factor: number): (value: number) => number;")
             .unwrap();
-    let shim = generate_shim(&functions, false, &[]);
+    let shim = generate_shim(&functions, false, &[], &Default::default());
     assert!(
         shim.contains("function make(argsArray: Json): JsValue"),
         "{shim}"
@@ -30,7 +30,7 @@ fn callable_interface_return_is_preserved_as_javascript_value() {
     assert_eq!(functions.len(), 1);
     assert_eq!(functions[0].name, "pLimit");
     assert_eq!(functions[0].ret, DtsType::Native(HirType::JsValue));
-    let shim = generate_shim(&functions, false, &[]);
+    let shim = generate_shim(&functions, false, &[], &Default::default());
     assert!(
         shim.contains("function pLimit(argsArray: Json): JsValue"),
         "{shim}"
@@ -77,7 +77,7 @@ fn classifies_number_rest_signature_as_variadic_fast_path() {
     assert_eq!(signature.params, vec![HirType::F64]);
     assert_eq!(signature.variadic, Some(HirType::F64));
     assert_eq!(
-        generate_shim(&funcs, true, &[]),
+        generate_shim(&funcs, true, &[], &Default::default()),
         "declare function sum(count: number, ...values: number[]): number;\n"
     );
 }
@@ -223,7 +223,7 @@ fn tagged_regular_signatures_classify_as_fast_paths() {
     );
     assert_eq!(signature.ret, HirType::Nullish(Box::new(HirType::Bool)));
 
-    let shim = generate_shim(&funcs, true, &[]);
+    let shim = generate_shim(&funcs, true, &[], &Default::default());
     let module = thaw_parser::parse_typescript(&shim)
         .unwrap_or_else(|error| panic!("tagged bridge shim did not parse: {error}\n{shim}"));
     let program = thaw_hir::lower_module(&module)
@@ -1549,7 +1549,7 @@ fn namespaced_fallback_function_shim_round_trips_through_real_lowering() {
         "#;
     let funcs = parse_dts(source).unwrap();
     assert_eq!(funcs.len(), 1);
-    let shim = generate_shim(&funcs, false, &[]);
+    let shim = generate_shim(&funcs, false, &[], &Default::default());
     assert!(shim.contains("function parse(argsArray: Json): Json {"));
 
     let program_source = format!(
@@ -1793,7 +1793,7 @@ fn falls_back_on_extends_field_collision() {
 fn generates_ambient_declaration_for_fast_path_function() {
     let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
     assert_eq!(
-        generate_shim(&funcs, true, &[]),
+        generate_shim(&funcs, true, &[], &Default::default()),
         "declare function add(a: number, b: number): number;\n"
     );
 }
@@ -1806,7 +1806,7 @@ fn generates_object_typed_ambient_declaration() {
     )
     .unwrap();
     assert_eq!(
-        generate_shim(&funcs, true, &[]),
+        generate_shim(&funcs, true, &[], &Default::default()),
         "declare function dist(p: { x: number; y: number }): number;\n"
     );
 }
@@ -1821,7 +1821,7 @@ fn generates_object_typed_ambient_declaration() {
 #[test]
 fn downgrades_fast_path_to_fallback_when_no_native_lib_is_available() {
     let funcs = parse_dts("export declare function daysToWeeks(days: number): number;").unwrap();
-    let shim = generate_shim(&funcs, false, &[]);
+    let shim = generate_shim(&funcs, false, &[], &Default::default());
     assert!(
         !shim.contains("declare function"),
         "must not emit an ambient FFI declaration with nothing to link against, got:\n{shim}"
@@ -1834,7 +1834,7 @@ fn downgrades_fast_path_to_fallback_when_no_native_lib_is_available() {
 fn native_lib_available_true_keeps_fast_path_as_before() {
     let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
     assert_eq!(
-        generate_shim(&funcs, true, &[]),
+        generate_shim(&funcs, true, &[], &Default::default()),
         "declare function add(a: number, b: number): number;\n"
     );
 }
@@ -1862,7 +1862,7 @@ fn effective_classifications_leaves_fallback_alone_regardless_of_native_lib() {
 #[test]
 fn generates_call_dynamic_wrapper_for_fallback_function() {
     let funcs = parse_dts("export declare function identity<T>(x: T): T;").unwrap();
-    let shim = generate_shim(&funcs, true, &[]);
+    let shim = generate_shim(&funcs, true, &[], &Default::default());
     assert!(shim.contains("// Fallback (QuickJS-NG):"));
     assert!(shim.contains("function identity(argsArray: Json): Json {"));
     assert!(shim.contains(r#"return callDynamic("identity", argsArray);"#));
@@ -1926,7 +1926,7 @@ fn generate_shim_emits_exactly_one_declaration_for_an_overloaded_name() {
             declare function ms(value: string): number;
         "#;
     let funcs = parse_dts(dts).unwrap();
-    let shim = generate_shim(&funcs, true, &[]);
+    let shim = generate_shim(&funcs, true, &[], &Default::default());
 
     assert_eq!(
         shim.matches("function ms").count(),
@@ -1952,7 +1952,7 @@ fn generates_qualified_alias_for_a_cross_package_colliding_name() {
         qualified_key: "qs::stringify".to_string(),
         suppress_bare: true,
     }];
-    let shim = generate_shim(&funcs, true, &qualified);
+    let shim = generate_shim(&funcs, true, &qualified, &Default::default());
 
     assert!(shim.contains("function qs_stringify(argsArray: Json): Json {"));
     assert!(shim.contains(r#"return callDynamic("qs::stringify", argsArray);"#));
@@ -1971,7 +1971,7 @@ fn generates_both_bare_and_qualified_alias_when_not_suppressed() {
         qualified_key: "qs::identity".to_string(),
         suppress_bare: false,
     }];
-    let shim = generate_shim(&funcs, true, &qualified);
+    let shim = generate_shim(&funcs, true, &qualified, &Default::default());
 
     assert!(shim.contains("function qs_identity(argsArray: Json): Json {"));
     assert!(shim.contains(r#"return callDynamic("qs::identity", argsArray);"#));
@@ -1991,7 +1991,7 @@ fn generated_shim_round_trips_through_real_lowering() {
             export declare function identity<T>(x: T): T;
         "#;
     let funcs = parse_dts(dts).unwrap();
-    let shim = generate_shim(&funcs, true, &[]);
+    let shim = generate_shim(&funcs, true, &[], &Default::default());
 
     let program_source = format!(
             "{shim}\nfunction main(): void {{\n    console.log(add(2, 3));\n    const r = identity(JSON.parse(\"[1]\"));\n    console.log(Number(r));\n}}\n"
