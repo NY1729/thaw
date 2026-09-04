@@ -1518,7 +1518,7 @@ fn frame_split_async_main_has_resume_function_and_multiple_states() {
     let mut compiler = HirCompiler::new(&context, "frame_split_ir");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
-    assert!(ir.contains("define ptr @thaw_user_main()"));
+    assert!(ir.contains("define internal ptr @thaw_user_main()"));
     assert!(ir.contains("define internal void @thaw_user_main.resume"));
     assert!(ir.contains("state_1"));
     assert!(ir.contains("state_2"));
@@ -1568,7 +1568,7 @@ fn frame_splits_non_main_async_function() {
     let mut compiler = HirCompiler::new(&context, "general_async_frame");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
-    assert!(ir.contains("define ptr @compute()"));
+    assert!(ir.contains("define internal ptr @compute()"));
     assert!(ir.contains("define internal void @compute.resume"));
     assert_eq!(compile_and_run(source, "general_async_frame"), "main\n");
 }
@@ -2708,7 +2708,7 @@ fn frame_split_async_function_preserves_arguments_across_await() {
     let mut compiler = HirCompiler::new(&context, "async_arguments");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
-    assert!(ir.contains("define ptr @compute(double"));
+    assert!(ir.contains("define internal ptr @compute(double"));
     assert!(ir.contains("frame_a"));
     assert!(ir.contains("frame_b"));
     assert_eq!(compile_and_run(source, "async_arguments"), "42\n");

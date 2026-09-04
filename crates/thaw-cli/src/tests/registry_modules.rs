@@ -7480,3 +7480,84 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function whose declared name matches a C standard library
+/// math function (`floor`, here -- the real-world trigger: lodash exports
+/// `_.floor`/`_.ceil`/`_.round`, and any package declaring one of these
+/// pulls in the same shape) used to corrupt *every* `Math.floor`/`Math.
+/// ceil`/`Math.round` call made from *any* Fallback JS running in the same
+/// program, not just calls to the colliding function itself.
+///
+/// Root cause: `declare_function` (thaw-llvm) gave every HIR-compiled
+/// function -- including this one, generated verbatim from a `.d.ts`
+/// declaration by `registry_integration/shims.rs` -- ordinary `external`
+/// LLVM linkage, keyed on its bare source name with no mangling
+/// (`llvm_symbol_for`). In the final binary that makes it a *global,
+/// default-visibility* ELF symbol -- confirmed via `readelf --dyn-syms`
+/// showing a `floor` entry in the executable's own dynamic symbol table.
+/// Since libm is linked dynamically, Linux's default symbol interposition
+/// rule then made *every* reference to `floor` process-wide -- including
+/// the one QuickJS-NG's own `Math.floor` builtin makes internally via the
+/// PLT -- resolve to *this* native function instead of libm's real
+/// `floor(double): double`. Called with a `double` argument (in an XMM
+/// register, per the C calling convention) as if it were thaw's own
+/// `floor(argsArray: Json): Json` (expecting a pointer in a general-
+/// purpose register), it dereferenced garbage and crashed inside
+/// `thaw_std::json::ordered_object_fields` -- reproducing as `SIGSEGV` on
+/// `Math.floor`/`Math.ceil`/`Math.round` calls anywhere in the program,
+/// including ones with nothing to do with the colliding function (this is
+/// also the real root cause of the previously-unresolved `_.chunk`
+/// SIGSEGV: `_.chunk`'s own implementation calls `Math.floor` internally,
+/// and lodash's full `.d.ts` always declares `floor`/`ceil`/`round` too).
+///
+/// Fixed by giving every HIR-compiled function `internal` LLVM linkage
+/// instead: they never need to be called from outside the single LLVM
+/// module thaw-llvm compiles the whole program into (intra-module calls
+/// resolve directly regardless of linkage), so this closes off the
+/// interposition risk entirely without changing how anything actually
+/// runs -- confirmed by the existing frame-split IR-text assertions
+/// (`define internal ptr @...` instead of `define ptr @...`) and by the
+/// full test suite staying green.
+#[test]
+fn a_fallback_function_named_like_a_libm_function_does_not_corrupt_math_builtins() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-libm-name-collision-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("math-clash-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function floor(n: number): number;\n\
+         export declare function useMathFloor(n: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.floor = function(x) { return x - 1000; };\n\
+         module.exports.useMathFloor = function(x) { return Math.floor(x); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { floor, useMathFloor } from "math-clash-kit";
+function main(): void {
+    console.log(floor(5));
+    console.log(useMathFloor(4.7));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "-995\n4\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
