@@ -32,11 +32,18 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
         );
     }
     let call_signature_interfaces = all_interface_decls_by_name(&module);
+    let local_type_aliases = all_type_alias_decls_by_name(&module);
     functions.extend(
         module
             .body
             .iter()
-            .flat_map(|item| extract_const_call_signature_decls(item, &call_signature_interfaces))
+            .flat_map(|item| {
+                extract_const_call_signature_decls(
+                    item,
+                    &call_signature_interfaces,
+                    &local_type_aliases,
+                )
+            })
             .map(|(name, signature)| match signature {
                 CallableConstSignature::Interface(call) => {
                     lower_dts_call_signature(&name, call, &interfaces, &generic_interfaces)
@@ -63,6 +70,71 @@ fn all_interface_decls_by_name(module: &Module) -> HashMap<String, &TsInterfaceD
         map.entry(iface.id.sym.to_string()).or_insert(iface);
     }
     map
+}
+
+/// Every *non-generic* type alias declared anywhere in `module`, by its
+/// own bare name -- a generic alias's own type parameter would need
+/// substitution to resolve at all, which `resolve_local_callable_fn_types`
+/// below doesn't attempt (mirrors `resolve_interfaces`'s identical
+/// generic/non-generic split for interfaces). Used only to look a type
+/// alias up by name when resolving a `declare const`'s own type, not a
+/// replacement for `resolve_interfaces`'s own classification map.
+fn all_type_alias_decls_by_name(module: &Module) -> HashMap<String, &TsType> {
+    let mut map = HashMap::new();
+    for alias in module.body.iter().flat_map(extract_type_alias_decls) {
+        if alias.type_params.is_some() {
+            continue;
+        }
+        map.entry(alias.id.sym.to_string())
+            .or_insert(alias.type_ann.as_ref());
+    }
+    map
+}
+
+/// Resolves `ty` to zero or more direct function-type call signatures,
+/// following a chain of local (bare or exported) non-generic type-alias
+/// references and unwrapping an intersection into each of its own
+/// operands. Real example: uuid's own `.d.ts` (via `@types/uuid`), `type
+/// v4 = v4Buffer & v4String;`, where `v4Buffer`/`v4String` are themselves
+/// further local aliases each resolving to a direct (possibly its own
+/// separately-generic) function type -- `v1`/`v3`/`v5`/`v6`/`v7`/
+/// `parse`/`stringify`/etc. all use the identical two-alias-intersection
+/// shape. `visited` guards against a self-referential alias cycle. Real
+/// `.d.ts` shapes seen so far never need anything deeper than this (a
+/// plain reference, or an intersection of references/direct function
+/// types) -- a union, mapped type, etc. isn't unwrapped, and just
+/// contributes no call signatures (same as any other unresolvable type).
+fn resolve_local_callable_fn_types<'a>(
+    ty: &'a TsType,
+    aliases: &HashMap<String, &'a TsType>,
+    visited: &mut HashSet<String>,
+) -> Vec<&'a TsFnType> {
+    match ty {
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            vec![function]
+        }
+        TsType::TsTypeRef(ty_ref) => {
+            let name = match &ty_ref.type_name {
+                TsEntityName::Ident(ident) => ident.sym.to_string(),
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
+            };
+            if !visited.insert(name.clone()) {
+                return Vec::new();
+            }
+            match aliases.get(name.as_str()) {
+                Some(aliased) => resolve_local_callable_fn_types(aliased, aliases, visited),
+                None => Vec::new(),
+            }
+        }
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(
+            intersection,
+        )) => intersection
+            .types
+            .iter()
+            .flat_map(|member| resolve_local_callable_fn_types(member, aliases, visited))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Which of `.d.ts`'s two callable-shape AST nodes a `declare const`
@@ -103,6 +175,7 @@ enum CallableConstSignature<'a> {
 fn extract_const_call_signature_decls<'a>(
     item: &'a ModuleItem,
     interfaces: &HashMap<String, &'a TsInterfaceDecl>,
+    local_type_aliases: &HashMap<String, &'a TsType>,
 ) -> Vec<(String, CallableConstSignature<'a>)> {
     let var_decl = match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(var_decl))) => var_decl.as_ref(),
@@ -130,9 +203,8 @@ fn extract_const_call_signature_decls<'a>(
                         TsEntityName::Ident(ident) => ident.sym.to_string(),
                         TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
                     };
-                    let iface = *interfaces.get(iface_name.as_str())?;
-                    Some(
-                        iface
+                    if let Some(iface) = interfaces.get(iface_name.as_str()) {
+                        let signatures = iface
                             .body
                             .body
                             .iter()
@@ -141,6 +213,32 @@ fn extract_const_call_signature_decls<'a>(
                                     Some((name.clone(), CallableConstSignature::Interface(call)))
                                 }
                                 _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        if !signatures.is_empty() {
+                            return Some(signatures);
+                        }
+                    }
+                    // Not a same-file call-signature interface -- try
+                    // resolving it as a (possibly intersected, possibly
+                    // chained) local type alias instead. Real example:
+                    // uuid's own `.d.ts` (via `@types/uuid`), `export
+                    // const v4: v4;` where `type v4 = v4Buffer &
+                    // v4String;` is a *local, unexported* alias, not an
+                    // interface at all.
+                    let functions = resolve_local_callable_fn_types(
+                        annotation.type_ann.as_ref(),
+                        local_type_aliases,
+                        &mut HashSet::new(),
+                    );
+                    if functions.is_empty() {
+                        return None;
+                    }
+                    Some(
+                        functions
+                            .into_iter()
+                            .map(|function| {
+                                (name.clone(), CallableConstSignature::Direct(function))
                             })
                             .collect::<Vec<_>>(),
                     )
