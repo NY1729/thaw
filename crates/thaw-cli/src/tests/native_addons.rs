@@ -1489,6 +1489,73 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Real, fetched `lodash@4.17.21` -- both entry-point shapes
+/// (`import _ from "lodash"` and `import * as _ from "lodash"`), plus a
+/// named import of a function with an *optional* callback parameter
+/// (`filter`). Found via the earlier lodash `default`-import fix's own
+/// verification against real lodash's full `.d.ts`: even
+/// `import * as _ from "lodash"; _.chunk(...)` (calling a function with
+/// no callback parameter at all) crashed with "unsupported dynamic
+/// object field Function(...)".
+///
+/// Root cause: an *optional* callback parameter (real example: lodash's
+/// `filter(collection: string | null | undefined, predicate?:
+/// StringIterator<boolean>): string[];`) classifies as `Native(Optional
+/// (Function(...)))`, a different `Native` variant from the bare
+/// `Native(Function(...))` case this session's earlier closure-as-
+/// plain-argument fix (commit `170f6a23`) covered, so it fell through
+/// `typed_dynamic_declaration`'s (thaw-cli's `shims.rs`) widening match
+/// arm unwidened. Separately, `typed_dynamic_bare_alias` (the wrapper
+/// generated under a function's bare name) had its own, independent,
+/// entirely unwidened parameter-type computation -- so a plain named
+/// import of any function with such a parameter crashed the moment it
+/// was called with the parameter omitted, regardless of the const-
+/// export-shape fix above. Both fixed the same way -- widened to `Json`
+/// for the non-`napi` backend, matching the existing bare-`Function`
+/// case -- and `typed_dynamic_bare_alias` additionally needed `napi`
+/// threaded through as a new parameter (it previously had no napi-
+/// awareness at all).
+#[test]
+fn registry_add_builds_and_calls_real_lodash_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-lodash-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "lodash@4.17.21").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import _ from "lodash";
+import * as ns from "lodash";
+function main(): void {
+    console.log(_.chunk([1, 2, 3, 4], 2).length);
+    console.log(_.capitalize("hello"));
+    console.log(ns.chunk([1, 2, 3, 4], 2).length);
+    console.log(_.filter("hello").length);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("2"));
+    assert_eq!(lines.next(), Some("Hello"));
+    assert_eq!(lines.next(), Some("2"));
+    assert_eq!(lines.next(), Some("5"));
+    assert_eq!(lines.next(), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Real, fetched drizzle-orm -- the next breadth-first bug-hunting target
 /// after uuid. drizzle-orm uses npm subpath exports extensively (the root
 /// package exposes only SQL-operator helpers; the actual `sqliteTable`/

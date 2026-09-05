@@ -9672,6 +9672,77 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An *optional* callback parameter on an ordinary top-level Fallback
+/// function, called with it omitted -- real example: lodash's
+/// `filter(collection: string | null | undefined, predicate?:
+/// StringIterator<boolean>): string[];` (found while testing the earlier
+/// lodash `default`-import fix against real lodash's own full `.d.ts`,
+/// via `import * as _ from "lodash"; _.chunk(...)`, which crashed even
+/// though `chunk` itself has no callback parameter at all).
+///
+/// Root cause: an optional callback parameter classifies as `Native(
+/// Optional(Function(...)))` -- a *different* `Native` variant from the
+/// bare `Native(Function(...))` case the test above covers, so it fell
+/// through `typed_dynamic_declaration`'s (thaw-cli's `shims.rs`) widening
+/// match arm unwidened. Separately, `typed_dynamic_bare_alias` (the
+/// wrapper generated under a function's *bare* name, reached by a plain
+/// named import like this test's) had its *own*, independent parameter-
+/// type computation with no widening at all, `napi`-aware or not -- so
+/// even fixing the first arm alone wasn't enough: calling the bare-name
+/// alias with the optional parameter omitted still crashed, since
+/// thaw-hir's omitted-trailing-optional-parameter machinery needed to
+/// synthesize a value using *this* alias's own (still unwidened)
+/// declared type. Both fixed the same way -- widened to `Json` for the
+/// non-`napi` backend, matching the existing bare-`Function` case.
+#[test]
+fn an_optional_callback_parameter_omitted_at_the_call_site_does_not_crash() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-optional-callback-param-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("filter-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function filter(collection: string, predicate?: (char: string, index: number, s: string) => boolean): string[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { \
+         filter: function(collection, predicate) { \
+         var out = []; \
+         for (var i = 0; i < collection.length; i++) { \
+         if (!predicate || predicate(collection[i], i, collection)) out.push(collection[i]); \
+         } \
+         return out; \
+         } \
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { filter } from "filter-kit";
+function main(): void {
+    console.log(filter("hello").length);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A dynamic-call argument that's itself a method call chained off a
 /// `JsValue` receiver, with no intermediate `const` binding at all --
 /// real-world example: zod's `z.string().pipe(z.string().min(3))`,
