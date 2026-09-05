@@ -926,6 +926,23 @@ impl<'ctx> HirCompiler<'ctx> {
         resolved: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let promise = self.compile_expr(inner)?.into_pointer_value();
+        self.drive_promise_to_resolved_value(promise, resolved)
+    }
+
+    /// The value-taking half of `compile_typed_blocking_await`, for a
+    /// caller that already has a compiled `Promise<T>` pointer in hand
+    /// (rather than an `HirExpr` to compile) -- e.g. a native callback's
+    /// raw return value from an indirect call
+    /// (`compile_napi_value_callback`). Drives it to completion, checks
+    /// fulfilled/rejected state, loads the resolved payload as
+    /// `resolved`'s native representation (propagating a rejection as a
+    /// pending thaw exception the same way an ordinary `await` does), and
+    /// destroys the promise.
+    fn drive_promise_to_resolved_value(
+        &mut self,
+        promise: PointerValue<'ctx>,
+        resolved: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let result = self
             .builder
             .build_call(
@@ -1007,5 +1024,74 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.branch_on_pending_exception()?;
         Ok(phi.as_basic_value())
+    }
+
+    /// The `Promise<void>` counterpart to `drive_promise_to_resolved_value`,
+    /// for a resolved type with no native representation to `build_load`
+    /// (`void` carries no payload). Drives the promise to completion,
+    /// propagates a rejection as a pending thaw exception the same way,
+    /// and destroys the promise -- without attempting to load a value.
+    fn drive_promise_to_completion(&mut self, promise: PointerValue<'ctx>) -> Result<(), String> {
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_runtime_run_until_resolved")
+                    .unwrap(),
+                &[promise.into()],
+                "await_void_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("typed Promise did not settle")?
+            .into_pointer_value();
+        let state = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_promise_state").unwrap(),
+                &[promise.into()],
+                "blocking_await_void_state",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("typed Promise has no state")?
+            .into_int_value();
+        let rejected = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                state,
+                self.context.i8_type().const_int(2, false),
+                "blocking_await_void_rejected",
+            )
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let failed = self
+            .context
+            .append_basic_block(function, "blocking_await_void_failed");
+        let merge = self
+            .context
+            .append_basic_block(function, "blocking_await_void_merge");
+        self.builder
+            .build_conditional_branch(rejected, failed, merge)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), result)
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge);
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_destroy").unwrap(),
+                &[promise.into()],
+                "destroy_blocking_await_void",
+            )
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()
     }
 }
