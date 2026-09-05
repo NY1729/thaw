@@ -1070,6 +1070,92 @@ fn is_ecmascript_keyword(name: &str) -> bool {
     )
 }
 
+/// Every top-level `export declare const NAME: TypeRef;` in `module`
+/// whose `TypeRef` names a *same-file* interface with at least one call
+/// signature -- the `Decl::Var` counterpart to a plain `Decl::Fn`, for a
+/// factory value bound directly to a name instead of declared `function`.
+/// Real example: drizzle-orm's `export declare const sqliteTable:
+/// SQLiteTableFn;`, `SQLiteTableFn` an interface with one call signature
+/// per overload, both declared in the same file. Each match yields the
+/// const's own declaration text followed by the referenced interface's
+/// own declaration text, concatenated -- `thaw_bridge::parse_dts` needs
+/// both present in the flattened output to synthesize a callable
+/// `DtsFunction` for it (the interface is where the actual call
+/// signature/arity lives; the const alone has no shape of its own).
+/// Restricted to a same-file interface, not one reached through a
+/// further import: every real package seen so far declares the factory-
+/// value const and its call-signature interface side by side in one
+/// file, and resolving a cross-file interface would need machinery
+/// parallel to `reexported_class_or_interface_declarations` -- not worth
+/// building speculatively.
+fn callable_const_declarations(
+    module: &thaw_parser::ast::Module,
+    source_map: &thaw_parser::common::SourceMap,
+) -> Result<Vec<(String, String)>, String> {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat, TsEntityName, TsType, TsTypeElement};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let mut declarations = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) = item else {
+            continue;
+        };
+        let Decl::Var(var_decl) = &export.decl else {
+            continue;
+        };
+        for declarator in &var_decl.decls {
+            let Pat::Ident(binding) = &declarator.name else {
+                continue;
+            };
+            let Some(annotation) = binding.type_ann.as_ref() else {
+                continue;
+            };
+            let TsType::TsTypeRef(ty_ref) = annotation.type_ann.as_ref() else {
+                continue;
+            };
+            let iface_name = match &ty_ref.type_name {
+                TsEntityName::Ident(ident) => ident.sym.to_string(),
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
+            };
+            let mut matched_iface_export = None;
+            for other in &module.body {
+                let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(iface_export)) = other else {
+                    continue;
+                };
+                let Decl::TsInterface(iface) = &iface_export.decl else {
+                    continue;
+                };
+                if iface.id.sym.as_ref() == iface_name.as_str() {
+                    matched_iface_export = Some((iface_export, iface));
+                    break;
+                }
+            }
+            let Some((iface_export, iface)) = matched_iface_export else {
+                continue;
+            };
+            if !iface
+                .body
+                .body
+                .iter()
+                .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
+            {
+                continue;
+            }
+            let name = binding.id.sym.to_string();
+            let const_snippet = source_map
+                .span_to_snippet(export.span())
+                .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?;
+            let iface_snippet = source_map
+                .span_to_snippet(iface_export.span())
+                .map_err(|error| {
+                    format!("failed to read declaration for `{iface_name}`: {error:?}")
+                })?;
+            declarations.push((name, format!("{const_snippet}\n{iface_snippet}")));
+        }
+    }
+    Ok(declarations)
+}
+
 /// Renames a single function declaration snippet's own declared name to
 /// `exported`, wherever it actually is -- rather than assuming it matches
 /// whatever name it was originally looked up under. That assumption holds
@@ -1277,6 +1363,7 @@ fn all_reexported_function_declarations(
             _ => {}
         }
     }
+    declarations.extend(callable_const_declarations(&module, &source_map)?);
     Ok(declarations)
 }
 
@@ -1314,6 +1401,13 @@ fn reexported_function_declarations(
                         format!("failed to read declaration for `{name}`: {error:?}")
                     })?,
             );
+        }
+    }
+    if declarations.is_empty() {
+        for (const_name, snippet) in callable_const_declarations(&module, &source_map)? {
+            if const_name == name {
+                declarations.push(snippet);
+            }
         }
     }
     if !declarations.is_empty() {

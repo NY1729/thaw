@@ -9829,3 +9829,58 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A factory value bound directly to a name (`export declare const NAME:
+/// SomeCallableInterface;`) instead of declared `function` -- the shape
+/// drizzle-orm's `sqliteTable`/`pgTable` use (`SQLiteTableFn`/`PgTableFn`,
+/// an interface with one call signature per overload). Confirms it's
+/// reachable and callable end to end: `thaw_bridge::parse_dts` synthesizes
+/// a `DtsFunction` from the interface's call signature(s), which flows
+/// through the same `Classification::Fallback` shim-generation path as any
+/// other npm function.
+#[test]
+fn a_declare_const_bound_to_a_callable_interface_is_reachable_and_callable() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-callable-const-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("table-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Factory {\n\
+         \x20\x20\x20\x20(name: string, count: number): string;\n\
+         }\n\
+         export declare const factory: Factory;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { \
+         factory: function(name, count) { return name + ':' + count; } \
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { factory } from "table-kit";
+function main(): void {
+    const result: string = factory("users", 3);
+    console.log(result);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "users:3\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
