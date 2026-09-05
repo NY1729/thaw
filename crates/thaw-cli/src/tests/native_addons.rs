@@ -1498,3 +1498,81 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Real, fetched `zod@3.23.0` -- a version-diversity check prompted by the
+/// user's own question of whether earlier zod work (this session, against
+/// whatever `zod` resolved to as latest -- zod v4) actually generalizes,
+/// rather than being overfit to that one observed version. It doesn't:
+/// `import { object, string } from "zod"` failed outright (`` `zod` has
+/// no export named `object` ``) against v3.
+///
+/// Root cause: zod v3's actual primitives (`object`, `string`, `number`,
+/// ... -- essentially its whole public API) are declared in
+/// `lib/types.d.ts` as **bare, non-exported** consts with a **direct**
+/// inline function type (no interface involved at all):
+/// `declare const objectType: <T extends ZodRawShape>(shape: T, params?)
+/// => ZodObject<...>;`, one per primitive, later locally rename-exported
+/// (`export { ..., objectType as object, ... };`). This session's earlier
+/// `declare const`-export fix (drizzle-orm's `sqliteTable`, commit
+/// `c3da7164`) only covered a const whose type is a `TsTypeRef` to a
+/// same-file interface with a call signature -- neither a *direct*
+/// inline function type, nor a *bare* (non-exported) const reached only
+/// through a local rename-export, were covered.
+///
+/// Fixed by extending exactly that machinery: thaw-bridge's
+/// `extract_const_call_signature_decls` gained a `CallableConstSignature::
+/// Direct` case (alongside the existing `Interface` one) for a `TsFnType`
+/// annotation directly, with a new `lower_dts_fn_type` sibling to
+/// `lower_dts_call_signature` synthesizing the `DtsFunction`; thaw-
+/// registry's `all_reexported_function_declarations` gained a bare-
+/// `Decl::Var` scan feeding its existing `local_declarations` map (the
+/// same one a bare `Decl::Fn` already uses), so a same-file rename-export
+/// resolves a callable const exactly like it already does a function; and
+/// `rename_declared_function` gained `"const "` to its rename-keyword
+/// list (previously only `"function "`/`"class "`/`"interface "`), so the
+/// renamed binding (`objectType` -> `object`) actually lands in the
+/// flattened output under its real, public name.
+///
+/// `import { z } from "zod"` (zod v3's alternate, namespace-style entry
+/// point) is a separate, still-open gap, not fixed here: `z` is a
+/// self-referential namespace alias (`import * as z from "./external";
+/// export { z };`) declared in `lib/index.d.ts`, one file *below* the
+/// package's own entry point (`index.d.ts`, just `export * from
+/// "./lib";`) -- unlike zod v4, whose own entry point declares this
+/// alias directly. thaw-registry's flattening only pulls individual
+/// function/const *declarations* through a wildcard re-export chain, not
+/// arbitrary top-level import/export-alias statements from a file reached
+/// only transitively, so `self_referential_namespace_aliases` (thaw-
+/// bridge) never sees `z`'s own alias declaration in the flattened output
+/// at all.
+#[test]
+fn registry_add_builds_a_schema_with_real_zod_v3_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-zod-v3-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "zod@3.23.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { object, string, number } from "zod";
+function main(): void {
+    const schema = object({ name: string(), age: number() });
+    console.log("ok");
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -1070,49 +1070,58 @@ fn is_ecmascript_keyword(name: &str) -> bool {
     )
 }
 
-/// Every top-level `export declare const NAME: TypeRef;` in `module`
-/// whose `TypeRef` names a *same-file* interface with at least one call
-/// signature -- the `Decl::Var` counterpart to a plain `Decl::Fn`, for a
-/// factory value bound directly to a name instead of declared `function`.
-/// Real example: drizzle-orm's `export declare const sqliteTable:
-/// SQLiteTableFn;`, `SQLiteTableFn` an interface with one call signature
-/// per overload, both declared in the same file. Each match yields the
-/// const's own declaration text followed by the referenced interface's
-/// own declaration text, concatenated -- `thaw_bridge::parse_dts` needs
-/// both present in the flattened output to synthesize a callable
-/// `DtsFunction` for it (the interface is where the actual call
-/// signature/arity lives; the const alone has no shape of its own).
-/// Restricted to a same-file interface, not one reached through a
-/// further import: every real package seen so far declares the factory-
-/// value const and its call-signature interface side by side in one
-/// file, and resolving a cross-file interface would need machinery
-/// parallel to `reexported_class_or_interface_declarations` -- not worth
-/// building speculatively.
-fn callable_const_declarations(
+/// Given one `const`/`let`/`var` declarator, if its type annotation names
+/// a callable shape -- a same-file interface with a call signature
+/// (`SQLiteTableFn`-style), or a *direct* inline function type with no
+/// interface involved at all (zod v3's `declare const objectType: <T
+/// extends ZodRawShape>(shape: T, params?) => ZodObject<...>;`, one per
+/// primitive) -- the declaration text needed to make its call signature
+/// visible in a flattened `.d.ts`: just `decl_span`'s own snippet for a
+/// direct function type (self-contained), or that snippet plus the
+/// referenced interface's own snippet for a `TsTypeRef` (the call
+/// signature lives there, not in the const itself). `None` if the type
+/// doesn't name a callable shape at all (an ordinary data constant, or a
+/// type this doesn't resolve).
+///
+/// `decl_span` is the caller's choice of "the const's own declaration
+/// text" -- an `ExportDecl`'s span (to keep an `export` prefix) for an
+/// exported const (`callable_const_declarations`, below), or a bare
+/// `VarDecl`'s own span for one reached only through a later local
+/// rename-export (`all_reexported_function_declarations`'s own
+/// `local_declarations` loop, mirroring how it already handles a bare
+/// `Decl::Fn`).
+///
+/// The interface lookup is restricted to a *same-file* interface, not one
+/// reached through a further import: every real package seen so far
+/// declares the factory-value const and its call-signature interface
+/// side by side in one file, and resolving a cross-file interface would
+/// need machinery parallel to `reexported_class_or_interface_declarations`
+/// -- not worth building speculatively.
+fn callable_const_declaration_snippet(
     module: &thaw_parser::ast::Module,
     source_map: &thaw_parser::common::SourceMap,
-) -> Result<Vec<(String, String)>, String> {
-    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat, TsEntityName, TsType, TsTypeElement};
+    decl_span: thaw_parser::common::Span,
+    binding: &thaw_parser::ast::BindingIdent,
+) -> Result<Option<String>, String> {
+    use thaw_parser::ast::{
+        Decl, ModuleDecl, ModuleItem, TsEntityName, TsFnOrConstructorType, TsType, TsTypeElement,
+    };
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let mut declarations = Vec::new();
-    for item in &module.body {
-        let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) = item else {
-            continue;
-        };
-        let Decl::Var(var_decl) = &export.decl else {
-            continue;
-        };
-        for declarator in &var_decl.decls {
-            let Pat::Ident(binding) = &declarator.name else {
-                continue;
-            };
-            let Some(annotation) = binding.type_ann.as_ref() else {
-                continue;
-            };
-            let TsType::TsTypeRef(ty_ref) = annotation.type_ann.as_ref() else {
-                continue;
-            };
+    let Some(annotation) = binding.type_ann.as_ref() else {
+        return Ok(None);
+    };
+    match annotation.type_ann.as_ref() {
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(_)) => {
+            let const_snippet = source_map.span_to_snippet(decl_span).map_err(|error| {
+                format!(
+                    "failed to read declaration for `{}`: {error:?}",
+                    binding.id.sym
+                )
+            })?;
+            Ok(Some(const_snippet))
+        }
+        TsType::TsTypeRef(ty_ref) => {
             let iface_name = match &ty_ref.type_name {
                 TsEntityName::Ident(ident) => ident.sym.to_string(),
                 TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
@@ -1131,7 +1140,7 @@ fn callable_const_declarations(
                 }
             }
             let Some((iface_export, iface)) = matched_iface_export else {
-                continue;
+                return Ok(None);
             };
             if !iface
                 .body
@@ -1139,18 +1148,53 @@ fn callable_const_declarations(
                 .iter()
                 .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
             {
-                continue;
+                return Ok(None);
             }
-            let name = binding.id.sym.to_string();
-            let const_snippet = source_map
-                .span_to_snippet(export.span())
-                .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?;
+            let const_snippet = source_map.span_to_snippet(decl_span).map_err(|error| {
+                format!(
+                    "failed to read declaration for `{}`: {error:?}",
+                    binding.id.sym
+                )
+            })?;
             let iface_snippet = source_map
                 .span_to_snippet(iface_export.span())
                 .map_err(|error| {
                     format!("failed to read declaration for `{iface_name}`: {error:?}")
                 })?;
-            declarations.push((name, format!("{const_snippet}\n{iface_snippet}")));
+            Ok(Some(format!("{const_snippet}\n{iface_snippet}")))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Every top-level `export declare const NAME: T;` in `module` whose type
+/// `T` names a callable shape -- see `callable_const_declaration_snippet`
+/// for the two shapes recognized and real examples of each. The
+/// `Decl::Var` counterpart to a plain exported `Decl::Fn`.
+fn callable_const_declarations(
+    module: &thaw_parser::ast::Module,
+    source_map: &thaw_parser::common::SourceMap,
+) -> Result<Vec<(String, String)>, String> {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat};
+    use thaw_parser::common::Spanned;
+
+    let mut declarations = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) = item else {
+            continue;
+        };
+        let Decl::Var(var_decl) = &export.decl else {
+            continue;
+        };
+        for declarator in &var_decl.decls {
+            let Pat::Ident(binding) = &declarator.name else {
+                continue;
+            };
+            if let Some(snippet) =
+                callable_const_declaration_snippet(module, source_map, export.span(), binding)?
+            {
+                declarations.push((binding.id.sym.to_string(), snippet));
+            }
         }
     }
     Ok(declarations)
@@ -1165,7 +1209,14 @@ fn callable_const_declarations(
 /// an inline `export default function <ident>(...) {}`) and keeps that
 /// real `<ident>`, which need not equal the literal string `"default"`.
 fn rename_declared_function(snippet: String, exported: &str) -> String {
-    let Some((keyword_index, keyword)) = ["function ", "class ", "interface "]
+    // `"const "` covers a callable-const snippet (`callable_const_
+    // declaration_snippet`, e.g. zod v3's `declare const objectType:
+    // (...) => ...;`) -- for the interface-backed shape, whose snippet
+    // concatenates the const's own declaration with its referenced
+    // interface's, `"const "` always appears before that interface's own
+    // `"interface "`, so this still renames the *const's* binding name
+    // (the one actually being re-exported), not the interface's.
+    let Some((keyword_index, keyword)) = ["function ", "class ", "interface ", "const "]
         .into_iter()
         .filter_map(|keyword| snippet.find(keyword).map(|index| (index, keyword)))
         .min_by_key(|(index, _)| *index)
@@ -1247,6 +1298,34 @@ fn all_reexported_function_declarations(
                 .entry(function.ident.sym.to_string())
                 .or_default()
                 .push(snippet);
+        }
+    }
+    // A *local*, non-exported callable `const` -- the `Decl::Var`
+    // counterpart to the bare `Decl::Fn` loop just above, for the exact
+    // same reason (a same-file rename-export below needs to resolve it).
+    // Real example: zod v3's `lib/types.d.ts`, which declares `declare
+    // const objectType: <T extends ZodRawShape>(shape: T, params?) =>
+    // ZodObject<...>;` (and ~30 siblings) bare, then separately does
+    // `export { ..., objectType as object, ... };` -- without this,
+    // `object`/`string`/`number`/etc. (essentially all of zod v3's own
+    // API) were silently missing from the flattened `package.d.ts`
+    // entirely.
+    for item in &module.body {
+        let ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Var(var_decl))) = item else {
+            continue;
+        };
+        for declarator in &var_decl.decls {
+            let thaw_parser::ast::Pat::Ident(binding) = &declarator.name else {
+                continue;
+            };
+            if let Some(snippet) =
+                callable_const_declaration_snippet(&module, &source_map, var_decl.span(), binding)?
+            {
+                local_declarations
+                    .entry(binding.id.sym.to_string())
+                    .or_default()
+                    .push(snippet);
+            }
         }
     }
     for item in &module.body {
