@@ -9526,6 +9526,96 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A native closure passed as an argument to an *ordinary top-level
+/// Fallback function call* -- not a method call on a `JsValue` receiver
+/// (the shape the three tests above cover, `holder.check(pred)`). Real-
+/// world example: drizzle-orm's `sqlite-proxy` driver, `drizzle(callback:
+/// (sql, params, method) => Promise<{rows}>)` -- `drizzle` is a plain
+/// `declare function`, not a method.
+///
+/// Found via drizzle bug-hunting: this built successfully but crashed at
+/// *runtime* with a JS-side `TypeError: cb is not a function` -- the
+/// callback argument was silently never written into the JSON args array
+/// at all (`compile_typed_dynamic_call`, thaw-llvm's `dynamic_host.rs`,
+/// only marshals a typed function argument for the `napi` backend with a
+/// `JsValue` return; every other combination -- including any
+/// Fallback/QuickJS call -- has a deliberate `continue` that skips the
+/// argument's slot instead of erroring, so the real JS side saw `args[0]
+/// === undefined`).
+///
+/// Root cause, two independent gaps found together:
+///
+/// 1. `typed_dynamic_declaration` (thaw-cli's `shims.rs`) rendered a
+///    `Function`/`CallableFunction`-classified parameter as a real
+///    callback type in the generated shim for *both* `napi` and
+///    Fallback/QuickJS functions alike -- unlike its sibling
+///    `supported_class_method_param` (used for class methods), which
+///    already restricts this to the `napi` backend. Fixed by applying the
+///    same restriction here: for a non-`napi` function, a
+///    `Function`/`CallableFunction`-classified parameter is widened to
+///    `Json` (matching how `DtsType::Unsupported` is already handled),
+///    which routes it through `coerce_to_declared`(`declared == Json`)'s
+///    `registerNativeCallback` bridge instead.
+/// 2. Once routed there, this specific test still failed at runtime with
+///    "JavaScript value handle registry is empty" -- unlike every other
+///    test exercising this bridge, this program's *first-ever* touch of a
+///    JsValue handle at all is registering the closure itself (no prior
+///    `makeHolder(): JsValue`-style call to have bootstrapped anything
+///    first). `retain_value` (thaw-quickjs's `api.rs`, the sole write path
+///    into the realm's handle registry) assumed the registry (`__thaw_
+///    value_handles`/`__thaw_value_handle_live`) already existed, unlike
+///    its near-duplicate sibling `thaw_js_get_global`, which already
+///    lazily created it on first use. Fixed by moving that lazy-creation
+///    into `retain_value` itself (and simplifying `thaw_js_get_global` to
+///    just call it), so *every* path that can be a program's first handle
+///    registration self-heals the same way.
+///
+/// Confirmed to reproduce the pre-fix silent-wrong-output symptom (this
+/// doesn't fail to *build* -- it must be asserted via the callback's own
+/// observable side effect) via a temporary revert of both fixes together.
+#[test]
+fn a_native_closure_can_be_passed_as_an_argument_to_an_ordinary_fallback_function_call() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-plain-callback-arg-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("callback-arg-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function invoke(cb: (x: number) => number): void;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { \
+         invoke: function(cb) { console.log('result:' + cb(21)); } \
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { invoke } from "callback-arg-kit";
+function main(): void {
+    invoke((x: number): number => x * 2);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "result:42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A dynamic-call argument that's itself a method call chained off a
 /// `JsValue` receiver, with no intermediate `const` binding at all --
 /// real-world example: zod's `z.string().pipe(z.string().min(3))`,

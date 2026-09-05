@@ -284,6 +284,22 @@ impl<'ctx> HirCompiler<'ctx> {
         let return_block = self.builder.get_insert_block().unwrap();
         let entry = self.context.append_basic_block(adapter, "entry");
         self.builder.position_at_end(entry);
+        // `adapter`'s own body is a *separate* LLVM function from whatever
+        // is currently being compiled -- if that outer compilation is
+        // itself inside a user `try` block (real example: a database call
+        // wrapped in `try { ... } catch { ... }`, awaited inside an async
+        // function that also registers an async callback via this same
+        // adapter), `self.catch_stack` still holds the *outer* function's
+        // own catch block. `branch_on_pending_exception` (called below,
+        // via `drive_promise_to_resolved_value`/`drive_promise_to_
+        // completion` for a `Promise`-returning callback) would otherwise
+        // branch straight into that unrelated block from inside this
+        // adapter -- an illegal cross-function edge ("Referring to a basic
+        // block in another function!", an LLVM module-verification
+        // failure). `adapter` has no enclosing `try` of its own, so it
+        // must see an empty catch stack (propagate/default-return on
+        // failure, matching a top-level function with no active catch).
+        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
         let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
         let args_string = adapter.get_nth_param(1).unwrap();
         let args_json = self
@@ -407,6 +423,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_return(Some(&result))
             .map_err(|error| error.to_string())?;
+        self.catch_stack = outer_catch_stack;
         self.builder.position_at_end(return_block);
         Ok((adapter.as_global_value().as_pointer_value(), closure))
     }

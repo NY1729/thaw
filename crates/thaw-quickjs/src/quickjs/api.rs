@@ -319,39 +319,7 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
         let Ok(value) = ctx.globals().get::<_, Value>(name.as_str()) else {
             return 0;
         };
-        let globals = ctx.globals();
-        let handles: Array = match globals.get("__thaw_value_handles") {
-            Ok(handles) => handles,
-            Err(_) => {
-                let Ok(handles) = Array::new(ctx.clone()) else {
-                    return 0;
-                };
-                if globals
-                    .set("__thaw_value_handles", handles.clone())
-                    .is_err()
-                {
-                    return 0;
-                }
-                let Ok(live) = Array::new(ctx.clone()) else {
-                    return 0;
-                };
-                if globals.set("__thaw_value_handle_live", live).is_err() {
-                    return 0;
-                }
-                handles
-            }
-        };
-        let index = handles.len();
-        if handles.set(index, value).is_err() {
-            return 0;
-        }
-        let Ok(live) = ctx.globals().get::<_, Array>("__thaw_value_handle_live") else {
-            return 0;
-        };
-        if live.set(index, true).is_err() {
-            return 0;
-        }
-        index as u64 + 1
+        retain_value(&ctx, value).unwrap_or(0)
     })
 }
 
@@ -395,14 +363,41 @@ fn value_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Value<'js>, Stri
     Ok(value)
 }
 
+/// Retains `value` in the realm-global handle registry and returns a
+/// stable opaque handle, lazily creating the registry itself (`__thaw_
+/// value_handles`/`__thaw_value_handle_live`) on first use -- unlike
+/// `handle_array` (a *lookup*, used once something is already known to be
+/// registered), this is the sole *write* path into the registry, so it
+/// must not assume some earlier call already bootstrapped it. Real
+/// example: a program whose first-ever touch of a JsValue handle is
+/// registering a native closure as a callback
+/// (`thaw_js_register_native_callback`) passed straight into an ordinary
+/// top-level Fallback function call, with no prior dynamic-value-
+/// returning call (e.g. no `makeHolder(): JsValue`-style call) to have
+/// bootstrapped the registry first -- previously failed with "JavaScript
+/// value handle registry is empty" even though this was really the very
+/// first legitimate retain.
 fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
-    let handles = handle_array(ctx)?;
+    let globals = ctx.globals();
+    let handles: Array = match globals.get("__thaw_value_handles") {
+        Ok(handles) => handles,
+        Err(_) => {
+            let handles = Array::new(ctx.clone()).map_err(|error| error.to_string())?;
+            globals
+                .set("__thaw_value_handles", handles.clone())
+                .map_err(|error| error.to_string())?;
+            let live = Array::new(ctx.clone()).map_err(|error| error.to_string())?;
+            globals
+                .set("__thaw_value_handle_live", live)
+                .map_err(|error| error.to_string())?;
+            handles
+        }
+    };
     let index = handles.len();
     handles
         .set(index, value)
         .map_err(|error| error.to_string())?;
-    let live: Array = ctx
-        .globals()
+    let live: Array = globals
         .get("__thaw_value_handle_live")
         .map_err(|_| "JavaScript value handle liveness registry is empty".to_string())?;
     live.set(index, true).map_err(|error| error.to_string())?;
