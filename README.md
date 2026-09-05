@@ -1964,9 +1964,17 @@ The workspace crates have narrow responsibilities:
   `number[]` fields in the arena. Return ownership applies to every string and
   array-data leaf, invoking its configured destructor exactly once per pointer
 
-### Not yet compatible
+### JIT / QuickJS execution boundary and remaining compatibility
 
-An experimental QuickJS-independent residual JIT backend is now linked as a
+Thaw deliberately uses a hybrid execution model. Statically typed or otherwise
+analyzable package code is specialized into native code; genuinely dynamic
+operations such as `loadScript`, `callDynamic`, and opaque `JsValue`
+property/method/constructor access remain on QuickJS. Replacing those operations
+with a home-grown general-purpose JavaScript runtime is not a project goal.
+QuickJS is linked only when the compiled program actually needs that fallback;
+fully specialized artifacts keep their `quickjs` flag false and omit it.
+
+The QuickJS-independent specialization JIT backend is linked as a
 separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
 HIR through LLVM to a small W^X runtime which specializes and caches numeric
 expressions containing arguments, constants, unary negation,
@@ -2696,8 +2704,9 @@ only the `aN` slots referenced by its IR. Numeric/boolean predicates may accept
 and return `boolean`; LLVM converts boolean arguments to JIT slots and comparison results
 back to the native boolean representation. Boolean literals and logical
 negation use the same IR, including ECMAScript's falsey `NaN` behavior.
-Broader Dynamic IR remains a migration step; ordinary fallback bundles continue
-to use QuickJS for now.
+Unsupported but statically analyzable cases remain migration candidates when
+real packages expose them. Runtime-shaped and eval-like behavior intentionally
+continues to use QuickJS.
 Fixed-shape object and tuple parameters whose leaves are number, boolean,
 string, tagged primitive unions, or primitive arrays can now enter extracted JIT exports as well,
 including mutually nested objects and tuples. LLVM recursively expands the
@@ -3152,6 +3161,16 @@ normally discarded together at the request boundary. Long-lived values,
 escaping values and true asynchronous coroutine frames require explicit
 lifetime rules before they are added.
 
+Registry fallback integration now covers class construction, typed instance
+methods, ordinary `JsValue` property reads, recursive method/property chains,
+compiled callbacks and Promise/thenable results. Declaration flattening covers
+the import-equals, namespace, callable-const and re-export forms required by the
+real zod, hono, drizzle, lodash, dayjs and uuid packages. Plain fallback
+functions emit every overload and select the best candidate per call by arity
+and argument shape, rather than declaration order. Non-callable package value
+exports such as uuid's `NIL`/`MAX` constants and mime's pre-created singleton
+remain a known registry gap.
+
 ## Testing
 
 ```sh
@@ -3180,19 +3199,17 @@ the current top-level status; code and tests remain authoritative.
 
 ## Development priorities
 
-The dependency order for closing the major compatibility gaps is:
+Current priorities are:
 
-1. Establish explicit runtime value ownership and an error-result ABI.
-2. Add cross-function error propagation and `finally` on that ABI.
-3. Introduce a real promise/event-loop contract, then lower `async` functions
-   to resumable state machines or LLVM coroutines.
-4. Expand HIR typing and inference without weakening native layout guarantees.
-5. Continue filling Node resolution/global compatibility from real package
-   tests; dependency discovery and the current ESM/CommonJS bundle graph are
-   parser-backed.
-6. Add a versioned ABI metadata format for fast-path libraries.
-7. Implement the minimal synchronous N-API host described in
-   `native-addons.md`, then expand it from observed addon requirements.
+1. Move additional statically analyzable package paths onto the specialization
+   JIT when real-package tests expose a false fallback.
+2. Keep QuickJS isolated as a conditional dependency for genuinely dynamic
+   semantics; do not duplicate a general-purpose JavaScript runtime.
+3. Publish non-callable package value exports, beginning with uuid's `NIL` and
+   `MAX` constants and mime's pre-created singleton.
+4. Keep real-package integration tests and precise fallback diagnostics as the
+   compatibility gate.
+5. Extend Node and N-API compatibility from observed package requirements.
 
 The first N-API host is now implemented, including shared worker-pool execution,
 main-thread completion and cancellation for the core async-work lifecycle.
