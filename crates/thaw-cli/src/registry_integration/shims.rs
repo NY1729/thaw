@@ -22564,6 +22564,42 @@ fn generate_registry_shims(
         } else if package_exports.len() == 1 {
             let target = package_exports.values().next().unwrap().clone();
             package_exports.insert("default".to_string(), target);
+        } else if pkg
+            .commonjs_export_name
+            .as_deref()
+            .is_some_and(|name| !package_exports.contains_key(name))
+            && !package_exports.is_empty()
+        {
+            // `export = X;` where `X` is bound to a whole object/
+            // namespace value (real example: lodash's `declare const _:
+            // LoDashStatic;`, ~300 methods), not a single function/class
+            // whose own flattened name happens to equal `X` -- unlike
+            // `qs`-shaped packages where the exported identifier *is*
+            // itself one of its own flattened function names.
+            // `package_exports` has no key literally named `X` at all
+            // (the object identifier is never itself one of its own
+            // flattened method names), so neither branch above can
+            // produce a "default" *export* entry, and `import Name from
+            // "pkg"` (module_graph.rs's `bundle`) fails outright with "no
+            // export named `default`" even though every individual
+            // method (`import { chunk } from "pkg"`) already works.
+            //
+            // Real TypeScript's own `esModuleInterop`/synthetic-default-
+            // export convention treats `export = X;` as satisfying a
+            // default import with X's own full shape -- i.e. the *whole*
+            // package export table, exactly like a bare `import * as
+            // Name from "pkg"` would. `external_namespace_aliases`
+            // (consumed by module_graph.rs's `bundle`) already binds a
+            // default import that resolves via this set as a full
+            // namespace over `dependency_exports` -- see
+            // `self_referential_namespace_aliases`'s identical use for
+            // zod's own `z`/`default` -- so marking `"default"` as a
+            // namespace alias here, without needing an actual
+            // `package_exports["default"]` entry at all, is enough.
+            external_namespace_aliases
+                .entry(pkg.name.clone())
+                .or_default()
+                .insert("default".to_string());
         }
         external_exports.insert(pkg.name.clone(), package_exports);
     }

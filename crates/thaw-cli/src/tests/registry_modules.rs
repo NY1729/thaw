@@ -5731,6 +5731,62 @@ fn default_callable_import_exposes_export_assignment_namespace_methods() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The `export = X;` shape the test above covers, but where `X` is bound
+/// to a whole *interface-typed const* with several methods (real
+/// example: lodash's `declare const _: LoDashStatic;`, ~300 methods) --
+/// unlike `tools` above, `_` is never itself one of its own flattened
+/// method names, so `package_exports.get("_")` always misses. `import {
+/// chunk } from "..."` (a named import of one flattened method) already
+/// worked before this fix; `import _ from "..."` (the default-import
+/// form, as common in real lodash code as the named form) failed
+/// outright ("no export named `default`") since nothing ever inserted a
+/// `"default"` key for this shape.
+#[test]
+fn default_import_exposes_an_export_assignment_interfaces_methods() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-export-assignment-interface-default-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("registry");
+    let package = registry.join("lodash-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export = _;\n\
+         export as namespace _;\n\
+         declare const _: LoDashStatic;\n\
+         interface LoDashStatic {\n\
+         \x20\x20\x20\x20chunk(value: number): number;\n\
+         \x20\x20\x20\x20capitalize(value: number): number;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { \
+         chunk: function(value) { return value * 2; }, \
+         capitalize: function(value) { return value + 1; } \
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import _ from \"lodash-kit\"; function main(): void { console.log(_.chunk(20)); console.log(_.capitalize(41)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "40\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registers_builds_and_runs_an_installed_npm_wildcard_subpath() {
     let dir = std::env::temp_dir().join(format!(
