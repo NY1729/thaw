@@ -37,8 +37,13 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
             .body
             .iter()
             .flat_map(|item| extract_const_call_signature_decls(item, &call_signature_interfaces))
-            .map(|(name, call)| {
-                lower_dts_call_signature(&name, call, &interfaces, &generic_interfaces)
+            .map(|(name, signature)| match signature {
+                CallableConstSignature::Interface(call) => {
+                    lower_dts_call_signature(&name, call, &interfaces, &generic_interfaces)
+                }
+                CallableConstSignature::Direct(function) => {
+                    lower_dts_fn_type(&name, function, &interfaces, &generic_interfaces)
+                }
             }),
     );
     Ok(functions)
@@ -60,22 +65,45 @@ fn all_interface_decls_by_name(module: &Module) -> HashMap<String, &TsInterfaceD
     map
 }
 
-/// Every top-level `export declare const NAME: TypeRef;` (`let`/`var`
-/// too) whose `TypeRef` resolves (via `interfaces`, see
-/// `all_interface_decls_by_name`) to an interface with at least one call
-/// signature -- the shape a real npm package's `.d.ts` uses for a factory
-/// value bound directly to a name instead of declared `function`. Real
-/// example: drizzle-orm's `export declare const sqliteTable:
-/// SQLiteTableFn;`, where `SQLiteTableFn` is an interface with one call
-/// signature per overload. Parallel to `extract_fn_decls`/
-/// `extract_interface_method_decls`: yields `NAME -> each of the
-/// interface's own `TsCallSignatureDecl` members, so a caller can
-/// synthesize a `DtsFunction` per overload exactly like an ordinary
-/// ambient function declaration.
+/// Which of `.d.ts`'s two callable-shape AST nodes a `declare const`
+/// export's own type annotation actually is. `Interface` is the shape
+/// `extract_const_call_signature_decls`'s doc comment describes
+/// (`SQLiteTableFn`-style, possibly several overloads, one
+/// `TsCallSignatureDecl` per); `Direct` is a *self-contained* inline
+/// function type with no interface involved at all -- real example: zod
+/// v3's `lib/types.d.ts`, `declare const objectType: <T extends
+/// ZodRawShape>(shape: T, params?: RawCreateParams) => ZodObject<...>;`,
+/// later locally rename-exported (`export { objectType as object, ... }`)
+/// -- the shape essentially all of zod v3's own primitives (`object`,
+/// `string`, `number`, ...) use, unlike zod v4 (unaffected) or drizzle-
+/// orm's interface-based `sqliteTable`. `TsCallSignatureDecl` and
+/// `TsFnType` carry identical `params`/`type_params`/`type_ann` fields,
+/// just with `type_ann` optional on one and required on the other --
+/// kept as two small sibling `lower_dts_*` functions
+/// (`lower_dts_call_signature`/`lower_dts_fn_type`) rather than one
+/// shared generic helper, matching this file's existing convention of
+/// one function per distinct AST shape.
+enum CallableConstSignature<'a> {
+    Interface(&'a TsCallSignatureDecl),
+    Direct(&'a TsFnType),
+}
+
+/// Every top-level `declare const NAME: T;` (`let`/`var` too, exported or
+/// bare -- a bare one only matters together with a later local rename-
+/// export, see `all_reexported_function_declarations` in thaw-registry's
+/// `install.rs`) whose type `T` is a callable shape: either a `TypeRef`
+/// resolving (via `interfaces`, see `all_interface_decls_by_name`) to a
+/// same-file interface with at least one call signature, or a direct
+/// inline function type -- see `CallableConstSignature`'s own doc
+/// comment for real examples of both. Parallel to `extract_fn_decls`/
+/// `extract_interface_method_decls`: yields `NAME -> each callable
+/// signature found (one per interface overload, or the one direct type),
+/// so a caller can synthesize a `DtsFunction` per signature exactly like
+/// an ordinary ambient function declaration.
 fn extract_const_call_signature_decls<'a>(
     item: &'a ModuleItem,
     interfaces: &HashMap<String, &'a TsInterfaceDecl>,
-) -> Vec<(String, &'a TsCallSignatureDecl)> {
+) -> Vec<(String, CallableConstSignature<'a>)> {
     let var_decl = match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(var_decl))) => var_decl.as_ref(),
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
@@ -92,19 +120,33 @@ fn extract_const_call_signature_decls<'a>(
                 return None;
             };
             let annotation = binding.type_ann.as_ref()?;
-            let TsType::TsTypeRef(ty_ref) = annotation.type_ann.as_ref() else {
-                return None;
-            };
-            let iface_name = match &ty_ref.type_name {
-                TsEntityName::Ident(ident) => ident.sym.to_string(),
-                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
-            };
-            let iface = *interfaces.get(iface_name.as_str())?;
             let name = binding.id.sym.to_string();
-            Some(iface.body.body.iter().filter_map(move |member| match member {
-                TsTypeElement::TsCallSignatureDecl(call) => Some((name.clone(), call)),
+            match annotation.type_ann.as_ref() {
+                TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+                    Some(vec![(name, CallableConstSignature::Direct(function))])
+                }
+                TsType::TsTypeRef(ty_ref) => {
+                    let iface_name = match &ty_ref.type_name {
+                        TsEntityName::Ident(ident) => ident.sym.to_string(),
+                        TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
+                    };
+                    let iface = *interfaces.get(iface_name.as_str())?;
+                    Some(
+                        iface
+                            .body
+                            .body
+                            .iter()
+                            .filter_map(|member| match member {
+                                TsTypeElement::TsCallSignatureDecl(call) => {
+                                    Some((name.clone(), CallableConstSignature::Interface(call)))
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                }
                 _ => None,
-            }))
+            }
         })
         .flatten()
         .collect()
@@ -235,6 +277,134 @@ fn lower_dts_call_signature(
         Some(ann) => classify(&ann.type_ann),
         None => DtsType::Native(HirType::Void),
     };
+
+    DtsFunction {
+        name,
+        generic,
+        params,
+        required_params,
+        rest_param,
+        ret,
+    }
+}
+
+/// Like `lower_dts_call_signature`, for a *direct* inline function type
+/// (`(params) => Ret`) instead of an interface's call signature -- the
+/// `CallableConstSignature::Direct` shape (see its own doc comment).
+/// `TsFnType` carries the same `params`/`type_params` fields as
+/// `TsCallSignatureDecl`, differing only in `type_ann`: always present
+/// here (a function *type* is never written without one), rather than
+/// optional. There can be only one of these per const (no interface-style
+/// overloads), so unlike `extract_const_call_signature_decls`'s other
+/// branch this never needs to be called more than once per name.
+fn lower_dts_fn_type(
+    name: &str,
+    function: &TsFnType,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> DtsFunction {
+    let name = name.to_string();
+    let generic = function.type_params.as_ref().map(|parameters| DtsGenericFunction {
+        type_params: parameters
+            .params
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name.sym.to_string(),
+                    parameter.constraint.as_deref().map(describe_ts_type),
+                )
+            })
+            .collect(),
+        param_types: function
+            .params
+            .iter()
+            .map(|parameter| match parameter {
+                TsFnParam::Ident(binding) => binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| describe_ts_type(&annotation.type_ann))
+                    .unwrap_or_else(|| "Json".into()),
+                _ => "Json".into(),
+            })
+            .collect(),
+        return_type: describe_ts_type(&function.type_ann.type_ann),
+    });
+    let mut substitution = HashMap::new();
+    if let Some(type_params) = &function.type_params {
+        for parameter in &type_params.params {
+            let Some(constraint) = &parameter.constraint else {
+                continue;
+            };
+            if let DtsType::Native(constraint) = resolve_ts_type_with_substitution(
+                constraint,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            ) {
+                substitution.insert(parameter.name.sym.to_string(), constraint);
+            }
+        }
+    }
+    let classify = |ty: &TsType| {
+        resolve_ts_type_with_substitution(
+            ty,
+            &substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )
+    };
+
+    let rest_param = function.params.last().and_then(|param| {
+        let TsFnParam::Rest(rest) = param else {
+            return None;
+        };
+        let name = match rest.arg.as_ref() {
+            Pat::Ident(binding) => binding.id.sym.to_string(),
+            _ => "rest".to_string(),
+        };
+        let ty = match rest.type_ann.as_ref() {
+            Some(annotation) => match annotation.type_ann.as_ref() {
+                TsType::TsArrayType(array) => classify(&array.elem_type),
+                other => DtsType::Unsupported(format!(
+                    "rest parameter must have an array type, found {}",
+                    describe_ts_type(other)
+                )),
+            },
+            None => DtsType::Unsupported("missing rest parameter type annotation".into()),
+        };
+        Some((name, ty))
+    });
+    let fixed_param_count = function.params.len() - usize::from(rest_param.is_some());
+    let required_params = function
+        .params
+        .iter()
+        .take(fixed_param_count)
+        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
+        .count();
+    let params = function
+        .params
+        .iter()
+        .take(fixed_param_count)
+        .enumerate()
+        .map(|(i, param)| {
+            let TsFnParam::Ident(binding) = param else {
+                let reason =
+                    "unsupported parameter pattern (only simple identifiers are classified yet)"
+                        .to_string();
+                return (format!("arg{i}"), DtsType::Unsupported(reason));
+            };
+            let param_name = binding.id.sym.to_string();
+            let ty = match &binding.type_ann {
+                Some(ann) => classify(&ann.type_ann),
+                None => DtsType::Unsupported("missing type annotation".to_string()),
+            };
+            (param_name, ty)
+        })
+        .collect::<Vec<_>>();
+
+    let ret = classify(&function.type_ann.type_ann);
 
     DtsFunction {
         name,

@@ -1541,6 +1541,49 @@ fn a_plain_const_export_without_a_callable_interface_type_is_not_extracted() {
     assert!(funcs.is_empty(), "{funcs:?}");
 }
 
+/// `export declare const NAME: (params) => Ret;` -- a factory value with
+/// a *direct* inline function type, no interface involved at all. Real-
+/// world example: zod v3's `lib/types.d.ts`, `declare const objectType:
+/// <T extends ZodRawShape>(shape: T, params?: RawCreateParams) =>
+/// ZodObject<...>;`, one such const per zod primitive. Confirms
+/// `extract_const_call_signature_decls`'s `Direct` branch (distinct from
+/// the `Interface` branch the tests above cover).
+#[test]
+fn extracts_a_callable_const_export_with_a_direct_inline_function_type() {
+    let source = r#"
+            export declare const factory: (a: string, b: number) => string;
+            export declare function plain(x: number): number;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 2, "{funcs:?}");
+    let factory = funcs.iter().find(|f| f.name == "factory").unwrap();
+    assert_eq!(factory.params.len(), 2);
+    assert_eq!(factory.required_params, 2);
+    assert!(funcs.iter().any(|f| f.name == "plain"));
+}
+
+/// The same direct-inline-function-type const, but *bare* (not directly
+/// exported) and reached only through a *local* rename-export (no `from`
+/// clause) -- the exact shape zod v3 actually uses:
+/// `declare const objectType: (...) => ...;` declared plainly, then
+/// `export { objectType as object };` elsewhere in the same file.
+/// thaw-bridge's own extraction (this test) already handles a bare
+/// `Decl::Var` -- this just confirms it stays reachable *by its original
+/// name* here (`objectType`, not yet renamed); the rename itself is
+/// thaw-registry's job (`install.rs`'s `all_reexported_function_
+/// declarations`), exercised separately in that crate's own tests.
+#[test]
+fn a_bare_callable_const_with_a_direct_function_type_is_still_extracted_by_its_original_name() {
+    let source = r#"
+            declare const objectType: (shape: string) => string;
+            export { objectType as object };
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 1, "{funcs:?}");
+    assert_eq!(funcs[0].name, "objectType");
+    assert_eq!(funcs[0].params.len(), 1);
+}
+
 /// The exact shape found in a real ESM npm package's `.d.ts`
 /// (`escape-string-regexp`): `export default function name(...): T;`
 /// is a different AST node (`ExportDefaultDecl`) than
