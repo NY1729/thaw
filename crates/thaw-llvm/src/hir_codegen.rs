@@ -690,17 +690,60 @@ include!("hir_codegen/ffi_calls.rs");
 
 impl<'ctx> HirCompiler<'ctx> {
     /// Compiles `args`, calls `function` with them, and extracts the
-    /// return value. Shared by `compile_call` and `compile_ffi_call`.
+    /// return value. Used by `compile_call`'s own default (plain named
+    /// function) fallthrough -- every other call shape (a dynamic method
+    /// call, a typed ambient declaration, an FFI call, ...) has its own
+    /// dedicated compilation path instead.
+    ///
+    /// A `JsValue`-typed argument reaching a `Json`-declared parameter
+    /// here needs the same `{"__thaw_js_handle_id__": N}` placeholder
+    /// encoding `compile_json_object_set_native`'s own field setter
+    /// already applies (see `compile_dynamic_value_placeholder`'s doc
+    /// comment) -- `coerce_to_declared` (thaw-hir) passes a `JsValue`
+    /// through *unchanged* into a `Json`-declared slot, relying on
+    /// exactly this kind of downstream detection to thread the real
+    /// handle through instead of a raw, mistyped integer. Previously
+    /// only the JSON-args-array-construction call sites did this
+    /// (guarded by `compiling_quickjs_dynamic_arguments`); an *ordinary*
+    /// function call reaching this path never did, so a real npm
+    /// function's own generated Fallback wrapper receiving another such
+    /// wrapper's `JsValue`-ish return value as an argument (real
+    /// example: uuid's `stringify(parse(id))`, `parse`'s `NonSharedArrayBuffer`
+    /// return classifying as `JsValue` and `stringify`'s `Uint8Array`
+    /// parameter classifying as `Json`, both via the same "unclassified
+    /// npm type" fallback) crashed LLVM's own module verifier outright
+    /// ("Call parameter type does not match function signature!") --
+    /// passing a raw `i64` where the callee's declared parameter is a
+    /// pointer. Uses the *unchecked* placeholder builder (no
+    /// `compiling_quickjs_dynamic_arguments` gate) since this path is
+    /// never reached for an N-API/native-addon target (those have their
+    /// own separate, dedicated call-compilation code, not this one) --
+    /// safe to assume a QuickJS-side reviver always exists downstream
+    /// wherever this specific mismatch can occur at all.
     fn build_call_with(
         &mut self,
         function: FunctionValue<'ctx>,
         args: &[HirExpr],
         name: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        let param_types = function.get_type().get_param_types();
         let compiled_args = args
             .iter()
-            .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
-            .collect::<Result<Vec<_>, _>>()?;
+            .enumerate()
+            .map(|(index, arg)| {
+                let value = self.compile_expr(arg)?;
+                let value = if value.is_int_value()
+                    && param_types
+                        .get(index)
+                        .is_some_and(|ty| ty.is_pointer_type())
+                {
+                    self.compile_dynamic_value_placeholder_unchecked(value)?
+                } else {
+                    value
+                };
+                Ok(BasicMetadataValueEnum::from(value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
 
         let call_site = self
             .builder
