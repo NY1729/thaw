@@ -1534,17 +1534,9 @@ function main(): void {
 /// flattened output under its real, public name.
 ///
 /// `import { z } from "zod"` (zod v3's alternate, namespace-style entry
-/// point) is a separate, still-open gap, not fixed here: `z` is a
-/// self-referential namespace alias (`import * as z from "./external";
-/// export { z };`) declared in `lib/index.d.ts`, one file *below* the
-/// package's own entry point (`index.d.ts`, just `export * from
-/// "./lib";`) -- unlike zod v4, whose own entry point declares this
-/// alias directly. thaw-registry's flattening only pulls individual
-/// function/const *declarations* through a wildcard re-export chain, not
-/// arbitrary top-level import/export-alias statements from a file reached
-/// only transitively, so `self_referential_namespace_aliases` (thaw-
-/// bridge) never sees `z`'s own alias declaration in the flattened output
-/// at all.
+/// point) needed a separate, follow-on fix -- see
+/// `registry_add_builds_a_schema_with_real_zod_v3s_z_namespace_when_enabled`
+/// below.
 #[test]
 fn registry_add_builds_a_schema_with_real_zod_v3_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -1561,6 +1553,68 @@ fn registry_add_builds_a_schema_with_real_zod_v3_when_enabled() {
         r#"import { object, string, number } from "zod";
 function main(): void {
     const schema = object({ name: string(), age: number() });
+    console.log("ok");
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Real, fetched `zod@3.23.0`'s alternate, namespace-style entry point:
+/// `import { z } from "zod"` and `import zod from "zod"` (both
+/// `z.object(...)`/`zod.object(...)`), the shape essentially as common in
+/// real zod v3 code as the bare-name form the test above covers. Was a
+/// separate, still-open gap after that fix: `z` is a self-referential
+/// namespace alias (`import * as z from "./external"; export { z };
+/// export default z;`) declared in `lib/index.d.ts`, one file *below* the
+/// package's own entry point (`index.d.ts`, just `export * from
+/// "./lib";`) -- unlike zod v4, whose own entry point declares this
+/// alias directly, so it was already visible to `self_referential_
+/// namespace_aliases` (thaw-bridge) without any special handling.
+/// thaw-registry's flattening only ever pulled individual function/const
+/// *declarations* through a wildcard re-export chain, never arbitrary
+/// top-level import/export-alias statements from a file reached only
+/// transitively, so `z`'s own alias declaration never reached the
+/// flattened output at all.
+///
+/// Fixed with a new `self_referential_namespace_alias_snippets`
+/// (thaw-registry's `install.rs`), recursing through wildcard re-exports
+/// the same way `collect_namespace_reexports` already does, splicing the
+/// exact `import`/`export` snippet text verbatim into the flattened
+/// output wherever found (its import source doesn't need to resolve to
+/// anything real -- `self_referential_namespace_aliases` only checks the
+/// AST shape). `export default z;` also needed
+/// `self_referential_namespace_aliases` itself (thaw-bridge) to recognize
+/// a *separate* `export default X;` statement as an alias under the
+/// implicit name `"default"` -- previously it only matched `export { X as
+/// default }`, the form zod v4 happens to use instead.
+#[test]
+fn registry_add_builds_a_schema_with_real_zod_v3s_z_namespace_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-zod-v3-z-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "zod@3.23.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { z } from "zod";
+import zod from "zod";
+function main(): void {
+    const schema = z.object({ name: z.string(), age: z.number() });
+    const schema2 = zod.object({ ok: zod.boolean() });
     console.log("ok");
 }"#,
     )
