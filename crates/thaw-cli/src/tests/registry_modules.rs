@@ -10377,3 +10377,75 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "users:3\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn non_callable_named_and_singleton_exports_are_reachable() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-value-exports-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let constants = registry.join("constant-kit");
+    let singleton = registry.join("mime-kit");
+    std::fs::create_dir_all(&constants).unwrap();
+    std::fs::create_dir_all(&singleton).unwrap();
+    std::fs::write(constants.join("package.d.ts"), "export declare const NIL: string;\nexport declare const MAX: string;\n").unwrap();
+    std::fs::write(constants.join("bundle.js"), "module.exports = { NIL: 'zero-id', MAX: 'max-id' };\n").unwrap();
+    std::fs::write(singleton.join("package.d.ts"), "export declare class Mime { getType(path: string): string | null; }\ndeclare const mime: Mime;\nexport = mime;\n").unwrap();
+    std::fs::write(singleton.join("bundle.js"), "module.exports = { getType: function(path) { return path.endsWith('.txt') ? 'text/plain' : null; } };\n").unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"import { NIL, MAX } from "constant-kit";
+import mime from "mime-kit";
+function main(): void {
+    console.log(NIL + ":" + MAX);
+    console.log(JSON.stringify(mime.getType("note.txt")));
+}"#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &["constant-kit".into(), "mime-kit".into()]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "zero-id:max-id\n\"text/plain\"\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn fallback_method_signature_contextually_types_callbacks_and_type_only_imports() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-contextual-method-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("web-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export type { Context } from './context';\n\
+         export declare class Hono {\n\
+         \x20 constructor();\n\
+         \x20 get(path: string, handler: (context: JsValue) => Json): void;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Hono() {} Hono.prototype.get = function(path, handler) { return handler({ text: function(value) { return value; } }); }; module.exports = { Hono: Hono };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Hono, Context } from "web-kit";
+function main(): void {
+    const app = new Hono();
+    app.get("/", (c) => { const value: string = c.text("Hello Thaw"); console.log(value); return JSON.parse("{}"); });
+    app.get("/typed", (c: Context) => { const value: string = c.text("Typed"); console.log(value); return JSON.parse("{}"); });
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &["web-kit".into()]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "Hello Thaw\nTyped\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

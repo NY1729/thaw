@@ -106,6 +106,12 @@ pub struct DtsProperty {
     pub readonly: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DtsValue {
+    pub name: String,
+    pub ty: DtsType,
+}
+
 /// A parameter/return type as written in the `.d.ts`, before deciding
 /// whether the whole signature is representable in Thaw's native type
 /// system.

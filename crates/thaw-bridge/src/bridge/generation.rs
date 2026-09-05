@@ -353,6 +353,9 @@ pub struct ModuleBundle<'a> {
     /// property-chain-derived function value), but capturing within the
     /// same `eval` call that created the object sidesteps it.
     pub nested_namespace_aliases: &'a [(String, String)],
+    /// `(export_name, runtime_getter, local, typed_getter_symbol)` for
+    /// non-callable values captured once after this bundle is loaded.
+    pub value_exports: &'a [(String, String, String, String)],
 }
 
 /// Wraps a real npm package's CommonJS source so it can run inside
@@ -567,6 +570,18 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             "    loadScript(\"{}\");\n",
             escape_ts_string_literal(&wrapped)
         ));
+        for (export_name, runtime_getter, _, _) in bundle.value_exports {
+            let getter_source = format!(
+                "globalThis[\"{}\"] = (function(value) {{ return function() {{ return value != null && Object.prototype.hasOwnProperty.call(value, \"{}\") ? value[\"{}\"] : value; }}; }})(globalThis.module.exports);",
+                escape_ts_string_literal(runtime_getter),
+                escape_ts_string_literal(export_name),
+                escape_ts_string_literal(export_name),
+            );
+            out.push_str(&format!(
+                "    loadScript(\"{}\");\n",
+                escape_ts_string_literal(&getter_source)
+            ));
+        }
         // Captured immediately, before any later package's own
         // `loadScript` can overwrite the bare name -- see
         // `ModuleBundle::qualified_aliases`'s doc comment.

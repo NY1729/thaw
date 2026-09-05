@@ -2200,6 +2200,7 @@ fn generates_load_script_call_per_bundle() {
             fallback_names: &[],
             qualified_aliases: &[],
             nested_namespace_aliases: &[],
+            value_exports: &[],
         },
         ModuleBundle {
             package_name: "is-odd",
@@ -2207,6 +2208,7 @@ fn generates_load_script_call_per_bundle() {
             fallback_names: &[],
             qualified_aliases: &[],
             nested_namespace_aliases: &[],
+            value_exports: &[],
         },
     ];
     let init = generate_module_init(&bundles);
@@ -2225,6 +2227,7 @@ fn escapes_quotes_and_newlines_in_bundled_source() {
         fallback_names: &[],
         qualified_aliases: &[],
         nested_namespace_aliases: &[],
+        value_exports: &[],
     }];
     let init = generate_module_init(&bundles);
     // The wrapper adds its own quotes/backslashes/newlines too; this
@@ -2444,6 +2447,7 @@ fn generated_module_init_round_trips_through_real_lowering() {
         fallback_names: &fallback_names,
         qualified_aliases: &[],
         nested_namespace_aliases: &[],
+        value_exports: &[],
     }]);
     let program_source = format!(
             "{init}\nfunction main(): void {{\n    console.log(String(callDynamic(\"greet\", JSON.parse(\"[]\"))));\n}}\n"
@@ -2481,6 +2485,7 @@ fn generate_module_init_captures_qualified_aliases_right_after_load() {
             fallback_names: &qs_fallback,
             qualified_aliases: &qs_aliases,
             nested_namespace_aliases: &[],
+            value_exports: &[],
         },
         ModuleBundle {
             package_name: "@hapi/hoek",
@@ -2488,6 +2493,7 @@ fn generate_module_init_captures_qualified_aliases_right_after_load() {
             fallback_names: &hoek_fallback,
             qualified_aliases: &hoek_aliases,
             nested_namespace_aliases: &[],
+            value_exports: &[],
         },
     ];
     let init = generate_module_init(&bundles);
@@ -2844,4 +2850,34 @@ fn destructured_parameter_falls_back_without_dropping_sibling_functions() {
         panic!("expected Fallback");
     };
     assert!(reason.contains("unsupported parameter pattern"));
+}
+
+#[test]
+fn extracts_non_callable_values_without_duplicating_callable_consts() {
+    let values = parse_dts_values(
+        r#"export interface Factory { (): string; }
+            export declare const factory: Factory;
+            export declare const NIL: string;
+            export declare const count: number;
+            export declare class Mime { getType(path: string): string | null; }
+            declare const mime: Mime;"#,
+    )
+    .unwrap();
+    assert_eq!(
+        values,
+        vec![
+            DtsValue {
+                name: "NIL".into(),
+                ty: DtsType::Native(HirType::Str)
+            },
+            DtsValue {
+                name: "count".into(),
+                ty: DtsType::Native(HirType::F64)
+            },
+            DtsValue {
+                name: "mime".into(),
+                ty: DtsType::Native(HirType::JsValue)
+            },
+        ]
+    );
 }
