@@ -1751,6 +1751,41 @@ fn nested_object_fields_classify_as_fast_path() {
     );
 }
 
+/// `export default X;` -- a *separate* AST node from `export { X as
+/// default }`, and the shape a real npm package commonly uses instead.
+/// Real example: zod v3's `lib/index.d.ts`, `import * as z from
+/// "./external"; export { z }; export default z;` -- confirms
+/// `self_referential_namespace_aliases` recognizes `default` here too,
+/// not just the `export { X as default }` form.
+#[test]
+fn self_referential_namespace_aliases_recognizes_a_separate_export_default_statement() {
+    let source = r#"
+            import * as z from "./external";
+            export * from "./external";
+            export { z };
+            export default z;
+        "#;
+    let aliases = self_referential_namespace_aliases(source);
+    assert!(aliases.contains("z"), "{aliases:?}");
+    assert!(aliases.contains("default"), "{aliases:?}");
+}
+
+/// A plain `export default someValue;` where `someValue` is *not* bound
+/// by a namespace import at all must not be mistaken for a self-
+/// referential alias -- confirms the new `export default` handling is
+/// conditioned on the identifier actually being a namespace import, the
+/// same restriction the existing `export { X as default }` form already
+/// has.
+#[test]
+fn export_default_of_an_unrelated_identifier_is_not_a_self_referential_alias() {
+    let source = r#"
+            declare function helper(): number;
+            export default helper;
+        "#;
+    let aliases = self_referential_namespace_aliases(source);
+    assert!(aliases.is_empty(), "{aliases:?}");
+}
+
 #[test]
 fn falls_back_on_self_referential_interface_without_breaking_other_functions() {
     let source = r#"

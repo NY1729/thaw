@@ -474,42 +474,55 @@ pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
         })
         .flatten()
         .collect();
-    module
-        .body
-        .iter()
-        .filter_map(|item| {
-            let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+    let named_aliases = module.body.iter().filter_map(|item| {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+            return None;
+        };
+        if export.type_only || export.src.is_some() {
+            return None;
+        }
+        Some(export.specifiers.iter().filter_map(|specifier| {
+            let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else {
                 return None;
             };
-            if export.type_only || export.src.is_some() {
+            if named.is_type_only {
                 return None;
             }
-            Some(export.specifiers.iter().filter_map(|specifier| {
-                let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else {
-                    return None;
-                };
-                if named.is_type_only {
-                    return None;
-                }
-                let export_name = |name: &swc_ecma_ast::ModuleExportName| match name {
-                    swc_ecma_ast::ModuleExportName::Ident(name) => Some(name.sym.to_string()),
-                    swc_ecma_ast::ModuleExportName::Str(_) => None,
-                };
-                let original = export_name(&named.orig)?;
-                if !namespace_imports.contains(&original) {
-                    return None;
-                }
-                Some(
-                    named
-                        .exported
-                        .as_ref()
-                        .and_then(export_name)
-                        .unwrap_or(original),
-                )
-            }))
-        })
-        .flatten()
-        .collect()
+            let export_name = |name: &swc_ecma_ast::ModuleExportName| match name {
+                swc_ecma_ast::ModuleExportName::Ident(name) => Some(name.sym.to_string()),
+                swc_ecma_ast::ModuleExportName::Str(_) => None,
+            };
+            let original = export_name(&named.orig)?;
+            if !namespace_imports.contains(&original) {
+                return None;
+            }
+            Some(
+                named
+                    .exported
+                    .as_ref()
+                    .and_then(export_name)
+                    .unwrap_or(original),
+            )
+        }))
+    }).flatten();
+    // `export default X;` (a *separate* AST node from `export { X as
+    // default }` above, and the shape a real npm package commonly uses
+    // instead -- real example: zod v3's `lib/index.d.ts`, `import * as z
+    // from "./external"; export { z }; export default z;`) is equally a
+    // self-referential alias of a namespace-imported name, just under the
+    // implicit name `"default"`.
+    let default_alias = module.body.iter().find_map(|item| {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(default_expr)) = item else {
+            return None;
+        };
+        let Expr::Ident(ident) = default_expr.expr.as_ref() else {
+            return None;
+        };
+        namespace_imports
+            .contains(ident.sym.as_str())
+            .then(|| "default".to_string())
+    });
+    named_aliases.chain(default_alias).collect()
 }
 
 /// Every `declare namespace NAME { export { A as B, C as D, ... }; }`

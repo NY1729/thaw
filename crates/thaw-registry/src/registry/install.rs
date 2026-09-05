@@ -953,7 +953,127 @@ fn dts_source_with_reexported_functions(
             members.join(", ")
         ));
     }
+    let mut self_referential_visited = std::collections::BTreeSet::new();
+    for snippet in
+        self_referential_namespace_alias_snippets(entry_path, &mut self_referential_visited)?
+    {
+        output.push('\n');
+        output.push_str(&snippet);
+    }
     Ok(output)
+}
+
+/// A same-file `import * as X from "SOURCE"; export { X[, X as Y], ... };`
+/// (and/or `export default X;`) -- the shape `thaw_bridge::self_
+/// referential_namespace_aliases` recognizes in an already-flattened
+/// `.d.ts`, but only at the top level of *one* file. Real npm packages
+/// sometimes declare this in a file reached only *transitively* through
+/// the entry point's own `export * from "...";`, not the entry point
+/// itself -- real example: zod v3's `lib/index.d.ts` (`import * as z
+/// from "./external"; export * from "./external"; export { z }; export
+/// default z;`), one file below the package's own entry point
+/// (`index.d.ts`, just `export * from "./lib";`) -- unlike zod v4, whose
+/// entry point declares this alias directly, so it was already visible
+/// to `self_referential_namespace_aliases` without this. Recurses through
+/// wildcard re-exports the same way `collect_namespace_reexports` does,
+/// returning the raw import/export snippet text verbatim for each
+/// namespace-imported name that's re-exported this way -- its import
+/// source doesn't need to resolve to anything real in the flattened
+/// output (`self_referential_namespace_aliases` only checks the AST
+/// shape, never follows the source path), so a caller can splice it into
+/// the flattened output to make the alias visible to that same
+/// downstream detector.
+fn self_referential_namespace_alias_snippets(
+    entry_path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{
+        Expr, ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName, ModuleItem,
+    };
+    use thaw_parser::common::{SourceMapper, Span, Spanned};
+
+    if !visited.insert(entry_path.to_path_buf()) {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(entry_path).map_err(|error| {
+        format!(
+            "failed to read re-exported declarations `{}`: {error}",
+            entry_path.display()
+        )
+    })?;
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+
+    let mut namespace_imports: std::collections::HashMap<String, (Span, Vec<Span>)> =
+        std::collections::HashMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        for specifier in &import.specifiers {
+            if let ImportSpecifier::Namespace(namespace) = specifier {
+                namespace_imports
+                    .entry(namespace.local.sym.to_string())
+                    .or_insert_with(|| (import.span(), Vec::new()));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export))
+                if !export.type_only && export.src.is_none() =>
+            {
+                for specifier in &export.specifiers {
+                    let ExportSpecifier::Named(named) = specifier else {
+                        continue;
+                    };
+                    if named.is_type_only {
+                        continue;
+                    }
+                    let ModuleExportName::Ident(ident) = &named.orig else {
+                        continue;
+                    };
+                    if let Some((_, exports)) = namespace_imports.get_mut(ident.sym.as_str()) {
+                        exports.push(export.span());
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(default_expr)) => {
+                if let Expr::Ident(ident) = default_expr.expr.as_ref() {
+                    if let Some((_, exports)) = namespace_imports.get_mut(ident.sym.as_str()) {
+                        exports.push(default_expr.span());
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) if !export.type_only => {
+                if let Some(source_path) = export.src.value.as_str() {
+                    if let Some(target_path) = declaration_reexport_path(entry_path, source_path) {
+                        found.extend(self_referential_namespace_alias_snippets(
+                            &target_path,
+                            visited,
+                        )?);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (name, (import_span, export_spans)) in &namespace_imports {
+        if export_spans.is_empty() {
+            continue;
+        }
+        let mut snippet = source_map
+            .span_to_snippet(*import_span)
+            .map_err(|error| format!("failed to read namespace import `{name}`: {error:?}"))?;
+        for export_span in export_spans {
+            snippet.push('\n');
+            snippet.push_str(&source_map.span_to_snippet(*export_span).map_err(|error| {
+                format!("failed to read self-referential export for `{name}`: {error:?}")
+            })?);
+        }
+        found.push(snippet);
+    }
+    Ok(found)
 }
 
 /// Every `export * as NAME from "SOURCE";` reachable from `entry_path`'s
