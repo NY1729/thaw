@@ -1494,6 +1494,53 @@ fn interface_methods_outside_the_export_assignment_type_are_not_extracted() {
     assert_eq!(funcs[0].name, "pLimit");
 }
 
+/// `export declare const NAME: SomeCallableInterface;` -- a factory
+/// value bound directly to a name instead of declared `function`. Real-
+/// world example: drizzle-orm's `export declare const sqliteTable:
+/// SQLiteTableFn;`, where `SQLiteTableFn` is an interface with one call
+/// signature per overload (each overload contributes its own
+/// `DtsFunction`, same convention as an overloaded interface method).
+#[test]
+fn extracts_a_callable_const_export_from_its_interfaces_call_signatures() {
+    let source = r#"
+            export interface Factory {
+                (a: string, b: number): string;
+                (a: string): string;
+            }
+            export declare const factory: Factory;
+            export declare function plain(x: number): number;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 3, "{funcs:?}");
+    let overloads: Vec<_> = funcs.iter().filter(|f| f.name == "factory").collect();
+    assert_eq!(overloads.len(), 2, "{funcs:?}");
+    assert!(overloads
+        .iter()
+        .any(|f| f.params.len() == 2 && f.required_params == 2));
+    assert!(overloads
+        .iter()
+        .any(|f| f.params.len() == 1 && f.required_params == 1));
+    assert!(funcs.iter().any(|f| f.name == "plain"));
+}
+
+/// A `declare const` whose declared type does *not* resolve to a call-
+/// signature interface (an ordinary object shape, or an unknown/unrelated
+/// type name) must not contribute any function at all -- confirms the new
+/// extraction is conditioned on the referenced interface actually having
+/// a call signature, not triggered by every `const` export.
+#[test]
+fn a_plain_const_export_without_a_callable_interface_type_is_not_extracted() {
+    let source = r#"
+            export interface PlainShape {
+                value: string;
+            }
+            export declare const notCallable: PlainShape;
+            export declare const unknownType: SomethingUndeclared;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert!(funcs.is_empty(), "{funcs:?}");
+}
+
 /// The exact shape found in a real ESM npm package's `.d.ts`
 /// (`escape-string-regexp`): `export default function name(...): T;`
 /// is a different AST node (`ExportDefaultDecl`) than

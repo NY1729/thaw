@@ -1407,3 +1407,94 @@ function main(): void {
     assert_eq!(lines.next(), None);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Real, fetched drizzle-orm -- the next breadth-first bug-hunting target
+/// after uuid. drizzle-orm uses npm subpath exports extensively (the root
+/// package exposes only SQL-operator helpers; the actual `sqliteTable`/
+/// `pgTable` factories and column builders live under dialect-specific
+/// subpaths like `drizzle-orm/sqlite-core`), which thaw-registry already
+/// supports: `thaw registry add drizzle-orm` alone processes every subpath
+/// at install time, and `--use drizzle-orm/sqlite-core` at build time
+/// resolves against the already-installed `subpaths/sqlite-core/`
+/// directory (`thaw registry add drizzle-orm/sqlite-core` directly does
+/// *not* work -- it's treated as a separate package spec and fails trying
+/// to `npm install` it).
+///
+/// `sqliteTable` (and `pgTable`, `mysqlTable`, ...) -- the central
+/// primitive essentially all real drizzle schema-definition code depends
+/// on -- was completely absent from the flattened `package.d.ts`, unlike
+/// every previously-supported npm export shape. Root cause: drizzle-orm
+/// declares it `export declare const sqliteTable: SQLiteTableFn;`
+/// (`SQLiteTableFn` an interface with one call signature per overload) --
+/// a `Decl::Var` binding, not `declare function`. Thaw's whole export
+/// pipeline (thaw-registry's re-export flattening, thaw-bridge's `.d.ts`
+/// parser) only ever recognized a function or class/interface export;
+/// a plain const was silently dropped, same underlying gap as uuid's
+/// `NIL`/`MAX` (see the doc comment above) but blocking rather than
+/// cosmetic, since without it no real drizzle schema can be written at
+/// all.
+///
+/// Fixed by teaching thaw-registry's flattening (`callable_const_
+/// declarations` in `install.rs`) to recognize a `declare const NAME:
+/// TypeRef;` whose `TypeRef` is a same-file interface with a call
+/// signature, carrying both the const's and the interface's own
+/// declaration text into the flattened output, and teaching thaw-bridge's
+/// `parse_dts` (`extract_const_call_signature_decls`/
+/// `lower_dts_call_signature`) to synthesize a `DtsFunction` per overload
+/// from such an interface's call signatures -- exactly like an ordinary
+/// ambient function declaration. No thaw-hir or thaw-cli shim-generation
+/// changes were needed: once `sqliteTable` is just another entry in
+/// `pkg.functions`, it flows through the entirely existing
+/// `Classification::Fallback` call path (every overload here classifies
+/// Fallback, since every parameter/return type involves unresolvable
+/// generics/callbacks), identical to any other already-working npm
+/// function.
+///
+/// Scope: this only covers making `sqliteTable`/`integer`/`text` etc.
+/// *callable*. Using the *returned* table's columns
+/// (`usersTable.id`) or passing it into a query builder
+/// (`db.select().from(usersTable)`) is a separate, later concern, not
+/// attempted here.
+#[test]
+fn registry_add_builds_a_sqlite_schema_with_real_drizzle_orm_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-drizzle-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "drizzle-orm").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { sqliteTable, integer, text } from "drizzle-orm/sqlite-core";
+function main(): void {
+    const users = sqliteTable("users", {
+        id: integer(),
+        name: text(),
+    });
+    console.log("ok");
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["drizzle-orm/sqlite-core".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
