@@ -9678,3 +9678,74 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "200\n200\n200\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `coerce_to_declared`'s missing symmetric case to its own `Json`
+/// branch just above it: a dynamic method call with no `JsValue` hint
+/// (`lower_dynamic_value_method_call`'s own default) always comes back
+/// `Json`-typed, even when the caller's own declared slot is a concrete
+/// scalar -- real trigger found while finishing the hono `app.get` arc:
+/// `const body: string = await res.text()` used to fail outright
+/// ("value has type Json, expected Str"), with no way to consume the
+/// result except keeping it `JsValue`-typed and decoding it manually
+/// later. Fixed by reusing the exact `JsonAsNumber`/`JsonAsString`/
+/// `JsonAsBool` nodes `dictionary_value_from_json` (objects.rs) already
+/// builds for the identical "decode a Json value into its declared
+/// scalar type" problem elsewhere -- already fully supported by type
+/// inference and both codegen backends, so no new HIR node or codegen
+/// path was needed, just a new branch in `coerce_to_declared` itself.
+///
+/// Exercises all three scalar targets (`number`, `boolean`, `string`)
+/// against one holder object whose methods all return plain data with
+/// no annotation anywhere on the call site itself.
+#[test]
+fn a_dynamic_method_calls_json_result_decodes_into_a_declared_scalar_type() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-json-to-scalar-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("scalar-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeHolder(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeHolder: function() { \
+         return { \
+         num: function() { return 42; }, \
+         flag: function() { return true; }, \
+         text: function() { return 'hi'; } \
+         }; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeHolder } from "scalar-kit";
+function main(): void {
+    const h: JsValue = makeHolder();
+    const n: number = h.num();
+    const b: boolean = h.flag();
+    const s: string = h.text();
+    console.log(n);
+    console.log(b);
+    console.log(s);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\ntrue\nhi\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

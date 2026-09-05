@@ -4,6 +4,31 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        // The symmetric case to the `HirType::Json` branch just below --
+        // a dynamic method call with no `JsValue` hint (`lower_dynamic_
+        // value_method_call`'s own default) always comes back `Json`-
+        // typed, even when the caller's own declared slot is a concrete
+        // scalar. Real trigger: `const body: string = await res.text()`
+        // (real hono) used to fail outright ("value has type Json,
+        // expected Str") with no way to consume the result except by
+        // keeping it `JsValue`-typed and manually decoding it later.
+        // Reuses the exact `JsonAsNumber`/`JsonAsString`/`JsonAsBool`
+        // nodes `dictionary_value_from_json` (objects.rs) already builds
+        // for the identical "decode a Json field into its declared
+        // scalar type" problem -- already fully supported by type
+        // inference and both codegen backends, so no new HIR node or
+        // codegen path is needed here.
+        if matches!(declared, HirType::F64 | HirType::Str | HirType::Bool) {
+            let actual = self.infer_expr_type(&value)?;
+            if actual == HirType::Json {
+                return Ok(match declared {
+                    HirType::F64 => HirExpr::JsonAsNumber(Box::new(value)),
+                    HirType::Str => HirExpr::JsonAsString(Box::new(value)),
+                    HirType::Bool => HirExpr::JsonAsBool(Box::new(value)),
+                    _ => unreachable!(),
+                });
+            }
+        }
         if *declared == HirType::Json {
             let actual = self.infer_expr_type(&value)?;
             if actual == HirType::Json {
