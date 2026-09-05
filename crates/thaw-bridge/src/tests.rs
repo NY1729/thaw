@@ -1584,6 +1584,56 @@ fn a_bare_callable_const_with_a_direct_function_type_is_still_extracted_by_its_o
     assert_eq!(funcs[0].params.len(), 1);
 }
 
+/// A `declare const NAME: T;` whose type `T` is a *local, unexported*
+/// type alias (not a direct function type, not an interface) -- real
+/// example: uuid's own `.d.ts` (via `@types/uuid`), `export const
+/// validate: validate;` where `type validate = (uuid: string) =>
+/// boolean;` is declared bare, elsewhere in the same file.
+#[test]
+fn extracts_a_callable_const_typed_through_a_local_type_alias() {
+    let source = r#"
+            type validate = (uuid: string) => boolean;
+            export const validate: validate;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 1, "{funcs:?}");
+    assert_eq!(funcs[0].name, "validate");
+    assert_eq!(funcs[0].params.len(), 1);
+    assert_eq!(funcs[0].required_params, 1);
+}
+
+/// The same shape, but the const's type alias resolves to an
+/// *intersection* of two further local aliases, each themselves a direct
+/// function type -- real example: uuid's `v1`/`v3`/`v4`/`v5`/`v6`/`v7`,
+/// each declared `type vN = vNBuffer & vNString;` where `vNBuffer`/
+/// `vNString` are themselves separate local aliases. Confirms both
+/// overloads survive as separate `DtsFunction`s, the same convention
+/// already used for an interface's own multiple call signatures.
+#[test]
+fn extracts_a_callable_const_typed_through_an_intersection_of_local_aliases() {
+    let source = r#"
+            type v4String = (options?: string) => string;
+            type v4Buffer = <T>(options: string | null | undefined, buffer: T) => T;
+            type v4 = v4Buffer & v4String;
+            export const v4: v4;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 2, "{funcs:?}");
+    assert!(funcs.iter().all(|f| f.name == "v4"), "{funcs:?}");
+    assert!(
+        funcs
+            .iter()
+            .any(|f| f.params.len() == 1 && f.required_params == 0),
+        "{funcs:?}"
+    );
+    assert!(
+        funcs
+            .iter()
+            .any(|f| f.params.len() == 2 && f.required_params == 2),
+        "{funcs:?}"
+    );
+}
+
 /// The exact shape found in a real ESM npm package's `.d.ts`
 /// (`escape-string-regexp`): `export default function name(...): T;`
 /// is a different AST node (`ExportDefaultDecl`) than

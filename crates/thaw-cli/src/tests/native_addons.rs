@@ -1408,6 +1408,87 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Real, fetched `uuid@8.3.2` -- a legacy major version predating the
+/// currently-fixed latest uuid (the test above), with a completely
+/// different `.d.ts` export shape: `uuid@8.3.2` itself ships no `.d.ts`
+/// at all (types come from the separately-versioned `@types/uuid`),
+/// whose real `index.d.mts` is `import uuid from "./index.js"; export
+/// import v1 = uuid.v1; export import v4 = uuid.v4; export import
+/// validate = uuid.validate; ...` -- a TS import-equals declaration whose
+/// module reference is a qualified *entity name* (`uuid.v1`, a property
+/// access into an already-imported value), not a `require(...)` call.
+/// thaw-registry's flattening had no code recognizing this AST shape at
+/// all, so none of uuid v8's functions were reachable.
+///
+/// Root cause, two parts: (1) nothing in `install.rs` matched
+/// `TsModuleRef::TsEntityName` at all (only `TsExternalModuleRef`, the
+/// `require(...)` shape `import_equals_targets` already handles) -- fixed
+/// by a new loop resolving the qualifier (`uuid`) via the existing
+/// `named_import_targets`, then reusing `reexported_function_
+/// declarations` to look the member (`v1`) up in `uuid`'s own target
+/// file exactly like a named re-export already does. (2) even once
+/// found, `uuid.v1`'s own declared type (`export const v1: v1;`) is
+/// typed through a *local, unexported* type-alias chain
+/// (`type v1 = v1Buffer & v1String;`, each side itself a further local
+/// alias resolving to a direct function type) -- a shape neither
+/// `callable_const_declaration_snippet` (thaw-registry, text inclusion)
+/// nor `extract_const_call_signature_decls` (thaw-bridge, classification)
+/// recognized, both only handling a same-file call-signature interface or
+/// a *direct* inline function type. Fixed on the thaw-registry side by
+/// carrying the const's own snippet together with *every* type alias/
+/// interface declared in the same file (harmless when unrelated -- `.d.ts`
+/// type declarations are erasable); on the thaw-bridge side by a new
+/// `resolve_local_callable_fn_types`, following a local alias chain and
+/// unwrapping an intersection into each of its own operands, yielding one
+/// `DtsFunction` per resolved overload (`v1Buffer`'s generic
+/// buffer-output overload and `v1String`'s simple string-returning one),
+/// the same "first overload wins" convention already documented as a
+/// separate, scoped-out limitation for the latest uuid's own `v4`
+/// (confirmed present here too, for the exact same reason -- not
+/// attempted here either).
+#[test]
+fn registry_add_reexports_uuid_v8s_import_equals_functions_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-uuid-v8-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "uuid@8.3.2").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { validate, version, parse, stringify } from "uuid";
+function main(): void {
+    const ns = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+    console.log(validate(ns));
+    console.log(version(ns));
+    const bytes = parse(ns);
+    console.log(bytes.length);
+    const roundTripped: string = stringify(bytes);
+    console.log(roundTripped);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("true"));
+    assert_eq!(lines.next(), Some("1"));
+    assert_eq!(lines.next(), Some("16"));
+    assert_eq!(lines.next(), Some("6ba7b810-9dad-11d1-80b4-00c04fd430c8"));
+    assert_eq!(lines.next(), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Real, fetched drizzle-orm -- the next breadth-first bug-hunting target
 /// after uuid. drizzle-orm uses npm subpath exports extensively (the root
 /// package exposes only SQL-operator helpers; the actual `sqliteTable`/

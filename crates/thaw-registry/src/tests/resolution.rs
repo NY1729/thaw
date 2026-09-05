@@ -582,6 +582,61 @@ fn installed_package_inlines_import_equals_reexports() {
 }
 
 #[test]
+fn installed_package_inlines_export_import_member_reexports() {
+    // `export import NAME = BASE.MEMBER;` -- a TS import-equals
+    // declaration whose module reference is a qualified *entity name* (a
+    // property access into an already-imported value), not a
+    // `require(...)` call (the shape the test above covers). Real
+    // example: uuid@8.3.2's real `.d.ts` (via `@types/uuid`), `import
+    // uuid from "./index.js"; export import v1 = uuid.v1; export import
+    // validate = uuid.validate; ...`. `validate`'s own declared type
+    // (`export const validate: validate;`) is itself a *local, unexported*
+    // type alias (`type validate = (uuid: string) => boolean;`) in
+    // `./index.js`'s own `.d.ts` -- not an interface, not a direct
+    // function type on the const itself.
+    let scratch = temp_registry("installed-dts-export-import-member-scratch");
+    let registry = temp_registry("installed-dts-export-import-member-registry");
+    let package = scratch.join("node_modules/uuid-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"uuid-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import uuid from './impl';\n\
+         export import validate = uuid.validate;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("impl.d.ts"),
+        "export {};\n\
+         type validate = (uuid: string) => boolean;\n\
+         export const validate: validate;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { validate: function(id) { return id.length === 36; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "uuid-kit").unwrap();
+    let declarations = resolve(&registry, "uuid-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("export const validate: validate;"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("type validate = (uuid: string) => boolean;"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_the_type_an_import_equals_value_is_declared_with() {
     // `import Name = require("./path")` used as a *type* reference
     // (`declare const x: Name;`), not the value re-export
