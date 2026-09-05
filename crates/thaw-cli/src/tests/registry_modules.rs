@@ -6719,6 +6719,66 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A Fallback function whose overloads are discriminated by *arity
+/// range*, not `typeof` -- real-world example: uuid's `v4(options?):
+/// string` (0-1 args) alongside its generic buffer-output
+/// `v4<TBuf extends Uint8Array = Uint8Array>(options, buf, offset?):
+/// TBuf` (2-3 args), previously unreachable no matter what a real call
+/// passed, since "first successful overload wins" only ever exposed the
+/// first. Exercises the full pipeline end to end (`generate_registry_
+/// shims`'s new per-overload declarations plus `class_methods.rs`'s new
+/// bare-call rewrite), not just the rewrite function in isolation --
+/// this is the test that would have caught the original bug.
+#[test]
+fn fallback_function_overload_is_picked_by_call_site_arity() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-overload-arity-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("id-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeId(seed?: number): string;\n\
+         export declare function makeId(seed: number, salt: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.makeId = function(seed, salt) {\n\
+             if (salt !== undefined) { return seed * 1000 + salt; }\n\
+             return 'id-' + (seed === undefined ? 0 : seed);\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeId } from "id-kit";
+function main(): void {
+    console.log(makeId());
+    console.log(makeId(5));
+    console.log(makeId(5, 7));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // If the 2-argument call had stayed pinned to the first (0-1 arg)
+    // overload's declaration instead, this would be a compile error
+    // (too many arguments), not a wrong runtime value.
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "id-0\nid-5\n5007\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Fallback function whose `.d.ts` signature ends in a rest parameter
 /// (real-world example: `clsx(...inputs: ClassValue[]): string`).
 /// `typed_dynamic_declaration` used to ignore `rest_param` entirely and

@@ -19800,6 +19800,54 @@ fn sanitize_identifier(s: &str) -> String {
         .collect()
 }
 
+/// A `DtsFunction`'s declared parameter types as plain `HirType`s, for
+/// `overload_type_score` (`class_methods.rs`) to compare against a real
+/// call site's actual argument types. Anything that isn't `DtsType::
+/// Native` -- including a reference to one of the function's own generic
+/// type parameters, which doesn't classify as `Native` -- widens to
+/// `Json`, matching the "unclassifiable stays Json" convention used
+/// everywhere else in this file; `Json` scores as a universal-but-weak
+/// match, so a generic overload only loses to a more specifically-typed
+/// sibling when one genuinely fits better, never disqualified outright.
+fn dts_function_param_hir_types(function: &thaw_bridge::DtsFunction) -> Vec<thaw_hir::HirType> {
+    function
+        .params
+        .iter()
+        .map(|(_, ty)| match ty {
+            thaw_bridge::DtsType::Native(ty) => ty.clone(),
+            // A bare `undefined`/`null` literal type used purely to steer
+            // *real* TypeScript's own overload resolution -- real
+            // example: uuid's `v4(options?, buf?: undefined, offset?):
+            // string`, where `buf`'s declared type exists only to
+            // distinguish this overload from its sibling generic
+            // buffer-output one (`v4<TBuf>(options, buf: TBuf, offset?):
+            // TBuf`). `classify_ts_type` widens a bare `undefined`/`null`
+            // keyword type to `Unsupported` the same as any other
+            // unclassifiable type (correct for *rendering* -- it's still
+            // a callable, Json-typed parameter at runtime, see
+            // `typed_dynamic_declaration`'s own matching comment), but
+            // scoring it as a weak Json match here would make it
+            // indistinguishable from the sibling overload's *own*
+            // unresolvable generic-typed `buf` -- letting a real,
+            // concrete argument (an actual buffer) tie against this
+            // phantom parameter instead of correctly losing to it.
+            // Recovering the literal shape here (for scoring only, not
+            // rendering) lets `overload_type_score`'s existing exact-type
+            // fallback arm correctly disqualify this overload for any
+            // argument that isn't itself undefined/null.
+            thaw_bridge::DtsType::Unsupported(message)
+                if message == "`undefined` is not supported" =>
+            {
+                thaw_hir::HirType::Undefined
+            }
+            thaw_bridge::DtsType::Unsupported(message) if message == "`null` is not supported" => {
+                thaw_hir::HirType::Null
+            }
+            _ => thaw_hir::HirType::Json,
+        })
+        .collect()
+}
+
 fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
     match ty {
         thaw_hir::HirType::F64 => Some("number".into()),
@@ -21234,6 +21282,18 @@ type ClassConstructorRewrite = (
 );
 /// `(class, method, helper, argument_count, has_callback, parameter_types)`.
 type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::HirType>);
+/// `(function name, helper symbol, min arity, max arity, parameter
+/// types)` -- a registry Fallback function with more than one `.d.ts`
+/// overload (real example: uuid's `v4`, a `(options?): string` overload
+/// alongside a generic `<TBuf extends Uint8Array = Uint8Array>(options,
+/// buf, offset?): TBuf` one) that "first successful overload wins"
+/// (below) can't fully expose through a single bare-name alias. Each
+/// overload gets its own helper symbol here; `class_methods.rs`'s
+/// `rewrite_external_class_methods_with_static` picks between them at
+/// each real call site by arity and, on a tie, `overload_type_score`
+/// against the call's actual argument types -- the same mechanism
+/// already used for external class method/constructor overloads.
+type FallbackFunctionOverloadRewrite = (String, String, usize, usize, Vec<thaw_hir::HirType>);
 /// `(class, property, helper)` for an instance getter.
 type ClassGetterRewrite = (String, String, String);
 /// `(class, property, helper, value_type)` for an instance setter.
@@ -21645,6 +21705,7 @@ type RegistryShims = (
     Vec<StaticClassGetterRewrite>,
     Vec<StaticClassSetterRewrite>,
     Vec<FactoryClassRewrite>,
+    Vec<FallbackFunctionOverloadRewrite>,
     ExternalExports,
     ExternalNamespaceAliases,
     ExternalNestedNamespaces,
@@ -21993,6 +22054,15 @@ fn generate_registry_shims(
     let mut typed_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     let mut jit_targets = std::collections::HashSet::new();
+    // Names `union_overload_dispatch_declaration` already claims with a
+    // runtime `typeof`-based dispatcher -- correctly handled already, so
+    // the argument-shape-scoring loop below must skip them rather than
+    // building a redundant (and less capable, since it can't discriminate
+    // by real value at runtime the way `typeof` can) compile-time rewrite
+    // for the same name.
+    let mut union_dispatched_names: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    let mut fallback_function_overload_rewrites: Vec<FallbackFunctionOverloadRewrite> = Vec::new();
     let mut class_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     let mut class_rewrites = Vec::new();
@@ -22322,6 +22392,7 @@ fn generate_registry_shims(
                 overloaded_names.push(&function.name);
             }
         }
+        let overloaded_names_for_argument_shape_dispatch = overloaded_names.clone();
         for name in overloaded_names {
             let is_fallback = pkg.classifications.iter().any(|(candidate, classification)| {
                 candidate == name
@@ -22340,6 +22411,7 @@ fn generate_registry_shims(
             {
                 shim.push_str(&declaration);
                 typed_targets.insert((pkg.name.clone(), name.to_string()), symbol);
+                union_dispatched_names.insert((pkg.name.clone(), name.to_string()));
             }
         }
         // Names for which `typed_dynamic_bare_alias` below actually
@@ -22456,6 +22528,62 @@ fn generate_registry_shims(
                         jit_targets.insert((pkg.name.clone(), function.name.clone()));
                     }
                 }
+            }
+        }
+        // Argument-shape-aware overload dispatch: an overloaded name not
+        // already claimed by a `typeof`-based runtime dispatcher above
+        // only ever exposes its *first* overload through the bare/
+        // qualified alias just emitted -- real example: uuid's
+        // `v4<TBuf extends Uint8Array = Uint8Array>(options?, buf?,
+        // offset?): TBuf`, whose generic buffer-output overload is
+        // otherwise unreachable no matter what a real call site passes.
+        // Every overload (including whichever one became the default
+        // above) gets its own freshly-suffixed declaration here,
+        // independent of the bare-alias symbol -- a little redundant
+        // declaration text, but far simpler than trying to splice the
+        // first-wins loop's already-claimed symbol back in, and exactly
+        // the "duplicate declaration under a different name for the same
+        // runtime symbol" shape `typed_dynamic_declaration`'s own
+        // `overload_suffix` already documents supporting. Each becomes a
+        // `FallbackFunctionOverloadRewrite` candidate that `class_methods
+        // .rs`'s rewrite pass picks between by arity and, on a tie,
+        // `overload_type_score` against each real call site's actual
+        // argument types -- the bare-alias default keeps working
+        // unchanged for any call that pass doesn't recognize a better
+        // match for.
+        for name in &overloaded_names_for_argument_shape_dispatch {
+            let name = *name;
+            if union_dispatched_names.contains(&(pkg.name.clone(), name.to_string()))
+                || !typed_targets.contains_key(&(pkg.name.clone(), name.to_string()))
+            {
+                continue;
+            }
+            let is_fallback = pkg.classifications.iter().any(|(candidate, classification)| {
+                candidate == name
+                    && matches!(classification, thaw_bridge::Classification::Fallback { .. })
+            });
+            if !is_fallback {
+                continue;
+            }
+            let napi = pkg.native_addon.is_some() && pkg.bundle_js.is_none();
+            let empty_arities = std::collections::BTreeSet::new();
+            for (index, function) in pkg.functions.iter().enumerate() {
+                if function.name != name || function.rest_param.is_some() {
+                    continue;
+                }
+                let Some((symbol, declaration)) =
+                    typed_dynamic_declaration(&pkg.name, function, napi, &empty_arities, Some(index))
+                else {
+                    continue;
+                };
+                shim.push_str(&declaration);
+                fallback_function_overload_rewrites.push((
+                    name.to_string(),
+                    symbol,
+                    function.required_params,
+                    function.params.len(),
+                    dts_function_param_hir_types(function),
+                ));
             }
         }
         if pkg.native_addon.is_some() && pkg.bundle_js.is_none() {
@@ -22676,6 +22804,7 @@ fn generate_registry_shims(
         static_class_getter_rewrites,
         static_class_setter_rewrites,
         factory_class_rewrites,
+        fallback_function_overload_rewrites,
         external_exports,
         external_namespace_aliases,
         external_nested_namespaces,
