@@ -2673,7 +2673,8 @@ impl<'ctx> HirCompiler<'ctx> {
             };
             (Some(receiver), method_args)
         };
-        let callback = matches!(signature.params.last(), Some(HirType::Function(_, _)))
+        let callback = (signature.backend == DynamicBackend::Napi
+            && matches!(signature.params.last(), Some(HirType::Function(_, _))))
             .then(|| method_args.last())
             .flatten();
         let marshalled_args = if callback.is_some() {
@@ -2729,15 +2730,27 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        self.compiling_quickjs_dynamic_arguments = signature.backend == DynamicBackend::QuickJs;
         for (index, (argument, ty)) in marshalled_args
             .iter()
             .zip(signature.params.iter().skip(usize::from(!is_static)))
             .enumerate()
         {
-            let value = self.compile_expr(argument)?;
-            self.compile_typed_dynamic_argument(array, value, ty)
+            let (value, marshalled_type) = if signature.backend == DynamicBackend::QuickJs
+                && matches!(ty, HirType::Function(_, _))
+            {
+                (
+                    self.compile_register_native_callback(std::slice::from_ref(argument))?,
+                    &HirType::JsValue,
+                )
+            } else {
+                (self.compile_expr(argument)?, ty)
+            };
+            self.compile_typed_dynamic_argument(array, value, marshalled_type)
                 .map_err(|error| format!("N-API method argument {}: {error}", index + 1))?;
         }
+        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
         let method = signature
             .symbol
             .split('$')
@@ -2759,19 +2772,6 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         let result = if let Some(callback) = callback {
-            if signature.backend != DynamicBackend::Napi {
-                // thaw-cli's shims.rs never generates a QuickJS-backed
-                // class method declaration with a trailing callback
-                // parameter (see `supported_class_method_param`'s Fallback
-                // caller) -- this is a defensive check, not a reachable
-                // real-package case, since `compile_typed_napi_method_
-                // callback` below assumes the N-API-specific reference
-                // ABI.
-                return Err(
-                    "a QuickJS-NG (Fallback) class method does not support a callback parameter yet"
-                        .into(),
-                );
-            }
             self.compile_typed_napi_method_callback(
                 receiver,
                 method.as_pointer_value(),

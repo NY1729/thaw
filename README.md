@@ -3167,9 +3167,11 @@ compiled callbacks and Promise/thenable results. Declaration flattening covers
 the import-equals, namespace, callable-const and re-export forms required by the
 real zod, hono, drizzle, lodash, dayjs and uuid packages. Plain fallback
 functions emit every overload and select the best candidate per call by arity
-and argument shape, rather than declaration order. Non-callable package value
-exports such as uuid's `NIL`/`MAX` constants and mime's pre-created singleton
-remain a known registry gap.
+and argument shape, rather than declaration order. Typed non-callable package
+values are captured once after module initialization, covering uuid-style
+string constants and mime-style pre-created singleton objects. Fallback class
+method signatures also contextually type callback arguments; type-only package
+imports such as Hono's `Context` are erased to a local `JsValue` type binding.
 
 ## Testing
 
@@ -3205,11 +3207,9 @@ Current priorities are:
    JIT when real-package tests expose a false fallback.
 2. Keep QuickJS isolated as a conditional dependency for genuinely dynamic
    semantics; do not duplicate a general-purpose JavaScript runtime.
-3. Publish non-callable package value exports, beginning with uuid's `NIL` and
-   `MAX` constants and mime's pre-created singleton.
-4. Keep real-package integration tests and precise fallback diagnostics as the
+3. Keep real-package integration tests and precise fallback diagnostics as the
    compatibility gate.
-5. Extend Node and N-API compatibility from observed package requirements.
+4. Extend Node and N-API compatibility from observed package requirements.
 
 The first N-API host is now implemented, including shared worker-pool execution,
 main-thread completion and cancellation for the core async-work lifecycle.

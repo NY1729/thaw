@@ -9,8 +9,8 @@
 宣言flatten、呼び出し引数の形に基づくFallback関数のoverload選択まで実装済みである。zod、hono、drizzle、
 lodash、dayjs、uuidは実パッケージ統合テストで追跡している。
 
-残る明確な共通ギャップは、uuidの`NIL`/`MAX`やmimeの既製singletonのような、packageが直接公開する
-非callable値exportである。chalkに必要な一般的なプロパティ読み出しとチェーンの基盤は実装済みだが、chalk
+後続実装により、uuidの`NIL`/`MAX`やmimeの既製singletonのような、packageが直接公開する型付き
+非callable値exportもmodule初期化後に一度取得して公開できる。chalkに必要な一般的なプロパティ読み出しとチェーンの基盤は実装済みだが、chalk
 自体の互換性は実パッケージテストが追加されるまで未検証として扱う。また、真に動的な`loadScript`、
 `callDynamic`、opaqueな`JsValue`操作は、汎用JS runtimeを再実装せずQuickJSに残す設計である。
 
@@ -131,5 +131,5 @@ zodのAPIは「ジェネリックなスキーマクラス階層 + メソッド�
 - **#4 Fallbackクラスのメソッド呼び出し**: 当初想定より掘り下げたところ、実際に必要だったのは「QuickJS-NG版のtypedメソッド呼び出しコード生成」（小〜中規模、既存のnapiクラス機構をbackend分岐で共有）に加えて、**「Fallbackのファクトリ関数の戻り値をどのクラスのインスタンスとして追跡するか」**（`function_return_named_types`の新設、`declare namespace`内のクラス抽出漏れの修正、`class_methods.rs`への`FactoryClassRewrite`追跡の追加）という、事前调査時には見えていなかった追加の一段だった。ユーザーに詳細を報告した上で「リスクを承知で実装する」の判断を得て実施。
   - **できるようになったこと**: `dayjs(...).format(...)`/`.year()`/`.month()`/`.date()`/`.isValid()`など、Fallbackのファクトリ関数が返すクラスインスタンスへの**インスタンスメソッド呼び出し**が実際のdayjsパッケージで動作する。
   - **後続実装で解消**: Fallbackクラスに対する`new ClassName(...)`、通常の`JsValue`プロパティ読み出し、メソッド/プロパティの再帰的チェーン。
-  - **未解決**: mimeのような「関数ではなくpackageが直接エクスポートする既製のシングルトン値」の経路（import走査＋非関数値エクスポートの公開が別途必要）。staticメソッドとgetter/setterの対応状況は、この文書では保証対象にしない。
+  - **後続実装で解消**: mimeのような「関数ではなくpackageが直接エクスポートする既製のシングルトン値」と、uuidの文字列定数を含む型付き非callable値export。staticメソッドとgetter/setterの対応状況は、この文書では保証対象にしない。
   - **chalk**: 必要な動的チェーンの基盤は後続実装済み。ただし実パッケージによる互換性確認は未実施。

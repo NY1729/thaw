@@ -696,7 +696,11 @@ impl<'a> FnLowerer<'a> {
             self.ret_type = expected_return.cloned().unwrap_or(HirType::Dynamic);
             let (body, inferred) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
-                    let expression = self.lower_expr(expr)?;
+                    let expression = if let Some(expected) = expected_return {
+                        self.lower_expr_with_expected_type(expr, Some(expected))?
+                    } else {
+                        self.lower_expr(expr)?
+                    };
                     let inferred = self.infer_expr_type(&expression)?;
                     let body = if prefix.is_empty() {
                         expression

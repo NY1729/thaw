@@ -56,6 +56,67 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     Ok(functions)
 }
 
+/// Extracts typed, non-callable top-level value declarations. Callable
+/// `const`s are already returned by [`parse_dts`] and are excluded here.
+pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
+    let module = thaw_parser::parse_typescript(source)?;
+    let (interfaces, generic_interfaces) = resolve_interfaces(&module);
+    let callable = parse_dts(source)?
+        .into_iter()
+        .map(|function| function.name)
+        .collect::<HashSet<_>>();
+    let class_names = parse_dts_classes(source)?
+        .into_iter()
+        .map(|class| class.name)
+        .collect::<HashSet<_>>();
+    let mut values = Vec::new();
+    for item in &module.body {
+        let declaration = match item {
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(declaration))) => {
+                declaration.as_ref()
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+                Decl::Var(declaration) => declaration.as_ref(),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        for declarator in &declaration.decls {
+            let Pat::Ident(binding) = &declarator.name else {
+                continue;
+            };
+            let name = binding.id.sym.to_string();
+            if callable.contains(&name) {
+                continue;
+            }
+            let Some(annotation) = &binding.type_ann else {
+                continue;
+            };
+            let mut ty = resolve_ts_type_with_substitution(
+                &annotation.type_ann,
+                &HashMap::new(),
+                &interfaces,
+                &generic_interfaces,
+                &mut Vec::new(),
+            );
+            if matches!(&ty, DtsType::Unsupported(_)) {
+                let referenced = match annotation.type_ann.as_ref() {
+                    TsType::TsTypeRef(reference) => match &reference.type_name {
+                        TsEntityName::Ident(ident) => Some(ident.sym.as_str()),
+                        TsEntityName::TsQualifiedName(qualified) => Some(qualified.right.sym.as_str()),
+                    },
+                    _ => None,
+                };
+                if referenced.is_some_and(|name| class_names.contains(name)) {
+                    ty = DtsType::Native(HirType::JsValue);
+                }
+            }
+            values.push(DtsValue { name, ty });
+        }
+    }
+    Ok(values)
+}
+
 /// Every interface declared anywhere in `module`, by its own bare name --
 /// unlike `resolve_interfaces`'s internal `raw` map, this doesn't split
 /// generic from non-generic interfaces (a call-signature interface may
@@ -621,6 +682,39 @@ pub fn self_referential_namespace_aliases(source: &str) -> HashSet<String> {
             .then(|| "default".to_string())
     });
     named_aliases.chain(default_alias).collect()
+}
+
+/// Names explicitly exported only as TypeScript types. Registry imports of
+/// these names are erased at runtime but still need a local type binding.
+pub fn exported_type_names(source: &str) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_typescript(source) else {
+        return HashSet::new();
+    };
+    module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => Some(export),
+            _ => None,
+        })
+        .flat_map(|export| {
+            export.specifiers.iter().filter_map(move |specifier| {
+                let swc_ecma_ast::ExportSpecifier::Named(named) = specifier else {
+                    return None;
+                };
+                if !export.type_only && !named.is_type_only {
+                    return None;
+                }
+                let name = named.exported.as_ref().unwrap_or(&named.orig);
+                match name {
+                    swc_ecma_ast::ModuleExportName::Ident(ident) => Some(ident.sym.to_string()),
+                    swc_ecma_ast::ModuleExportName::Str(string) => {
+                        string.value.as_str().map(str::to_string)
+                    }
+                }
+            })
+        })
+        .collect()
 }
 
 /// Every `declare namespace NAME { export { A as B, C as D, ... }; }`

@@ -7,6 +7,7 @@ struct ResolvedPackage {
     name: String,
     commonjs_export_name: Option<String>,
     functions: Vec<thaw_bridge::DtsFunction>,
+    values: Vec<thaw_bridge::DtsValue>,
     classes: Vec<thaw_bridge::DtsClass>,
     classifications: Vec<(String, thaw_bridge::Classification)>,
     native_lib: Option<PathBuf>,
@@ -30,6 +31,7 @@ struct ResolvedPackage {
     /// has no export named `z`" (neither is a function/class/interface
     /// at all -- both are bound purely by an `import *`).
     namespace_self_aliases: std::collections::HashSet<String>,
+    type_only_exports: std::collections::HashSet<String>,
     /// Every `NAME -> { member name -> real flattened function name }`
     /// nested-namespace table this package's own `.d.ts` declares -- see
     /// `thaw_bridge::nested_namespace_members`'s own doc comment. Real
@@ -21357,6 +21359,7 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
                 | thaw_hir::HirType::Str
                 | thaw_hir::HirType::Bool
                 | thaw_hir::HirType::Json
+                | thaw_hir::HirType::JsValue
                 | thaw_hir::HirType::Void
                 | thaw_hir::HirType::Object(_)
         )
@@ -21565,13 +21568,12 @@ fn generate_napi_class_method_overloads(
             .filter(|candidate| {
                 candidate.params.iter().enumerate().all(|(index, (_, ty))| {
                     supported_class_method_param(ty, index, candidate.params.len())
-                        // The QuickJS-NG (Fallback) backend doesn't marshal
-                        // a callback parameter for a class method yet (see
-                        // `compile_typed_napi_method`'s explicit guard) --
-                        // excluded here rather than left to silently lose
-                        // the `has_callback` bit below, which would still
-                        // generate a declaration nothing can call safely.
-                        && (napi || !matches!(ty, thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(_, _))))
+                        || (!napi
+                            && index + 1 == candidate.params.len()
+                            && matches!(ty,
+                                thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(params, ret))
+                                if params.iter().all(|param| render_dynamic_type(param).is_some())
+                                    && render_dynamic_type(ret).is_some()))
                 }) && candidate
                     .rest_param
                     .as_ref()
@@ -21918,6 +21920,8 @@ fn generate_registry_shims(
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
         let classes = thaw_bridge::parse_dts_classes(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
+        let values = thaw_bridge::parse_dts_values(&package.dts_source)
+            .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
         let commonjs_export_name = commonjs_export_name(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s CommonJS export: {e}"))?;
         // Whether there's actually a `native.a` to link a FastPath
@@ -21936,11 +21940,13 @@ fn generate_registry_shims(
             .collect();
         let namespace_self_aliases =
             thaw_bridge::self_referential_namespace_aliases(&package.dts_source);
+        let type_only_exports = thaw_bridge::exported_type_names(&package.dts_source);
         let nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             commonjs_export_name,
             functions,
+            values,
             classes,
             classifications,
             native_lib: package.native_lib,
@@ -21948,6 +21954,7 @@ fn generate_registry_shims(
             bundle_js: package.bundle_js,
             factory_class_returns,
             namespace_self_aliases,
+            type_only_exports,
             nested_namespaces,
         });
     }
@@ -22048,10 +22055,13 @@ fn generate_registry_shims(
         Vec<String>,
         Vec<(String, String)>,
         Vec<(String, String)>,
+        Vec<(String, String, String, String)>,
     );
 
     let mut shim = String::new();
     let mut typed_targets: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    let mut value_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     let mut jit_targets = std::collections::HashSet::new();
     // Names `union_overload_dispatch_declaration` already claims with a
@@ -22620,6 +22630,41 @@ fn generate_registry_shims(
             ));
         }
         if let Some(bundle_js) = &pkg.bundle_js {
+            let value_exports = pkg
+                .values
+                .iter()
+                .filter_map(|value| {
+                    let thaw_bridge::DtsType::Native(ty) = &value.ty else {
+                        return None;
+                    };
+                    if !matches!(ty, thaw_hir::HirType::Str | thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::JsValue) {
+                        return None;
+                    }
+                    let rendered = render_dynamic_type(ty)?;
+                    let local = format!(
+                        "__thaw_value_{}_{}",
+                        sanitize_identifier(&pkg.name),
+                        value.name
+                    );
+                    let runtime_getter = format!("{}::$value${}", pkg.name, value.name);
+                    let encoded = runtime_getter
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    let typed_getter = format!("__thaw_typed_js_{encoded}");
+                    shim.push_str(&format!(
+                        "declare function {typed_getter}(): {rendered};\nlet {local}: {rendered} = {typed_getter}();\n"
+                    ));
+                    value_targets.insert((pkg.name.clone(), value.name.clone()), local.clone());
+                    Some((
+                        value.name.clone(),
+                        runtime_getter,
+                        local,
+                        typed_getter,
+                    ))
+                })
+                .collect::<Vec<_>>();
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
@@ -22676,7 +22721,10 @@ fn generate_registry_shims(
             // same `loadScript` call also carries (`generation.rs`'s
             // `wrap_as_commonjs_module`), which never got a chance to
             // run either.
-            if !fallback_names.is_empty() || pkg.native_addon.is_some() || !pkg.classes.is_empty()
+            if !fallback_names.is_empty()
+                || pkg.native_addon.is_some()
+                || !pkg.classes.is_empty()
+                || !value_exports.is_empty()
             {
                 bundles.push((
                     pkg.name.clone(),
@@ -22684,6 +22732,7 @@ fn generate_registry_shims(
                     fallback_names,
                     qualified_aliases,
                     nested_namespace_aliases,
+                    value_exports,
                 ));
             }
         }
@@ -22692,13 +22741,14 @@ fn generate_registry_shims(
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()
         .map(
-            |(name, js, fallback_names, qualified_aliases, nested_namespace_aliases)| {
+            |(name, js, fallback_names, qualified_aliases, nested_namespace_aliases, value_exports)| {
                 thaw_bridge::ModuleBundle {
                     package_name: name.as_str(),
                     js_source: js.as_str(),
                     fallback_names,
                     qualified_aliases,
                     nested_namespace_aliases,
+                    value_exports,
                 }
             },
         )
@@ -22726,6 +22776,13 @@ fn generate_registry_shims(
             external_nested_namespaces.insert(pkg.name.clone(), pkg.nested_namespaces.clone());
         }
         let mut package_exports = std::collections::HashMap::new();
+        for name in &pkg.type_only_exports {
+            // ponytail: external type-only imports are erased to JsValue;
+            // preserve their structure only when native layout is required.
+            let target = format!("__thaw_type_{}_{}", sanitize_identifier(&pkg.name), name);
+            shim.push_str(&format!("type {target} = JsValue;\n"));
+            package_exports.insert(name.clone(), target);
+        }
         for (name, classification) in &pkg.classifications {
             let target = if matches!(classification, thaw_bridge::Classification::Fallback { .. }) {
                 typed_targets
@@ -22740,6 +22797,11 @@ fn generate_registry_shims(
         for class in &pkg.classes {
             if let Some(target) = class_targets.get(&(pkg.name.clone(), class.name.clone())) {
                 package_exports.insert(class.name.clone(), target.clone());
+            }
+        }
+        for value in &pkg.values {
+            if let Some(target) = value_targets.get(&(pkg.name.clone(), value.name.clone())) {
+                package_exports.insert(value.name.clone(), target.clone());
             }
         }
         if let Some(target) = pkg
