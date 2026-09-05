@@ -340,32 +340,58 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or("N-API value callback must return a value")?;
-            let result_json = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_json_array_new").unwrap(),
-                    &[],
-                    "napi_value_callback_result_array",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap();
-            self.compile_json_array_push_native(result_json, result, ret)?;
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_json_index").unwrap(),
-                    &[
-                        result_json.into(),
-                        self.context.f64_type().const_zero().into(),
-                        null_key.into(),
-                    ],
-                    "napi_value_callback_result",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
+            // An `async` callback's declared return type is always
+            // `Promise<T>` here (see `discover_frame_async_functions`'s
+            // "every async function must expose the same Promise-handle
+            // ABI" invariant), so `result` is a genuine, resolvable
+            // `ThawPromise` pointer -- never a raw unwrapped value in
+            // disguise. Drive it to its resolved value (propagating a
+            // rejection as a pending thaw exception, same as an ordinary
+            // `await`) before marshaling `T`, not `Promise<T>`, to JSON.
+            let (result, ret) = match ret {
+                HirType::Promise(resolved) if **resolved == HirType::Void => {
+                    self.drive_promise_to_completion(result.into_pointer_value())?;
+                    (result, resolved.as_ref())
+                }
+                HirType::Promise(resolved) => {
+                    let resolved_value = self.drive_promise_to_resolved_value(
+                        result.into_pointer_value(),
+                        resolved,
+                    )?;
+                    (resolved_value, resolved.as_ref())
+                }
+                other => (result, other),
+            };
+            if matches!(ret, HirType::Undefined | HirType::Void) {
+                self.compile_json_null()?
+            } else {
+                let result_json = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_array_new").unwrap(),
+                        &[],
+                        "napi_value_callback_result_array",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                self.compile_json_array_push_native(result_json, result, ret)?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_json_index").unwrap(),
+                        &[
+                            result_json.into(),
+                            self.context.f64_type().const_zero().into(),
+                            null_key.into(),
+                        ],
+                        "napi_value_callback_result",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+            }
         };
         let result = self
             .builder

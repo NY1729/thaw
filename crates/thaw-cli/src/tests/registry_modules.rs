@@ -9389,6 +9389,143 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A native closure passed as a dynamic-method-call argument (same shape
+/// as the test above), whose declared return type is `Promise<T>` --
+/// real-world example: drizzle-orm's `sqlite-proxy` driver,
+/// `drizzle(callback)`, where `callback` is always
+/// `(sql, params, method) => Promise<{rows}>` since it wraps real I/O.
+/// Found via drizzle bug-hunting: passing an `async` predicate crashed at
+/// *build* time with `"cannot serialize collection element Promise(F64)
+/// to JSON"`.
+///
+/// Root cause: `compile_napi_value_callback` (the callback bridge, reused
+/// for both real N-API addons and this QuickJS Fallback path) pushes the
+/// callback's raw return value into its JSON result array using the
+/// callback's *declared* return type verbatim -- for an `async` callback
+/// that's `HirType::Promise(inner)`, but nothing ever stripped the
+/// `Promise` wrapper or drove it to resolution first, and
+/// `compile_json_array_push_native` has no match arm for
+/// `HirType::Promise` at all. Every `is_async` function -- named or an
+/// inline async arrow -- always exposes the same real, resolvable
+/// `ThawPromise`-pointer ABI regardless of whether its body actually
+/// suspends (`discover_frame_async_functions`'s own documented
+/// invariant), so the raw return value here is never a raw unwrapped
+/// value in disguise -- just an unresolved promise. Fixed by teaching
+/// `compile_napi_value_callback` to detect a `Promise`-typed `ret` and
+/// drive it to its resolved value via `drive_promise_to_resolved_value`
+/// (the value-taking half of the existing `compile_typed_blocking_await`,
+/// already used for an ordinary typed `await` expression) before
+/// marshaling the *resolved* type, not `Promise<T>`, to JSON. Confirmed
+/// to reproduce the exact pre-fix build error via a temporary revert.
+#[test]
+fn a_promise_returning_native_closure_can_be_passed_as_a_dynamic_method_call_argument() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-async-native-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("async-callback-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeHolder(): Holder;\n\
+         interface Holder {\n\
+         \x20\x20\x20\x20check(pred: (n: number) => Promise<number>): void;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeHolder: function() { \
+         return { \
+         check: function(pred) { \
+         var result = pred(5); \
+         console.log('got:' + result); \
+         } \
+         }; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeHolder } from "async-callback-kit";
+function main(): void {
+    const holder: JsValue = makeHolder();
+    holder.check(async (n: number): Promise<number> => n * 10);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "got:50\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The `async` predicate's `Promise<void>`-resolved counterpart (no
+/// meaningful return value at all) -- confirms the null-result path
+/// still works correctly once routed through the same Promise-unwrapping
+/// branch (real-world example: zod's own `.superRefine((val, ctx) => {
+/// ctx.addIssue(...); })`-shaped callbacks, if ever declared `async`).
+#[test]
+fn a_promise_void_returning_native_closure_argument_still_produces_a_null_result() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-async-void-native-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("async-void-callback-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeHolder(): Holder;\n\
+         interface Holder {\n\
+         \x20\x20\x20\x20check(pred: (n: number) => Promise<void>): void;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeHolder: function() { \
+         return { \
+         check: function(pred) { \
+         var result = pred(5); \
+         console.log('got:' + result); \
+         } \
+         }; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeHolder } from "async-void-callback-kit";
+function main(): void {
+    const holder: JsValue = makeHolder();
+    holder.check(async (n: number): Promise<void> => { console.log(n); });
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\ngot:null\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A dynamic-call argument that's itself a method call chained off a
 /// `JsValue` receiver, with no intermediate `const` binding at all --
 /// real-world example: zod's `z.string().pipe(z.string().min(3))`,
