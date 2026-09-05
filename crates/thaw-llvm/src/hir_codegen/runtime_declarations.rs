@@ -1207,7 +1207,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_js_call_method_handle_result",
             handle_result_type.fn_type(
-                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                &[
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.bool_type().into(),
+                ],
                 false,
             ),
             Some(Linkage::External),
