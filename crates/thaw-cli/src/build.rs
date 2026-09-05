@@ -112,6 +112,7 @@ fn build_with_link_mode(
         static_class_getter_rewrites,
         static_class_setter_rewrites,
         factory_class_rewrites,
+        fallback_function_overload_rewrites,
         external_exports,
         external_namespace_aliases,
         external_nested_namespaces,
@@ -140,6 +141,7 @@ fn build_with_link_mode(
         &static_class_getter_rewrites,
         &static_class_setter_rewrites,
         &factory_class_rewrites,
+        &fallback_function_overload_rewrites,
     )?;
     let user_source =
         rewrite_external_class_constructors(&user_source, &class_constructor_rewrites)?;

@@ -5265,6 +5265,7 @@ fn rewrites_named_and_namespace_static_class_methods() {
         &[],
         &[],
         &[],
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -5290,6 +5291,7 @@ fn rewrites_typed_napi_instance_getters() {
             "value".into(),
             "__thaw_get_value".into(),
         )],
+        &[],
         &[],
         &[],
         &[],
@@ -5324,6 +5326,7 @@ fn rewrites_typed_napi_instance_setters_and_preserves_expression_values() {
         &[],
         &[],
         &[],
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -5355,6 +5358,7 @@ fn rewrites_named_and_namespace_static_accessors() {
             "__thaw_set_version".into(),
             thaw_hir::HirType::F64,
         )],
+        &[],
         &[],
     )
     .unwrap();
@@ -5544,6 +5548,79 @@ fn selects_external_method_overloads_by_arity_and_callback_shape() {
             rewritten,
             "const db = Database_ctor(\":memory:\"); const done = (error: Json): void => {}; __run_sync(db, \"select 1\"); __run_callback(db, \"select 1\", done);"
         );
+}
+
+/// A registry Fallback function's overloads discriminated by *arity
+/// range* -- real example: uuid's `v4(options?): string` (0-1 args)
+/// alongside its generic buffer-output `v4<TBuf extends Uint8Array =
+/// Uint8Array>(options, buf, offset?): TBuf` (2-3 args), previously
+/// unreachable no matter what a real call passed since "first
+/// successful overload wins" only ever exposed the first. Confirms
+/// `rewrite_fallback_function_overloads` (a bare-call analog of
+/// `rewrite_external_class_methods`) picks the right helper purely by
+/// how many arguments a call site actually passes.
+#[test]
+fn selects_fallback_function_overloads_by_arity_range() {
+    let source = "makeId(); makeId(1); makeId(1, 2);";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[
+            (
+                "makeId".into(),
+                "__makeId_default".into(),
+                0,
+                1,
+                vec![thaw_hir::HirType::F64],
+            ),
+            (
+                "makeId".into(),
+                "__makeId_buffer".into(),
+                2,
+                2,
+                vec![thaw_hir::HirType::F64, thaw_hir::HirType::F64],
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        rewritten,
+        "__makeId_default(); __makeId_default(1); __makeId_buffer(1, 2);"
+    );
+}
+
+/// A registry Fallback function's overloads with *identical* arity,
+/// discriminated only by each argument's actual type -- the same
+/// disambiguation `selects_same_arity_external_method_overloads_by_
+/// argument_type` already confirms for class methods, applied to a bare
+/// function call instead.
+#[test]
+fn selects_fallback_function_overloads_with_the_same_arity_by_argument_type() {
+    let source =
+        "const n = 42; const s = \"hello\"; describe(n); describe(s); describe(7); describe(\"world\");";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[
+            (
+                "describe".into(),
+                "__describe_number".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::F64],
+            ),
+            (
+                "describe".into(),
+                "__describe_string".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Str],
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        rewritten,
+        "const n = 42; const s = \"hello\"; __describe_number(n); __describe_string(s); __describe_number(7); __describe_string(\"world\");"
+    );
 }
 
 #[test]
