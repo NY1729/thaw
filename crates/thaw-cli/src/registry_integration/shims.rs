@@ -20758,7 +20758,14 @@ fn typed_dynamic_declaration(
             .iter()
             .map(|ty| {
                 if generic.type_params.iter().any(|(name, _)| name == ty)
-                    || (ty.starts_with('(') && is_safe_callback_param_type(ty, generic))
+                    // Same restriction as the non-generic branch below and
+                    // `supported_class_method_param` for methods: a
+                    // callback-shaped parameter has no QuickJS-side
+                    // marshaling at all (`compile_typed_dynamic_call`
+                    // silently drops it for any non-`napi` backend), so
+                    // it's only safe to keep as a real callback type when
+                    // this declaration is `napi`-backed.
+                    || (napi && ty.starts_with('(') && is_safe_callback_param_type(ty, generic))
                     || matches!(ty.as_str(), "number" | "string" | "boolean" | "Json" | "JsValue")
                 {
                     ty.clone()
@@ -20911,6 +20918,25 @@ fn typed_dynamic_declaration(
         .params
         .iter()
         .map(|(name, ty)| match ty {
+            // A `Function`/`CallableFunction`-classified parameter has no
+            // QuickJS-NG-side marshaling at all (`compile_typed_dynamic_
+            // call`, thaw-llvm's `dynamic_host.rs`, only wires a typed
+            // function argument through for the `napi` backend with a
+            // `JsValue` return -- for every other combination, including
+            // every Fallback/QuickJS call, it silently drops the argument
+            // from the JSON args array instead of erroring). Widened to
+            // `Json` here the same way `Unsupported` already is, so the
+            // closure instead reaches `coerce_to_declared`'s `Json`-gated
+            // `registerNativeCallback` wrapping -- the mechanism that
+            // already correctly bridges a native closure into a real,
+            // callable QuickJS value elsewhere (a dynamic method-call
+            // argument, or a Promise-returning callback's own return).
+            // Real example: drizzle-orm's `sqlite-proxy` driver,
+            // `drizzle(callback: (sql, params, method) => Promise<{rows}>)`
+            // -- a plain top-level Fallback function, not a method call.
+            thaw_bridge::DtsType::Native(
+                thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..),
+            ) if !napi => Some((name.clone(), "Json".to_string())),
             thaw_bridge::DtsType::Native(ty) => {
                 render_dynamic_type(ty).map(|ty| (name.clone(), ty))
             }
