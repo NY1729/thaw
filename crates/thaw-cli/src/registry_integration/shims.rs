@@ -20547,15 +20547,48 @@ fn typed_dynamic_bare_alias(
     symbol: &str,
     function: &thaw_bridge::DtsFunction,
     is_jit_backed: bool,
+    napi: bool,
 ) -> Option<String> {
     if function.rest_param.is_some() || function.generic.is_some() {
         return None;
     }
+    // Same restriction `typed_dynamic_declaration` itself applies to a
+    // `Function`/`CallableFunction`-classified parameter: no QuickJS-NG
+    // side marshaling exists for a typed function argument outside the
+    // `napi` backend. This wrapper forwards to `symbol` (`typed_dynamic_
+    // declaration`'s own, already-correctly-widened declaration) -- if
+    // *this* alias's own signature didn't widen the identical parameter
+    // the same way, thaw-hir's omitted-trailing-optional-parameter
+    // machinery (reached whenever the alias is called with the parameter
+    // left out, real example: lodash's `filter(collection)` with its
+    // optional `predicate` omitted) needs to synthesize a value for it
+    // using *this* declared type -- which, left as a real callback type,
+    // crashed with "unsupported dynamic object field Function(...)"
+    // (`compile_json_object_set_native`, thaw-llvm, has no `Function`
+    // arm either). Kept as its own small copy rather than shared with
+    // `typed_dynamic_declaration`'s identical match arm, matching this
+    // function's own established convention just below of small
+    // independent copies over threading a shared helper through.
     let params = function
         .params
         .iter()
         .map(|(name, ty)| {
             let rendered = match ty {
+                thaw_bridge::DtsType::Native(
+                    thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..),
+                ) if !napi => "Json".to_string(),
+                thaw_bridge::DtsType::Native(
+                    thaw_hir::HirType::Optional(payload)
+                    | thaw_hir::HirType::Nullable(payload)
+                    | thaw_hir::HirType::Nullish(payload),
+                ) if !napi
+                    && matches!(
+                        payload.as_ref(),
+                        thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
+                    ) =>
+                {
+                    "Json".to_string()
+                }
                 thaw_bridge::DtsType::Native(ty) => render_dynamic_type(ty)?,
                 thaw_bridge::DtsType::Unsupported(_) => "Json".to_string(),
             };
@@ -20937,6 +20970,33 @@ fn typed_dynamic_declaration(
             thaw_bridge::DtsType::Native(
                 thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..),
             ) if !napi => Some((name.clone(), "Json".to_string())),
+            // The identical restriction, for a callback parameter that's
+            // also *optional* (`predicate?: (value: string, index:
+            // number, s: string) => boolean` -- real example: lodash's
+            // `filter`'s string-collection overload). Classifies as
+            // `Native(Optional(Function(...)))`, a different `Native`
+            // variant from the bare case just above, so it fell through
+            // to the generic `render_dynamic_type` branch below unwidened
+            // -- `compile_json_object_set_native_with_undefined`
+            // (thaw-llvm) has no `Function`/`CallableFunction` arm either
+            // (only its sibling, the array-element path, was fixed for
+            // this earlier), so building any call to such a function
+            // crashed with "unsupported dynamic object field
+            // Function(...)". Optionality itself needs no special
+            // handling once widened -- a JSON value already represents
+            // "omitted" naturally, the same as the bare case.
+            thaw_bridge::DtsType::Native(
+                thaw_hir::HirType::Optional(payload)
+                | thaw_hir::HirType::Nullable(payload)
+                | thaw_hir::HirType::Nullish(payload),
+            ) if !napi
+                && matches!(
+                    payload.as_ref(),
+                    thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
+                ) =>
+            {
+                Some((name.clone(), "Json".to_string()))
+            }
             thaw_bridge::DtsType::Native(ty) => {
                 render_dynamic_type(ty).map(|ty| (name.clone(), ty))
             }
@@ -22293,6 +22353,7 @@ fn generate_registry_shims(
                     && matches!(classification, thaw_bridge::Classification::Fallback { .. })
             });
             if is_fallback {
+                let napi = pkg.native_addon.is_some() && pkg.bundle_js.is_none();
                 let jit_operation = pkg
                     .bundle_js
                     .as_deref()
@@ -22314,13 +22375,7 @@ fn generate_registry_shims(
                         let call_arities = observed_identifier_arities
                             .get(&function.name)
                             .unwrap_or(&empty_arities);
-                        typed_dynamic_declaration(
-                            &pkg.name,
-                            function,
-                            pkg.native_addon.is_some() && pkg.bundle_js.is_none(),
-                            call_arities,
-                            None,
-                        )
+                        typed_dynamic_declaration(&pkg.name, function, napi, call_arities, None)
                     });
                 // First successful overload wins, matching TS's own
                 // overload-resolution convention of preferring the first
@@ -22359,9 +22414,13 @@ fn generate_registry_shims(
                     // is disambiguated *through*, unlike the plain bare
                     // name below.
                     if let Some(q) = qualified.iter().find(|q| q.name == function.name) {
-                        if let Some(alias) =
-                            typed_dynamic_bare_alias(&q.alias, &symbol, function, jit_operation.is_some())
-                        {
+                        if let Some(alias) = typed_dynamic_bare_alias(
+                            &q.alias,
+                            &symbol,
+                            function,
+                            jit_operation.is_some(),
+                            napi,
+                        ) {
                             shim.push_str(&alias);
                             bare_aliased.insert(function.name.clone());
                         }
@@ -22386,6 +22445,7 @@ fn generate_registry_shims(
                             &symbol,
                             function,
                             jit_operation.is_some(),
+                            napi,
                         ) {
                             shim.push_str(&alias);
                             bare_aliased.insert(function.name.clone());
