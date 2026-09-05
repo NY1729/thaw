@@ -1275,7 +1275,14 @@ function main(): void {
 /// implicit-return expression-body handler, matching how real hono
 /// handlers are actually written (`Handler`'s own declared return type
 /// is never surfaced through the flattened `.d.ts`, so nobody writing
-/// real hono code annotates a handler's return type at all).
+/// real hono code annotates a handler's return type at all). Also reads
+/// the response body back as a plain `string` (`await res.text()`, not
+/// `JsValue`) -- a separate, narrower gap noted while finishing this
+/// arc and fixed alongside it: `coerce_to_declared` had no path for
+/// decoding a dynamic call's default `Json` result into a declared
+/// scalar type at all (see `a_dynamic_method_calls_json_result_decodes_
+/// into_a_declared_scalar_type` in `registry_modules.rs` for the
+/// synthetic, network-free reproduction).
 #[test]
 fn registry_add_routes_and_serves_a_real_hono_app_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -1290,7 +1297,7 @@ fn registry_add_routes_and_serves_a_real_hono_app_when_enabled() {
     std::fs::write(
         &source,
         r#"import { Hono } from "hono";
-function main(): void {
+async function main(): Promise<void> {
     const appA = new Hono();
     appA.get('/', (c: JsValue) => { return c.text('hello world'); });
     const resA: JsValue = appA.request('/');
@@ -1300,6 +1307,8 @@ function main(): void {
     appB.get('/', (c: JsValue) => c.text('hello again'));
     const resB: JsValue = appB.request('/');
     console.log(resB.status);
+    const bodyB: string = await resB.text();
+    console.log(bodyB);
 }"#,
     )
     .unwrap();
@@ -1311,6 +1320,9 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "200\n200\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "200\n200\nhello again\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
