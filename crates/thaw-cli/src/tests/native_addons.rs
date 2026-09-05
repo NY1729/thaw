@@ -1326,3 +1326,84 @@ async function main(): Promise<void> {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Real, fetched uuid -- the first breadth-first bug-hunting target after
+/// zod/dayjs/hono all closed out (per [[project_thaw_overview]]'s Phase-4
+/// roadmap). `v4`/`v1`/`v3`/`v5`/`v6`/`v7`/`validate`/`version` all build
+/// and run correctly with no changes needed (both real and synthetic
+/// `v3`/`v5` outputs were cross-checked against a direct `node` run of
+/// uuid's own bundle, byte-for-byte identical).
+///
+/// `parse(id)` (returns `NonSharedArrayBuffer`) piped straight into
+/// `stringify(bytes)` (parameter `Uint8Array`, second parameter `offset`
+/// omitted) crashed LLVM's own module verifier outright -- both
+/// unresolved reference types classify the same "unclassified npm type"
+/// way thaw-bridge falls back to for real, but land on *opposite* sides
+/// of the return-value/parameter divide (`JsValue` vs `Json`), and
+/// `stringify`'s own omitted-second-parameter dispatch routes the call
+/// through an *ordinary* compiled function call, not a dynamic-call
+/// intrinsic -- see the synthetic, network-free reproduction and full
+/// root-cause writeup at `a_jsvalue_returning_functions_result_passed_
+/// into_another_functions_json_parameter_works` in `registry_modules.rs`.
+/// This test just confirms the same fix holds against the real,
+/// unmodified npm package.
+///
+/// Two known, deliberately-unattempted gaps found along the way, both
+/// scoped as separate, larger features rather than narrow bugs: (a)
+/// uuid's `NIL`/`MAX` constant exports (`export { default as NIL } from
+/// './nil.js'`, where the target file's default export is a bare
+/// `declare const`, not a function) -- thaw's whole package-export
+/// pipeline (thaw-bridge's parser, thaw-cli's shim generation) only ever
+/// recognizes a function or class/interface export, never a plain data
+/// constant, so this would need a genuinely new export kind threaded
+/// through several layers, not a flattening fix alone; (b) `v4`'s own
+/// buffer-output overload (`v4<TBuf extends Uint8Array = Uint8Array>
+/// (options, buf, offset?): TBuf`) doesn't actually specialize on `TBuf`
+/// at all -- thaw-bridge's "first overload that classifies" convention
+/// always picks `v4`'s first (`buf?: undefined`) overload instead,
+/// so passing a real buffer silently gets the wrong (string-typed)
+/// declaration.
+#[test]
+fn registry_add_generates_and_parses_uuids_with_real_uuid_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-uuid-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "uuid").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { v4, validate, version, parse, stringify } from "uuid";
+function main(): void {
+    const id: string = v4();
+    console.log(validate(id));
+    console.log(version(id));
+
+    const ns = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+    const bytes = parse(ns);
+    console.log(bytes.length);
+    const roundTripped: string = stringify(bytes);
+    console.log(roundTripped);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("true"));
+    assert_eq!(lines.next(), Some("4"));
+    assert_eq!(lines.next(), Some("16"));
+    assert_eq!(lines.next(), Some("6ba7b810-9dad-11d1-80b4-00c04fd430c8"));
+    assert_eq!(lines.next(), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
