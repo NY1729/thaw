@@ -351,6 +351,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into(),
             );
         }
+        self.compile_dynamic_value_placeholder_unchecked(handle)
+    }
+
+    /// The gate-free core of `compile_dynamic_value_placeholder`, for a
+    /// call site that already knows (by construction, not by the
+    /// per-compilation `compiling_quickjs_dynamic_arguments` flag) that a
+    /// reviver exists downstream -- see `build_call_with`'s own use of
+    /// this, which reaches it only for an *ordinary* function call
+    /// (never N-API, which rejects a `JsValue` argument outright well
+    /// before codegen).
+    fn compile_dynamic_value_placeholder_unchecked(
+        &mut self,
+        handle: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let handle = self
             .builder
             .build_unsigned_int_to_float(

@@ -9749,3 +9749,83 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\ntrue\nhi\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `JsValue`-returning Fallback function's result passed straight into
+/// *another* Fallback function's `Json`-declared parameter, both
+/// unannotated at the call site (no intermediate `: JsValue`/`: Json`
+/// binding) -- real-world example: real uuid's `stringify(parse(id))`,
+/// where `parse`'s return type (`NonSharedArrayBuffer`) and `stringify`'s
+/// parameter type (`Uint8Array`) are both unresolved reference types
+/// thaw-bridge classifies the same "unclassified npm type" way `parse`'s
+/// gets treated as `JsValue` (a return value) while `stringify`'s gets
+/// treated as `Json` (a parameter) -- and `stringify` also has a second,
+/// omittable optional parameter, so calling it with just one argument
+/// (`stringify(bytes)`) routes through thaw-hir's omitted-parameter-mask
+/// wrapper mechanism, an *ordinary* compiled function call like any
+/// other, not a manually-built dynamic-call intrinsic.
+///
+/// Used to crash LLVM's own module verifier at build time ("Call
+/// parameter type does not match function signature!") -- `coerce_to_
+/// declared` (thaw-hir) already passes a `JsValue` through unchanged
+/// into a `Json`-declared slot (relying on downstream codegen to
+/// recognize the mismatch and thread the real handle through instead of
+/// a raw, mistyped integer), but `build_call_with` (the codegen path an
+/// *ordinary* function call like this one takes) never did any such
+/// recognition at all -- only the JSON-args-array-construction call
+/// sites did (guarded by `compiling_quickjs_dynamic_arguments`, which
+/// this path never set). Fixed by having `build_call_with` itself detect
+/// the same "expected a pointer (Json/Dictionary's own representation),
+/// got a raw int (actually a `JsValue` handle)" mismatch per argument,
+/// using `compile_dynamic_value_placeholder`'s own encoding via a new
+/// gate-free variant (safe here since an N-API/native-addon target never
+/// reaches this call path at all, unlike the gated call sites).
+#[test]
+fn a_jsvalue_returning_functions_result_passed_into_another_functions_json_parameter_works() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jsvalue-into-json-param-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("buffer-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function parse(id: string): NonSharedArrayBuffer;\n\
+         export declare function stringify(arr: Uint8Array, offset?: number): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { \
+         parse: function(id) { return { tag: id, length: 16 }; }, \
+         stringify: function(arr, offset) { return 'stringified:' + arr.tag; } \
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { parse, stringify } from "buffer-kit";
+function main(): void {
+    const bytes = parse("hello");
+    console.log(bytes.length);
+    const s: string = stringify(bytes);
+    console.log(s);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "16\nstringified:hello\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
