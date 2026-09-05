@@ -877,6 +877,55 @@ fn dts_source_with_reexported_functions(
             }
         }
     }
+    // `export import NAME = BASE.MEMBER;` -- a TS import-equals
+    // declaration whose module reference is a qualified *entity name* (a
+    // property access into an already-imported value), not a
+    // `require(...)` call (`import_equals_targets`'s own shape, handled
+    // above). Real example: uuid@8's real `.d.ts` (via `@types/uuid`),
+    // `import uuid from "./index.js"; export import v1 = uuid.v1; export
+    // import v4 = uuid.v4; ...`. `uuid.MEMBER` resolves to whatever
+    // `./index.js`'s own `.d.ts` exports under the plain name `MEMBER` --
+    // a default-imported value's shape mirrors its target's own named
+    // exports -- so this reuses `reexported_function_declarations`
+    // exactly the way a named re-export (`export { X } from "..."`)
+    // already does above, just keyed off a qualified-name AST shape
+    // instead of an `ExportSpecifier`.
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(import)) = item else {
+            continue;
+        };
+        if !import.is_export {
+            continue;
+        }
+        let thaw_parser::ast::TsModuleRef::TsEntityName(thaw_parser::ast::TsEntityName::TsQualifiedName(qualified)) =
+            &import.module_ref
+        else {
+            continue;
+        };
+        let thaw_parser::ast::TsEntityName::Ident(base) = &qualified.left else {
+            continue;
+        };
+        let Some((target_path, _)) = named_import_targets.get(base.sym.as_str()) else {
+            continue;
+        };
+        let member = qualified.right.sym.to_string();
+        let exported = import.id.sym.to_string();
+        if seen.contains(&exported) {
+            continue;
+        }
+        let mut visited = std::collections::BTreeSet::new();
+        let declarations = reexported_function_declarations(target_path, &member, &mut visited)?;
+        if !declarations.is_empty() {
+            seen.insert(exported.clone());
+        }
+        for mut snippet in declarations {
+            if exported != member {
+                snippet = rename_declared_function(snippet, &exported);
+            }
+            output.push('\n');
+            output.push_str(&snippet);
+        }
+    }
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) = item else {
             continue;
@@ -1259,29 +1308,82 @@ fn callable_const_declaration_snippet(
                     break;
                 }
             }
-            let Some((iface_export, iface)) = matched_iface_export else {
-                return Ok(None);
-            };
-            if !iface
-                .body
-                .body
-                .iter()
-                .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
-            {
+            if let Some((iface_export, iface)) = matched_iface_export {
+                if iface
+                    .body
+                    .body
+                    .iter()
+                    .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
+                {
+                    let const_snippet = source_map.span_to_snippet(decl_span).map_err(|error| {
+                        format!(
+                            "failed to read declaration for `{}`: {error:?}",
+                            binding.id.sym
+                        )
+                    })?;
+                    let iface_snippet =
+                        source_map.span_to_snippet(iface_export.span()).map_err(|error| {
+                            format!("failed to read declaration for `{iface_name}`: {error:?}")
+                        })?;
+                    return Ok(Some(format!("{const_snippet}\n{iface_snippet}")));
+                }
+            }
+            // A local (bare or exported) type alias, or an interface with
+            // no call signature of its own, whose shape might still
+            // resolve to something callable through a chain of further
+            // local aliases/interfaces -- rather than resolving that
+            // chain ourselves (thaw-bridge's own `classify_ts_type`/
+            // `resolve_interfaces` already does, downstream, once the
+            // text is present), carry the const's own snippet together
+            // with *every* type alias and interface declared in this
+            // same file (bare or exported). `.d.ts` type declarations are
+            // erasable and side-effect-free, so including ones that turn
+            // out unrelated to this particular const is harmless. Real
+            // example: uuid's own `.d.ts` (via `@types/uuid`), where
+            // `v1`'s declared type (`type v1 = v1Buffer & v1String;`) is
+            // a *local, unexported* type alias chaining through several
+            // more (`v1Buffer`, `v1String`, `V1Options`, ...). Conditioned
+            // on the referenced name actually resolving to *something*
+            // local at all -- a truly unknown/external type name still
+            // returns `None`, unchanged from before.
+            let resolves_locally = module.body.iter().any(|item| {
+                let decl = match item {
+                    ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(decl)) => decl,
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+                    _ => return false,
+                };
+                match decl {
+                    Decl::TsInterface(iface) => iface.id.sym.as_ref() == iface_name.as_str(),
+                    Decl::TsTypeAlias(alias) => alias.id.sym.as_ref() == iface_name.as_str(),
+                    _ => false,
+                }
+            });
+            if !resolves_locally {
                 return Ok(None);
             }
-            let const_snippet = source_map.span_to_snippet(decl_span).map_err(|error| {
+            let mut combined = source_map.span_to_snippet(decl_span).map_err(|error| {
                 format!(
                     "failed to read declaration for `{}`: {error:?}",
                     binding.id.sym
                 )
             })?;
-            let iface_snippet = source_map
-                .span_to_snippet(iface_export.span())
-                .map_err(|error| {
-                    format!("failed to read declaration for `{iface_name}`: {error:?}")
-                })?;
-            Ok(Some(format!("{const_snippet}\n{iface_snippet}")))
+            for item in &module.body {
+                let decl = match item {
+                    ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(decl)) => decl,
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+                    _ => continue,
+                };
+                let span = match decl {
+                    Decl::TsInterface(iface) => iface.span(),
+                    Decl::TsTypeAlias(alias) => alias.span(),
+                    _ => continue,
+                };
+                combined.push('\n');
+                combined.push_str(&source_map.span_to_snippet(span).map_err(|error| {
+                    format!("failed to read a local type declaration: {error:?}")
+                })?);
+            }
+            Ok(Some(combined))
         }
         _ => Ok(None),
     }
