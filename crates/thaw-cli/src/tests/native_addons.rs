@@ -1348,21 +1348,25 @@ async function main(): Promise<void> {
 /// This test just confirms the same fix holds against the real,
 /// unmodified npm package.
 ///
-/// Two known, deliberately-unattempted gaps found along the way, both
-/// scoped as separate, larger features rather than narrow bugs: (a)
-/// uuid's `NIL`/`MAX` constant exports (`export { default as NIL } from
+/// One known, deliberately-unattempted gap found along the way, scoped
+/// as a separate, larger feature rather than a narrow bug: uuid's
+/// `NIL`/`MAX` constant exports (`export { default as NIL } from
 /// './nil.js'`, where the target file's default export is a bare
 /// `declare const`, not a function) -- thaw's whole package-export
 /// pipeline (thaw-bridge's parser, thaw-cli's shim generation) only ever
 /// recognizes a function or class/interface export, never a plain data
 /// constant, so this would need a genuinely new export kind threaded
-/// through several layers, not a flattening fix alone; (b) `v4`'s own
-/// buffer-output overload (`v4<TBuf extends Uint8Array = Uint8Array>
-/// (options, buf, offset?): TBuf`) doesn't actually specialize on `TBuf`
-/// at all -- thaw-bridge's "first overload that classifies" convention
-/// always picks `v4`'s first (`buf?: undefined`) overload instead,
-/// so passing a real buffer silently gets the wrong (string-typed)
-/// declaration.
+/// through several layers, not a flattening fix alone.
+///
+/// `v4`'s own buffer-output overload (`v4<TBuf extends Uint8Array =
+/// Uint8Array>(options, buf, offset?): TBuf`) -- previously unreachable,
+/// always resolving to `v4`'s first (`buf?: undefined`) overload no
+/// matter what a real call passed -- is now fixed (registry Fallback
+/// functions pick an overload by real call-site arity/argument-type
+/// scoring, the same mechanism external class methods already used; see
+/// `fallback_function_overload_is_picked_by_call_site_arity` in
+/// `registry_modules.rs` for the synthetic reproduction) and exercised
+/// below.
 #[test]
 fn registry_add_generates_and_parses_uuids_with_real_uuid_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -1387,6 +1391,9 @@ function main(): void {
     console.log(bytes.length);
     const roundTripped: string = stringify(bytes);
     console.log(roundTripped);
+
+    const filled: JsValue = v4(undefined, bytes as JsValue);
+    console.log(filled);
 }"#,
     )
     .unwrap();
@@ -1404,6 +1411,21 @@ function main(): void {
     assert_eq!(lines.next(), Some("4"));
     assert_eq!(lines.next(), Some("16"));
     assert_eq!(lines.next(), Some("6ba7b810-9dad-11d1-80b4-00c04fd430c8"));
+    // If the buffer-output overload had stayed unreachable (always
+    // resolving to `v4`'s first, `string`-returning overload instead),
+    // this call wouldn't even have compiled -- `const filled: JsValue =
+    // v4(...)` would be a type mismatch against a `string` result.
+    let filled_line = lines.next().expect("v4's buffer overload result");
+    let filled_bytes: Vec<&str> = filled_line.split(',').collect();
+    assert_eq!(
+        filled_bytes.len(),
+        16,
+        "expected a 16-byte filled buffer: {filled_line}"
+    );
+    assert_ne!(
+        filled_line, "107,167,184,16,157,173,17,209,128,180,0,192,79,212,48,200",
+        "buffer wasn't actually filled with random bytes by the buffer-output overload"
+    );
     assert_eq!(lines.next(), None);
     let _ = std::fs::remove_dir_all(dir);
 }

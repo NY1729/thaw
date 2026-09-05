@@ -5,7 +5,17 @@ fn rewrite_external_class_methods(
     methods: &[ClassMethodRewrite],
 ) -> Result<String, String> {
     rewrite_external_class_methods_with_static(
-        source, classes, methods, &[], &[], &[], &[], &[], &[],
+        source, classes, methods, &[], &[], &[], &[], &[], &[], &[],
+    )
+}
+
+#[cfg(test)]
+fn rewrite_fallback_function_overloads(
+    source: &str,
+    functions: &[FallbackFunctionOverloadRewrite],
+) -> Result<String, String> {
+    rewrite_external_class_methods_with_static(
+        source, &[], &[], &[], &[], &[], &[], &[], &[], functions,
     )
 }
 
@@ -20,6 +30,7 @@ fn rewrite_external_class_methods_with_static(
     static_getters: &[StaticClassGetterRewrite],
     static_setters: &[StaticClassSetterRewrite],
     factories: &[FactoryClassRewrite],
+    functions: &[FallbackFunctionOverloadRewrite],
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
@@ -40,6 +51,7 @@ fn rewrite_external_class_methods_with_static(
         && static_getters.is_empty()
         && static_setters.is_empty()
         && factories.is_empty()
+        && functions.is_empty()
     {
         return Ok(source.to_string());
     }
@@ -775,6 +787,18 @@ fn rewrite_external_class_methods_with_static(
                         | thaw_hir::HirType::Nullish(inner) => Some(*inner),
                         other => Some(other),
                     },
+                    // `JsValue` is thaw's own built-in dynamic-value type,
+                    // not something a user's source ever declares itself
+                    // -- without this, `x as JsValue` (a real, useful
+                    // pattern for handing an already-dynamically-typed
+                    // value to a call that needs one, real example:
+                    // passing a registry function's own JsValue-typed
+                    // result into another function's JsValue-typed
+                    // parameter when its declared shape can't be locally
+                    // inferred any other way) silently inferred as
+                    // "unknown type" here, same as any other unrecognized
+                    // reference.
+                    ("JsValue", []) => Some(thaw_hir::HirType::JsValue),
                     (_, []) => named.get(name.sym.as_str()).cloned(),
                     _ => None,
                 }
@@ -1451,6 +1475,7 @@ fn rewrite_external_class_methods_with_static(
     struct Finder<'a> {
         classes: &'a [ClassConstructorRewrite],
         factories: &'a [FactoryClassRewrite],
+        functions: &'a [FallbackFunctionOverloadRewrite],
         methods: &'a [ClassMethodRewrite],
         static_methods: &'a [StaticClassMethodRewrite],
         getters: &'a [ClassGetterRewrite],
@@ -1946,6 +1971,53 @@ fn rewrite_external_class_methods_with_static(
                             }
                         }
                     }
+                } else if let Expr::Ident(name) = callee.as_ref() {
+                    // A bare function call against a registry Fallback
+                    // name with more than one `.d.ts` overload -- real
+                    // example: uuid's `v4(options?): string` vs. its
+                    // generic buffer-output `v4<TBuf extends Uint8Array =
+                    // Uint8Array>(options, buf, offset?): TBuf`. Filters
+                    // by arity range first (an overload set discriminated
+                    // by argument *count*, like `v4`'s, needs no further
+                    // scoring), then breaks a same-arity tie by comparing
+                    // each argument's actual inferred type against the
+                    // candidate's declared parameter types -- identical
+                    // pattern to the static/instance-method branches
+                    // above, just with no receiver to splice in.
+                    let selected = self
+                        .functions
+                        .iter()
+                        .filter(|(candidate_name, _, min_arity, max_arity, _)| {
+                            candidate_name == name.sym.as_str()
+                                && call.args.len() >= *min_arity
+                                && call.args.len() <= *max_arity
+                        })
+                        .filter_map(|candidate| {
+                            let mut score = 0u16;
+                            for (argument, declared) in call.args.iter().zip(candidate.4.iter()) {
+                                if let Some(actual) = source_expr_type(
+                                    argument.expr.as_ref(),
+                                    &self.value_types,
+                                    self.function_types,
+                                    self.named_types,
+                                ) {
+                                    score += u16::from(overload_type_score(declared, &actual)?);
+                                }
+                            }
+                            Some((score, candidate))
+                        })
+                        .reduce(|best, candidate| {
+                            if candidate.0 > best.0 {
+                                candidate
+                            } else {
+                                best
+                            }
+                        })
+                        .map(|(_, candidate)| candidate);
+                    if let Some((_, symbol, _, _, _)) = selected {
+                        let span = callee.span();
+                        self.edits.push((span.lo.0, span.hi.0, symbol.clone()));
+                    }
                 }
             }
             call.visit_children_with(self);
@@ -2170,6 +2242,7 @@ fn rewrite_external_class_methods_with_static(
     let mut finder = Finder {
         classes,
         factories,
+        functions,
         methods,
         static_methods,
         getters,
