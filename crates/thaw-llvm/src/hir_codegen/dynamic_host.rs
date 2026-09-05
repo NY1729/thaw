@@ -1125,6 +1125,33 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(value)
     }
 
+    /// Compiles a `.method()` call's receiver expression, used by both
+    /// `compile_call_dynamic_method` and `compile_call_dynamic_method_handle`.
+    /// A receiver that is itself a `.method()` call is always lowered as
+    /// the `"callDynamicMethodHandle"` intrinsic (`lower_dynamic_value_
+    /// method_call` always requests `JsValue` for a receiver, regardless
+    /// of what the *outer* call's own dispatch ends up being) -- so this
+    /// structurally detects "I am not the terminal link in this chain" and
+    /// compiles that inner call with `chain_intermediate: true`, meaning
+    /// its own result must not have a pending thenable resolved early
+    /// (see `compile_call_dynamic_method_handle`'s doc comment and the
+    /// plan this fix came from: eagerly resolving every chain link, not
+    /// just the terminal one, invokes a lazy query-builder's `.then` --
+    /// e.g. drizzle-orm's -- before later links like `.where(...)` apply).
+    fn compile_dynamic_method_receiver(
+        &mut self,
+        handle: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match handle {
+            HirExpr::Call(callee, inner_args)
+                if matches!(callee.as_ref(), HirExpr::Var(n) if n == "callDynamicMethodHandle") =>
+            {
+                self.compile_call_dynamic_method_handle(inner_args, true)
+            }
+            _ => self.compile_expr(handle),
+        }
+    }
+
     fn compile_call_dynamic_method(
         &mut self,
         args: &[HirExpr],
@@ -1134,7 +1161,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [handle, name, call_args] = args else {
             return Err("callDynamicMethod expects exactly three arguments".into());
         };
-        let handle = self.compile_expr(handle)?;
+        let handle = self.compile_dynamic_method_receiver(handle)?;
         let name = self.compile_expr(name)?;
         // Set for the same reason `compile_typed_dynamic_call` sets it
         // around its own args-marshaling: `call_args` (the pre-built
@@ -1213,13 +1240,14 @@ impl<'ctx> HirCompiler<'ctx> {
     fn compile_call_dynamic_method_handle(
         &mut self,
         args: &[HirExpr],
+        chain_intermediate: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let [handle, name, call_args] = args else {
             return Err("callDynamicMethodHandle expects exactly three arguments".into());
         };
-        let handle = self.compile_expr(handle)?;
+        let handle = self.compile_dynamic_method_receiver(handle)?;
         let name = self.compile_expr(name)?;
         // See the matching comment in `compile_call_dynamic_method`.
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
@@ -1238,13 +1266,22 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        let chain_intermediate_flag = self
+            .context
+            .bool_type()
+            .const_int(chain_intermediate as u64, false);
         let result = self
             .builder
             .build_call(
                 self.module
                     .get_function("thaw_js_call_method_handle_result")
                     .unwrap(),
-                &[handle.into(), name.into(), args_json.into()],
+                &[
+                    handle.into(),
+                    name.into(),
+                    args_json.into(),
+                    chain_intermediate_flag.into(),
+                ],
                 "dynamic_method_handle_result",
             )
             .map_err(|error| error.to_string())?

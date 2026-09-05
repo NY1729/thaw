@@ -9224,6 +9224,85 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A chain whose intermediate links are themselves "thenable" (an object
+/// with a callable `.then`, not a genuine pending Promise) must not have
+/// each intermediate result eagerly resolved via `Promise.resolve()` --
+/// doing so invokes `.then` prematurely, executing the chain's side
+/// effect before later links (`.where(...)`) ever apply. Real-world
+/// example: drizzle-orm's `db.select().from(users).where(cond)`, where
+/// every query-builder link is a thenable and only the fully-built,
+/// awaited chain should execute the query. Reproduces the bug via a
+/// minimal synthetic thenable builder instead of the real npm package.
+#[test]
+fn a_chained_methods_intermediate_thenable_result_is_not_resolved_early() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-chained-thenable-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("chain-thenable-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeDb(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function makeQuery(steps) {\n\
+             return {\n\
+                 from: function(part) {\n\
+                     console.log('FROM:' + part);\n\
+                     return makeQuery(steps.concat(['from:' + part]));\n\
+                 },\n\
+                 where: function(part) {\n\
+                     console.log('WHERE:' + part);\n\
+                     return makeQuery(steps.concat(['where:' + part]));\n\
+                 },\n\
+                 then: function(resolve, reject) {\n\
+                     console.log('EXECUTED:' + steps.join(','));\n\
+                     return Promise.resolve(steps.join(',')).then(resolve, reject);\n\
+                 }\n\
+             };\n\
+         }\n\
+         function makeDb() {\n\
+             return {\n\
+                 select: function() {\n\
+                     console.log('SELECT');\n\
+                     return makeQuery(['select']);\n\
+                 }\n\
+             };\n\
+         }\n\
+         module.exports.makeDb = makeDb;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeDb } from "chain-thenable-kit";
+async function main(): Promise<void> {
+    const db: JsValue = makeDb();
+    const result: JsValue = await db.select().from("t").where("c");
+    console.log(result);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "SELECT\nFROM:t\nWHERE:c\nEXECUTED:select,from:t,where:c\nselect,from:t,where:c\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The "no import at all" bare-name and package-qualified (`pkg.name(...)`)
 /// call syntaxes used to always reach `generate_shim`'s own, always-
 /// untyped `(argsArray: Json): Json` fallback -- fine for a single-

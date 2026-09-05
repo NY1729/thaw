@@ -952,17 +952,32 @@ pub extern "C" fn thaw_js_call_method_result(
 /// method returning another schema instance, as opposed to
 /// `.safeParse(...)`'s plain data result (which stays on the
 /// `thaw_js_call_method_result` path).
+/// `chain_intermediate` is true when this call's own result is itself
+/// the receiver of another chained `.method()` call (e.g. `.from(...)`
+/// in `db.select().from(x).where(y)`) -- in that case a pending
+/// thenable (a lazy query-builder object, not a genuine async result)
+/// must NOT be resolved yet, since `Promise.resolve()` on any thenable
+/// eagerly invokes its `.then`, which would execute the chain
+/// prematurely. Only the terminal link in a chain (`chain_intermediate
+/// == false`) resolves its result, matching real JS semantics where
+/// only an explicit `await`/consumption of the final value would ever
+/// settle a pending promise or thenable.
 #[no_mangle]
 pub extern "C" fn thaw_js_call_method_handle_result(
     handle: u64,
     name: *const c_char,
     args_json: *const c_char,
+    chain_intermediate: bool,
 ) -> ThawHandleResult {
     let name = to_str(name);
     let args_json = to_str(args_json);
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let value = invoke_method(&ctx, handle, &name, &args_json)?;
-        let value = resolve_promise_value(&ctx, value, &format!("JavaScript method `{name}`"))?;
+        let value = if chain_intermediate {
+            value
+        } else {
+            resolve_promise_value(&ctx, value, &format!("JavaScript method `{name}`"))?
+        };
         retain_value(&ctx, value)
     });
     match result {

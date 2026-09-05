@@ -1647,6 +1647,90 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Real drizzle-orm's query-builder chain (`db.select().from(t).where(cond)`,
+/// via the `sqlite-proxy` driver) -- the scenario explicitly scoped out of
+/// the test above. Every `.select()`/`.from()`/`.where()` link is a
+/// "thenable" (drizzle's `QueryPromise` base class implements `.then` by
+/// calling `execute()`), and `resolve_promise_value`
+/// (`crates/thaw-quickjs/src/quickjs/api.rs`) used to call
+/// `Promise.resolve()` unconditionally on every dynamic method call's
+/// result -- which, per real JS semantics, eagerly invokes any thenable's
+/// `.then`. This executed the query as soon as `.from(t)` returned, with
+/// no `WHERE` clause, before `.where(...)` was ever applied.
+///
+/// Fixed by threading a `chain_intermediate` flag from thaw-llvm's
+/// `compile_call_dynamic_method_handle` (`dynamic_host.rs`) through to
+/// `thaw_js_call_method_handle_result`: a receiver that is itself a
+/// chained `.method()` call is structurally detectable in the HIR (see
+/// `lower_dynamic_value_method_call`, thaw-hir's `invocations.rs`, which
+/// always lowers a method call's receiver with an expected type of
+/// `JsValue`), so only the terminal link in a chain resolves its result --
+/// matching real JS semantics, where only an explicit `await`/consumption
+/// of the final value would ever settle a pending promise or thenable.
+/// See `a_chained_methods_intermediate_thenable_result_is_not_resolved_early`
+/// in `registry_modules.rs` for the synthetic, network-free reproduction.
+#[test]
+fn registry_add_runs_a_real_drizzle_query_builder_chain_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-drizzle-chain-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "drizzle-orm").unwrap();
+    thaw_registry::add(&registry, "better-sqlite3").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { sqliteTable, integer, text } from "drizzle-orm/sqlite-core";
+import { drizzle } from "drizzle-orm/sqlite-proxy";
+import { eq } from "drizzle-orm";
+
+const users = sqliteTable("users", {
+    id: integer(),
+    name: text(),
+});
+
+async function callback(sql: string, params: JsValue, method: string): Promise<{ rows: number[] }> {
+    console.log(sql);
+    return { rows: [] };
+}
+
+async function main(): Promise<void> {
+    const db = drizzle(callback);
+    await db.select().from(users).where(eq(users.id, 1));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["drizzle-orm/sqlite-core".to_string(), "drizzle-orm/sqlite-proxy".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let mut lines = stdout.lines();
+    let sql = lines.next().unwrap();
+    assert!(sql.contains("where"), "expected a WHERE clause: {sql}");
+    assert_eq!(lines.next(), None, "query executed more than once: {stdout}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Real, fetched `zod@3.23.0` -- a version-diversity check prompted by the
 /// user's own question of whether earlier zod work (this session, against
 /// whatever `zod` resolved to as latest -- zod v4) actually generalizes,
