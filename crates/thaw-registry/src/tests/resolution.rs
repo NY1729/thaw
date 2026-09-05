@@ -474,6 +474,56 @@ fn installed_package_flattens_a_nested_namespace_reexport() {
 }
 
 #[test]
+fn installed_package_carries_a_self_referential_namespace_alias_from_a_transitively_reexported_file() {
+    // `import * as z from "SOURCE"; export { z }; export default z;` --
+    // `thaw_bridge::self_referential_namespace_aliases`'s own shape, but
+    // declared one file *below* the package's own entry point (reached
+    // only transitively through a plain `export * from "./external";`),
+    // not in the entry point itself. Real example: zod v3's own
+    // `lib/index.d.ts` (`index.d.ts`, the package's entry point, is just
+    // `export * from "./lib";`) -- unlike zod v4, whose entry point
+    // declares this alias directly and so needed no special handling.
+    // Without carrying this snippet into the flattened output, `import {
+    // z } from "zod"` failed outright ("no export named `z`") even though
+    // `z`'s own methods (`object`, `string`, ...) were all individually
+    // reachable by their own bare names.
+    let scratch = temp_registry("installed-dts-self-referential-alias-scratch");
+    let registry = temp_registry("installed-dts-self-referential-alias-registry");
+    let package = scratch.join("node_modules/case-kit6");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"case-kit6","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(package.join("index.d.ts"), "export * from './external';\n").unwrap();
+    fs::write(
+        package.join("external.d.ts"),
+        "import * as z from './z';\n\
+         export declare function greet(): string;\n\
+         export { z };\n\
+         export default z;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { greet: function() { return 'hi'; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "case-kit6").unwrap();
+    let declarations = resolve(&registry, "case-kit6").unwrap().dts_source;
+    assert!(
+        declarations.contains("import * as z from './z';") || declarations.contains("import * as z from \"./z\";"),
+        "{declarations}"
+    );
+    assert!(declarations.contains("export { z };"), "{declarations}");
+    assert!(declarations.contains("export default z;"), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_import_equals_reexports() {
     // `import Name = require("./path")` (a TS import-equals declaration)
     // followed by a *local* `export { Name as exported };` (no `from`
