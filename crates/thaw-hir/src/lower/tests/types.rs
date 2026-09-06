@@ -1,4 +1,46 @@
 #[test]
+fn lowers_any_and_unknown_annotations_to_dynamic_values() {
+    let program = lower(
+        r#"
+        function acceptUnknown(value: unknown): unknown { return value; }
+        function acceptAny(value: any): any { return value; }
+        function main(): void {}
+        "#,
+    );
+    assert_eq!(program.functions[0].params[0].ty, HirType::Json);
+    assert_eq!(program.functions[0].ret, HirType::Json);
+    assert_eq!(program.functions[1].params[0].ty, HirType::Json);
+    assert_eq!(program.functions[1].ret, HirType::Json);
+}
+
+#[test]
+fn stringifies_an_unknown_value_through_the_dynamic_host() {
+    lower(
+        r#"
+        function stringify(value: unknown): string {
+            return JSON.stringify(value);
+        }
+        function main(): void {}
+        "#,
+    );
+}
+
+#[test]
+fn accepts_an_abi_compatible_object_prefix() {
+    lower(
+        r#"
+        type Narrow = { first: number; last: string };
+        type Wide = { first: number; last: string; middle: boolean };
+        function accept(value: Narrow): string { return value.last; }
+        function main(): void {
+            const value: Wide = { first: 1, last: "ok", middle: true };
+            console.log(accept(value));
+        }
+        "#,
+    );
+}
+
+#[test]
 fn validates_satisfies_without_widening_the_expression() {
     let program = lower(
         r#"
