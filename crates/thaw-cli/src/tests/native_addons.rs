@@ -705,7 +705,7 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     }
     let dir = std::env::temp_dir().join(format!("thaw-cli-auto-sqlite3-{}", std::process::id()));
     let registry = dir.join("modules");
-    let added = thaw_registry::add(&registry, "sqlite3@5.1.7").unwrap();
+    let added = thaw_registry::add(&registry, "sqlite3@6.0.1").unwrap();
     let native = added
         .native_addon
         .expect("the official GitHub prebuild should be downloaded");
@@ -714,11 +714,11 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     assert_eq!(native.libc, "glibc");
     assert!(native.source.contains("TryGhost/node-sqlite3/releases"));
 
-    // Keep this fixture focused on construction and one error-first
-    // callback method rather than sqlite3's full overloaded surface.
+    // Keep the declaration fixture focused on the three methods exercised
+    // here; sqlite3's full overload surface is covered by declaration tests.
     std::fs::write(
             registry.join("sqlite3/package.d.ts"),
-            "export declare class Database { constructor(filename: string); close(callback: (error: Error | null) => void): void; }\n",
+            "export declare class Database { constructor(filename: string); exec(sql: string): void; run(sql: string, params: Json[], callback: (error: Error | null) => void): void; all(sql: string, callback: (error: Error | null, rows: any[]) => void): void; close(callback: (error: Error | null) => void): void; }\n",
         )
         .unwrap();
     let source = dir.join("main.ts");
@@ -728,8 +728,13 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
         "import { Database } from \"sqlite3\";\n\
              function main(): void {\n\
                  const database: JsValue = new Database(\":memory:\");\n\
-                 const onClose = (error: Json): void => { console.log(\"sqlite3-closed\"); };\n\
-                 database.close(onClose);\n\
+                 database.exec(\"CREATE TABLE values_table (value INTEGER)\");\n\
+                 database.run(\"INSERT INTO values_table(value) VALUES (?)\", [42], (error: Json): void => {\n\
+                     database.all(\"SELECT value FROM values_table\", (error: Json, rows: Json): void => {\n\
+                         console.log(JSON.stringify(rows));\n\
+                         database.close((): void => { console.log(\"sqlite3-closed\"); });\n\
+                     });\n\
+                 });\n\
                  console.log(\"sqlite3-constructed\");\n\
              }\n",
     )
@@ -753,7 +758,7 @@ fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "sqlite3-constructed\nsqlite3-closed\n"
+        "sqlite3-constructed\n[{\"value\":42}]\nsqlite3-closed\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
