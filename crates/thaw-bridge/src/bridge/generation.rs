@@ -504,6 +504,7 @@ fn wrap_as_commonjs_module(
          \x20\x20var __thaw_napi_argument = function(value) {{\n\
          \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
          \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) return {{ __thaw_napi_handle__: handle }};\n\
+         \x20\x20\x20\x20if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) return value.toJSON();\n\
          \x20\x20\x20\x20if (Array.isArray(value)) return value.map(__thaw_napi_argument);\n\
          \x20\x20\x20\x20var id = __thaw_napi_reference_ids.get(value);\n\
          \x20\x20\x20\x20if (id) return typeof value === 'function' ? {{ __thaw_napi_function__: id }} : {{ __thaw_napi_object__: id, value: __thaw_napi_reference_values.get(id) }};\n\
