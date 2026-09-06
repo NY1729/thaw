@@ -22827,9 +22827,13 @@ fn generate_registry_shims(
             native_addons.push((
                 pkg.name.clone(),
                 bytes,
-                pkg.commonjs_export_name.clone().or_else(|| {
-                    (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone())
-                }),
+                if pkg.bundle_js.is_some() {
+                    None
+                } else {
+                    pkg.commonjs_export_name.clone().or_else(|| {
+                        (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone())
+                    })
+                },
             ));
         }
         if let Some(bundle_js) = &pkg.bundle_js {
