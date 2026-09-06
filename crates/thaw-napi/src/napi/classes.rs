@@ -580,6 +580,19 @@ pub unsafe extern "C" fn napi_instanceof(
     if !matches!(value_ref(constructor), Ok(Value::Function(_))) {
         return record_status(env, NAPI_FUNCTION_EXPECTED);
     }
+    let constructor_name = find_property_value(
+        env,
+        constructor,
+        &PropertyKey::String("name".into()),
+    )
+    .and_then(|name| match value_ref(name) {
+        Ok(Value::String(name)) => Some(name.as_str()),
+        _ => None,
+    });
+    if matches!(value_ref(object), Ok(Value::Date(_))) && constructor_name == Some("Date") {
+        *result = true;
+        return NAPI_OK;
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         *result = false;
         return NAPI_OK;

@@ -1311,6 +1311,42 @@ fn instanceof_walks_constructor_prototype_chains() {
 }
 
 #[test]
+fn global_date_and_regexp_are_constructors() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut global = ptr::null_mut();
+        assert_eq!(napi_get_global(env_ptr, &mut global), NAPI_OK);
+        for name in [c"Date", c"RegExp"] {
+            let mut constructor = ptr::null_mut();
+            assert_eq!(
+                napi_get_named_property(env_ptr, global, name.as_ptr(), &mut constructor),
+                NAPI_OK
+            );
+            assert!(matches!(value_ref(constructor), Ok(Value::Function(_))));
+        }
+        let mut date = ptr::null_mut();
+        let mut date_constructor = ptr::null_mut();
+        let mut matches = false;
+        assert_eq!(napi_create_date(env_ptr, 42.0, &mut date), NAPI_OK);
+        assert_eq!(
+            napi_get_named_property(
+                env_ptr,
+                global,
+                c"Date".as_ptr(),
+                &mut date_constructor,
+            ),
+            NAPI_OK
+        );
+        assert_eq!(
+            napi_instanceof(env_ptr, date, date_constructor, &mut matches),
+            NAPI_OK
+        );
+        assert!(matches);
+    }
+}
+
+#[test]
 fn object_type_tags_are_stable_and_unique() {
     unsafe {
         let mut env = Env::new();
@@ -1375,4 +1411,3 @@ fn lock_async_test() -> std::sync::MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
-
