@@ -426,10 +426,13 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn build_optional_value(
         &mut self,
-        value: BasicValueEnum<'ctx>,
+        mut value: BasicValueEnum<'ctx>,
         payload: &HirType,
         present: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if *payload == HirType::Json && value.is_int_value() {
+            value = self.compile_dynamic_value_placeholder_unchecked(value)?;
+        }
         let optional_type = self
             .basic_type(&HirType::Optional(Box::new(payload.clone())))?
             .into_struct_type();
