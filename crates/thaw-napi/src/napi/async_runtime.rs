@@ -744,6 +744,11 @@ pub extern "C" fn thaw_napi_poll_async_work() -> usize {
     completed
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_napi_async_work_pending() -> u8 {
+    u8::from(ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0)
+}
+
 /// Runs queued completion callbacks on the calling thread and waits until all
 /// work submitted by native addons has completed. Generated executables call
 /// this once user `main` returns.

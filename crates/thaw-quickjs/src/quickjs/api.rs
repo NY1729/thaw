@@ -269,15 +269,21 @@ fn resolve_value_impl<'js>(
     // `null` is the universal placeholder every typed decoder on the
     // other side already tolerates (a `Void`-declared return, notably,
     // never even inspects the JSON it's handed).
-    match ctx
-        .json_stringify(result)
-        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?
-    {
-        Some(text) => text
-            .to_string()
-            .map_err(|e| format!("failed to JSON-encode the result: {e}")),
-        None => Ok("null".to_string()),
-    }
+    let json: Object = ctx
+        .globals()
+        .get("JSON")
+        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?;
+    let stringify: Function = json
+        .get("stringify")
+        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?;
+    let replacer: Function = ctx
+        .globals()
+        .get("__thaw_json_binary_replacer")
+        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?;
+    stringify
+        .call::<_, Option<String>>((result, replacer))
+        .map_err(|e| format!("failed to JSON-encode the result: {e}"))
+        .map(|value| value.unwrap_or_else(|| "null".to_string()))
 }
 
 fn finish_with_platform_events<'js>(
@@ -312,8 +318,9 @@ fn finish_with_platform_events<'js>(
                     .globals()
                     .get::<_, Function>("__thaw_child_process_active")
                     .ok()
-                    .and_then(|probe| probe.call::<_, bool>(()).ok())
-                    .unwrap_or(false);
+                .and_then(|probe| probe.call::<_, bool>(()).ok())
+                .unwrap_or(false)
+                || napi_bridge_pending();
             if active {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;

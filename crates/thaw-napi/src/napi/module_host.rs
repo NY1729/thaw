@@ -111,6 +111,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
         thaw_napi_call,
         thaw_napi_handle_bridge,
         thaw_napi_poll_async_work,
+        thaw_napi_async_work_pending,
     );
     Ok(())
 }
@@ -658,16 +659,14 @@ unsafe fn json_from_value_with_undefined(
                 })
                 .collect::<Result<_, String>>()?,
         ),
-        Value::Buffer(values) => {
-            JsonValue::Array(values.iter().map(|value| JsonValue::from(*value)).collect())
-        }
+        Value::Buffer(values) => buffer_json(values, preserve_undefined),
         Value::ExternalBuffer { data, length } => {
             let bytes = if *length == 0 {
                 &[]
             } else {
                 std::slice::from_raw_parts(*data, *length)
             };
-            JsonValue::Array(bytes.iter().map(|value| JsonValue::from(*value)).collect())
+            buffer_json(bytes, preserve_undefined)
         }
         Value::BufferView {
             array_buffer,
@@ -681,7 +680,7 @@ unsafe fn json_from_value_with_undefined(
             } else {
                 std::slice::from_raw_parts(data.add(*byte_offset), *length)
             };
-            JsonValue::Array(bytes.iter().map(|value| JsonValue::from(*value)).collect())
+            buffer_json(bytes, preserve_undefined)
         }
         Value::ArrayBuffer { .. }
         | Value::SharedArrayBuffer(_)
@@ -706,6 +705,19 @@ unsafe fn json_from_value_with_undefined(
             }
         },
     })
+}
+
+fn buffer_json(bytes: &[u8], typed: bool) -> JsonValue {
+    let data = bytes
+        .iter()
+        .copied()
+        .map(JsonValue::from)
+        .collect::<Vec<_>>();
+    if typed {
+        serde_json::json!({ "type": "Buffer", "data": data })
+    } else {
+        JsonValue::Array(data)
+    }
 }
 
 fn is_native_instance(value: usize) -> bool {
@@ -767,16 +779,19 @@ unsafe fn call_impl(
 ) -> Result<String, String> {
     let args: Vec<JsonValue> = serde_json::from_str(args_json)
         .map_err(|error| format!("invalid argument JSON: {error}"))?;
-    let function = HOST
-        .with(|host| host.borrow().functions.get(name).cloned())
+    let (function, env) = HOST
+        .with(|host| {
+            let host = host.borrow();
+            Some((
+                host.functions.get(name)?.clone(),
+                host.exports.get(name)?.0 as NapiEnv,
+            ))
+        })
         .ok_or_else(|| format!("no such native addon function `{name}`"))?;
-    let mut env = Box::new(Env::new());
-    if let Some(module_file_name) = module_file_name_for_export(name) {
-        env.module_file_name = module_file_name;
-    }
+    let env = env_mut(env).map_err(|_| "invalid native addon environment")?;
     let args = args
         .iter()
-        .map(|value| value_from_json_with_undefined(&mut env, value, preserve_undefined))
+        .map(|value| value_from_json_with_undefined(env, value, preserve_undefined))
         .collect();
     let this_arg = env.alloc(Value::Undefined);
     let mut info = CallbackInfo {
@@ -785,9 +800,9 @@ unsafe fn call_impl(
         new_target: ptr::null_mut(),
         data: function.data,
     };
-    let result = (function.callback)(&mut *env, &mut info);
+    let result = (function.callback)(env, &mut info);
     if let Some(exception) = env.exception {
-        return Err(describe_env_exception(&mut *env as *mut Env, exception)?);
+        return Err(describe_env_exception(env, exception)?);
     }
     let result = wait_for_promise(result)?;
     serde_json::to_string(&json_from_value_with_undefined(result, preserve_undefined)?)
