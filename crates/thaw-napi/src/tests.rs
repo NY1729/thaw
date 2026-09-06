@@ -311,7 +311,8 @@ fn loads_and_calls_a_real_napi_addon() {
         assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "84.0");
         let result = thaw_napi_call_result(c"finalized".as_ptr(), c"[]".as_ptr());
         assert!(result.error.is_null());
-        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "1.0");
+        // Calls reuse the addon's environment; values are finalized with it.
+        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "0.0");
         let typed = thaw_napi_call_typed_result(
             c"isUndefined".as_ptr(),
             c"[{\"$__thaw_napi_undefined$\":true}]".as_ptr(),
