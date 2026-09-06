@@ -19908,8 +19908,8 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
             let ret = render_dynamic_type(ret)?;
             Some(format!("({}) => {ret}", params.join(", ")))
         }
-        thaw_hir::HirType::CallableFunction(params, optional, None, ret) => {
-            let params = params
+        thaw_hir::HirType::CallableFunction(params, optional, rest, ret) => {
+            let mut params = params
                 .iter()
                 .enumerate()
                 .map(|(index, ty)| {
@@ -19921,6 +19921,9 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
+            if let Some(rest) = rest {
+                params.push(format!("...args: {}[]", render_dynamic_type(rest)?));
+            }
             let ret = render_dynamic_type(ret)?;
             Some(format!("({}) => {ret}", params.join(", ")))
         }
@@ -21567,29 +21570,28 @@ fn generate_napi_class_method_overloads(
             })
             .filter(|candidate| {
                 candidate.params.iter().enumerate().all(|(index, (_, ty))| {
-                    supported_class_method_param(ty, index, candidate.params.len())
-                        || (!napi
-                            && index + 1 == candidate.params.len()
-                            && matches!(ty,
-                                thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(params, ret))
-                                if params.iter().all(|param| render_dynamic_type(param).is_some())
-                                    && render_dynamic_type(ret).is_some()))
+                    !napi
+                        || supported_class_method_param(ty, index, candidate.params.len())
                 }) && candidate
                     .rest_param
                     .as_ref()
                     .is_none_or(|(_, ty)| supported_class_method_param(ty, 0, 1))
-                    && supported_class_method_return(&candidate.ret)
+                    && (!napi || supported_class_method_return(&candidate.ret))
             })
             .collect::<Vec<_>>();
         for (overload_index, overload) in overloads.into_iter().enumerate() {
-            let thaw_bridge::DtsType::Native(return_type) = &overload.ret else {
-                continue;
+            let return_type = match &overload.ret {
+                thaw_bridge::DtsType::Native(return_type) => {
+                    if *return_type == thaw_hir::HirType::Void {
+                        Some("Json".to_string())
+                    } else {
+                        render_dynamic_type(return_type)
+                    }
+                }
+                thaw_bridge::DtsType::Unsupported(_) if !napi => Some("JsValue".to_string()),
+                thaw_bridge::DtsType::Unsupported(_) => None,
             };
-            let Some(return_type) = (if *return_type == thaw_hir::HirType::Void {
-                Some("Json".to_string())
-            } else {
-                render_dynamic_type(return_type)
-            }) else {
+            let Some(return_type) = return_type else {
                 continue;
             };
             let argument_counts = if overload.rest_param.is_some() {
@@ -21609,6 +21611,9 @@ fn generate_napi_class_method_overloads(
                     .iter()
                     .filter_map(|(name, ty)| match ty {
                         thaw_bridge::DtsType::Native(ty) => Some((name.clone(), ty.clone())),
+                        thaw_bridge::DtsType::Unsupported(_) if !napi => {
+                            Some((name.clone(), thaw_hir::HirType::Json))
+                        }
                         thaw_bridge::DtsType::Unsupported(_) => None,
                     })
                     .collect::<Vec<_>>();
@@ -21639,7 +21644,7 @@ fn generate_napi_class_method_overloads(
                 .join(", ");
                 let has_callback = matches!(
                     included_params.last(),
-                    Some((_, thaw_hir::HirType::Function(_, _)))
+                    Some((_, thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)))
                 );
                 let runtime_key = format!(
                     "{}{}${}$overload{overload_index}$arity{argument_count}",
@@ -21940,7 +21945,8 @@ fn generate_registry_shims(
             .collect();
         let namespace_self_aliases =
             thaw_bridge::self_referential_namespace_aliases(&package.dts_source);
-        let type_only_exports = thaw_bridge::exported_type_names(&package.dts_source);
+        let mut type_only_exports = thaw_bridge::exported_type_names(&package.dts_source);
+        type_only_exports.extend(classes.iter().map(|class| class.name.clone()));
         let nested_namespaces = thaw_bridge::nested_namespace_members(&package.dts_source);
         resolved.push(ResolvedPackage {
             name: package.name.clone(),

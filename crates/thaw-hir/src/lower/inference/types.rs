@@ -11,11 +11,17 @@ impl<'a> FnLowerer<'a> {
                 HirType::CallableFunction(fixed, _, rest, expected_ret),
                 HirType::Function(params, ret),
             ) => {
-                let mut abi = fixed.clone();
-                if let Some(rest) = rest {
-                    abi.push(HirType::Array(rest.clone()));
-                }
-                abi == *params && expected_ret == ret
+                expected_ret == ret
+                    && params.len() >= fixed.len()
+                    && params[..fixed.len()] == fixed[..]
+                    && match rest {
+                        Some(rest) => {
+                            let tail = &params[fixed.len()..];
+                            tail == [HirType::Array(rest.clone())]
+                                || tail.iter().all(|ty| ty == rest.as_ref())
+                        }
+                        None => params.len() == fixed.len(),
+                    }
             }
             _ => false,
         };

@@ -286,17 +286,27 @@ fn installed_package_inlines_named_import_reexports() {
     .unwrap();
     fs::write(
         package.join("index.d.ts"),
-        "import { App } from './app';\nimport { route as routeFn } from './route';\nexport { App, routeFn as route };\n",
+        "import { App } from './app';\nimport { route as routeFn } from './route';\nexport { App, routeFn as route };\nexport { Context } from './context';\n",
     )
     .unwrap();
     fs::write(
         package.join("app.d.ts"),
-        "export declare class App<T = unknown> {\n    constructor(base?: string);\n    get(path: string): T;\n}\n",
+        "import { Base } from './base';\nexport declare class App<T = unknown> extends Base {\n    constructor(base?: string);\n    get(path: string): T;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("base.d.ts"),
+        "declare class InternalBase {\n    request(path: string): Promise<Response>;\n}\nexport { InternalBase as Base };\n",
     )
     .unwrap();
     fs::write(
         package.join("route.d.ts"),
         "export declare function route(path: string): string;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("context.d.ts"),
+        "export declare class Context {\n    text(value: string): Response;\n}\n",
     )
     .unwrap();
     fs::write(
@@ -312,9 +322,50 @@ fn installed_package_inlines_named_import_reexports() {
         "{declarations}"
     );
     assert!(
+        declarations.contains("class Base")
+            && declarations.contains("request(path: string): Promise<Response>"),
+        "{declarations}"
+    );
+    assert!(
         declarations.contains("function route(path: string): string"),
         "{declarations}"
     );
+    assert!(declarations.contains("class Context"), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_package_inlines_types_through_wildcard_barrels() {
+    let scratch = temp_registry("installed-dts-wildcard-types-scratch");
+    let registry = temp_registry("installed-dts-wildcard-types-registry");
+    let package = scratch.join("node_modules/service-kit");
+    fs::create_dir_all(package.join("types")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"service-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(package.join("index.d.ts"), "export * from './types';\n").unwrap();
+    fs::write(
+        package.join("types/index.d.ts"),
+        "export type * from './server';\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("types/server.d.ts"),
+        "export interface Result { status: number; }\n\
+         export type Handler = (value: string) => Result;\n\
+         export class Server { run(handler: Handler): Promise<Result>; }\n",
+    )
+    .unwrap();
+    fs::write(package.join("index.js"), "module.exports = {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "service-kit").unwrap();
+    let declarations = resolve(&registry, "service-kit").unwrap().dts_source;
+    assert!(declarations.contains("interface Result"), "{declarations}");
+    assert!(declarations.contains("type Handler"), "{declarations}");
+    assert!(declarations.contains("class Server"), "{declarations}");
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
