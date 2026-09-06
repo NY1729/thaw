@@ -2444,7 +2444,11 @@ fn describe_ts_type(ty: &TsType) -> String {
             };
             format!("{op_name} {}", describe_ts_type(&op.type_ann))
         }
-        TsType::TsIndexedAccessType(_) => "an indexed access type".to_string(),
+        TsType::TsIndexedAccessType(indexed) => format!(
+            "{}[{}]",
+            describe_ts_type(&indexed.obj_type),
+            describe_ts_type(&indexed.index_type)
+        ),
         TsType::TsMappedType(_) => "a mapped type".to_string(),
         TsType::TsLitType(lit) => match &lit.lit {
             // `Wtf8Atom` has no `Display`; its `Debug` already renders as
@@ -2565,6 +2569,15 @@ fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>)
                 render(&indexed.obj_type, substitutions, generic, depth),
                 render(&indexed.index_type, substitutions, generic, depth)
             ),
+            TsType::TsTypeOperator(operator) => format!(
+                "{} {}",
+                match operator.op {
+                    TsTypeOperatorOp::KeyOf => "keyof",
+                    TsTypeOperatorOp::Unique => "unique",
+                    TsTypeOperatorOp::ReadOnly => "readonly",
+                },
+                render(&operator.type_ann, substitutions, generic, depth)
+            ),
             TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) =>
                 union.types.iter().map(|ty| render(ty, substitutions, generic, depth)).collect::<Vec<_>>().join(" | "),
             TsType::TsParenthesizedType(parenthesized) => {
@@ -2603,6 +2616,31 @@ fn describe_contextual_rest_type(ty: &TsType, generic: &GenericInterfaces<'_>) -
         let TsType::TsTypeRef(reference) = current else {
             return described;
         };
+        if let TsEntityName::Ident(name) = &reference.type_name {
+            if let Some(alias) = generic.aliases.get(name.sym.as_str()) {
+                if let TsType::TsUnionOrIntersectionType(
+                    TsUnionOrIntersectionType::TsUnionType(union),
+                ) = alias.type_ann.as_ref()
+                {
+                    if let Some(first) = union.types.first() {
+                        let forwards_parameter = alias
+                            .type_params
+                            .as_ref()
+                            .and_then(|parameters| parameters.params.first())
+                            .is_some_and(|parameter| {
+                                matches!(first.as_ref(), TsType::TsTypeRef(first_ref)
+                                    if matches!(&first_ref.type_name, TsEntityName::Ident(first_name)
+                                        if first_ref.type_params.is_none()
+                                            && first_name.sym == parameter.name.sym))
+                            });
+                        if !forwards_parameter {
+                            current = first;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
         let Some(next) = reference
             .type_params
             .as_ref()

@@ -20055,6 +20055,22 @@ fn supported_json_collection_element(ty: &thaw_hir::HirType) -> bool {
     }
 }
 
+fn generic_rest_array_result(
+    generic: &thaw_bridge::DtsGenericFunction,
+) -> Option<(&str, bool)> {
+    generic.type_params.iter().find_map(|(parameter, _)| {
+        if generic.return_type == format!("{parameter}[]")
+            || generic.return_type == format!("Array<{parameter}>")
+        {
+            Some((parameter.as_str(), false))
+        } else if generic.return_type == format!("Array<{parameter}[keyof {parameter}]>") {
+            Some((parameter.as_str(), true))
+        } else {
+            None
+        }
+    })
+}
+
 /// `typed_dynamic_declaration`'s handling for a Fallback function whose
 /// `.d.ts` signature ends in a rest parameter (`...inputs: T[]`, real
 /// example: `clsx(...inputs: ClassValue[]): string`). There's no fixed
@@ -20145,16 +20161,26 @@ fn typed_dynamic_rest_declaration(
     };
 
     let mut declarations = String::new();
-    let generic_array = function.generic.as_ref().and_then(|generic| {
-        generic.type_params.iter().find_map(|(parameter, _)| {
-            let returns_array = generic.return_type == format!("{parameter}[]")
-                || generic.return_type == format!("Array<{parameter}>");
-            let accepts_collection = generic.param_types[..fixed_count]
+    let generic_array = function
+        .generic
+        .as_ref()
+        .and_then(generic_rest_array_result)
+        .filter(|(parameter, object_values)| {
+            function
+                .generic
+                .as_ref()
+                .expect("generic_array requires generic metadata")
+                .param_types[..fixed_count]
                 .iter()
-                .any(|ty| ty == &format!("{parameter}[]") || ty.contains(&format!("<{parameter}>")));
-            (returns_array && accepts_collection).then_some(parameter.as_str())
-        })
-    });
+                .any(|ty| {
+                    if *object_values {
+                        ty == *parameter || ty.starts_with(&format!("{parameter} |"))
+                    } else {
+                        ty == &format!("{parameter}[]")
+                            || ty.contains(&format!("<{parameter}>"))
+                    }
+                })
+        });
     for &total in &arities {
         let mut params_rendered = render_fixed_params(total);
         for index in 0..total.saturating_sub(fixed_count) {
@@ -20164,7 +20190,7 @@ fn typed_dynamic_rest_declaration(
             "declare function {base_symbol}__arity_{total}({}): {ret};\n",
             params_rendered.join(", ")
         ));
-        if let Some(parameter) = generic_array {
+        if let Some((parameter, object_values)) = generic_array {
             let mut specialized = function
                 .generic
                 .as_ref()
@@ -20173,8 +20199,13 @@ fn typed_dynamic_rest_declaration(
                 .iter()
                 .enumerate()
                 .map(|(index, ty)| {
-                    let ty = if ty == &format!("{parameter}[]")
-                        || ty.contains(&format!("<{parameter}>"))
+                    let ty = if object_values
+                        && (ty == parameter || ty.starts_with(&format!("{parameter} |")))
+                    {
+                        "Json".into()
+                    } else if !object_values
+                        && (ty == &format!("{parameter}[]")
+                            || ty.contains(&format!("<{parameter}>")))
                     {
                         format!("{parameter}[]")
                     } else {
@@ -20187,7 +20218,8 @@ fn typed_dynamic_rest_declaration(
                 specialized.push(format!("__thaw_rest_{index}: Json"));
             }
             declarations.push_str(&format!(
-                "declare function {base_symbol}__generic_rest__arity_{total}<{parameter}>({}): {parameter}[];\n",
+                "declare function {base_symbol}__generic_rest__arity_{total}<{}>({}): {parameter}[];\n",
+                parameter,
                 specialized.join(", ")
             ));
         }
@@ -22607,20 +22639,15 @@ fn generate_registry_shims(
                         observed_identifier_arities.get(&function.name),
                     ) {
                         if function.rest_param.is_some()
+                            && !overloaded_names_for_argument_shape_dispatch
+                                .contains(&function.name.as_str())
                             && generic.contextual_rest_param_type.is_some()
                         {
                             let direct = symbol.replace(
                                 "__thaw_typed_wrapper_",
                                 "__thaw_typed_",
                             );
-                            let specialized = generic.type_params.iter().any(|(parameter, _)| {
-                                (generic.return_type == format!("{parameter}[]")
-                                    || generic.return_type == format!("Array<{parameter}>") )
-                                    && generic.param_types.iter().any(|ty| {
-                                        ty == &format!("{parameter}[]")
-                                            || ty.contains(&format!("<{parameter}>"))
-                                    })
-                            });
+                            let specialized = generic_rest_array_result(generic).is_some();
                             for &arity in arities {
                                 let mut params = dts_function_param_hir_types(function);
                                 params.resize(arity, thaw_hir::HirType::Json);
@@ -22681,16 +22708,53 @@ fn generate_registry_shims(
             }
             let napi = pkg.native_addon.is_some() && pkg.bundle_js.is_none();
             let empty_arities = std::collections::BTreeSet::new();
+            let call_arities = observed_identifier_arities
+                .get(name)
+                .unwrap_or(&empty_arities);
             for (index, function) in pkg.functions.iter().enumerate() {
-                if function.name != name || function.rest_param.is_some() {
+                if function.name != name {
                     continue;
                 }
                 let Some((symbol, declaration)) =
-                    typed_dynamic_declaration(&pkg.name, function, napi, &empty_arities, Some(index))
+                    typed_dynamic_declaration(&pkg.name, function, napi, call_arities, Some(index))
                 else {
                     continue;
                 };
                 shim.push_str(&declaration);
+                if let Some(generic) = function
+                    .generic
+                    .as_ref()
+                    .filter(|_| function.rest_param.is_some())
+                {
+                    let direct = symbol.replace("__thaw_typed_wrapper_", "__thaw_typed_");
+                    let specialized = generic_rest_array_result(generic).is_some();
+                    for &arity in call_arities {
+                        let mut params = dts_function_param_hir_types(function);
+                        if let Some(contextual) = generic.contextual_param_types.first() {
+                            if generic.type_params.iter().any(|(parameter, _)| {
+                                contextual == &format!("{parameter}[]")
+                                    || contextual.contains(&format!("<{parameter}>"))
+                            }) {
+                                params[0] = thaw_hir::HirType::Array(Box::new(
+                                    thaw_hir::HirType::Json,
+                                ));
+                            }
+                        }
+                        params.resize(arity, thaw_hir::HirType::Json);
+                        fallback_function_overload_rewrites.push((
+                            name.to_string(),
+                            format!(
+                                "{direct}{}__arity_{arity}",
+                                if specialized { "__generic_rest" } else { "" }
+                            ),
+                            arity,
+                            arity,
+                            params,
+                            Some(generic.clone()),
+                        ));
+                    }
+                    continue;
+                }
                 fallback_function_overload_rewrites.push((
                     name.to_string(),
                     symbol,
