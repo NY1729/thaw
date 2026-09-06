@@ -8145,6 +8145,7 @@ fn fallback_class_is_constructible_via_new() {
         "export declare class Widget {\n\
              constructor(name?: string);\n\
              describe(): string;\n\
+             $disconnect(): void;\n\
          }\n",
     )
     .unwrap();
@@ -8152,6 +8153,7 @@ fn fallback_class_is_constructible_via_new() {
         package.join("bundle.js"),
         "function Widget(name) { this.name = name || 'default'; }\n\
          Widget.prototype.describe = function() { return 'Widget:' + this.name; };\n\
+         Widget.prototype.$disconnect = function() { console.log('disconnected'); };\n\
          module.exports.Widget = Widget;\n",
     )
     .unwrap();
@@ -8164,6 +8166,7 @@ function main(): void {
     console.log(named.describe());
     const defaulted = new Widget();
     console.log(defaulted.describe());
+    defaulted.$disconnect();
 }
 "#,
     )
@@ -8178,7 +8181,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "Widget:hi\nWidget:default\n"
+        "Widget:hi\nWidget:default\ndisconnected\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
