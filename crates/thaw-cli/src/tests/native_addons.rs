@@ -1555,6 +1555,7 @@ import * as ns from "lodash";
 import { every, filter, find, map, reduce, some, sortBy } from "lodash";
 function main(): void {
     let sortTotal: number = 0;
+    let objectSortTotal: number = 0;
     console.log(_.chunk([1, 2, 3, 4], 2).length);
     console.log(_.capitalize("hello"));
     console.log(ns.chunk([1, 2, 3, 4], 2).length);
@@ -1569,6 +1570,10 @@ function main(): void {
     console.log(sorted[0]);
     console.log(sorted.join(','));
     console.log(sortTotal);
+    const sortedObject = sortBy({ a: 4, b: 2 }, value => { objectSortTotal = objectSortTotal + value; return value; });
+    console.log(sortedObject[0]);
+    console.log(sortedObject.join(','));
+    console.log(objectSortTotal);
 }"#,
     )
     .unwrap();
@@ -1594,6 +1599,9 @@ function main(): void {
     assert_eq!(lines.next(), Some("true"));
     assert_eq!(lines.next(), Some("1"));
     assert_eq!(lines.next(), Some("1,2,3"));
+    assert_eq!(lines.next(), Some("6"));
+    assert_eq!(lines.next(), Some("2"));
+    assert_eq!(lines.next(), Some("2,4"));
     assert_eq!(lines.next(), Some("6"));
     assert_eq!(lines.next(), None);
     let _ = std::fs::remove_dir_all(dir);
