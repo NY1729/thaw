@@ -2685,12 +2685,32 @@ fn records_optional_and_default_constructor_arities() {
 }
 
 #[test]
+fn classifies_this_bound_rest_callbacks_for_contextual_inference() {
+    let classes = parse_dts_classes(
+        "export class Command {\n\
+             action(fn: (this: this, ...args: any[]) => void | Promise<void>): this;\n\
+         }",
+    )
+    .unwrap();
+    let callback = &classes[0].methods[0].params[0].1;
+    assert!(
+        matches!(
+            callback,
+            DtsType::Native(HirType::CallableFunction(params, _, Some(rest), ret))
+                if params.is_empty() && **rest == HirType::Json && **ret == HirType::Void
+        ),
+        "{callback:?}"
+    );
+}
+
+#[test]
 fn expands_inherited_external_class_members() {
     let classes = parse_dts_classes(
         r#"export class Base {
                 constructor(value: number);
                 base(value: number): number;
                 inherited(): string;
+                request: (path: string) => Promise<Response>;
                 static version(): number;
                 readonly id: number;
             }
@@ -2719,6 +2739,10 @@ fn expands_inherited_external_class_members() {
         .methods
         .iter()
         .any(|method| method.name == "inherited"));
+    assert!(derived
+        .methods
+        .iter()
+        .any(|method| method.name == "request" && method.required_params == 1));
     assert!(derived
         .methods
         .iter()

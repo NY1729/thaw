@@ -2738,7 +2738,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .enumerate()
         {
             let (value, marshalled_type) = if signature.backend == DynamicBackend::QuickJs
-                && matches!(ty, HirType::Function(_, _))
+                && matches!(ty, HirType::Function(_, _) | HirType::CallableFunction(..))
             {
                 (
                     self.compile_register_native_callback(std::slice::from_ref(argument))?,
@@ -2771,6 +2771,41 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        if signature.backend == DynamicBackend::QuickJs && signature.ret == HirType::JsValue {
+            self.uses_quickjs_handles = true;
+            let result = self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_js_call_method_handle_result")
+                        .unwrap(),
+                    &[
+                        receiver.into(),
+                        method.as_pointer_value().into(),
+                        args_json.into(),
+                        self.context.bool_type().const_zero().into(),
+                    ],
+                    "typed_dynamic_method_handle_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_struct_value();
+            let value = self
+                .builder
+                .build_extract_value(result, 0, "typed_dynamic_method_handle_value")
+                .map_err(|error| error.to_string())?;
+            let error = self
+                .builder
+                .build_extract_value(result, 1, "typed_dynamic_method_handle_error")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_store(self.pending_exception().as_pointer_value(), error)
+                .map_err(|error| error.to_string())?;
+            self.branch_on_pending_exception()?;
+            return Ok(value);
+        }
         let result = if let Some(callback) = callback {
             self.compile_typed_napi_method_callback(
                 receiver,

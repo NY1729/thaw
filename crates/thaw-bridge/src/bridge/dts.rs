@@ -1135,6 +1135,28 @@ fn lower_dts_class(
                 let Some(property_name) = property_name(&property.key) else {
                     continue;
                 };
+                if let Some(TsType::TsFnOrConstructorType(
+                    TsFnOrConstructorType::TsFnType(function),
+                )) = property.type_ann.as_ref().map(|annotation| annotation.type_ann.as_ref())
+                {
+                    let function = lower_dts_fn_type(
+                        &property_name,
+                        function,
+                        interfaces,
+                        generic_interfaces,
+                    );
+                    methods.push(DtsMethod {
+                        name: function.name,
+                        params: function.params,
+                        required_params: function.required_params,
+                        rest_param: function.rest_param,
+                        ret: function.ret,
+                        is_static: property.is_static,
+                        kind: DtsMethodKind::Method,
+                        overloaded: false,
+                    });
+                    continue;
+                }
                 let ty = property
                     .type_ann
                     .as_ref()
@@ -2320,6 +2342,19 @@ fn classify_non_nullable_type(
         .unwrap_or_else(|| DtsType::Unsupported("NonNullable<T> has no native value".into()))
 }
 
+fn ts_type_includes_void(ty: &TsType) -> bool {
+    match ty {
+        TsType::TsKeywordType(keyword) => keyword.kind == TsKeywordTypeKind::TsVoidKeyword,
+        TsType::TsParenthesizedType(parenthesized) => {
+            ts_type_includes_void(&parenthesized.type_ann)
+        }
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            union.types.iter().any(|ty| ts_type_includes_void(ty))
+        }
+        _ => false,
+    }
+}
+
 fn classify_native_union(
     union: &swc_ecma_ast::TsUnionType,
     mut classify: impl FnMut(&TsType) -> DtsType,
@@ -2747,6 +2782,9 @@ fn classify_ts_type(
             let mut optional = Vec::with_capacity(function.params.len());
             let mut rest = None;
             for (index, parameter) in function.params.iter().enumerate() {
+                if matches!(parameter, TsFnParam::Ident(parameter) if parameter.id.sym == "this") {
+                    continue;
+                }
                 let (annotation, is_optional) = match parameter {
                     TsFnParam::Ident(parameter) => {
                         let Some(annotation) = &parameter.type_ann else {
@@ -2770,11 +2808,7 @@ fn classify_ts_type(
                         };
                         match classify_ts_type(&array.elem_type, interfaces, generic_interfaces) {
                             DtsType::Native(ty) => rest = Some(ty),
-                            DtsType::Unsupported(reason) => {
-                                return DtsType::Unsupported(format!(
-                                    "callback rest element type: {reason}"
-                                ));
-                            }
+                            DtsType::Unsupported(_) => rest = Some(HirType::Json),
                         }
                         continue;
                     }
@@ -2808,24 +2842,25 @@ fn classify_ts_type(
                 }
                 optional.push(is_optional);
             }
-            match classify_ts_type(&function.type_ann.type_ann, interfaces, generic_interfaces) {
-                DtsType::Native(ret) => {
-                    DtsType::Native(if rest.is_some() || optional.iter().any(|value| *value) {
-                        let optional = HirOptionalMask::from_bools(&optional);
-                        HirType::CallableFunction(
-                            params,
-                            optional,
-                            rest.map(Box::new),
-                            Box::new(ret),
-                        )
-                    } else {
-                        HirType::Function(params, Box::new(ret))
-                    })
+            let ret = match classify_ts_type(
+                &function.type_ann.type_ann,
+                interfaces,
+                generic_interfaces,
+            ) {
+                DtsType::Native(ret) => ret,
+                DtsType::Unsupported(_) if ts_type_includes_void(&function.type_ann.type_ann) => {
+                    HirType::Void
                 }
                 DtsType::Unsupported(reason) => {
-                    DtsType::Unsupported(format!("callback return type: {reason}"))
+                    return DtsType::Unsupported(format!("callback return type: {reason}"));
                 }
-            }
+            };
+            DtsType::Native(if rest.is_some() || optional.iter().any(|value| *value) {
+                let optional = HirOptionalMask::from_bools(&optional);
+                HirType::CallableFunction(params, optional, rest.map(Box::new), Box::new(ret))
+            } else {
+                HirType::Function(params, Box::new(ret))
+            })
         }
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsConstructorType(_)) => {
             DtsType::Unsupported("constructor callback types are not supported".into())
@@ -3640,6 +3675,9 @@ fn resolve_ts_type_with_substitution(
             let mut optional = Vec::with_capacity(function.params.len());
             let mut rest = None;
             for (index, parameter) in function.params.iter().enumerate() {
+                if matches!(parameter, TsFnParam::Ident(parameter) if parameter.id.sym == "this") {
+                    continue;
+                }
                 let (annotation, is_optional) = match parameter {
                     TsFnParam::Ident(parameter) => {
                         let Some(annotation) = &parameter.type_ann else {
@@ -3669,11 +3707,7 @@ fn resolve_ts_type_with_substitution(
                             in_progress,
                         ) {
                             DtsType::Native(ty) => rest = Some(ty),
-                            DtsType::Unsupported(reason) => {
-                                return DtsType::Unsupported(format!(
-                                    "callback rest element type: {reason}"
-                                ));
-                            }
+                            DtsType::Unsupported(_) => rest = Some(HirType::Json),
                         }
                         continue;
                     }
@@ -3703,29 +3737,31 @@ fn resolve_ts_type_with_substitution(
                 params.push(ty);
                 optional.push(is_optional);
             }
-            match resolve_ts_type_with_substitution(
+            let ret = match resolve_ts_type_with_substitution(
                 &function.type_ann.type_ann,
                 substitution,
                 interfaces,
                 generic_interfaces,
                 in_progress,
             ) {
-                DtsType::Native(ret) => {
-                    DtsType::Native(if rest.is_some() || optional.iter().any(|value| *value) {
-                        HirType::CallableFunction(
-                            params,
-                            HirOptionalMask::from_bools(&optional),
-                            rest.map(Box::new),
-                            Box::new(ret),
-                        )
-                    } else {
-                        HirType::Function(params, Box::new(ret))
-                    })
+                DtsType::Native(ret) => ret,
+                DtsType::Unsupported(_) if ts_type_includes_void(&function.type_ann.type_ann) => {
+                    HirType::Void
                 }
                 DtsType::Unsupported(reason) => {
-                    DtsType::Unsupported(format!("callback return type: {reason}"))
+                    return DtsType::Unsupported(format!("callback return type: {reason}"));
                 }
-            }
+            };
+            DtsType::Native(if rest.is_some() || optional.iter().any(|value| *value) {
+                HirType::CallableFunction(
+                    params,
+                    HirOptionalMask::from_bools(&optional),
+                    rest.map(Box::new),
+                    Box::new(ret),
+                )
+            } else {
+                HirType::Function(params, Box::new(ret))
+            })
         }
         TsType::TsTypeLit(type_lit) => {
             let mut fields = Vec::with_capacity(type_lit.members.len());

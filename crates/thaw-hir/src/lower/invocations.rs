@@ -1639,7 +1639,28 @@ impl<'a> FnLowerer<'a> {
                         HirType::CallableFunction(params, _, rest, ret) => {
                             let mut abi_params = params.clone();
                             if let Some(rest) = rest {
-                                abi_params.push(HirType::Array(rest.clone()));
+                                let (argument_count, declares_rest) = match argument.expr.as_ref() {
+                                    Expr::Arrow(arrow) => (
+                                        arrow.params.len(),
+                                        matches!(arrow.params.last(), Some(Pat::Rest(_))),
+                                    ),
+                                    Expr::Fn(function) => (
+                                        function.function.params.len(),
+                                        matches!(
+                                            function.function.params.last(),
+                                            Some(param) if matches!(param.pat, Pat::Rest(_))
+                                        ),
+                                    ),
+                                    _ => (abi_params.len() + 1, true),
+                                };
+                                if declares_rest {
+                                    abi_params.push(HirType::Array(rest.clone()));
+                                } else {
+                                    abi_params.resize(
+                                        argument_count.max(abi_params.len()),
+                                        rest.as_ref().clone(),
+                                    );
+                                }
                             }
                             Some((abi_params, ret.as_ref().clone()))
                         }
