@@ -1607,6 +1607,37 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn registry_add_builds_and_calls_real_chalk_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-chalk-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "chalk@5.4.1").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import chalk from "chalk";
+function main(): void {
+    console.log(chalk.red.bold("hello"));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("hello"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Real, fetched drizzle-orm -- the next breadth-first bug-hunting target
 /// after uuid. drizzle-orm uses npm subpath exports extensively (the root
 /// package exposes only SQL-operator helpers; the actual `sqliteTable`/

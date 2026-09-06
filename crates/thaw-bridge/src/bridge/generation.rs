@@ -572,7 +572,7 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
         ));
         for (export_name, runtime_getter, _, _) in bundle.value_exports {
             let getter_source = format!(
-                "globalThis[\"{}\"] = (function(value) {{ return function() {{ return value != null && Object.prototype.hasOwnProperty.call(value, \"{}\") ? value[\"{}\"] : value; }}; }})(globalThis.module.exports);",
+                "globalThis[\"{}\"] = (function(value) {{ return function() {{ return value != null && Object.prototype.hasOwnProperty.call(value, \"{}\") ? value[\"{}\"] : value != null && Object.prototype.hasOwnProperty.call(value, \"default\") ? value.default : value; }}; }})(globalThis.module.exports);",
                 escape_ts_string_literal(runtime_getter),
                 escape_ts_string_literal(export_name),
                 escape_ts_string_literal(export_name),

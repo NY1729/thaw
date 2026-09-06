@@ -101,7 +101,19 @@ impl<'a> FnLowerer<'a> {
                 .as_ident()
                 .and_then(|class| self.interfaces.get(class.sym.as_ref()).cloned()),
             Expr::This(_) => self.scope.get(&self.resolve_binding("this")).cloned(),
-            Expr::Member(_) | Expr::Paren(_) | Expr::TsAs(_) | Expr::TsTypeAssertion(_) => {
+            Expr::Member(member) => infer_generic_constructor_expr_type(
+                expr,
+                self.interfaces,
+                self.generic_interfaces,
+                std::slice::from_ref(&self.scope),
+                &self.generic_call_returns,
+            )
+            .ok()
+            .or_else(|| {
+                (self.infer_member_receiver_type(&member.obj) == Some(HirType::JsValue))
+                    .then_some(HirType::JsValue)
+            }),
+            Expr::Paren(_) | Expr::TsAs(_) | Expr::TsTypeAssertion(_) => {
                 infer_generic_constructor_expr_type(
                     expr,
                     self.interfaces,
