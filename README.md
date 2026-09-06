@@ -3174,7 +3174,7 @@ functions emit every overload and select the best candidate per call by arity
 and argument shape, rather than declaration order. Generic callback aliases,
 indexed-access element types and generic collection wrappers contextually type
 unannotated callback parameters; real Lodash `map`, `filter`, `reduce`, `find`,
-`some`, `every`, and generic-rest `sortBy` calls are covered. Typed non-callable package
+`some`, `every`, and generic-rest `sortBy` calls (including native array results) are covered. Typed non-callable package
 values are captured once after module initialization, covering uuid-style
 string constants and mime-style pre-created singleton objects. Fallback class
 method signatures also contextually type direct callback arguments and callbacks

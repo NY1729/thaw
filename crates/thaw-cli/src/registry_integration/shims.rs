@@ -20145,6 +20145,16 @@ fn typed_dynamic_rest_declaration(
     };
 
     let mut declarations = String::new();
+    let generic_array = function.generic.as_ref().and_then(|generic| {
+        generic.type_params.iter().find_map(|(parameter, _)| {
+            let returns_array = generic.return_type == format!("{parameter}[]")
+                || generic.return_type == format!("Array<{parameter}>");
+            let accepts_collection = generic.param_types[..fixed_count]
+                .iter()
+                .any(|ty| ty == &format!("{parameter}[]") || ty.contains(&format!("<{parameter}>")));
+            (returns_array && accepts_collection).then_some(parameter.as_str())
+        })
+    });
     for &total in &arities {
         let mut params_rendered = render_fixed_params(total);
         for index in 0..total.saturating_sub(fixed_count) {
@@ -20154,6 +20164,33 @@ fn typed_dynamic_rest_declaration(
             "declare function {base_symbol}__arity_{total}({}): {ret};\n",
             params_rendered.join(", ")
         ));
+        if let Some(parameter) = generic_array {
+            let mut specialized = function
+                .generic
+                .as_ref()
+                .expect("generic_array requires generic metadata")
+                .param_types[..fixed_count]
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    let ty = if ty == &format!("{parameter}[]")
+                        || ty.contains(&format!("<{parameter}>"))
+                    {
+                        format!("{parameter}[]")
+                    } else {
+                        "Json".into()
+                    };
+                    format!("{}: {ty}", fixed_params[index].0)
+                })
+                .collect::<Vec<_>>();
+            for index in 0..total.saturating_sub(fixed_count) {
+                specialized.push(format!("__thaw_rest_{index}: Json"));
+            }
+            declarations.push_str(&format!(
+                "declare function {base_symbol}__generic_rest__arity_{total}<{parameter}>({}): {parameter}[];\n",
+                specialized.join(", ")
+            ));
+        }
     }
 
     let wrapper = format!(
@@ -22576,12 +22613,23 @@ fn generate_registry_shims(
                                 "__thaw_typed_wrapper_",
                                 "__thaw_typed_",
                             );
+                            let specialized = generic.type_params.iter().any(|(parameter, _)| {
+                                (generic.return_type == format!("{parameter}[]")
+                                    || generic.return_type == format!("Array<{parameter}>") )
+                                    && generic.param_types.iter().any(|ty| {
+                                        ty == &format!("{parameter}[]")
+                                            || ty.contains(&format!("<{parameter}>"))
+                                    })
+                            });
                             for &arity in arities {
                                 let mut params = dts_function_param_hir_types(function);
                                 params.resize(arity, thaw_hir::HirType::Json);
                                 fallback_function_overload_rewrites.push((
                                     function.name.clone(),
-                                    format!("{direct}__arity_{arity}"),
+                                    format!(
+                                        "{direct}{}__arity_{arity}",
+                                        if specialized { "__generic_rest" } else { "" }
+                                    ),
                                     arity,
                                     arity,
                                     params,
