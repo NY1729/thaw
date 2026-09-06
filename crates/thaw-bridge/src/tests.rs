@@ -2704,6 +2704,21 @@ fn classifies_this_bound_rest_callbacks_for_contextual_inference() {
 }
 
 #[test]
+fn resolves_class_method_type_parameters_inside_generic_interfaces() {
+    let classes = parse_dts_classes(
+        r#"export interface Box<T> { value: T; }
+           export class Service {
+             register<T extends string>(options: Box<T>): void;
+           }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        classes[0].methods[0].params[0].1,
+        DtsType::Native(HirType::Object(vec![("value".into(), HirType::Str)]))
+    );
+}
+
+#[test]
 fn expands_inherited_external_class_members() {
     let classes = parse_dts_classes(
         r#"export class Base {

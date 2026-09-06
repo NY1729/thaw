@@ -24,7 +24,38 @@ impl<'a> FnLowerer<'a> {
     /// behind methods) into real zod's own shape-validation logic on the
     /// far side, which throws on its own once it doesn't recognize the
     /// field as a real Zod schema.
-    fn lower_object_lit_field_value(&mut self, value: &Expr) -> Result<HirExpr, String> {
+    fn lower_object_lit_field_value(
+        &mut self,
+        value: &Expr,
+        expected: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        if let Some(expected) = expected {
+            let contextual = match expected {
+                HirType::Function(params, ret) => Some((params.clone(), ret.as_ref().clone())),
+                HirType::CallableFunction(params, _, rest, ret) => {
+                    let mut params = params.clone();
+                    if let Some(rest) = rest {
+                        params.push(HirType::Array(rest.clone()));
+                    }
+                    Some((params, ret.as_ref().clone()))
+                }
+                _ => None,
+            };
+            if let Some((params, ret)) = contextual {
+                let needs_context = match value {
+                    Expr::Arrow(arrow) => arrow.params.iter().any(
+                        |param| matches!(param, Pat::Ident(binding) if binding.type_ann.is_none()),
+                    ),
+                    Expr::Fn(function) => function.function.params.iter().any(|param| {
+                        matches!(&param.pat, Pat::Ident(binding) if binding.type_ann.is_none())
+                    }),
+                    _ => false,
+                };
+                if needs_context {
+                    return self.lower_promise_callback(value, &params, Some(&ret));
+                }
+            }
+        }
         let Expr::Call(call) = value else {
             return self.lower_expr(value);
         };
@@ -41,7 +72,11 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    fn lower_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
+    fn lower_object_lit(
+        &mut self,
+        obj_lit: &SwcObjectLit,
+        expected_fields: Option<&[(Symbol, HirType)]>,
+    ) -> Result<HirExpr, String> {
         struct AwaitFinder(bool);
         impl Visit for AwaitFinder {
             fn visit_await_expr(&mut self, _: &AwaitExpr) {
@@ -119,7 +154,12 @@ impl<'a> FnLowerer<'a> {
                             },
                             _ => return Err("unsupported object literal key".to_string()),
                         };
-                        vec![(name, self.lower_object_lit_field_value(value)?)]
+                        let expected = expected_fields.and_then(|fields| {
+                            fields
+                                .iter()
+                                .find_map(|(field, ty)| (field == &name).then_some(ty))
+                        });
+                        vec![(name, self.lower_object_lit_field_value(value, expected)?)]
                     }
                     Prop::Shorthand(ident) => vec![(
                         ident.sym.to_string(),
