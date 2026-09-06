@@ -2384,7 +2384,9 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             let value = self.compile_expr(arg)?;
             self.compile_typed_dynamic_argument(array, value, ty)
-                .map_err(|error| format!("typed dynamic argument {}: {error}", index + 1))?;
+                .map_err(|error| {
+                    format!("typed dynamic argument {} ({ty:?}): {error}", index + 1)
+                })?;
         }
         self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
         let name = self
