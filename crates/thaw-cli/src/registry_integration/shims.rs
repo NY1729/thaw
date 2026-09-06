@@ -22179,6 +22179,7 @@ fn generate_registry_shims(
     for pkg in &resolved {
         let native_lib_available = pkg.native_lib.is_some() || is_native_builtin(&pkg.name);
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
+        let overload_rewrite_start = fallback_function_overload_rewrites.len();
         if pkg.native_addon.is_some() {
             for class in &pkg.classes {
                 let helpers = generate_napi_class_constructors(class, true, &mut shim);
@@ -22763,6 +22764,22 @@ fn generate_registry_shims(
                     dts_function_param_hir_types(function),
                     function.generic.clone(),
                 ));
+            }
+        }
+        let package_overloads = fallback_function_overload_rewrites
+            .drain(overload_rewrite_start..)
+            .collect::<Vec<_>>();
+        for candidate in package_overloads {
+            if !union_dispatched_names.contains(&(pkg.name.clone(), candidate.0.clone())) {
+                fallback_function_overload_rewrites.push(candidate.clone());
+            }
+            if let Some(qualified) = qualified
+                .iter()
+                .find(|qualified| qualified.name == candidate.0)
+            {
+                let mut candidate = candidate;
+                candidate.0 = qualified.alias.clone();
+                fallback_function_overload_rewrites.push(candidate);
             }
         }
         if pkg.native_addon.is_some() && pkg.bundle_js.is_none() {
