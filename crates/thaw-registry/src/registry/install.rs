@@ -151,14 +151,16 @@ fn select_optional_dependency_addon(
         return Ok(None);
     };
     let (platform, arch, libc) = target_prebuild_components();
-    let suffix = if platform == "linux" {
-        format!("-{platform}-{arch}-{libc}")
+    let suffixes = if platform == "linux" && libc == "musl" {
+        vec![format!("-{platform}-{arch}-{libc}"), format!("-linuxmusl-{arch}")]
+    } else if platform == "linux" {
+        vec![format!("-{platform}-{arch}-{libc}"), format!("-{platform}-{arch}")]
     } else {
-        format!("-{platform}-{arch}")
+        vec![format!("-{platform}-{arch}")]
     };
     let mut names = optional
         .keys()
-        .filter(|name| name.ends_with(&suffix))
+        .filter(|name| suffixes.iter().any(|suffix| name.ends_with(suffix)))
         .collect::<Vec<_>>();
     names.sort();
     for name in names {
@@ -171,12 +173,17 @@ fn select_optional_dependency_addon(
             .get("main")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("index.js");
-        let path = dependency_dir.join(main);
-        if path
+        let main_path = dependency_dir.join(main);
+        let path = if main_path
             .extension()
             .is_some_and(|extension| extension == "node")
-            && path.is_file()
+            && main_path.is_file()
         {
+            Some(main_path)
+        } else {
+            find_node_file(&dependency_dir)?
+        };
+        if let Some(path) = path {
             let relative_path = path
                 .strip_prefix(node_modules_dir)
                 .unwrap_or(&path)

@@ -102,6 +102,9 @@ fn bundle_commonjs_package(
     record_package_version(&mut dependency_versions, root_package, root_package_dir);
 
     while let Some((key, abs_path, pkg_name, pkg_dir)) = worklist.pop() {
+        if abs_path.extension().is_some_and(|extension| extension == "node") {
+            continue;
+        }
         let source = fs::read_to_string(&abs_path)
             .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
         let source = if abs_path.extension().is_some_and(|ext| ext == "json") {
@@ -333,4 +336,3 @@ fn record_package_version(versions: &mut BTreeMap<String, String>, name: &str, d
         }
     }
 }
-
