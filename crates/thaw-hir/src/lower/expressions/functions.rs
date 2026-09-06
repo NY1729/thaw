@@ -501,9 +501,9 @@ impl<'a> FnLowerer<'a> {
         parameter_types: &[HirType],
         expected_return: Option<&HirType>,
     ) -> Result<HirExpr, String> {
-        if arrow.params.len() != parameter_types.len() {
+        if arrow.params.len() > parameter_types.len() {
             return Err(format!(
-                "Promise callback expects {} parameter(s), got {}",
+                "contextual callback accepts at most {} parameter(s), got {}",
                 parameter_types.len(),
                 arrow.params.len()
             ));
@@ -528,6 +528,20 @@ impl<'a> FnLowerer<'a> {
                         type_ann: Box::new(hir_type_as_ts_type(ty)?),
                     }));
                 }
+            }
+            for ty in parameter_types.iter().skip(contextual.params.len()) {
+                let name = format!("__thaw_unused_{}", self.next_binding);
+                self.next_binding += 1;
+                contextual.params.push(Pat::Ident(swc_ecma_ast::BindingIdent {
+                    id: swc_ecma_ast::Ident::new_no_ctxt(
+                        name.into(),
+                        swc_common::DUMMY_SP,
+                    ),
+                    type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn {
+                        span: swc_common::DUMMY_SP,
+                        type_ann: Box::new(hir_type_as_ts_type(ty)?),
+                    })),
+                }));
             }
             if contextual.return_type.is_none() {
                 if let Some(expected) = expected_return {
@@ -684,6 +698,14 @@ impl<'a> FnLowerer<'a> {
                 if !matches!(pat, Pat::Ident(_) | Pat::Rest(_)) {
                     destructuring.push((pat, name.clone(), ty.clone()));
                 }
+                params.push(HirParam {
+                    name,
+                    ty: ty.clone(),
+                });
+            }
+            for ty in parameter_types.iter().skip(arrow.params.len()) {
+                let name = format!("__thaw_unused_{}", self.next_binding);
+                self.next_binding += 1;
                 params.push(HirParam {
                     name,
                     ty: ty.clone(),
