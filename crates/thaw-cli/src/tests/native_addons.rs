@@ -1996,6 +1996,65 @@ async function main(): Promise<void> {
 }
 
 #[test]
+fn registry_add_processes_a_real_hono_sharp_image_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-hono-sharp-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "hono@4.13.7").unwrap();
+    thaw_registry::add(&registry, "sharp@0.35.4").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Hono } from "hono";
+import sharp from "sharp";
+import { Buffer } from "node:buffer";
+async function main(): Promise<void> {
+    const app = new Hono();
+    app.post("/images", async (c) => {
+        const input = Buffer.from(await c.req.arrayBuffer());
+        const output = await sharp(input).resize(512, 512).webp().toBuffer();
+        return c.body(output, 200, { "Content-Type": "image/webp" });
+    });
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>';
+    const response = await app.request("/images", { method: "POST", body: svg });
+    await response.arrayBuffer();
+    console.log(response.status);
+    console.log(response.headers.get("content-type"));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["hono".into(), "sharp".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "200\n\"image/webp\"\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_runs_a_real_hapi_route_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
