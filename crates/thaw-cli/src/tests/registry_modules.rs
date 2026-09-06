@@ -10213,6 +10213,53 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn an_async_native_callback_can_reenter_quickjs_while_being_polled() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-reentrant-native-promise-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("callback-promise-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeHolder(): JsValue;\n\
+         export declare function run(callback: () => Promise<void>): Promise<void>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.makeHolder = function() { return { check: function(callback) { return callback('held'); } }; };\n\
+         module.exports.run = function(callback) { return new Promise(function(resolve, reject) { setTimeout(function() { Promise.resolve(callback()).then(resolve, reject); }, 0); }); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeHolder, run } from "callback-promise-kit";
+const holder: JsValue = makeHolder();
+async function main(): Promise<void> {
+    await run(async (): Promise<void> => {
+        await new Promise<void>((resolve): void => resolve());
+        console.log(holder.check((value: string): string => value));
+    });
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"held\"\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Real-world example: hono's `app.get(path, (c) => c.text(...))` --
 /// registering a route handler that receives a `JsValue` "context" and
 /// returns a live `Response`-shaped object, then reading `.status` off
