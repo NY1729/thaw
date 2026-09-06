@@ -401,7 +401,10 @@ fn build_staticlib_without_default_features(pkg: &str) -> Result<PathBuf, String
 
 fn build_staticlib_with_options(pkg: &str, no_default_features: bool) -> Result<PathBuf, String> {
     let mut command = Command::new("cargo");
-    command.args(["build", "--release", "-p", pkg, "--message-format=json"]);
+    command
+        .args(["build", "--release", "-p", pkg, "--message-format=json"])
+        .arg("--manifest-path")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"));
     if no_default_features {
         command.arg("--no-default-features");
         // Keep feature variants in separate target directories. CLI tests build
