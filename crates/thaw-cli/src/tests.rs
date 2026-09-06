@@ -4621,7 +4621,10 @@ fn jit_tags_fixed_aggregate_union_results() {
 #[test]
 fn rewrite_qualified_calls_is_a_no_op_with_no_rewrites() {
     let source = "function main(): void { console.log(qs.stringify(x)); }";
-    assert_eq!(rewrite_qualified_calls(source, &[]).unwrap(), source);
+    assert_eq!(
+        rewrite_qualified_calls(source, &[], &Default::default()).unwrap(),
+        source
+    );
 }
 
 #[test]
@@ -4644,7 +4647,7 @@ fn rewrite_qualified_calls_replaces_matching_qualified_calls_only() {
             "hoek_stringify".to_string(),
         ),
     ];
-    let rewritten = rewrite_qualified_calls(source, &rewrites).unwrap();
+    let rewritten = rewrite_qualified_calls(source, &rewrites, &Default::default()).unwrap();
 
     assert!(rewritten.contains("console.log(qs_stringify(x));"));
     assert!(rewritten.contains("console.log(hoek_stringify(y));"));
@@ -4662,24 +4665,14 @@ fn rewrite_qualified_calls_handles_a_call_nested_in_an_expression() {
         "stringify".to_string(),
         "qs_stringify".to_string(),
     )];
-    let rewritten = rewrite_qualified_calls(source, &rewrites).unwrap();
+    let rewritten = rewrite_qualified_calls(source, &rewrites, &Default::default()).unwrap();
     assert!(rewritten.contains("const r = String(qs_stringify(x));"));
 }
 
-/// `pkg.name(...)` bare-qualifier syntax sugar exists for calling a
-/// `--use`d package's function with *no import at all*. When the user
-/// instead writes a real `import * as qs from "qs"` -- the natural,
-/// idiomatic choice of alias being the package's own name -- this must
-/// NOT fire: `qs` is a genuine namespace-import binding with its own,
-/// fully-typed member-call resolution (`module_graph`'s namespace-export
-/// rewriting), and this text-level rewrite firing anyway sent every
-/// argument to the untyped `argsArray`-based Fallback alias unwrapped
-/// (real symptom: `semver.major("1.2.3")` crashed with "args_json is not
-/// a valid JSON array" instead of returning `1`, since `semver_major`
-/// only accepts one packed JSON array argument, not `major`'s real
-/// `(version, optionsOrLoose?)` shape).
+/// Namespace imports resolve through the package-qualified typed alias before
+/// module bundling, allowing the overload pass to inspect the real call shape.
 #[test]
-fn rewrite_qualified_calls_does_not_shadow_a_real_namespace_import() {
+fn rewrite_qualified_calls_resolves_a_real_namespace_import() {
     let source =
         "import * as qs from \"qs\";\nfunction main(): void { console.log(qs.stringify(x)); }";
     let rewrites = vec![(
@@ -4687,16 +4680,15 @@ fn rewrite_qualified_calls_does_not_shadow_a_real_namespace_import() {
         "stringify".to_string(),
         "qs_stringify".to_string(),
     )];
-    let rewritten = rewrite_qualified_calls(source, &rewrites).unwrap();
-    assert!(rewritten.contains("console.log(qs.stringify(x));"));
+    let overloads = std::collections::HashSet::from(["qs_stringify".to_string()]);
+    let rewritten = rewrite_qualified_calls(source, &rewrites, &overloads).unwrap();
+    assert!(rewritten.contains("console.log(qs_stringify(x));"));
 }
 
-/// Same, but for a default import (`import qs from "qs"`) and a renamed
-/// named import (`import { stringify as qs } from "qs"`) -- any real
-/// import binding shadows the bare-qualifier sugar, not just `import *
-/// as`.
+/// Default imports expose the package namespace too; a renamed named import is
+/// still an ordinary value and must not be treated as a namespace.
 #[test]
-fn rewrite_qualified_calls_does_not_shadow_a_default_or_renamed_named_import() {
+fn rewrite_qualified_calls_distinguishes_default_and_named_imports() {
     let rewrites = vec![(
         "qs".to_string(),
         "stringify".to_string(),
@@ -4704,14 +4696,19 @@ fn rewrite_qualified_calls_does_not_shadow_a_default_or_renamed_named_import() {
     )];
     let default_import =
         "import qs from \"qs\";\nfunction main(): void { console.log(qs.stringify(x)); }";
-    assert!(rewrite_qualified_calls(default_import, &rewrites)
-        .unwrap()
-        .contains("console.log(qs.stringify(x));"));
+    let overloads = std::collections::HashSet::from(["qs_stringify".to_string()]);
+    assert!(
+        rewrite_qualified_calls(default_import, &rewrites, &overloads)
+            .unwrap()
+            .contains("console.log(qs_stringify(x));")
+    );
 
     let renamed_named_import = "import { stringify as qs } from \"qs\";\nfunction main(): void { console.log(qs.stringify(x)); }";
-    assert!(rewrite_qualified_calls(renamed_named_import, &rewrites)
-        .unwrap()
-        .contains("console.log(qs.stringify(x));"));
+    assert!(
+        rewrite_qualified_calls(renamed_named_import, &rewrites, &overloads)
+            .unwrap()
+            .contains("console.log(qs.stringify(x));")
+    );
 }
 
 #[test]

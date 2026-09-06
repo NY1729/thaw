@@ -74,18 +74,11 @@ fn rewrite_external_class_constructors(
 /// compiler. `rewrites` is empty when there were no collisions at all,
 /// in which case this returns `source` untouched without even parsing it.
 ///
-/// Skips any `pkg.name(...)` where `pkg` is *also* a real import binding
-/// in this file (`import * as pkg`/`import pkg`/`import { x as pkg }`,
-/// from any specifier) -- this convenience syntax exists for calling a
-/// `--use`d package's function with no import at all, and must not
-/// shadow a genuine `import * as semver from "semver"` whose alias
-/// happens to match the package's own qualifier (the natural, idiomatic
-/// choice): that case has real member-call support of its own
-/// (`module_graph`'s namespace-export rewriting, which resolves to the
-/// same typed wrapper a named import gets), and this text-level rewrite
-/// firing instead sent every argument to the untyped `argsArray`-based
-/// Fallback alias unwrapped -- e.g. `semver.major("1.2.3")` crashed with
-/// "args_json is not a valid JSON array" instead of returning `1`.
+/// Real default/namespace imports are resolved against their source package
+/// too, so overload selection sees the package-qualified alias before the
+/// module graph removes the import. Named imports remain excluded because a
+/// member access on one of those is an ordinary value operation, not package
+/// qualification.
 ///
 /// Uses `swc_ecma_visit`'s `Visit` to walk the whole AST (a call can be
 /// nested arbitrarily deep in an expression), unlike the top-level-only
@@ -98,6 +91,7 @@ fn rewrite_external_class_constructors(
 fn rewrite_qualified_calls(
     source: &str,
     rewrites: &[QualifiedCallRewrite],
+    imported_overload_aliases: &std::collections::HashSet<String>,
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{CallExpr, Callee, Expr, ImportSpecifier, MemberProp, ModuleDecl, ModuleItem};
@@ -110,6 +104,8 @@ fn rewrite_qualified_calls(
     struct Finder<'a> {
         rewrites: &'a [(String, String, String)],
         imported_names: std::collections::HashSet<String>,
+        imported_packages: std::collections::HashMap<String, String>,
+        imported_overload_aliases: &'a std::collections::HashSet<String>,
         matches: Vec<(u32, u32, String)>,
     }
     impl Visit for Finder<'_> {
@@ -119,11 +115,19 @@ fn rewrite_qualified_calls(
                     if let (Expr::Ident(obj), MemberProp::Ident(prop)) =
                         (&*member.obj, &member.prop)
                     {
-                        if !self.imported_names.contains(obj.sym.as_str()) {
-                            if let Some((_, _, alias)) =
-                                self.rewrites.iter().find(|(pkg, name, _)| {
-                                    pkg.as_str() == &*obj.sym && name.as_str() == &*prop.sym
-                                })
+                        let package = self
+                            .imported_packages
+                            .get(obj.sym.as_str())
+                            .map(String::as_str)
+                            .unwrap_or(obj.sym.as_str());
+                        if let Some((_, _, alias)) =
+                            self.rewrites.iter().find(|(pkg, name, _)| {
+                                pkg == package && name.as_str() == &*prop.sym
+                            })
+                        {
+                            let imported = self.imported_packages.contains_key(obj.sym.as_str());
+                            if (!self.imported_names.contains(obj.sym.as_str()) || imported)
+                                && (!imported || self.imported_overload_aliases.contains(alias))
                             {
                                 let span = member.span();
                                 self.matches.push((span.lo.0, span.hi.0, alias.clone()));
@@ -138,13 +142,22 @@ fn rewrite_qualified_calls(
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
     let mut imported_names = std::collections::HashSet::new();
+    let mut imported_packages = std::collections::HashMap::new();
     for item in &module.body {
         if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+            let package = import.src.value.as_str().unwrap_or_default().to_string();
             for specifier in &import.specifiers {
                 let local = match specifier {
                     ImportSpecifier::Named(named) => &named.local,
-                    ImportSpecifier::Default(default) => &default.local,
-                    ImportSpecifier::Namespace(namespace) => &namespace.local,
+                    ImportSpecifier::Default(default) => {
+                        imported_packages.insert(default.local.sym.to_string(), package.clone());
+                        &default.local
+                    }
+                    ImportSpecifier::Namespace(namespace) => {
+                        imported_packages
+                            .insert(namespace.local.sym.to_string(), package.clone());
+                        &namespace.local
+                    }
                 };
                 imported_names.insert(local.sym.to_string());
             }
@@ -153,6 +166,8 @@ fn rewrite_qualified_calls(
     let mut finder = Finder {
         rewrites,
         imported_names,
+        imported_packages,
+        imported_overload_aliases,
         matches: Vec::new(),
     };
     module.visit_with(&mut finder);

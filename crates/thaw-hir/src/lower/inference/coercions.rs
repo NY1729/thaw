@@ -20,13 +20,38 @@ impl<'a> FnLowerer<'a> {
         // codegen path is needed here.
         if matches!(declared, HirType::F64 | HirType::Str | HirType::Bool) {
             let actual = self.infer_expr_type(&value)?;
-            if actual == HirType::Json {
+            if matches!(actual, HirType::Json | HirType::JsValue) {
+                let value = if actual == HirType::JsValue {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                        vec![value],
+                    )
+                } else {
+                    value
+                };
                 return Ok(match declared {
                     HirType::F64 => HirExpr::JsonAsNumber(Box::new(value)),
                     HirType::Str => HirExpr::JsonAsString(Box::new(value)),
                     HirType::Bool => HirExpr::JsonAsBool(Box::new(value)),
                     _ => unreachable!(),
                 });
+            }
+        }
+        if matches!(
+            declared,
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+        ) {
+            let actual = self.infer_expr_type(&value)?;
+            if matches!(actual, HirType::Json | HirType::JsValue) {
+                let value = if actual == HirType::JsValue {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                        vec![value],
+                    )
+                } else {
+                    value
+                };
+                return Ok(HirExpr::JsonAsNative(Box::new(value), declared.clone()));
             }
         }
         if *declared == HirType::Json {

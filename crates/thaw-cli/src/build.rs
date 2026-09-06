@@ -223,7 +223,7 @@ fn build_with_assets(
     let (
         registry_shim,
         registry_native_libs,
-        mut qualified_call_rewrites,
+        qualified_call_rewrites,
         class_constructor_rewrites,
         class_method_rewrites,
         static_class_method_rewrites,
@@ -238,13 +238,6 @@ fn build_with_assets(
         external_nested_namespaces,
     ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
-    let qualifier_by_package =
-        package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
-    let use_qualifiers: std::collections::HashSet<&str> = use_packages
-        .iter()
-        .filter_map(|package| qualifier_by_package.get(package).map(String::as_str))
-        .collect();
-    qualified_call_rewrites.retain(|(qualifier, _, _)| use_qualifiers.contains(qualifier.as_str()));
     // `qs.stringify(x)`-style calls, for a name that collided across two
     // `--use`d packages, only exist as source-level syntax sugar over the
     // package-qualified alias `generate_registry_shims` actually
@@ -278,7 +271,15 @@ fn build_with_assets(
         "function __thaw_artifact_metadata(): string {{ return {marker_literal}; }}\n"
     ));
     let transform = |source: &str| {
-        let source = rewrite_qualified_calls(source, &qualified_call_rewrites)?;
+        let imported_overload_aliases = fallback_function_overload_rewrites
+            .iter()
+            .map(|rewrite| rewrite.0.clone())
+            .collect();
+        let source = rewrite_qualified_calls(
+            source,
+            &qualified_call_rewrites,
+            &imported_overload_aliases,
+        )?;
         let source = rewrite_external_class_methods_with_static(
             &source,
             &class_constructor_rewrites,

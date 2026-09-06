@@ -5788,6 +5788,54 @@ fn default_import_exposes_an_export_assignment_interfaces_methods() {
 }
 
 #[test]
+fn dynamic_collection_results_coerce_to_declared_native_types() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-dynamic-collection-results-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("registry");
+    let package = registry.join("collection-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export = toolkit;\n\
+         declare const toolkit: Toolkit;\n\
+         interface Toolkit {\n\
+         \x20\x20transform(values: number[], callback: (value: number) => number): number[];\n\
+         \x20\x20select(values: string, callback: (value: string) => boolean): string[];\n\
+         \x20\x20select(values: number[], callback: (value: number) => boolean): number[];\n\
+         \x20\x20fold(values: number[], callback: (total: number, value: number) => number, initial: number): number;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { \
+         transform: function(values, callback) { return values.map(callback); }, \
+         select: function(values, callback) { return values.filter(callback); }, \
+         fold: function(values, callback, initial) { return values.reduce(callback, initial); } \
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import toolkit from \"collection-kit\"; function main(): void { const doubled: number[] = toolkit.transform([1, 2, 3, 4], (value: number): number => value * 2); const selected: number[] = toolkit.select(doubled, (value: number): boolean => value >= 6); const total: number = toolkit.fold(selected, (sum: number, value: number): number => sum + value, 0); console.log(doubled.join(',')); console.log(selected.join(',')); console.log(total); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "2,4,6,8\n6,8\n14\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registers_builds_and_runs_an_installed_npm_wildcard_subpath() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-installed-wildcard-{}",
