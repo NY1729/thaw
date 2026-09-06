@@ -35,6 +35,39 @@ fn bundles_a_multi_file_package_reachable_from_main() {
 }
 
 #[test]
+fn bundles_package_imports_from_a_generated_nested_package_scope() {
+    let root = temp_registry("bundle_generated_scope");
+    let node_modules = root.join("node_modules");
+    let package = node_modules.join("@scope/client");
+    let generated = node_modules.join(".generated/client");
+    fs::create_dir_all(&package).unwrap();
+    fs::create_dir_all(&generated).unwrap();
+    fs::write(
+        package.join("default.js"),
+        "module.exports = require('.generated/client/default');",
+    )
+    .unwrap();
+    fs::write(
+        generated.join("package.json"),
+        r##"{"imports":{"#main":{"require":{"node":"./index.js"}}}}"##,
+    )
+    .unwrap();
+    fs::write(
+        generated.join("default.js"),
+        "module.exports = require('#main');",
+    )
+    .unwrap();
+    fs::write(generated.join("index.js"), "module.exports = 42;").unwrap();
+
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "@scope/client", &package, "default.js").unwrap();
+    assert_eq!(file_count, 3);
+    assert!(bundle.contains(".generated/client/index.js"), "{bundle}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn bundled_modules_receive_node_filename_and_dirname() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("bundle_module_paths");
