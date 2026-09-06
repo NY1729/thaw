@@ -1,3 +1,4 @@
+  globalThis.global = globalThis;
   const timers = new Map();
   const normalizeDelay = value => {
     const number = Number(value);
@@ -60,6 +61,9 @@
       this._counts = new Map();
       this._timers = new Map();
       this._indent = '';
+      for (const name of ['log', 'info', 'debug', 'warn', 'error']) {
+        this[name] = this[name].bind(this);
+      }
     }
     _write(stream, args) {
       const text = this._indent + consoleFormat(...args) + '\n';
@@ -212,4 +216,3 @@
     }
     globalThis.DOMException = DOMException;
   }
-

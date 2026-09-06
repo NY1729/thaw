@@ -7,6 +7,8 @@ use thaw_parser::ast::{
     TsEntityName, TsInterfaceDecl, TsTypeRef,
 };
 
+type SourceTransform<'a> = dyn Fn(&str) -> Result<String, String> + 'a;
+
 #[derive(Debug)]
 struct LoadedModule {
     path: PathBuf,
@@ -182,6 +184,7 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
 fn load_module(
     path: PathBuf,
     source_override: Option<&str>,
+    transform: Option<&SourceTransform<'_>>,
     modules: &mut Vec<LoadedModule>,
     loaded: &mut HashMap<PathBuf, usize>,
     visiting: &mut Vec<PathBuf>,
@@ -203,6 +206,11 @@ fn load_module(
         None => std::fs::read_to_string(&path)
             .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?,
     };
+    let source = match transform {
+        Some(transform) => transform(&source)
+            .map_err(|error| format!("failed to transform `{}`: {error}", path.display()))?,
+        None => source,
+    };
     let module = thaw_parser::parse_typescript(&source)
         .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
     let module = thaw_hir::normalize_top_level_destructuring(&module)
@@ -214,7 +222,7 @@ fn load_module(
         }
         let dependency_path = resolve_relative(&path, &specifier)
             .map_err(|error| format!("{}: {error}", source_location(&path, &source, &specifier)))?;
-        let dependency = load_module(dependency_path, None, modules, loaded, visiting)?;
+        let dependency = load_module(dependency_path, None, transform, modules, loaded, visiting)?;
         dependencies.insert(specifier, dependency);
     }
     visiting.pop();
@@ -653,6 +661,7 @@ pub fn external_specifiers(
     load_module(
         entry,
         Some(entry_source),
+        None,
         &mut modules,
         &mut HashMap::new(),
         &mut Vec::new(),
@@ -704,6 +713,7 @@ fn resolve_nested_namespaces(
         .collect()
 }
 
+#[cfg(test)]
 pub fn bundle(
     entry: &Path,
     entry_source: &str,
@@ -711,6 +721,26 @@ pub fn bundle(
     external_namespace_aliases: &HashMap<String, HashSet<String>>,
     external_nested_namespaces: &HashMap<String, HashMap<String, HashMap<String, String>>>,
     external_resolutions: &HashMap<String, String>,
+) -> Result<Module, String> {
+    bundle_with_source_transform(
+        entry,
+        entry_source,
+        external_exports,
+        external_namespace_aliases,
+        external_nested_namespaces,
+        external_resolutions,
+        &|source| Ok(source.to_string()),
+    )
+}
+
+pub fn bundle_with_source_transform(
+    entry: &Path,
+    entry_source: &str,
+    external_exports: &HashMap<String, HashMap<String, String>>,
+    external_namespace_aliases: &HashMap<String, HashSet<String>>,
+    external_nested_namespaces: &HashMap<String, HashMap<String, HashMap<String, String>>>,
+    external_resolutions: &HashMap<String, String>,
+    transform: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<Module, String> {
     let entry = entry
         .canonicalize()
@@ -720,6 +750,7 @@ pub fn bundle(
     let entry_index = load_module(
         entry,
         Some(entry_source),
+        Some(transform),
         &mut modules,
         &mut loaded,
         &mut Vec::new(),
