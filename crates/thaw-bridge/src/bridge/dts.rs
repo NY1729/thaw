@@ -61,6 +61,20 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
 pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
     let module = thaw_parser::parse_typescript(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
+    let callable_objects = module
+        .body
+        .iter()
+        .flat_map(extract_interface_decls)
+        .filter(|interface| {
+            interface.body.body.iter().any(|member| {
+                matches!(
+                    member,
+                    TsTypeElement::TsPropertySignature(_) | TsTypeElement::TsMethodSignature(_)
+                )
+            })
+        })
+        .map(|interface| interface.id.sym.to_string())
+        .collect::<HashSet<_>>();
     let callable = parse_dts(source)?
         .into_iter()
         .map(|function| function.name)
@@ -86,12 +100,24 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
                 continue;
             };
             let name = binding.id.sym.to_string();
-            if callable.contains(&name) {
-                continue;
-            }
             let Some(annotation) = &binding.type_ann else {
                 continue;
             };
+            if callable.contains(&name) {
+                let callable_object = matches!(
+                    annotation.type_ann.as_ref(),
+                    TsType::TsTypeRef(reference)
+                        if matches!(&reference.type_name, TsEntityName::Ident(interface)
+                            if callable_objects.contains(interface.sym.as_str()))
+                );
+                if callable_object {
+                    values.push(DtsValue {
+                        name,
+                        ty: DtsType::Native(HirType::JsValue),
+                    });
+                }
+                continue;
+            }
             let mut ty = resolve_ts_type_with_substitution(
                 &annotation.type_ann,
                 &HashMap::new(),

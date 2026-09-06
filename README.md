@@ -3169,7 +3169,7 @@ Registry fallback integration now covers class construction, typed instance
 methods, ordinary `JsValue` property reads, recursive method/property chains,
 compiled callbacks and Promise/thenable results. Declaration flattening covers
 the import-equals, namespace, callable-const and re-export forms required by the
-real zod, hono, drizzle, lodash, dayjs and uuid packages. Plain fallback
+real zod, hono, drizzle, lodash, dayjs, uuid and chalk packages. Plain fallback
 functions emit every overload and select the best candidate per call by arity
 and argument shape, rather than declaration order. Generic callback aliases,
 indexed-access element types and generic collection wrappers contextually type

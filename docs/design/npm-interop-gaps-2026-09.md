@@ -10,8 +10,8 @@
 lodash、dayjs、uuidは実パッケージ統合テストで追跡している。
 
 後続実装により、uuidの`NIL`/`MAX`やmimeの既製singletonのような、packageが直接公開する型付き
-非callable値exportもmodule初期化後に一度取得して公開できる。chalkに必要な一般的なプロパティ読み出しとチェーンの基盤は実装済みだが、chalk
-自体の互換性は実パッケージテストが追加されるまで未検証として扱う。また、真に動的な`loadScript`、
+非callable値exportもmodule初期化後に一度取得して公開できる。chalkに必要なcallable objectと再帰的な
+プロパティチェーンも実装され、実パッケージで検証済みである。また、真に動的な`loadScript`、
 `callDynamic`、opaqueな`JsValue`操作は、汎用JS runtimeを再実装せずQuickJSに残す設計である。
 
 ## 調査結果サマリ

@@ -10437,6 +10437,47 @@ function main(): void {
 }
 
 #[test]
+fn callable_object_properties_chain_through_live_javascript_values() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-callable-object-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("style-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Style { (...text: unknown[]): string; readonly upper: Style; }\n\
+         declare const style: Style;\nexport default style;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function style(value) { return String(value).toUpperCase(); }\n\
+         style.upper = style;\nmodule.exports = { default: style };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import style from "style-kit";
+function main(): void { console.log(style.upper("hello")); }
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"HELLO\"\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn non_callable_named_and_singleton_exports_are_reachable() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-value-exports-{}",
