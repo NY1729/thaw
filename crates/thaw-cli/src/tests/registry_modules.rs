@@ -5788,6 +5788,43 @@ fn default_import_exposes_an_export_assignment_interfaces_methods() {
 }
 
 #[test]
+fn commonjs_default_import_exposes_named_only_exports() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-commonjs-named-class-default-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("registry");
+    let package = registry.join("store-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function answer(): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { answer: function() { return 42; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import store from \"store-kit\"; function main(): void { console.log(store.answer()); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn dynamic_collection_results_coerce_to_declared_native_types() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-dynamic-collection-results-{}",
@@ -9183,21 +9220,24 @@ fn an_if_condition_accepts_a_json_value_via_truthiness_coercion() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function makeResult(ok: boolean): JsValue;\n",
+        "export declare function makeResult(ok: boolean): JsValue;\nexport declare function makeValue(ok: boolean): JsValue;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
         "module.exports.makeResult = function(ok) {\n\
              return { check: function() { return { success: ok }; } };\n\
-         };\n",
+         };\n\
+         module.exports.makeValue = function(ok) { return ok ? { value: 1 } : null; };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        r#"import { makeResult } from "result-kit";
+        r#"import { makeResult, makeValue } from "result-kit";
 function main(): void {
+    console.log(makeValue(false) ? "truthy" : "falsy");
+    console.log(makeValue(true) ? "truthy" : "falsy");
     const r = makeResult(true).check();
     if (r.success) {
         console.log("yes");
@@ -9225,7 +9265,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "yes\nnegated-no\nfalsy\n"
+        "falsy\ntruthy\nyes\nnegated-no\nfalsy\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

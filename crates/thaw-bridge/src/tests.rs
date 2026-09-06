@@ -2650,6 +2650,9 @@ fn extracts_class_constructors_methods_properties_and_overloads() {
         .collect::<Vec<_>>();
     assert_eq!(runs.len(), 2);
     assert!(runs.iter().all(|method| method.overloaded));
+    assert!(runs
+        .iter()
+        .all(|method| method.ret == DtsType::Native(HirType::Void)));
     let close = database
         .methods
         .iter()
