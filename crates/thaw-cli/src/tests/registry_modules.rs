@@ -6867,7 +6867,9 @@ fn generic_rest_callbacks_are_inferred_and_passed_without_array_marshalling() {
         r#"import { orderBy } from "order-kit";
 function main(): void {
     let total: number = 0;
-    console.log(orderBy([3, 1, 2], value => { total = total + value; return value; }).length);
+    const result = orderBy([3, 1, 2], value => { total = total + value; return value; });
+    console.log(result[0]);
+    console.log(result.join(','));
     console.log(total);
 }
 "#,
@@ -6881,7 +6883,7 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n6\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n3,1,2\n6\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
