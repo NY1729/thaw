@@ -158,7 +158,8 @@
   hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || [],
-    env: globalThis.process.env || {},
+    env: Object.assign({}, JSON.parse(globalThis.__thaw_host_env_json || '{}'),
+                       globalThis.process.env || {}),
     platform: globalThis.process.platform || hostInfo.platform || 'linux',
     arch: globalThis.process.arch || hostInfo.arch || '',
     version: globalThis.process.version || '',

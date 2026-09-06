@@ -11,6 +11,15 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         format!("{:?}", std::thread::current().id()),
                     )
                     .expect("failed to install OS thread identity");
+                ctx.globals()
+                    .set(
+                        "__thaw_host_env_json",
+                        serde_json::to_string(
+                            &std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
+                        )
+                        .expect("failed to serialize host environment"),
+                    )
+                    .expect("failed to install host environment");
                 install_napi_bridge(&ctx).expect("failed to install N-API bridge");
                 let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
                 install_shared_environment_functions(&ctx, shared_env)
