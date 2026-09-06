@@ -67,10 +67,32 @@
       value &&
       typeof value === 'object' &&
       !Array.isArray(value) &&
+      value.type === 'Buffer' &&
+      Array.isArray(value.data)
+    ) {
+      return Buffer.from(value.data);
+    }
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
       Object.keys(value).length === 1 &&
       value.$__thaw_napi_undefined$ === true
     ) {
       return undefined;
+    }
+    return value;
+  };
+  globalThis.__thaw_json_binary_replacer = function (key, value) {
+    const source = this[key];
+    if (source instanceof ArrayBuffer) {
+      return { type: 'Buffer', data: Array.from(new Uint8Array(source)) };
+    }
+    if (ArrayBuffer.isView(source)) {
+      return {
+        type: 'Buffer',
+        data: Array.from(new Uint8Array(source.buffer, source.byteOffset, source.byteLength)),
+      };
     }
     return value;
   };

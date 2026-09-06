@@ -92,6 +92,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     "drain_napi_async_work",
                 )
                 .unwrap();
+            if self.uses_quickjs {
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_js_run_event_loop").unwrap(),
+                        &[],
+                        "run_quickjs_after_napi",
+                    )
+                    .unwrap();
+            }
             self.builder
                 .build_call(
                     self.module.get_function("thaw_napi_unload_all").unwrap(),

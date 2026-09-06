@@ -62,20 +62,21 @@ use wasmi_wasi::WasiCtx;
 type NapiBridgeCallback = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
 type NapiBridgeExports = unsafe extern "C" fn() -> *const c_char;
 type NapiBridgePoll = extern "C" fn() -> usize;
+type NapiBridgePending = extern "C" fn() -> u8;
 type NapiBridgeHandle = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
     *const c_char,
     *const c_char,
 ) -> *const c_char;
-static NAPI_BRIDGE: Mutex<
-    Option<(
-        NapiBridgeExports,
-        NapiBridgeCallback,
-        NapiBridgeHandle,
-        NapiBridgePoll,
-    )>,
-> = Mutex::new(None);
+type NapiBridge = (
+    NapiBridgeExports,
+    NapiBridgeCallback,
+    NapiBridgeHandle,
+    NapiBridgePoll,
+    NapiBridgePending,
+);
+static NAPI_BRIDGE: Mutex<Option<NapiBridge>> = Mutex::new(None);
 
 thread_local! {
     static ACTIVE_NAPI_CONTEXT: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
@@ -102,12 +103,13 @@ pub fn register_napi_bridge(
     call: NapiBridgeCallback,
     handle: NapiBridgeHandle,
     poll: NapiBridgePoll,
+    pending: NapiBridgePending,
 ) {
-    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call, handle, poll));
+    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call, handle, poll, pending));
 }
 
 fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-    let Some((exports, call, handle, _)) = *NAPI_BRIDGE.lock().unwrap() else {
+    let Some((exports, call, handle, _, _)) = *NAPI_BRIDGE.lock().unwrap() else {
         return Ok(());
     };
     let exports = Function::new(ctx.clone(), move || unsafe { to_str(exports()) })?;
@@ -140,6 +142,14 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     )?;
     ctx.globals().set("__thaw_napi_bridge_handle", handle)?;
     Ok(())
+}
+
+fn napi_bridge_pending() -> bool {
+    NAPI_BRIDGE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|bridge| (bridge.4)() != 0)
 }
 
 fn poll_napi_bridge(ctx: &Ctx<'_>) {

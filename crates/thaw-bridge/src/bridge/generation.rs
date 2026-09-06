@@ -517,7 +517,7 @@ fn wrap_as_commonjs_module(
          \x20\x20}};\n\
          \x20\x20var __thaw_napi_arguments = function(args) {{ return Array.prototype.map.call(args, __thaw_napi_argument); }};\n\
          \x20\x20var __thaw_napi_handle = function(operation, target, name, args) {{\n\
-         \x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_handle(operation, String(target), name || '', JSON.stringify(__thaw_napi_arguments(args || []))));\n\
+         \x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_handle(operation, String(target), name || '', JSON.stringify(__thaw_napi_arguments(args || []))), globalThis.__thaw_json_date_reviver);\n\
          \x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\
          \x20\x20\x20\x20if (result && result.value && result.value['$__thaw_napi_undefined$'] === true) result.value = undefined;\n\
          \x20\x20\x20\x20if (result && result.value && result.value.__thaw_napi_handle__) result.value = __thaw_napi_proxy(result.value.__thaw_napi_handle__);\n\
@@ -534,7 +534,7 @@ fn wrap_as_commonjs_module(
          \x20\x20JSON.parse(globalThis.__thaw_napi_bridge_exports()).forEach(function(name) {{\n\
          \x20\x20\x20\x20__thaw_addon[name] = function() {{\n\
          \x20\x20\x20\x20\x20\x20if (new.target) {{ var created = __thaw_napi_handle('construct', name, '', Array.prototype.slice.call(arguments)), prototype = new.target.prototype; Object.keys(prototype).forEach(function(key) {{ __thaw_napi_handle('set', created.value, key, [prototype[key]]); }}); return __thaw_napi_proxy(created.value, prototype); }}\n\
-         \x20\x20\x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_call(name, JSON.stringify(__thaw_napi_arguments(arguments))));\n\
+         \x20\x20\x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_call(name, JSON.stringify(__thaw_napi_arguments(arguments))), globalThis.__thaw_json_date_reviver);\n\
          \x20\x20\x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\
          \x20\x20\x20\x20\x20\x20return result;\n\
          \x20\x20\x20\x20}};\n\

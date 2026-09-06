@@ -55,6 +55,28 @@ fn round_trips_objects_and_arrays() {
 }
 
 #[test]
+fn dynamic_json_boundary_round_trips_binary_values_as_buffers() {
+    assert_eq!(
+        load(
+            "function binaryResult() {\n\
+               const buffer = new ArrayBuffer(3);\n\
+               new Uint8Array(buffer).set([1, 2, 3]);\n\
+               return { buffer, view: new Uint8Array(buffer, 1, 2) };\n\
+             }\n\
+             function inspectBinary(value) {\n\
+               return [Buffer.isBuffer(value.buffer), Array.from(value.buffer), Buffer.isBuffer(value.view), Array.from(value.view)];\n\
+             }"
+        ),
+        1
+    );
+    let encoded = call("binaryResult", "[]");
+    assert_eq!(
+        call("inspectBinary", &format!("[{encoded}]")),
+        "[true,[1,2,3],true,[2,3]]"
+    );
+}
+
+#[test]
 fn resolves_a_returned_promise() {
     assert_eq!(
         load("function later(x) { return Promise.resolve(x * 2); }"),
