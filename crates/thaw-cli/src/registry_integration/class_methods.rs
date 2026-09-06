@@ -1420,6 +1420,9 @@ fn rewrite_external_class_methods_with_static(
                 }
                 Some(score)
             }
+            (thaw_hir::HirType::Array(declared), thaw_hir::HirType::Array(actual)) => {
+                overload_type_score(declared, actual).map(|score| score.saturating_add(2))
+            }
             (left, right) if left == right => Some(2),
             _ => None,
         }
@@ -1522,6 +1525,14 @@ fn rewrite_external_class_methods_with_static(
                 if declared == parameter {
                     if let Some(actual) = type_text(&actual) {
                         substitutions.insert(parameter.clone(), actual);
+                    } else if let thaw_hir::HirType::Object(fields) = &actual {
+                        if let Some((_, first)) = fields.first() {
+                            if fields.iter().all(|(_, ty)| ty == first) {
+                                if let Some(value) = type_text(first) {
+                                    substitutions.insert(parameter.clone(), value);
+                                }
+                            }
+                        }
                     }
                 } else if declared == &format!("{parameter}[]") {
                     if let thaw_hir::HirType::Array(element) = &actual {
@@ -1535,6 +1546,16 @@ fn rewrite_external_class_methods_with_static(
                     if let thaw_hir::HirType::Array(element) = &actual {
                         if let Some(element) = type_text(element) {
                             substitutions.insert(parameter.clone(), element);
+                        }
+                    }
+                } else if declared.starts_with(&format!("{parameter} |")) {
+                    if let thaw_hir::HirType::Object(fields) = &actual {
+                        if let Some((_, first)) = fields.first() {
+                            if fields.iter().all(|(_, ty)| ty == first) {
+                                if let Some(value) = type_text(first) {
+                                    substitutions.insert(parameter.clone(), value);
+                                }
+                            }
                         }
                     }
                 }
@@ -1576,6 +1597,8 @@ fn rewrite_external_class_methods_with_static(
                         if let Some(element) = replacement.strip_suffix("[]") {
                             rendered = element.into();
                         }
+                    } else if rendered == format!("{name}[keyof {name}]") {
+                        rendered = replacement.clone();
                     }
                 }
                 if matches!(rendered.as_str(), "number" | "string" | "boolean" | "Json")
@@ -2176,8 +2199,35 @@ fn rewrite_external_class_methods_with_static(
                                 }
                             }
                         }
+                        let mut symbol = symbol.clone();
+                        if let (Some(generic), Some(first)) = (generic, call.args.first()) {
+                            if generic.type_params.iter().any(|(parameter, _)| {
+                                generic.return_type
+                                    == format!("Array<{parameter}[keyof {parameter}]>")
+                            }) {
+                                if let Some(thaw_hir::HirType::Object(fields)) = source_expr_type(
+                                    first.expr.as_ref(),
+                                    &self.value_types,
+                                    self.function_types,
+                                    self.named_types,
+                                ) {
+                                    let common = fields.first().map(|(_, ty)| ty).filter(|first| {
+                                        fields.iter().all(|(_, ty)| ty == *first)
+                                    });
+                                    let type_arg = match common {
+                                        Some(thaw_hir::HirType::F64) => Some("number"),
+                                        Some(thaw_hir::HirType::Str) => Some("string"),
+                                        Some(thaw_hir::HirType::Bool) => Some("boolean"),
+                                        _ => None,
+                                    };
+                                    if let Some(type_arg) = type_arg {
+                                        symbol.push_str(&format!("<{type_arg}>"));
+                                    }
+                                }
+                            }
+                        }
                         let span = callee.span();
-                        self.edits.push((span.lo.0, span.hi.0, symbol.clone()));
+                        self.edits.push((span.lo.0, span.hi.0, symbol));
                     }
                 }
             }

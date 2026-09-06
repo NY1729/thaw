@@ -6849,15 +6849,17 @@ fn generic_rest_callbacks_are_inferred_and_passed_without_array_marshalling() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function orderBy<T>(values: T[], ...iteratees: Array<(value: T) => number>): T[];\n",
+        "export declare function orderBy<T>(values: T[], ...iteratees: Array<(value: T) => number>): T[];\n\
+         export declare function orderBy<T extends object>(values: T, ...iteratees: Array<(value: T[keyof T]) => number>): Array<T[keyof T]>;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
         "module.exports.orderBy = function(values) { \
          var iteratees = Array.prototype.slice.call(arguments, 1); \
-         iteratees.forEach(function(iteratee) { values.forEach(iteratee); }); \
-         return values; \
+         var result = Array.isArray(values) ? values : Object.values(values); \
+         iteratees.forEach(function(iteratee) { result.forEach(iteratee); }); \
+         return result; \
          };\n",
     )
     .unwrap();
@@ -6870,6 +6872,9 @@ function main(): void {
     const result = orderBy([3, 1, 2], value => { total = total + value; return value; });
     console.log(result[0]);
     console.log(result.join(','));
+    const objectResult = orderBy({ a: 4, b: 2 }, value => { total = total + value; return value; });
+    console.log(objectResult[0]);
+    console.log(objectResult.join(','));
     console.log(total);
 }
 "#,
@@ -6883,7 +6888,10 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n3,1,2\n6\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "3\n3,1,2\n4\n4,2\n12\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
