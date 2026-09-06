@@ -76,7 +76,10 @@ fn package_subpath_runtime_target(manifest: &serde_json::Value, subpath: &str) -
     None
 }
 
-fn resolve_package_import(package_dir: &Path, spec: &str) -> Option<(String, PathBuf)> {
+fn resolve_package_import(path: &Path, spec: &str) -> Option<(String, PathBuf)> {
+    let package_dir = path
+        .ancestors()
+        .find(|directory| read_manifest(directory).is_ok())?;
     let manifest = read_manifest(package_dir).ok()?;
     let imports = manifest.get("imports")?.as_object()?;
     if let Some(value) = imports.get(spec) {

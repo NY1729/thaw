@@ -97,6 +97,14 @@ different one. `--bridge <file.d.ts>` and `--link <library>` provide the manual
 FFI route. Native functions returning an error-aware result struct can opt in
 with `--ffi-metadata <file.json>`:
 
+Packages with generated files, such as Prisma Client, can be registered from
+an existing installation after running their generator:
+
+```sh
+npx prisma generate
+target/release/thaw registry add @prisma/client --from-node-modules node_modules
+```
+
 ```json
 {
   "version": 2,

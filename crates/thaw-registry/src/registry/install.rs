@@ -2220,10 +2220,14 @@ fn reexported_class_or_interface_declarations_inner(
 }
 
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {
-    if !source.starts_with('.') {
-        return None;
-    }
-    let path = entry_path.parent()?.join(source);
+    let path = if source == "." || source.starts_with("./") || source.starts_with("../") {
+        entry_path.parent()?.join(source)
+    } else {
+        let node_modules = entry_path
+            .ancestors()
+            .find(|path| path.file_name().is_some_and(|name| name == "node_modules"))?;
+        node_modules.join(source)
+    };
     [path.with_extension("d.ts"), path.join("index.d.ts")]
         .into_iter()
         .find(|candidate| candidate.is_file())
