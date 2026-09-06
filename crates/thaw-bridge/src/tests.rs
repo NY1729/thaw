@@ -663,10 +663,12 @@ fn generates_native_addon_wrapper_and_module_initializer() {
     let init = generate_native_addon_init(&[NativeAddon {
         package_name: "native-add",
         bytes: &[0xde, 0xad, 0xbe, 0xef],
+        dependencies: vec![&[0xca, 0xfe]],
         root_export: None,
     }]);
     assert!(init.contains("function __thaw_native_module_init(): void"));
     assert!(init.contains(r#"loadNativeAddonEmbedded("deadbeef", "");"#));
+    assert!(init.contains(r#"loadNativeSharedLibraryEmbedded("cafe");"#));
 }
 
 #[test]

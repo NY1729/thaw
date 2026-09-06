@@ -12,6 +12,7 @@ struct ResolvedPackage {
     classifications: Vec<(String, thaw_bridge::Classification)>,
     native_lib: Option<PathBuf>,
     native_addon: Option<PathBuf>,
+    native_dependencies: Vec<PathBuf>,
     bundle_js: Option<String>,
     /// `(factory function name) -> (this package's own class name)` for
     /// every function whose declared return type names one of `classes`
@@ -22049,6 +22050,7 @@ fn generate_registry_shims(
             classifications,
             native_lib: package.native_lib,
             native_addon: package.native_addon,
+            native_dependencies: package.native_dependencies,
             bundle_js: package.bundle_js,
             factory_class_returns,
             namespace_self_aliases,
@@ -22155,6 +22157,7 @@ fn generate_registry_shims(
         Vec<(String, String)>,
         Vec<(String, String, String, String)>,
     );
+    type PendingNativeAddon = (String, Vec<u8>, Vec<Vec<u8>>, Option<String>);
 
     let mut shim = String::new();
     let mut typed_targets: std::collections::HashMap<(String, String), String> =
@@ -22190,7 +22193,7 @@ fn generate_registry_shims(
     let mut static_class_setter_rewrites = Vec::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
-    let mut native_addons: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
+    let mut native_addons: Vec<PendingNativeAddon> = Vec::new();
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
@@ -22827,6 +22830,11 @@ fn generate_registry_shims(
             native_addons.push((
                 pkg.name.clone(),
                 bytes,
+                pkg.native_dependencies
+                    .iter()
+                    .map(std::fs::read)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("failed to embed native dependency: {error}"))?,
                 if pkg.bundle_js.is_some() {
                     None
                 } else {
@@ -22968,9 +22976,10 @@ fn generate_registry_shims(
     shim.push_str(&thaw_bridge::generate_module_init(&module_bundles));
     let native_addons: Vec<thaw_bridge::NativeAddon<'_>> = native_addons
         .iter()
-        .map(|(name, bytes, root_export)| thaw_bridge::NativeAddon {
+        .map(|(name, bytes, dependencies, root_export)| thaw_bridge::NativeAddon {
             package_name: name,
             bytes,
+            dependencies: dependencies.iter().map(Vec::as_slice).collect(),
             root_export: root_export.as_deref(),
         })
         .collect();

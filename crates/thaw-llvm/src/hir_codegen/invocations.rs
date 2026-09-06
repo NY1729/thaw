@@ -2017,6 +2017,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "constructDynamicValue" => return self.compile_construct_dynamic_value(args),
             "loadNativeAddon" => return self.compile_load_native_addon(args),
             "loadNativeAddonEmbedded" => return self.compile_load_embedded_native_addon(args),
+            "loadNativeSharedLibraryEmbedded" => {
+                return self.compile_load_embedded_native_dependency(args)
+            }
             "callNativeAddon" => return self.compile_call_native_addon(args),
             "callNativeAddonWithCallback" => {
                 return self.compile_call_native_addon_with_callback(args)

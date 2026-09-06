@@ -288,6 +288,49 @@ fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
     Ok(matches.pop())
 }
 
+fn platform_shared_libraries(
+    node_modules_dir: &Path,
+    manifest: &serde_json::Value,
+) -> Result<Vec<PathBuf>, String> {
+    let Some(optional) = manifest
+        .get("optionalDependencies")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
+    let (platform, arch, libc) = target_prebuild_components();
+    let markers = if platform == "linux" && libc == "musl" {
+        vec![format!("linuxmusl-{arch}"), format!("{platform}-{arch}-{libc}")]
+    } else {
+        vec![format!("{platform}-{arch}"), format!("{platform}-{arch}-{libc}")]
+    };
+    let mut libraries = Vec::new();
+    for name in optional.keys().filter(|name| markers.iter().any(|marker| name.contains(marker))) {
+        let root = node_modules_dir.join(name);
+        if !root.is_dir() {
+            continue;
+        }
+        let mut directories = vec![root];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(&directory)
+                .map_err(|error| format!("failed to inspect `{}`: {error}", directory.display()))?
+            {
+                let path = entry.map_err(|error| error.to_string())?.path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(".so"))
+                {
+                    libraries.push(path);
+                }
+            }
+        }
+    }
+    libraries.sort();
+    Ok(libraries)
+}
+
 fn download_prebuild_install_addon(
     package_dir: &Path,
     manifest: &serde_json::Value,
@@ -544,6 +587,19 @@ fn add_installed_inner(
         Ok(None) => (None, None),
         Err(diagnostic) => (None, Some(diagnostic)),
     };
+    let dependencies = dest_dir.join("native-dependencies");
+    if dependencies.is_dir() {
+        fs::remove_dir_all(&dependencies).map_err(|error| error.to_string())?;
+    }
+    let shared_libraries = platform_shared_libraries(node_modules_dir, &manifest)?;
+    if !shared_libraries.is_empty() {
+        fs::create_dir_all(&dependencies).map_err(|error| error.to_string())?;
+        for (index, source) in shared_libraries.iter().enumerate() {
+            let name = source.file_name().unwrap_or_default().to_string_lossy();
+            fs::copy(source, dependencies.join(format!("{index}-{name}")))
+                .map_err(|error| format!("failed to copy `{}`: {error}", source.display()))?;
+        }
+    }
     fs::write(dest_dir.join("package.d.ts"), dts_source).map_err(|e| {
         format!(
             "failed to write `{}`: {e}",

@@ -9,6 +9,7 @@ pub struct ResolvedPackage {
     /// from `native_lib` because `.node` uses N-API handles, not the Fast-path
     /// C layout.
     pub native_addon: Option<PathBuf>,
+    pub native_dependencies: Vec<PathBuf>,
     pub bundle_js: Option<String>,
     /// The version `add` recorded in `version.txt`, if this package went
     /// through `add` (rather than hand-curation, or an `add` run before
@@ -46,6 +47,14 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
     let native_lib = native_lib_path.is_file().then_some(native_lib_path);
     let native_addon_path = dir.join("native.node");
     let native_addon = native_addon_path.is_file().then_some(native_addon_path);
+    let mut native_dependencies = fs::read_dir(dir.join("native-dependencies"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    native_dependencies.sort();
 
     let bundle_js_path = dir.join("bundle.js");
     let bundle_js = if bundle_js_path.is_file() {
@@ -72,6 +81,7 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         dts_source,
         native_lib,
         native_addon,
+        native_dependencies,
         bundle_js,
         version,
         dependency_versions,
@@ -260,6 +270,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         ),
         native_lib: None,
         native_addon: None,
+        native_dependencies: Vec::new(),
         bundle_js: Some(source.to_string()),
         version: None,
         dependency_versions: None,
