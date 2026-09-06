@@ -7,6 +7,15 @@ fn napi_constructor_export_name(symbol: &str) -> Option<&str> {
     )
 }
 
+fn dynamic_member_name(symbol: &str, overloaded: bool) -> Option<String> {
+    let member = symbol.splitn(4, '$').nth(3)?;
+    Some(if overloaded {
+        member.rsplit_once("$overload")?.0.to_string()
+    } else {
+        member.to_string()
+    })
+}
+
 fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
     match ty {
         HirType::F64 | HirType::Str | HirType::Bool | HirType::Json => true,
@@ -2719,14 +2728,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .unwrap();
         self.compile_typed_dynamic_argument(array, assigned_value, assigned_type)
             .map_err(|error| format!("N-API setter value: {error}"))?;
-        let property = signature
-            .symbol
-            .split('$')
-            .nth(3)
+        let property = dynamic_member_name(&signature.symbol, false)
             .ok_or("invalid typed N-API setter symbol")?;
         let property = self
             .builder
-            .build_global_string_ptr(property, "napi_setter_name")
+            .build_global_string_ptr(&property, "napi_setter_name")
             .map_err(|error| error.to_string())?;
         let args_json = self
             .builder
@@ -2818,14 +2824,11 @@ impl<'ctx> HirCompiler<'ctx> {
             };
             self.compile_expr(receiver)?
         };
-        let property = signature
-            .symbol
-            .split('$')
-            .nth(3)
+        let property = dynamic_member_name(&signature.symbol, false)
             .ok_or("invalid typed N-API getter symbol")?;
         let property = self
             .builder
-            .build_global_string_ptr(property, "napi_getter_name")
+            .build_global_string_ptr(&property, "napi_getter_name")
             .map_err(|error| error.to_string())?;
         let result = self
             .builder
@@ -2960,14 +2963,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| format!("N-API method argument {}: {error}", index + 1))?;
         }
         self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
-        let method = signature
-            .symbol
-            .split('$')
-            .nth(3)
+        let method = dynamic_member_name(&signature.symbol, true)
             .ok_or("invalid typed N-API method symbol")?;
         let method = self
             .builder
-            .build_global_string_ptr(method, "napi_method_name")
+            .build_global_string_ptr(&method, "napi_method_name")
             .map_err(|error| error.to_string())?;
         let args_json = self
             .builder
