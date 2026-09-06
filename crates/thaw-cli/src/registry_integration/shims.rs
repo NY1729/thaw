@@ -19868,7 +19868,15 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
             .map(|payload| format!("{payload} | null | undefined")),
         thaw_hir::HirType::Union(elements) => elements
             .iter()
-            .map(render_dynamic_type)
+            .map(|element| {
+                render_dynamic_type(element).map(|rendered| {
+                    if matches!(element, thaw_hir::HirType::Function(..) | thaw_hir::HirType::CallableFunction(..)) {
+                        format!("({rendered})")
+                    } else {
+                        rendered
+                    }
+                })
+            })
             .collect::<Option<Vec<_>>>()
             .map(|elements| elements.join(" | ")),
         thaw_hir::HirType::Array(element) => {
@@ -21326,8 +21334,11 @@ fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: us
                 | thaw_hir::HirType::Str
                 | thaw_hir::HirType::Bool
                 | thaw_hir::HirType::Json
-                | thaw_hir::HirType::Object(_)
         )
+    ) || matches!(
+        ty,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Object(fields))
+            if fields.iter().all(|(_, field)| supported_json_collection_element(field))
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(

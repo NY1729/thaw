@@ -309,6 +309,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
                 }
+                HirType::Function(params, ret) => {
+                    value = self.compile_register_native_callback_from_closure(
+                        value.into_pointer_value(),
+                        params,
+                        ret,
+                    )?;
+                    value = self.compile_dynamic_value_placeholder(value)?;
+                    "thaw_json_object_set_json"
+                }
                 other => return Err(format!("unsupported dynamic object field {other:?}")),
             };
         self.builder
@@ -899,6 +908,15 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Null | HirType::Undefined => "thaw_json_array_push_json",
             HirType::JsValue => {
+                value = self.compile_dynamic_value_placeholder(value)?;
+                "thaw_json_array_push_json"
+            }
+            HirType::Function(params, ret) => {
+                value = self.compile_register_native_callback_from_closure(
+                    value.into_pointer_value(),
+                    params,
+                    ret,
+                )?;
                 value = self.compile_dynamic_value_placeholder(value)?;
                 "thaw_json_array_push_json"
             }

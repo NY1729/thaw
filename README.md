@@ -3175,12 +3175,12 @@ and argument shape, rather than declaration order. Typed non-callable package
 values are captured once after module initialization, covering uuid-style
 string constants and mime-style pre-created singleton objects. Fallback class
 method signatures also contextually type direct callback arguments and callbacks
-nested in object-literal arguments when the declaration resolves to a native
-object shape; type-only package imports such as Hono's `Context` are erased to a
-local `JsValue` type binding. Dynamic callback-or-configuration unions inside
-generic object parameters remain unsupported (for example Hapi's
-`ServerRoute.handler`) because nested function values do not yet have a generic
-JSON object ABI.
+nested in object-literal arguments, including callback-or-configuration unions
+inside generic object parameters such as Hapi's `ServerRoute.handler`;
+type-only package imports such as Hono's `Context` are erased to a local
+`JsValue` type binding. Nested callback bodies remain native LLVM/JIT code. The
+QuickJS boundary only reconstructs the surrounding dynamic object and exposes a
+thin callable wrapper that dispatches back to that native closure.
 
 ## Testing
 
