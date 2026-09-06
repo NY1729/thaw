@@ -62,6 +62,7 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
         Some(_) => return None,
         None => hex,
     };
+    let hex = hex.strip_suffix("__generic_rest").unwrap_or(hex);
     // Distinguishes two ambient declarations that must decode to the
     // *same* runtime symbol (so both dispatch through the one real JS
     // function at the far end) but need different Rust/LLVM-level names

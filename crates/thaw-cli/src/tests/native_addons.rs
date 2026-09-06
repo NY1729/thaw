@@ -1565,7 +1565,9 @@ function main(): void {
     console.log(find([1, 2, 3], value => value > 1));
     console.log(some([1, 2, 3], value => value === 2));
     console.log(every([1, 2, 3], value => value > 0));
-    console.log(sortBy([3, 1, 2], value => { sortTotal = sortTotal + value; return value; }).length);
+    const sorted = sortBy([3, 1, 2], value => { sortTotal = sortTotal + value; return value; });
+    console.log(sorted[0]);
+    console.log(sorted.join(','));
     console.log(sortTotal);
 }"#,
     )
@@ -1590,7 +1592,8 @@ function main(): void {
     assert_eq!(lines.next(), Some("2"));
     assert_eq!(lines.next(), Some("true"));
     assert_eq!(lines.next(), Some("true"));
-    assert_eq!(lines.next(), Some("3"));
+    assert_eq!(lines.next(), Some("1"));
+    assert_eq!(lines.next(), Some("1,2,3"));
     assert_eq!(lines.next(), Some("6"));
     assert_eq!(lines.next(), None);
     let _ = std::fs::remove_dir_all(dir);
