@@ -12,6 +12,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::F64 => Ok(self.context.f64_type().into()),
             HirType::I64 => Ok(self.context.i64_type().into()),
             HirType::Bool => Ok(self.context.bool_type().into()),
+            // `void` has no top-level return value, but tagged containers
+            // such as `void | T` still need a physical placeholder slot.
+            HirType::Void => Ok(self.context.i32_type().into()),
             HirType::Undefined => Ok(self.context.bool_type().into()),
             // Strings and arrays are both represented as a single opaque
             // pointer at the LLVM level; what they point to differs (a
