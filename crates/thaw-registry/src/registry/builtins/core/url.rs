@@ -21,7 +21,25 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20if (url.username !== '' || url.password !== '') options.auth = decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password);\n\
              \x20\x20return options;\n\
              }\n\
-             module.exports = { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, pathToFileURL: pathToFileURL, fileURLToPath: fileURLToPath, urlToHttpOptions: urlToHttpOptions };\n\
+             function parse(input) {\n\
+             \x20\x20var source = String(input);\n\
+             \x20\x20var absolute = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(source);\n\
+             \x20\x20var url = new globalThis.URL(source, 'http://thaw.invalid');\n\
+             \x20\x20return { protocol: absolute ? url.protocol : null, slashes: absolute && source.indexOf('//') >= 0, auth: url.username || url.password ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : null, host: absolute ? url.host : null, port: absolute && url.port ? url.port : null, hostname: absolute ? url.hostname : null, hash: url.hash || null, search: url.search || null, query: url.search ? url.search.slice(1) : null, pathname: url.pathname, path: url.pathname + url.search, href: source };\n\
+             }\n\
+             function format(input) {\n\
+             \x20\x20if (input instanceof globalThis.URL) return input.href;\n\
+             \x20\x20if (typeof input === 'string') return input;\n\
+             \x20\x20var protocol = input.protocol || '';\n\
+             \x20\x20var authority = input.host || input.hostname || '';\n\
+             \x20\x20if (!input.host && input.port) authority += ':' + input.port;\n\
+             \x20\x20if (input.auth) authority = encodeURI(input.auth).replace(/%3A/i, ':') + '@' + authority;\n\
+             \x20\x20var slashes = authority && (input.slashes || protocol === 'http:' || protocol === 'https:' || protocol === 'file:') ? '//' : '';\n\
+             \x20\x20var pathname = input.pathname || '';\n\
+             \x20\x20var search = input.search !== undefined && input.search !== null ? input.search : (input.query ? '?' + new globalThis.URLSearchParams(input.query).toString() : '');\n\
+             \x20\x20return protocol + slashes + authority + pathname + search + (input.hash || '');\n\
+             }\n\
+             module.exports = { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, parse: parse, format: format, pathToFileURL: pathToFileURL, fileURLToPath: fileURLToPath, urlToHttpOptions: urlToHttpOptions };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),

@@ -1918,6 +1918,50 @@ async function main(): Promise<void> {
 }
 
 #[test]
+fn registry_add_runs_a_real_hapi_route_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-hapi-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "@hapi/hapi@21.4.3").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import * as Hapi from "@hapi/hapi";
+async function main(): Promise<void> {
+    const server = Hapi.server({ port: 0 });
+    server.route({ method: "GET", path: "/", handler: (request, h) => h.response(request.path) });
+    const response = await server.inject("/");
+    console.log(response.statusCode);
+    console.log(response.payload);
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["@hapi/hapi".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "200\n/\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_infers_a_real_commander_action_callback_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
