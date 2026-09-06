@@ -22180,7 +22180,7 @@ fn generate_registry_shims(
         let native_lib_available = pkg.native_lib.is_some() || is_native_builtin(&pkg.name);
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
         let overload_rewrite_start = fallback_function_overload_rewrites.len();
-        if pkg.native_addon.is_some() {
+        if pkg.native_addon.is_some() && pkg.bundle_js.is_none() {
             for class in &pkg.classes {
                 let helpers = generate_napi_class_constructors(class, true, &mut shim);
                 if helpers.is_empty() {
