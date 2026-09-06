@@ -182,8 +182,8 @@ struct IncomingMessage {
 struct ServerResponse {
     status_code: f64,
     set_header: *const NativeClosure,
-    write: *const NativeClosure,
     end: *const NativeClosure,
+    write: *const NativeClosure,
 }
 
 /// One-request native slice of Node's `createServer` callback shape.
@@ -237,8 +237,8 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
         let mut response = ServerResponse {
             status_code: 200.0,
             set_header: &set_header,
-            write: &write,
             end: &end,
+            write: &write,
         };
         let code = *(callback as *const *const c_void);
         let callback_fn: Callback = std::mem::transmute(code);

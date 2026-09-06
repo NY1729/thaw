@@ -54,6 +54,13 @@ impl<'a> FnLowerer<'a> {
                 return Ok(HirExpr::JsonAsNative(Box::new(value), declared.clone()));
             }
         }
+        if let (HirType::Object(declared_fields), HirType::Object(actual_fields)) =
+            (declared, self.infer_expr_type(&value)?)
+        {
+            if actual_fields.starts_with(declared_fields) {
+                return Ok(value);
+            }
+        }
         if *declared == HirType::Json {
             let actual = self.infer_expr_type(&value)?;
             if actual == HirType::Json {

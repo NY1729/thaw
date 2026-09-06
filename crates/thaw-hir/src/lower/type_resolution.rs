@@ -45,9 +45,12 @@ fn lower_ts_type(
             TsKeywordTypeKind::TsUndefinedKeyword => Ok(HirType::Undefined),
             TsKeywordTypeKind::TsNullKeyword => Ok(HirType::Null),
             TsKeywordTypeKind::TsVoidKeyword => Ok(HirType::Void),
+            TsKeywordTypeKind::TsAnyKeyword | TsKeywordTypeKind::TsUnknownKeyword => {
+                Ok(HirType::Json)
+            }
             TsKeywordTypeKind::TsObjectKeyword => Ok(HirType::Dynamic),
             other => Err(format!(
-                "unsupported type keyword {other:?} (supports number/string/boolean/void)"
+                "unsupported type keyword {other:?}"
             )),
         },
         TsType::TsLitType(literal) => match &literal.lit {

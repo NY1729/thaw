@@ -76,6 +76,7 @@ impl<'a> FnLowerer<'a> {
                     return self.lower_promise_callback(value, &params, Some(&ret));
                 }
             }
+            return self.lower_expr_with_expected_type(value, Some(expected));
         }
         let Expr::Call(call) = value else {
             return self.lower_expr(value);

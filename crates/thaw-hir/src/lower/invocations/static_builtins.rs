@@ -210,8 +210,12 @@ impl<'a> FnLowerer<'a> {
                         }
                         let value = arguments[0].clone();
                         let value_type = self.infer_expr_type(&value)?;
-                        let value = if matches!(value_type, HirType::Json | HirType::Dictionary(_))
-                        {
+                        let value = if value_type == HirType::JsValue {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("readDynamicValue".into())),
+                                vec![value],
+                            )
+                        } else if matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
                             value
                         } else if json_convertible_native_type(&value_type) {
                             self.wrap_native_value_as_json(value, value_type.clone())?
