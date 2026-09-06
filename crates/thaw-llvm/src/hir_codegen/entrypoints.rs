@@ -27,6 +27,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     "run_async_main",
                 )
                 .unwrap();
+            if self.uses_napi {
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_napi_run_async_work")
+                            .unwrap(),
+                        &[],
+                        "drain_napi_for_async_main",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_runtime_run_until_resolved")
+                            .unwrap(),
+                        &[completion.into()],
+                        "resume_async_main_after_napi",
+                    )
+                    .unwrap();
+            }
             self.builder
                 .build_call(
                     self.module.get_function("thaw_promise_destroy").unwrap(),
