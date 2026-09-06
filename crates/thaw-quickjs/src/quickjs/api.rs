@@ -1,3 +1,21 @@
+#[cfg(unix)]
+fn native_promise_state(promise: *const c_void) -> u8 {
+    unsafe {
+        let poll = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_poll_one".as_ptr());
+        let state = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_promise_state".as_ptr());
+        if poll.is_null() || state.is_null() {
+            return 0;
+        }
+        std::mem::transmute::<*mut c_void, extern "C" fn() -> usize>(poll)();
+        std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*const c_void) -> u8>(state)(promise)
+    }
+}
+
+#[cfg(not(unix))]
+fn native_promise_state(_promise: *const c_void) -> u8 {
+    0
+}
+
 /// Evaluates `source` in the (per-thread) global QuickJS context. Top-level
 /// function declarations become callable afterwards via `thaw_js_call`.
 /// Returns `1` on success, `0` on failure (syntax error, thrown exception).
@@ -730,8 +748,21 @@ pub extern "C" fn thaw_js_register_native_callback(
                     return "error:invalid native Promise address".to_string();
                 };
                 let promise = address as *const c_void;
+                // The finisher consumes settled promises. Check first so a
+                // rejection cannot look pending and be consumed repeatedly.
+                let state = native_promise_state(promise);
+                if state == 0 {
+                    return String::new();
+                }
                 let finish_fn: NativeCallbackAdapter = unsafe { std::mem::transmute(finish) };
                 let result = unsafe { finish_fn(promise, std::ptr::null()) };
+                if state == 2 {
+                    return if result.is_null() {
+                        "error:native Promise rejected".to_string()
+                    } else {
+                        format!("error:{}", to_str(result))
+                    };
+                }
                 if result.is_null() {
                     return String::new();
                 }
