@@ -144,6 +144,14 @@ fn hir_type_as_ts_type(ty: &HirType) -> Result<TsType, String> {
             span: swc_common::DUMMY_SP,
             elem_type: Box::new(hir_type_as_ts_type(element)?),
         }),
+        HirType::JsValue => TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+            span: swc_common::DUMMY_SP,
+            type_name: swc_ecma_ast::TsEntityName::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                "JsValue".into(),
+                swc_common::DUMMY_SP,
+            )),
+            type_params: None,
+        }),
         HirType::Tuple(elements) => TsType::TsTupleType(swc_ecma_ast::TsTupleType {
             span: swc_common::DUMMY_SP,
             elem_types: elements

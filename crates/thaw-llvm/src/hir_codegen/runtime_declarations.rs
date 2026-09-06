@@ -1118,6 +1118,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let js_load_type = self.context.i8_type().fn_type(&[i8_ptr.into()], false);
         self.module
             .add_function("thaw_js_load", js_load_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_js_run_event_loop",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
 
         let js_call_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         self.module
@@ -1238,7 +1243,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_js_register_native_callback",
             handle_result_type.fn_type(
-                &[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()],
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                ],
                 false,
             ),
             Some(Linkage::External),
@@ -1492,6 +1502,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_promise_state",
             self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_poll_one",
+            self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(

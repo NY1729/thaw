@@ -4719,6 +4719,21 @@ fn rewrites_external_class_constructors_without_touching_other_new_expressions()
 }
 
 #[test]
+fn rewrites_external_class_constructors_with_erased_type_arguments() {
+    let source = "const app = new Hono<{ Bindings: Bindings }>();";
+    let rewritten = rewrite_external_class_constructors(
+        source,
+        &[(
+            "hono".into(),
+            "Hono".into(),
+            vec![(0, "Hono_ctor".into(), vec![])],
+        )],
+    )
+    .unwrap();
+    assert_eq!(rewritten, "const app = Hono_ctor();");
+}
+
+#[test]
 fn rewrites_external_class_constructors_by_argument_count() {
     let source = "const a = new Database(); const b = new Database('db'); const c = new Database('db', 6); const d = new Database('db', 6, true);";
     let rewritten = rewrite_external_class_constructors(

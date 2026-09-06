@@ -39,7 +39,10 @@ fn rewrite_external_class_constructors(
                     if candidates.next().is_none() {
                         self.replacements.push((
                             expression.span().lo.0,
-                            expression.callee.span().hi.0,
+                            expression
+                                .type_args
+                                .as_ref()
+                                .map_or_else(|| expression.callee.span().hi.0, |args| args.span().hi.0),
                             helper.clone(),
                         ));
                     }

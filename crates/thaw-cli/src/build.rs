@@ -130,21 +130,6 @@ fn build_with_link_mode(
     // package-qualified alias `generate_registry_shims` actually
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
-    let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
-    let user_source = rewrite_external_class_methods_with_static(
-        &user_source,
-        &class_constructor_rewrites,
-        &class_method_rewrites,
-        &static_class_method_rewrites,
-        &class_getter_rewrites,
-        &class_setter_rewrites,
-        &static_class_getter_rewrites,
-        &static_class_setter_rewrites,
-        &factory_class_rewrites,
-        &fallback_function_overload_rewrites,
-    )?;
-    let user_source =
-        rewrite_external_class_constructors(&user_source, &class_constructor_rewrites)?;
     let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
     if static_link && shim_source.contains("loadNativeAddonEmbedded(") {
         return Err(
@@ -169,13 +154,30 @@ fn build_with_link_mode(
     shim_source.push_str(&format!(
         "function __thaw_artifact_metadata(): string {{ return {marker_literal}; }}\n"
     ));
-    let mut module = module_graph::bundle(
+    let transform = |source: &str| {
+        let source = rewrite_qualified_calls(source, &qualified_call_rewrites)?;
+        let source = rewrite_external_class_methods_with_static(
+            &source,
+            &class_constructor_rewrites,
+            &class_method_rewrites,
+            &static_class_method_rewrites,
+            &class_getter_rewrites,
+            &class_setter_rewrites,
+            &static_class_getter_rewrites,
+            &static_class_setter_rewrites,
+            &factory_class_rewrites,
+            &fallback_function_overload_rewrites,
+        )?;
+        rewrite_external_class_constructors(&source, &class_constructor_rewrites)
+    };
+    let mut module = module_graph::bundle_with_source_transform(
         input,
         &user_source,
         &external_exports,
         &external_namespace_aliases,
         &external_nested_namespaces,
         &external_resolutions,
+        &transform,
     )?;
     if !shim_source.is_empty() {
         let mut shim = thaw_parser::parse_typescript(&shim_source)?;

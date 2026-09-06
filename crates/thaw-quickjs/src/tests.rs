@@ -21,6 +21,31 @@ fn loads_and_calls_a_simple_function() {
 }
 
 #[test]
+fn exposes_the_node_global_alias() {
+    assert_eq!(
+        load("function hasGlobal() { return global === globalThis; }"),
+        1
+    );
+    assert_eq!(call("hasGlobal", "[]"), "true");
+}
+
+#[test]
+fn console_methods_remain_callable_when_detached() {
+    assert_eq!(
+        load("function detachedConsoleLog() { const log = console.log; log('detached'); return true; }") ,
+        1
+    );
+    assert_eq!(call("detachedConsoleLog", "[]"), "true");
+}
+
+#[test]
+fn standalone_event_loop_runs_pending_timers() {
+    assert_eq!(load("globalThis.loopValue = 0; setTimeout(() => { loopValue = 42; }, 0); function readLoopValue() { return loopValue; }"), 1);
+    thaw_js_run_event_loop();
+    assert_eq!(call("readLoopValue", "[]"), "42");
+}
+
+#[test]
 fn round_trips_objects_and_arrays() {
     assert_eq!(load("function identity(x) { return x; }"), 1);
     assert_eq!(

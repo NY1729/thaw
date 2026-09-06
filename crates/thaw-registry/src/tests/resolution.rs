@@ -437,6 +437,36 @@ fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserve
 }
 
 #[test]
+fn installed_package_inlines_a_callable_const_reexported_from_another_file() {
+    let scratch = temp_registry("installed-dts-reexported-callable-const-scratch");
+    let registry = temp_registry("installed-dts-reexported-callable-const-registry");
+    let package = scratch.join("node_modules/server-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"server-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "export { serve } from './server.js';\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("server.d.ts"),
+        "declare const serve: (options: { port?: number }) => unknown;\nexport { serve };\n",
+    )
+    .unwrap();
+    fs::write(package.join("index.js"), "module.exports = { serve() {} };\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "server-kit").unwrap();
+    let declarations = resolve(&registry, "server-kit").unwrap().dts_source;
+    assert!(declarations.contains("const serve:"), "{declarations}");
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_flattens_a_nested_namespace_reexport() {
     // `export * as NAME from "SOURCE";` -- a namespace re-export, real-
     // world example: zod v4's own re-export barrel, `export * as coerce

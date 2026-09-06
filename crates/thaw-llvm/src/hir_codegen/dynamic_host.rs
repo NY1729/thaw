@@ -283,6 +283,25 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirType],
         ret: &HirType,
     ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>), String> {
+        let (adapter, closure, _) =
+            self.compile_value_callback_from_closure(closure, params, ret, false)?;
+        Ok((adapter, closure))
+    }
+
+    fn compile_value_callback_from_closure(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+        defer_promise: bool,
+    ) -> Result<
+        (
+            PointerValue<'ctx>,
+            PointerValue<'ctx>,
+            Option<PointerValue<'ctx>>,
+        ),
+        String,
+    > {
         let callback_name = format!("__thaw_napi_value_callback_{}", self.next_lambda);
         self.next_lambda += 1;
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -352,6 +371,27 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
             .map_err(|error| error.to_string())?;
+        if defer_promise && matches!(ret, HirType::Promise(_)) {
+            let promise = call
+                .try_as_basic_value()
+                .basic()
+                .ok_or("async value callback must return a Promise")?
+                .into_pointer_value();
+            self.builder
+                .build_return(Some(&promise))
+                .map_err(|error| error.to_string())?;
+            self.catch_stack = outer_catch_stack;
+            self.builder.position_at_end(return_block);
+            let HirType::Promise(resolved) = ret else {
+                unreachable!()
+            };
+            let finish = self.compile_native_promise_callback_finisher(resolved)?;
+            return Ok((
+                adapter.as_global_value().as_pointer_value(),
+                closure,
+                Some(finish),
+            ));
+        }
         // A `void`-returning closure (real example: zod's own
         // `superRefine((val, ctx) => { ctx.addIssue(...); })` -- the
         // predicate mutates `ctx` and returns nothing at all) has no
@@ -434,7 +474,113 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.catch_stack = outer_catch_stack;
         self.builder.position_at_end(return_block);
-        Ok((adapter.as_global_value().as_pointer_value(), closure))
+        Ok((adapter.as_global_value().as_pointer_value(), closure, None))
+    }
+
+    fn compile_native_promise_callback_finisher(
+        &mut self,
+        resolved: &HirType,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let name = format!("__thaw_native_promise_finish_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let function = self.module.add_function(
+            &name,
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            Some(Linkage::Internal),
+        );
+        let return_block = self.builder.get_insert_block().unwrap();
+        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        let promise = function.get_nth_param(0).unwrap().into_pointer_value();
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_runtime_poll_one").unwrap(),
+                &[],
+                "poll_native_promise",
+            )
+            .map_err(|error| error.to_string())?;
+        let state = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_promise_state").unwrap(),
+                &[promise.into()],
+                "native_promise_state",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_promise_state returned no value")?
+            .into_int_value();
+        let pending = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                state,
+                self.context.i8_type().const_zero(),
+                "native_promise_pending",
+            )
+            .map_err(|error| error.to_string())?;
+        let pending_block = self.context.append_basic_block(function, "pending");
+        let settled_block = self.context.append_basic_block(function, "settled");
+        self.builder
+            .build_conditional_branch(pending, pending_block, settled_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(pending_block);
+        self.builder
+            .build_return(Some(&ptr_type.const_null()))
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(settled_block);
+        let result_json = if *resolved == HirType::Void {
+            self.drive_promise_to_completion(promise)?;
+            self.compile_json_null()?
+        } else {
+            let value = self.drive_promise_to_resolved_value(promise, resolved)?;
+            let array = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_array_new").unwrap(),
+                    &[],
+                    "native_promise_result_array",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap();
+            self.compile_json_array_push_native(array, value, resolved)?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_index").unwrap(),
+                    &[
+                        array.into(),
+                        self.context.f64_type().const_zero().into(),
+                        ptr_type.const_null().into(),
+                    ],
+                    "native_promise_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+        };
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[result_json.into()],
+                "native_promise_result_string",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        self.builder
+            .build_return(Some(&result))
+            .map_err(|error| error.to_string())?;
+        self.catch_stack = outer_catch_stack;
+        self.builder.position_at_end(return_block);
+        Ok(function.as_global_value().as_pointer_value())
     }
 
     /// Wraps a real compiled (native) closure as a live, retained QuickJS
@@ -502,8 +648,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .filter(|(_, param)| **param == HirType::JsValue)
             .map(|(index, _)| 1u64 << index)
             .sum();
-        let (adapter, closure) =
-            self.compile_napi_value_callback_from_closure(closure, params, ret)?;
+        let (adapter, closure, finish) =
+            self.compile_value_callback_from_closure(closure, params, ret, true)?;
         let jsvalue_param_mask = self
             .context
             .i64_type()
@@ -514,7 +660,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.module
                     .get_function("thaw_js_register_native_callback")
                     .unwrap(),
-                &[adapter.into(), closure.into(), jsvalue_param_mask.into()],
+                &[
+                    adapter.into(),
+                    closure.into(),
+                    jsvalue_param_mask.into(),
+                    finish.unwrap_or_else(|| self.context.ptr_type(AddressSpace::default()).const_null()).into(),
+                ],
                 "register_native_callback",
             )
             .map_err(|error| error.to_string())?

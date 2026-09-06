@@ -154,9 +154,12 @@ fn net_read_all(handle: u32) -> String {
         let Some(stream) = streams.1.get_mut(&handle) else {
             return "err:socket is closed".to_string();
         };
-        let mut value = Vec::new();
-        match stream.read_to_end(&mut value) {
-            Ok(_) => format!("ok:{}", hex_encode(&value)),
+        let mut value = vec![0; 16 * 1024];
+        match stream.read(&mut value) {
+            Ok(length) => {
+                value.truncate(length);
+                format!("ok:{}", hex_encode(&value))
+            }
             Err(error) => format!("err:{error}"),
         }
     })
@@ -837,4 +840,3 @@ fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
     })
     .to_string()
 }
-
