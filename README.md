@@ -52,6 +52,17 @@ target/release/thaw inspect app
 This reports its ELF architecture, static/dynamic system linkage, embedded npm
 packages, and whether QuickJS or N-API support is present.
 
+Compile the self-contained frontend + backend example:
+
+```sh
+target/release/thaw build examples/fullstack-server/server.ts --static -o fullstack-server
+PORT=3000 ./fullstack-server
+```
+
+Then open `http://127.0.0.1:3000`. The imported frontend module, inline browser
+JavaScript, and JSON API are embedded in the single executable; no source or
+asset files are needed at runtime.
+
 Compile the Lambda example:
 
 ```sh
