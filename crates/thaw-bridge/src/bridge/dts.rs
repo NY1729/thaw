@@ -365,6 +365,13 @@ fn lower_dts_call_signature(
                 _ => "Json".into(),
             })
             .collect(),
+        contextual_rest_param_type: call.params.last().and_then(|parameter| {
+            let TsFnParam::Rest(rest) = parameter else { return None };
+            rest.type_ann.as_ref().map(|annotation| {
+                let ty = rest_element_type(annotation.type_ann.as_ref());
+                describe_contextual_rest_type(ty, generic_interfaces)
+            })
+        }),
         return_type: call
             .type_ann
             .as_ref()
@@ -518,6 +525,13 @@ fn lower_dts_fn_type(
                 _ => "Json".into(),
             })
             .collect(),
+        contextual_rest_param_type: function.params.last().and_then(|parameter| {
+            let TsFnParam::Rest(rest) = parameter else { return None };
+            rest.type_ann.as_ref().map(|annotation| {
+                let ty = rest_element_type(annotation.type_ann.as_ref());
+                describe_contextual_rest_type(ty, generic_interfaces)
+            })
+        }),
         return_type: describe_ts_type(&function.type_ann.type_ann),
     });
     let mut substitution = HashMap::new();
@@ -2073,6 +2087,13 @@ fn lower_dts_function(
                 _ => "Json".into(),
             })
             .collect(),
+        contextual_rest_param_type: func.params.last().and_then(|parameter| {
+            let Pat::Rest(rest) = &parameter.pat else { return None };
+            rest.type_ann.as_ref().map(|annotation| {
+                let ty = rest_element_type(annotation.type_ann.as_ref());
+                describe_contextual_rest_type(ty, generic_interfaces)
+            })
+        }),
         return_type: func
             .return_type
             .as_ref()
@@ -2225,6 +2246,13 @@ fn lower_dts_method_signature(
                 _ => "Json".into(),
             })
             .collect(),
+        contextual_rest_param_type: method.params.last().and_then(|parameter| {
+            let TsFnParam::Rest(rest) = parameter else { return None };
+            rest.type_ann.as_ref().map(|annotation| {
+                let ty = rest_element_type(annotation.type_ann.as_ref());
+                describe_contextual_rest_type(ty, generic_interfaces)
+            })
+        }),
         return_type: method
             .type_ann
             .as_ref()
@@ -2547,6 +2575,44 @@ fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>)
     }
 
     render(&alias.type_ann, &substitutions, generic, 0)
+}
+
+fn rest_element_type(ty: &TsType) -> &TsType {
+    match ty {
+        TsType::TsArrayType(array) => &array.elem_type,
+        TsType::TsTypeRef(reference)
+            if matches!(&reference.type_name, TsEntityName::Ident(name) if name.sym == *"Array") =>
+        {
+            reference
+                .type_params
+                .as_ref()
+                .and_then(|parameters| parameters.params.first())
+                .map_or(ty, |element| element)
+        }
+        _ => ty,
+    }
+}
+
+fn describe_contextual_rest_type(ty: &TsType, generic: &GenericInterfaces<'_>) -> String {
+    let mut current = ty;
+    for _ in 0..8 {
+        let described = describe_generic_parameter_type(current, generic);
+        if described.starts_with('(') {
+            return described;
+        }
+        let TsType::TsTypeRef(reference) = current else {
+            return described;
+        };
+        let Some(next) = reference
+            .type_params
+            .as_ref()
+            .and_then(|parameters| (parameters.params.len() == 1).then(|| &*parameters.params[0]))
+        else {
+            return described;
+        };
+        current = next;
+    }
+    describe_generic_parameter_type(current, generic)
 }
 
 /// The TS keyword spelling for a `TsKeywordTypeKind` (`number`/`string`/

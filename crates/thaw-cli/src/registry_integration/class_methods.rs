@@ -1502,7 +1502,18 @@ fn rewrite_external_class_methods_with_static(
             }
         }
         let mut substitutions = std::collections::HashMap::new();
-        for (argument, declared) in call.args.iter().zip(&generic.contextual_param_types) {
+        let fixed_contextual = if generic.contextual_rest_param_type.is_some() {
+            &generic.contextual_param_types[..generic.contextual_param_types.len() - 1]
+        } else {
+            &generic.contextual_param_types
+        };
+        let contextual_types = fixed_contextual.iter().chain(
+            generic
+                .contextual_rest_param_type
+                .iter()
+                .cycle(),
+        );
+        for (argument, declared) in call.args.iter().zip(contextual_types) {
             let Some(actual) = source_expr_type(argument.expr.as_ref(), variables, functions, named)
             else {
                 continue;
@@ -1529,7 +1540,13 @@ fn rewrite_external_class_methods_with_static(
                 }
             }
         }
-        for (argument, contextual) in call.args.iter().zip(&generic.contextual_param_types) {
+        let contextual_types = fixed_contextual.iter().chain(
+            generic
+                .contextual_rest_param_type
+                .iter()
+                .cycle(),
+        );
+        for (argument, contextual) in call.args.iter().zip(contextual_types) {
             let Expr::Arrow(arrow) = argument.expr.as_ref() else {
                 continue;
             };
