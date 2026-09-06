@@ -3226,6 +3226,11 @@ fn classify_ts_type(
     generic_interfaces: &GenericInterfaces,
 ) -> DtsType {
     match ty {
+        // External instances are opaque handles today. Treat a fluent
+        // `this` result as discarded so the method stays on its native
+        // backend instead of mixing an N-API receiver into QuickJS.
+        // ponytail: preserve the receiver once HIR has an external self type.
+        TsType::TsThisType(_) => DtsType::Native(HirType::Void),
         TsType::TsParenthesizedType(parenthesized) => {
             classify_ts_type(&parenthesized.type_ann, interfaces, generic_interfaces)
         }

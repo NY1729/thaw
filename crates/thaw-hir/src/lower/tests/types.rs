@@ -26,6 +26,20 @@ fn stringifies_an_unknown_value_through_the_dynamic_host() {
 }
 
 #[test]
+fn infers_void_for_a_dynamic_callback_with_a_bare_return() {
+    lower(
+        r#"
+        function main(): void {
+            const target: JsValue = getDynamicValue("target");
+            target.consume((value) => {
+                if (value) { return; }
+            });
+        }
+        "#,
+    );
+}
+
+#[test]
 fn accepts_an_abi_compatible_object_prefix() {
     lower(
         r#"
