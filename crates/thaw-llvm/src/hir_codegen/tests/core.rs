@@ -1653,6 +1653,22 @@ fn compiles_quickjs_fallback_path() {
     );
 }
 
+#[test]
+fn registers_a_callback_with_an_optional_void_result() {
+    let source = r#"
+        function main(): void {
+            const callback: (value: number) => void | undefined =
+                (value: number): void | undefined => {
+                    console.log(value);
+                    return undefined;
+                };
+            const handle: JsValue = registerNativeCallback(callback);
+            console.log(releaseDynamicValue(handle));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "optional_void_callback"), "true\n");
+}
+
 /// Module auto-initialization: a registry-generated `__thaw_module_init`
 /// (thaw-bridge's `generate_module_init`, wired in via thaw-cli's
 /// `--use`) must run before `main`'s body, with no `loadScript` call

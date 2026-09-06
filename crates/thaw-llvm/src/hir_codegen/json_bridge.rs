@@ -856,7 +856,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     preserve_undefined,
                 );
             }
-            HirType::Null | HirType::Undefined => {
+            HirType::Null | HirType::Undefined | HirType::Void => {
                 value = self.compile_json_null()?;
             }
             _ => {}
@@ -906,7 +906,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 value = self.compile_native_object_to_json(value.into_pointer_value(), element_type)?;
                 "thaw_json_array_push_json"
             }
-            HirType::Null | HirType::Undefined => "thaw_json_array_push_json",
+            HirType::Null | HirType::Undefined | HirType::Void => {
+                "thaw_json_array_push_json"
+            }
             HirType::JsValue => {
                 value = self.compile_dynamic_value_placeholder(value)?;
                 "thaw_json_array_push_json"
