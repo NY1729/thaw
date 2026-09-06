@@ -422,3 +422,31 @@ fn bundles_the_util_builtin_polyfill_when_required() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+#[test]
+fn bundled_bindings_require_uses_the_loaded_addon() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("bundle_bindings_addon");
+    fs::write(
+        dir.join("index.js"),
+        "module.exports = require('bindings')('native.node');",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("bundle_bindings_addon_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.require.addon = function() {{ return {{ answer: 42 }}; }}; {bundle} globalThis.readAddon = function() {{ return module.exports.answer; }};"
+    );
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("readAddon").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}

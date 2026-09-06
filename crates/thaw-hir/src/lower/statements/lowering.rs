@@ -48,7 +48,10 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                     None => {
-                        if !matches!(self.ret_type, HirType::Void | HirType::Dynamic) {
+                        if !matches!(
+                            self.ret_type,
+                            HirType::Void | HirType::Dynamic | HirType::JsValue
+                        ) {
                             return Err(format!(
                                 "bare `return` is not valid for return type {:?}",
                                 self.ret_type

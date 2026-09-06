@@ -31,6 +31,10 @@ impl<'a> FnLowerer<'a> {
                 Box::new(false_lit()),
             )),
             HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
+            HirType::JsValue => Ok(HirExpr::JsonAsBool(Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("readDynamicValue".into())),
+                vec![value],
+            )))),
             HirType::Null | HirType::Undefined => Ok(false_lit()),
             // Only ever seen here for a still-unresolved generic type
             // parameter placeholder during signature analysis, never a

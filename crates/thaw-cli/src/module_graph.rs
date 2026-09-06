@@ -832,6 +832,20 @@ pub fn bundle_with_source_transform(
                         namespaces.insert(local, namespace.clone());
                         continue;
                     }
+                    // Registry packages are loaded through CommonJS's
+                    // `module.exports`. With synthetic-default-import
+                    // semantics, a package that only declares named
+                    // exports exposes that whole object as its default.
+                    if is_external_default && !dependency_exports.contains_key("default") {
+                        if let Some(nested) = external_nested_namespaces.get(specifier) {
+                            nested_namespaces.insert(
+                                local.clone(),
+                                resolve_nested_namespaces(nested, dependency_exports),
+                            );
+                        }
+                        namespaces.insert(local, dependency_exports.clone());
+                        continue;
+                    }
                     // The external-package equivalent of the local-module
                     // check just above: `requested` doesn't name a real
                     // function/class/interface at all here, it's this
