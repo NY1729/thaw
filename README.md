@@ -26,6 +26,10 @@ target/release/thaw build app.ts -o app
 ./app
 ```
 
+The compiler may be invoked from outside the source workspace; runtime support
+libraries are built through Thaw's own workspace manifest rather than the
+caller's current directory.
+
 On Linux, `--static` requests a completely static ELF and verifies that the
 result has no dynamic interpreter:
 
@@ -3170,8 +3174,13 @@ functions emit every overload and select the best candidate per call by arity
 and argument shape, rather than declaration order. Typed non-callable package
 values are captured once after module initialization, covering uuid-style
 string constants and mime-style pre-created singleton objects. Fallback class
-method signatures also contextually type callback arguments; type-only package
-imports such as Hono's `Context` are erased to a local `JsValue` type binding.
+method signatures also contextually type direct callback arguments and callbacks
+nested in object-literal arguments when the declaration resolves to a native
+object shape; type-only package imports such as Hono's `Context` are erased to a
+local `JsValue` type binding. Dynamic callback-or-configuration unions inside
+generic object parameters remain unsupported (for example Hapi's
+`ServerRoute.handler`) because nested function values do not yet have a generic
+JSON object ABI.
 
 ## Testing
 

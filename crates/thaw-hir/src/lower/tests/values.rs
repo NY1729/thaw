@@ -942,6 +942,25 @@ fn coerces_object_literal_argument_to_the_parameter_shape() {
 }
 
 #[test]
+fn contextually_types_a_callback_inside_an_object_argument() {
+    let program = lower(
+        r#"function register(options: { handler: (request: { path: string }) => string }): void {}
+        function main(): void {
+            register({ handler: (request) => request.path });
+        }"#,
+    );
+    let HirStmt::Expr(HirExpr::Call(_, arguments)) = &program.functions[1].body[0] else {
+        panic!("expected register call");
+    };
+    assert!(matches!(
+        arguments.as_slice(),
+        [HirExpr::ObjectLit(fields)]
+            if matches!(&fields[0].1, HirExpr::Lambda(_, params, HirType::Str, _)
+                if params[0].ty == HirType::Object(vec![("path".into(), HirType::Str)]))
+    ));
+}
+
+#[test]
 fn lowers_json_type_annotation() {
     let program = lower(
         r#"function wrap(args: Json): Json {
@@ -1020,4 +1039,3 @@ fn lowers_calls_through_function_typed_object_properties() {
                 if matches!(callee.as_ref(), HirExpr::PropAccess(_, _, field) if field == "apply"))
     ));
 }
-
