@@ -5571,6 +5571,7 @@ fn selects_fallback_function_overloads_by_arity_range() {
                 0,
                 1,
                 vec![thaw_hir::HirType::F64],
+                None,
             ),
             (
                 "makeId".into(),
@@ -5578,6 +5579,7 @@ fn selects_fallback_function_overloads_by_arity_range() {
                 2,
                 2,
                 vec![thaw_hir::HirType::F64, thaw_hir::HirType::F64],
+                None,
             ),
         ],
     )
@@ -5606,6 +5608,7 @@ fn selects_fallback_function_overloads_with_the_same_arity_by_argument_type() {
                 1,
                 1,
                 vec![thaw_hir::HirType::F64],
+                None,
             ),
             (
                 "describe".into(),
@@ -5613,6 +5616,7 @@ fn selects_fallback_function_overloads_with_the_same_arity_by_argument_type() {
                 1,
                 1,
                 vec![thaw_hir::HirType::Str],
+                None,
             ),
         ],
     )

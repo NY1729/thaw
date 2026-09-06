@@ -1481,6 +1481,87 @@ fn rewrite_external_class_methods_with_static(
             .is_some_and(|(_, nested)| update_object_property_type(nested, remaining, value))
     }
 
+    fn annotate_generic_callback_arguments(
+        call: &CallExpr,
+        generic: &thaw_bridge::DtsGenericFunction,
+        variables: &std::collections::HashMap<String, thaw_hir::HirType>,
+        functions: &std::collections::HashMap<String, SourceFunctionResult>,
+        named: &std::collections::HashMap<String, thaw_hir::HirType>,
+        edits: &mut Vec<(u32, u32, String)>,
+    ) {
+        fn type_text(ty: &thaw_hir::HirType) -> Option<String> {
+            match ty {
+                thaw_hir::HirType::F64 => Some("number".into()),
+                thaw_hir::HirType::Str => Some("string".into()),
+                thaw_hir::HirType::Bool => Some("boolean".into()),
+                thaw_hir::HirType::Json => Some("Json".into()),
+                thaw_hir::HirType::Array(inner) => Some(format!("{}[]", type_text(inner)?)),
+                _ => None,
+            }
+        }
+        let mut substitutions = std::collections::HashMap::new();
+        for (argument, declared) in call.args.iter().zip(&generic.contextual_param_types) {
+            let Some(actual) = source_expr_type(argument.expr.as_ref(), variables, functions, named)
+            else {
+                continue;
+            };
+            for (parameter, _) in &generic.type_params {
+                if declared == parameter {
+                    if let Some(actual) = type_text(&actual) {
+                        substitutions.insert(parameter.clone(), actual);
+                    }
+                } else if declared == &format!("{parameter}[]") {
+                    if let thaw_hir::HirType::Array(element) = &actual {
+                        if let Some(element) = type_text(element) {
+                            substitutions.insert(parameter.clone(), element);
+                        }
+                    }
+                }
+            }
+        }
+        for (argument, contextual) in call.args.iter().zip(&generic.contextual_param_types) {
+            let Expr::Arrow(arrow) = argument.expr.as_ref() else {
+                continue;
+            };
+            let Some(end) = contextual.find(") =>") else {
+                continue;
+            };
+            let Some(parameters) = contextual.strip_prefix('(').map(|text| &text[..end - 1]) else {
+                continue;
+            };
+            for (parameter, declared) in arrow.params.iter().zip(parameters.split(',')) {
+                let Pat::Ident(binding) = parameter else {
+                    continue;
+                };
+                if binding.type_ann.is_some() {
+                    continue;
+                }
+                let Some((_, declared)) = declared.split_once(':') else {
+                    continue;
+                };
+                let mut rendered = declared.trim().to_string();
+                for (name, replacement) in &substitutions {
+                    if rendered == *name {
+                        rendered = replacement.clone();
+                    } else if rendered == format!("{name}[]") {
+                        rendered = format!("{replacement}[]");
+                    }
+                }
+                if matches!(rendered.as_str(), "number" | "string" | "boolean" | "Json")
+                    || rendered.ends_with("[]")
+                {
+                    let span = binding.id.span;
+                    if arrow.params.len() == 1 && arrow.span.lo == span.lo {
+                        edits.push((span.lo.0, span.lo.0, "(".into()));
+                        edits.push((span.hi.0, span.hi.0, format!(": {rendered})")));
+                    } else {
+                        edits.push((span.hi.0, span.hi.0, format!(": {rendered}")));
+                    }
+                }
+            }
+        }
+    }
+
     struct Finder<'a> {
         classes: &'a [ClassConstructorRewrite],
         factories: &'a [FactoryClassRewrite],
@@ -1996,7 +2077,7 @@ fn rewrite_external_class_methods_with_static(
                     let selected = self
                         .functions
                         .iter()
-                        .filter(|(candidate_name, _, min_arity, max_arity, _)| {
+                        .filter(|(candidate_name, _, min_arity, max_arity, _, _)| {
                             candidate_name == name.sym.as_str()
                                 && call.args.len() >= *min_arity
                                 && call.args.len() <= *max_arity
@@ -2023,7 +2104,17 @@ fn rewrite_external_class_methods_with_static(
                             }
                         })
                         .map(|(_, candidate)| candidate);
-                    if let Some((_, symbol, _, _, _)) = selected {
+                    if let Some((_, symbol, _, _, _, generic)) = selected {
+                        if let Some(generic) = generic {
+                            annotate_generic_callback_arguments(
+                                call,
+                                generic,
+                                &self.value_types,
+                                self.function_types,
+                                self.named_types,
+                                &mut self.edits,
+                            );
+                        }
                         let span = callee.span();
                         self.edits.push((span.lo.0, span.hi.0, symbol.clone()));
                     }

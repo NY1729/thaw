@@ -49,6 +49,9 @@ pub struct DtsFunction {
 pub struct DtsGenericFunction {
     pub type_params: Vec<(String, Option<String>)>,
     pub param_types: Vec<String>,
+    /// Parameter spellings with local generic callback aliases expanded.
+    /// Kept separate so existing fallback ABI rendering remains unchanged.
+    pub contextual_param_types: Vec<String>,
     /// The declared return type, rendered the same crude way
     /// `param_types` are (`describe_ts_type`) -- used to recognize the
     /// specific, safe-to-preserve shape of a type parameter that appears
