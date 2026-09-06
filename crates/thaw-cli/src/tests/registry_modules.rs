@@ -9866,6 +9866,7 @@ fn an_optional_callback_parameter_omitted_at_the_call_site_does_not_crash() {
         r#"import { filter } from "filter-kit";
 function main(): void {
     console.log(filter("hello").length);
+    console.log(filter("hello", (char: string) => char === "l").length);
 }
 "#,
     )
@@ -9878,7 +9879,7 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n2\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
