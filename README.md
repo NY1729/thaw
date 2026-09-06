@@ -63,6 +63,22 @@ Then open `http://127.0.0.1:3000`. The imported frontend module, inline browser
 JavaScript, and JSON API are embedded in the single executable; no source or
 asset files are needed at runtime.
 
+For a React/Vite frontend, install its dependencies once and let Thaw run the
+existing Vite build before embedding `dist/`:
+
+```sh
+npm install --prefix examples/react-vite-fullstack/frontend
+target/release/thaw build examples/react-vite-fullstack/server.ts \
+  --vite examples/react-vite-fullstack/frontend --static -o react-vite-server
+PORT=3000 ./react-vite-server
+```
+
+The backend can serve generated assets with `thawHasAsset(path)`,
+`thawAsset(path)`, and `thawAssetContentType(path)`. Use `--assets <directory>`
+instead when another frontend tool already produced the files or Vite uses a
+custom `outDir`. Asset paths are rooted at `/`, and `/index.html` is also
+available as `/`.
+
 Compile the Lambda example:
 
 ```sh

@@ -54,6 +54,101 @@ fn registry_import_meta_resolutions(
     resolutions
 }
 
+fn generate_asset_shim(directory: &Path) -> Result<String, String> {
+    if !directory.is_dir() {
+        return Err(format!(
+            "--assets expects a directory, got `{}`",
+            directory.display()
+        ));
+    }
+
+    fn collect(root: &Path, directory: &Path, files: &mut Vec<(String, String)>) -> Result<(), String> {
+        let entries = std::fs::read_dir(directory)
+            .map_err(|error| format!("failed to read asset directory `{}`: {error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!("failed to read asset entry in `{}`: {error}", directory.display())
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                format!("failed to inspect asset `{}`: {error}", path.display())
+            })?;
+            if file_type.is_dir() {
+                collect(root, &path, files)?;
+            } else if file_type.is_file() {
+                let relative = path.strip_prefix(root).unwrap();
+                let url = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
+                let bytes = std::fs::read(&path)
+                    .map_err(|error| format!("failed to read asset `{}`: {error}", path.display()))?;
+                let content = String::from_utf8(bytes).map_err(|_| {
+                    format!(
+                        "asset `{}` is not UTF-8; binary asset embedding is not implemented yet",
+                        path.display()
+                    )
+                })?;
+                files.push((url, content));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect(directory, directory, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    if files.is_empty() {
+        return Err(format!("asset directory `{}` is empty", directory.display()));
+    }
+
+    fn mime(path: &str) -> &'static str {
+        match Path::new(path).extension().and_then(|extension| extension.to_str()) {
+            Some("html") => "text/html; charset=utf-8",
+            Some("css") => "text/css; charset=utf-8",
+            Some("js" | "mjs") => "text/javascript; charset=utf-8",
+            Some("json" | "map") => "application/json; charset=utf-8",
+            Some("svg") => "image/svg+xml",
+            Some("txt") => "text/plain; charset=utf-8",
+            _ => "application/octet-stream",
+        }
+    }
+
+    let mut routes = Vec::new();
+    for (path, content) in files {
+        let content_type = mime(&path);
+        if path == "/index.html" {
+            routes.push(("/".to_string(), content.clone(), content_type));
+        }
+        routes.push((path, content, content_type));
+    }
+
+    let mut source = String::from(
+        "function thawHasAsset(path: string): boolean {\n",
+    );
+    for (path, _, _) in &routes {
+        source.push_str(&format!(
+            "if (path === {}) {{ return true; }}\n",
+            serde_json::to_string(path).unwrap()
+        ));
+    }
+    source.push_str("return false;\n}\nfunction thawAsset(path: string): string {\n");
+    for (path, content, _) in &routes {
+        source.push_str(&format!(
+            "if (path === {}) {{ return {}; }}\n",
+            serde_json::to_string(path).unwrap(),
+            serde_json::to_string(content).unwrap()
+        ));
+    }
+    source.push_str("return \"\";\n}\nfunction thawAssetContentType(path: string): string {\n");
+    for (path, _, content_type) in &routes {
+        source.push_str(&format!(
+            "if (path === {}) {{ return {}; }}\n",
+            serde_json::to_string(path).unwrap(),
+            serde_json::to_string(content_type).unwrap()
+        ));
+    }
+    source.push_str("return \"application/octet-stream\";\n}\n");
+    Ok(source)
+}
+
 // Keep the build inputs explicit: the slices come from separate CLI/registry
 // sources and are independently varied by integration tests.
 #[allow(clippy::too_many_arguments)]
@@ -66,6 +161,31 @@ fn build_with_link_mode(
     registry_dir: &Path,
     use_packages: &[String],
     static_link: bool,
+) -> Result<(), String> {
+    build_with_assets(
+        input,
+        output,
+        extra_links,
+        bridge_dts,
+        ffi_metadata,
+        registry_dir,
+        use_packages,
+        static_link,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_with_assets(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
+    static_link: bool,
+    assets: Option<&Path>,
 ) -> Result<(), String> {
     if static_link {
         ensure_static_system_libraries()?;
@@ -131,6 +251,9 @@ fn build_with_link_mode(
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
     let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
+    if let Some(directory) = assets {
+        shim_source.push_str(&generate_asset_shim(directory)?);
+    }
     if static_link && shim_source.contains("loadNativeAddonEmbedded(") {
         return Err(
             "--static cannot include an N-API addon: `.node` modules require the dynamic loader; use the package's JavaScript fallback or a static `native.a` backend"
