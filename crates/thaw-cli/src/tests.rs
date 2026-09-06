@@ -16,6 +16,20 @@ include!("tests/ffi_metadata.rs");
 include!("tests/native_addons.rs");
 
 #[test]
+fn vite_assets_are_embedded_with_routes_and_content_types() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-assets-{}", std::process::id()));
+    std::fs::create_dir_all(directory.join("assets")).unwrap();
+    std::fs::write(directory.join("index.html"), "<main>hello</main>").unwrap();
+    std::fs::write(directory.join("assets/app.js"), "console.log('hello')").unwrap();
+
+    let shim = generate_asset_shim(&directory).unwrap();
+    assert!(shim.contains("if (path === \"/\") { return \"text/html; charset=utf-8\"; }"));
+    assert!(shim.contains("if (path === \"/assets/app.js\") { return \"console.log('hello')\"; }"));
+
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn adapts_typed_dynamic_callable_results_to_natural_calls() {
     let function = thaw_bridge::DtsFunction {
         name: "customAlphabet".into(),
