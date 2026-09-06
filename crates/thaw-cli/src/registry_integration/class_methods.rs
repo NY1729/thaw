@@ -1488,7 +1488,9 @@ fn rewrite_external_class_methods_with_static(
         functions: &std::collections::HashMap<String, SourceFunctionResult>,
         named: &std::collections::HashMap<String, thaw_hir::HirType>,
         edits: &mut Vec<(u32, u32, String)>,
-    ) {
+    ) -> bool {
+        let edit_count = edits.len();
+        let mut complete = true;
         fn type_text(ty: &thaw_hir::HirType) -> Option<String> {
             match ty {
                 thaw_hir::HirType::F64 => Some("number".into()),
@@ -1511,6 +1513,14 @@ fn rewrite_external_class_methods_with_static(
                         substitutions.insert(parameter.clone(), actual);
                     }
                 } else if declared == &format!("{parameter}[]") {
+                    if let thaw_hir::HirType::Array(element) = &actual {
+                        if let Some(element) = type_text(element) {
+                            substitutions.insert(parameter.clone(), element);
+                        }
+                    }
+                } else if declared.contains(&format!("<{parameter}>")) {
+                    // ponytail: generic wrappers are treated as collections when the
+                    // actual value is an array; expand alias bodies if this becomes ambiguous.
                     if let thaw_hir::HirType::Array(element) = &actual {
                         if let Some(element) = type_text(element) {
                             substitutions.insert(parameter.clone(), element);
@@ -1545,6 +1555,10 @@ fn rewrite_external_class_methods_with_static(
                         rendered = replacement.clone();
                     } else if rendered == format!("{name}[]") {
                         rendered = format!("{replacement}[]");
+                    } else if rendered == format!("{name}[number]") {
+                        if let Some(element) = replacement.strip_suffix("[]") {
+                            rendered = element.into();
+                        }
                     }
                 }
                 if matches!(rendered.as_str(), "number" | "string" | "boolean" | "Json")
@@ -1557,9 +1571,15 @@ fn rewrite_external_class_methods_with_static(
                     } else {
                         edits.push((span.hi.0, span.hi.0, format!(": {rendered}")));
                     }
+                } else {
+                    complete = false;
                 }
             }
         }
+        if !complete {
+            edits.truncate(edit_count);
+        }
+        complete && edits.len() != edit_count
     }
 
     struct Finder<'a> {
@@ -2105,7 +2125,7 @@ fn rewrite_external_class_methods_with_static(
                         })
                         .map(|(_, candidate)| candidate);
                     if let Some((_, symbol, _, _, _, generic)) = selected {
-                        if let Some(generic) = generic {
+                        let annotated = generic.as_ref().is_some_and(|generic| {
                             annotate_generic_callback_arguments(
                                 call,
                                 generic,
@@ -2113,7 +2133,31 @@ fn rewrite_external_class_methods_with_static(
                                 self.function_types,
                                 self.named_types,
                                 &mut self.edits,
-                            );
+                            )
+                        });
+                        if !annotated {
+                            for (candidate_name, _, min_arity, max_arity, _, generic) in
+                                self.functions.iter()
+                            {
+                                if candidate_name != name.sym.as_str()
+                                    || call.args.len() < *min_arity
+                                    || call.args.len() > *max_arity
+                                {
+                                    continue;
+                                }
+                                if generic.as_ref().is_some_and(|generic| {
+                                    annotate_generic_callback_arguments(
+                                        call,
+                                        generic,
+                                        &self.value_types,
+                                        self.function_types,
+                                        self.named_types,
+                                        &mut self.edits,
+                                    )
+                                }) {
+                                    break;
+                                }
+                            }
                         }
                         let span = callee.span();
                         self.edits.push((span.lo.0, span.hi.0, symbol.clone()));
