@@ -21306,7 +21306,14 @@ type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::Hi
 /// each real call site by arity and, on a tie, `overload_type_score`
 /// against the call's actual argument types -- the same mechanism
 /// already used for external class method/constructor overloads.
-type FallbackFunctionOverloadRewrite = (String, String, usize, usize, Vec<thaw_hir::HirType>);
+type FallbackFunctionOverloadRewrite = (
+    String,
+    String,
+    usize,
+    usize,
+    Vec<thaw_hir::HirType>,
+    Option<thaw_bridge::DtsGenericFunction>,
+);
 /// `(class, property, helper)` for an instance getter.
 type ClassGetterRewrite = (String, String, String);
 /// `(class, property, helper, value_type)` for an instance setter.
@@ -22550,7 +22557,24 @@ fn generate_registry_shims(
                             bare_aliased.insert(function.name.clone());
                         }
                     }
-                    typed_targets.insert((pkg.name.clone(), function.name.clone()), symbol);
+                    typed_targets.insert(
+                        (pkg.name.clone(), function.name.clone()),
+                        symbol.clone(),
+                    );
+                    if !overloaded_names_for_argument_shape_dispatch.contains(&function.name.as_str())
+                        && function.generic.as_ref().is_some_and(|generic| {
+                            generic.contextual_param_types.iter().any(|ty| ty.starts_with('('))
+                        })
+                    {
+                        fallback_function_overload_rewrites.push((
+                            function.name.clone(),
+                            symbol,
+                            function.required_params,
+                            function.params.len(),
+                            dts_function_param_hir_types(function),
+                            function.generic.clone(),
+                        ));
+                    }
                     if jit_operation.is_some() {
                         jit_targets.insert((pkg.name.clone(), function.name.clone()));
                     }
@@ -22610,6 +22634,7 @@ fn generate_registry_shims(
                     function.required_params,
                     function.params.len(),
                     dts_function_param_hir_types(function),
+                    function.generic.clone(),
                 ));
             }
         }

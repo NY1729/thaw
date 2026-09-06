@@ -741,6 +741,19 @@ fn preserves_generic_function_syntax_for_call_site_specialization() {
 }
 
 #[test]
+fn expands_generic_callback_aliases_for_call_site_specialization() {
+    let functions = parse_dts(
+        "type Iterator<T, Result> = (value: T, index: number, values: T[]) => Result;\nexport declare function map<T, Result>(values: T[], iterator: Iterator<T, Result>): Result[];",
+    )
+    .unwrap();
+    let generic = functions[0].generic.as_ref().unwrap();
+    assert_eq!(
+        generic.contextual_param_types,
+        vec!["T[]", "(value: T, index: number, values: T[]) => Result"]
+    );
+}
+
+#[test]
 fn classifies_primitive_constrained_generic_function_as_fast_path() {
     let funcs =
         parse_dts("export declare function nanoid<Type extends string>(size?: number): Type;")

@@ -10409,6 +10409,39 @@ function main(): void {
 }
 
 #[test]
+fn generic_fallback_callback_alias_is_contextually_typed() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-callback-alias-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("callback-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "type Iterator<T, R> = (value: T, index: number, values: T[]) => R;\nexport declare function map<T, R>(values: T[], iterator: Iterator<T, R>): R[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { map: function(values, iterator) { return values.map(iterator); } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { map } from 'callback-kit'; function main(): void { map([1, 2, 3], value => value * 2); console.log('ok'); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &["callback-kit".into()]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn fallback_method_signature_contextually_types_callbacks_and_type_only_imports() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-contextual-method-callback-{}",
