@@ -20635,19 +20635,7 @@ fn typed_dynamic_bare_alias(
         .iter()
         .map(|(name, ty)| {
             let rendered = match ty {
-                thaw_bridge::DtsType::Native(
-                    thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..),
-                ) if !napi => "Json".to_string(),
-                thaw_bridge::DtsType::Native(
-                    thaw_hir::HirType::Optional(payload)
-                    | thaw_hir::HirType::Nullable(payload)
-                    | thaw_hir::HirType::Nullish(payload),
-                ) if !napi
-                    && matches!(
-                        payload.as_ref(),
-                        thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
-                    ) =>
-                {
+                thaw_bridge::DtsType::Native(ty) if !napi && contains_callable_type(ty) => {
                     "Json".to_string()
                 }
                 thaw_bridge::DtsType::Native(ty) => render_dynamic_type(ty)?,
@@ -20765,6 +20753,17 @@ fn typed_dynamic_bare_alias(
     Some(format!(
         "function {bare_name}({rendered_params}): {ret} {{\n    {call}\n}}\n"
     ))
+}
+
+fn contains_callable_type(ty: &thaw_hir::HirType) -> bool {
+    match ty {
+        thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..) => true,
+        thaw_hir::HirType::Optional(inner)
+        | thaw_hir::HirType::Nullable(inner)
+        | thaw_hir::HirType::Nullish(inner) => contains_callable_type(inner),
+        thaw_hir::HirType::Union(members) => members.iter().any(contains_callable_type),
+        _ => false,
+    }
 }
 
 fn typed_dynamic_declaration(
@@ -21028,9 +21027,9 @@ fn typed_dynamic_declaration(
             // Real example: drizzle-orm's `sqlite-proxy` driver,
             // `drizzle(callback: (sql, params, method) => Promise<{rows}>)`
             // -- a plain top-level Fallback function, not a method call.
-            thaw_bridge::DtsType::Native(
-                thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..),
-            ) if !napi => Some((name.clone(), "Json".to_string())),
+            thaw_bridge::DtsType::Native(ty) if !napi && contains_callable_type(ty) => {
+                Some((name.clone(), "Json".to_string()))
+            }
             // The identical restriction, for a callback parameter that's
             // also *optional* (`predicate?: (value: string, index:
             // number, s: string) => boolean` -- real example: lodash's
@@ -21046,18 +21045,6 @@ fn typed_dynamic_declaration(
             // Function(...)". Optionality itself needs no special
             // handling once widened -- a JSON value already represents
             // "omitted" naturally, the same as the bare case.
-            thaw_bridge::DtsType::Native(
-                thaw_hir::HirType::Optional(payload)
-                | thaw_hir::HirType::Nullable(payload)
-                | thaw_hir::HirType::Nullish(payload),
-            ) if !napi
-                && matches!(
-                    payload.as_ref(),
-                    thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
-                ) =>
-            {
-                Some((name.clone(), "Json".to_string()))
-            }
             thaw_bridge::DtsType::Native(ty) => {
                 render_dynamic_type(ty).map(|ty| (name.clone(), ty))
             }
@@ -22561,7 +22548,9 @@ fn generate_registry_shims(
                         (pkg.name.clone(), function.name.clone()),
                         symbol.clone(),
                     );
-                    if !overloaded_names_for_argument_shape_dispatch.contains(&function.name.as_str())
+                    if observed_identifier_arities.contains_key(&function.name)
+                        && !overloaded_names_for_argument_shape_dispatch
+                            .contains(&function.name.as_str())
                         && function.generic.as_ref().is_some_and(|generic| {
                             generic.contextual_param_types.iter().any(|ty| ty.starts_with('('))
                         })

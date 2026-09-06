@@ -57,6 +57,38 @@ fn adapts_typed_dynamic_callable_results_to_natural_calls() {
 }
 
 #[test]
+fn widens_callable_union_parameters_at_the_quickjs_boundary() {
+    let function = thaw_bridge::DtsFunction {
+        name: "replace".into(),
+        generic: None,
+        params: vec![(
+            "replacement".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Union(vec![
+                thaw_hir::HirType::CallableFunction(
+                    vec![thaw_hir::HirType::Str],
+                    thaw_hir::HirOptionalMask::from_bools(&[false]),
+                    Some(Box::new(thaw_hir::HirType::Json)),
+                    Box::new(thaw_hir::HirType::Str),
+                ),
+                thaw_hir::HirType::Str,
+            ])),
+        )],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+    };
+    let (_, declaration) = typed_dynamic_declaration(
+        "text-kit",
+        &function,
+        false,
+        &std::collections::BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+    assert!(declaration.contains("replacement: Json"));
+}
+
+#[test]
 fn quickjs_manifest_detection_tracks_dynamic_host_calls() {
     assert!(!source_uses_quickjs("function main() { return 42; }"));
     assert!(source_uses_quickjs(

@@ -754,6 +754,22 @@ fn expands_generic_callback_aliases_for_call_site_specialization() {
 }
 
 #[test]
+fn preserves_indexed_access_inside_generic_callback_aliases() {
+    let functions = parse_dts(
+        "type TupleIterator<T extends readonly unknown[], Result> = (value: T[number], index: number) => Result;\nexport declare function map<T extends readonly unknown[], Result>(values: T, iterator: TupleIterator<T, Result>): Result[];",
+    )
+    .unwrap();
+    assert_eq!(
+        functions[0]
+            .generic
+            .as_ref()
+            .unwrap()
+            .contextual_param_types,
+        vec!["T", "(value: T[number], index: number) => Result"]
+    );
+}
+
+#[test]
 fn classifies_primitive_constrained_generic_function_as_fast_path() {
     let funcs =
         parse_dts("export declare function nanoid<Type extends string>(size?: number): Type;")
