@@ -115,6 +115,8 @@
     queueMicrotask(() => callback(...args));
   };
   if (typeof globalThis.process === 'undefined') globalThis.process = {};
+  const hostInfo = typeof globalThis.__thaw_os_info === 'function'
+    ? JSON.parse(globalThis.__thaw_os_info()) : {};
   const processStart = Date.now();
   let processCwd = typeof globalThis.process.cwd === 'function'
     ? globalThis.process.cwd() : '/';
@@ -157,7 +159,8 @@
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || [],
     env: globalThis.process.env || {},
-    platform: globalThis.process.platform || 'linux',
+    platform: globalThis.process.platform || hostInfo.platform || 'linux',
+    arch: globalThis.process.arch || hostInfo.arch || '',
     version: globalThis.process.version || '',
     execPath: globalThis.process.execPath || '/usr/bin/node',
     config: globalThis.process.config || { variables: {} },
