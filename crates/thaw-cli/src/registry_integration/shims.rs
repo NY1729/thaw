@@ -22841,10 +22841,15 @@ fn generate_registry_shims(
                 .values
                 .iter()
                 .filter_map(|value| {
-                    let thaw_bridge::DtsType::Native(ty) = &value.ty else {
-                        return None;
+                    let dynamic;
+                    let ty = match &value.ty {
+                        thaw_bridge::DtsType::Native(ty) => ty,
+                        thaw_bridge::DtsType::Unsupported(_) => {
+                            dynamic = thaw_hir::HirType::JsValue;
+                            &dynamic
+                        }
                     };
-                    if !matches!(ty, thaw_hir::HirType::Str | thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::JsValue) {
+                    if !matches!(ty, thaw_hir::HirType::Str | thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Json | thaw_hir::HirType::JsValue) {
                         return None;
                     }
                     let rendered = render_dynamic_type(ty)?;

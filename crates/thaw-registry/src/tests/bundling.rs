@@ -450,3 +450,42 @@ fn bundled_bindings_require_uses_the_loaded_addon() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
+
+#[test]
+fn bundled_direct_node_require_uses_the_loaded_addon() {
+    use std::ffi::{CStr, CString};
+
+    let node_modules = temp_registry("bundle_direct_addon_node_modules");
+    let package = node_modules.join("pkg");
+    let native = node_modules.join("@vendor/native");
+    fs::create_dir_all(&package).unwrap();
+    fs::create_dir_all(&native).unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = require('@vendor/native/addon.node');",
+    )
+    .unwrap();
+    fs::write(
+        native.join("package.json"),
+        r#"{"name":"@vendor/native","main":"addon.node"}"#,
+    )
+    .unwrap();
+    fs::write(native.join("addon.node"), b"not JavaScript").unwrap();
+
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &package, "index.js").unwrap();
+    assert_eq!(file_count, 1);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.require.addon = function() {{ return {{ answer: 42 }}; }}; {bundle} globalThis.readAddon = function() {{ return module.exports.answer; }};"
+    );
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("readAddon").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    let _ = fs::remove_dir_all(node_modules);
+}

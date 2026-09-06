@@ -10778,3 +10778,24 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "/jit\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+#[test]
+fn imports_node_builtin_object_values() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-node-object-values-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { Buffer } from "node:buffer";
+           function main(): void { console.log(Number(Buffer.byteLength("thaw"))); }"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir, &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "4\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
