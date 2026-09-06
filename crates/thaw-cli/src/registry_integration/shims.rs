@@ -21391,7 +21391,8 @@ type StaticClassMethodRewrite = (
 );
 
 fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: usize) -> bool {
-    matches!(
+    matches!(ty, thaw_bridge::DtsType::Unsupported(reason) if reason == "`any` is not supported")
+        || matches!(
         ty,
         thaw_bridge::DtsType::Native(
             thaw_hir::HirType::F64
@@ -21644,14 +21645,7 @@ fn generate_napi_class_method_overloads(
                     && candidate.kind == thaw_bridge::DtsMethodKind::Method
             })
             .filter(|candidate| {
-                candidate.params.iter().enumerate().all(|(index, (_, ty))| {
-                    !napi
-                        || supported_class_method_param(ty, index, candidate.params.len())
-                }) && candidate
-                    .rest_param
-                    .as_ref()
-                    .is_none_or(|(_, ty)| supported_class_method_param(ty, 0, 1))
-                    && (!napi || supported_class_method_return(&candidate.ret))
+                !napi || supported_class_method_return(&candidate.ret)
             })
             .collect::<Vec<_>>();
         for (overload_index, overload) in overloads.into_iter().enumerate() {
@@ -21682,21 +21676,44 @@ fn generate_napi_class_method_overloads(
             };
             for argument_count in argument_counts {
                 let fixed_count = argument_count.min(overload.params.len());
+                if napi
+                    && (!overload.params[..fixed_count]
+                        .iter()
+                        .enumerate()
+                        .all(|(index, (_, ty))| {
+                            supported_class_method_param(ty, index, fixed_count)
+                        })
+                        || (argument_count > overload.params.len()
+                            && overload.rest_param.as_ref().is_none_or(|(_, ty)| {
+                                !supported_class_method_param(ty, 0, 1)
+                            })))
+                {
+                    continue;
+                }
                 let mut included_params = overload.params[..fixed_count]
                     .iter()
                     .filter_map(|(name, ty)| match ty {
                         thaw_bridge::DtsType::Native(ty) => Some((name.clone(), ty.clone())),
-                        thaw_bridge::DtsType::Unsupported(_) if !napi => {
+                        thaw_bridge::DtsType::Unsupported(reason)
+                            if !napi || reason == "`any` is not supported" =>
+                        {
                             Some((name.clone(), thaw_hir::HirType::Json))
                         }
                         thaw_bridge::DtsType::Unsupported(_) => None,
                     })
                     .collect::<Vec<_>>();
                 if argument_count > overload.params.len() {
-                    let Some((name, thaw_bridge::DtsType::Native(rest_type))) =
-                        &overload.rest_param
-                    else {
+                    let Some((name, rest_type)) = &overload.rest_param else {
                         continue;
+                    };
+                    let rest_type = match rest_type {
+                        thaw_bridge::DtsType::Native(ty) => ty.clone(),
+                        thaw_bridge::DtsType::Unsupported(reason)
+                            if !napi || reason == "`any` is not supported" =>
+                        {
+                            thaw_hir::HirType::Json
+                        }
+                        thaw_bridge::DtsType::Unsupported(_) => continue,
                     };
                     included_params.extend(
                         (overload.params.len()..argument_count)
@@ -22180,7 +22197,7 @@ fn generate_registry_shims(
         let native_lib_available = pkg.native_lib.is_some() || is_native_builtin(&pkg.name);
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
         let overload_rewrite_start = fallback_function_overload_rewrites.len();
-        if pkg.native_addon.is_some() && pkg.bundle_js.is_none() {
+        if pkg.native_addon.is_some() {
             for class in &pkg.classes {
                 let helpers = generate_napi_class_constructors(class, true, &mut shim);
                 if helpers.is_empty() {
