@@ -2262,6 +2262,7 @@ fn generates_load_script_call_per_bundle() {
     assert!(init.starts_with("function __thaw_module_init(): void {\n"));
     assert!(init.contains("function pad(s) { return s; }"));
     assert!(init.contains("function isOdd(n) { return n % 2 === 1; }"));
+    assert!(init.contains("Buffer.isBuffer(value)"));
     // Loaded in the given order.
     assert!(init.find("left-pad").unwrap() < init.find("is-odd").unwrap());
 }

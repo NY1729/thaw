@@ -328,4 +328,3 @@ thread_local! {
     static WASM_JS_IMPORTS: RefCell<(u32, HashMap<u32, WasmJsImport>)> = RefCell::new((1, HashMap::new()));
     static WASM_JS_VALUES: RefCell<(u32, HashMap<u32, WasmJsValue>)> = RefCell::new((1, HashMap::new()));
 }
-

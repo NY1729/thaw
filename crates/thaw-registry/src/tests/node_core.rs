@@ -8,7 +8,7 @@ fn process_builtin_polyfill_actually_runs_through_quickjs() {
     fs::write(
         dir.join("index.js"),
         "import process from 'process';\n\
-             export default function getPlatform() { return process.platform; }",
+             export default function getPlatform() { return [process.platform, process.arch]; }",
     )
     .unwrap();
     let empty_node_modules = temp_registry("builtin_process_node_modules");
@@ -36,7 +36,12 @@ fn process_builtin_polyfill_actually_runs_through_quickjs() {
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
-    assert_eq!(result, "\"linux\"");
+    let expected_arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        value => value,
+    };
+    assert_eq!(result, format!(r#"["linux","{expected_arch}"]"#));
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -297,7 +302,8 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 var add = util.promisify(function(a, b, callback) { queueMicrotask(function() { callback(null, a + b); }); });\n\
              \x20 var sum = await add(2, 3);\n\
              \x20 var callbackValue = await new Promise(function(resolve, reject) { util.callbackify(async function(value) { return value * 2; })(4, function(error, value) { if (error) reject(error); else resolve(value); }); });\n\
-             \x20 return [util.format('%s:%d:%j:%%', 'value', 4, { ok: true }), util.inspect(custom), Child.super_ === Base, new Child() instanceof Base, util.types.isDate(new Date()), util.types.isRegExp(/x/), util.types.isMap(new Map()), util.types.isTypedArray(new Uint8Array(1)), sum, callbackValue, util.stripVTControlCharacters('\\u001b[31mred\\u001b[0m'), util.toUSVString('x\\ud800y')];\n\
+             \x20 var debug = util.debuglog('sharp');\n\
+             \x20 return [util.format('%s:%d:%j:%%', 'value', 4, { ok: true }), util.inspect(custom), Child.super_ === Base, new Child() instanceof Base, util.types.isDate(new Date()), util.types.isRegExp(/x/), util.types.isMap(new Map()), util.types.isTypedArray(new Uint8Array(1)), sum, callbackValue, util.stripVTControlCharacters('\\u001b[31mred\\u001b[0m'), util.toUSVString('x\\ud800y'), typeof debug, debug.enabled];\n\
              };",
         )
         .unwrap();
@@ -320,7 +326,7 @@ fn util_helpers_run_through_bundled_commonjs_require() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"["value:4:{\"ok\":true}:%","custom",true,true,true,true,true,true,5,8,"red","x�y"]"#
+        r#"["value:4:{\"ok\":true}:%","custom",true,true,true,true,true,true,5,8,"red","x�y","function",false]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
