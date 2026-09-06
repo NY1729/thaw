@@ -777,6 +777,7 @@ struct Host {
     exports: HashMap<String, (usize, NapiValue)>,
     compiled_callbacks: HashMap<(usize, usize), NapiValue>,
     libraries: Vec<*mut c_void>,
+    embedded_files: Vec<std::fs::File>,
     // Addons retain `napi_env` pointers, so moving an Env during Vec growth
     // would invalidate foreign pointers. The Box provides stable addresses.
     #[allow(clippy::vec_box)]
@@ -795,6 +796,7 @@ impl Host {
             exports: HashMap::new(),
             compiled_callbacks: HashMap::new(),
             libraries: Vec::new(),
+            embedded_files: Vec::new(),
             module_envs: Vec::new(),
             pending_call_envs: Vec::new(),
             last_error: String::new(),

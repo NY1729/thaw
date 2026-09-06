@@ -7,6 +7,15 @@ pub unsafe extern "C" fn napi_module_register(module: *mut NapiModule) {
 
 type RegisterV1 = unsafe extern "C" fn(NapiEnv, NapiValue) -> NapiValue;
 
+unsafe fn dl_error() -> String {
+    let error = libc::dlerror();
+    if error.is_null() {
+        "dlopen failed".into()
+    } else {
+        CStr::from_ptr(error).to_string_lossy().into_owned()
+    }
+}
+
 unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     let path_text = path;
     let path = CString::new(path).map_err(|_| "addon path contains NUL".to_string())?;
@@ -350,6 +359,7 @@ pub extern "C" fn thaw_napi_unload_all() -> u8 {
                 libc::dlclose(handle);
             }
         }
+        host.embedded_files.clear();
         1
     })
 }
@@ -369,6 +379,59 @@ fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "linux")]
+fn load_embedded_shared_library(bytes: &[u8]) -> Result<(), String> {
+    let name = CString::new("thaw-native-dependency").unwrap();
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!("memfd_create failed: {}", std::io::Error::last_os_error()));
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.write_all(bytes)
+        .map_err(|error| format!("failed to write embedded native dependency: {error}"))?;
+    let path = CString::new(format!("/proc/self/fd/{fd}")).unwrap();
+    let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+    if handle.is_null() {
+        return Err(unsafe { dl_error() });
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.libraries.push(handle);
+        host.embedded_files.push(file);
+    });
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_embedded_shared_library(bytes: &[u8]) -> Result<(), String> {
+    let mut file = tempfile::Builder::new()
+        .prefix("thaw-native-dependency-")
+        .tempfile()
+        .map_err(|error| error.to_string())?;
+    file.write_all(bytes).map_err(|error| error.to_string())?;
+    file.flush().map_err(|error| error.to_string())?;
+    let path = CString::new(file.path().to_string_lossy().as_bytes()).unwrap();
+    let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+    if handle.is_null() {
+        return Err(unsafe { dl_error() });
+    }
+    HOST.with(|host| host.borrow_mut().libraries.push(handle));
+    Ok(())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_load_embedded_shared_hex(hex: *const c_char) -> u8 {
+    let result = text(hex).and_then(|hex| decode_hex(&hex)).and_then(|bytes| load_embedded_shared_library(&bytes));
+    match result {
+        Ok(()) => 1,
+        Err(error) => {
+            HOST.with(|host| host.borrow_mut().last_error = error.clone());
+            eprintln!("thaw-napi: {error}");
+            0
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), String> {
     let name = CString::new("thaw-native-addon").unwrap();
     let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
@@ -381,7 +444,9 @@ fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), Strin
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.write_all(bytes)
         .map_err(|error| format!("failed to write embedded addon: {error}"))?;
-    unsafe { load_impl(&format!("/proc/self/fd/{fd}"), root_name) }
+    unsafe { load_impl(&format!("/proc/self/fd/{fd}"), root_name)? };
+    HOST.with(|host| host.borrow_mut().embedded_files.push(file));
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
