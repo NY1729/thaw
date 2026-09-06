@@ -94,7 +94,10 @@ impl<'a> FnLowerer<'a> {
         match expr {
             Expr::Ident(receiver) => {
                 let name = self.resolve_binding(receiver.sym.as_ref());
-                self.scope.get(&name).cloned()
+                self.scope
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| (receiver.sym == *"crypto").then_some(HirType::JsValue))
             }
             Expr::New(construction) => construction
                 .callee
@@ -241,8 +244,24 @@ impl<'a> FnLowerer<'a> {
         let json_args = args
             .iter()
             .map(|argument| {
-                let value =
-                    self.lower_expr_with_expected_type(&argument.expr, Some(&HirType::JsValue))?;
+                let value = match argument.expr.as_ref() {
+                    Expr::Arrow(arrow) => {
+                        let expected_return = if arrow.is_async {
+                            HirType::Promise(Box::new(HirType::JsValue))
+                        } else {
+                            HirType::JsValue
+                        };
+                        self.lower_contextual_arrow(
+                            arrow,
+                            &vec![HirType::JsValue; arrow.params.len()],
+                            Some(&expected_return),
+                        )?
+                    }
+                    _ => self.lower_expr_with_expected_type(
+                        &argument.expr,
+                        Some(&HirType::JsValue),
+                    )?,
+                };
                 self.coerce_to_declared(&HirType::Json, value)
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -331,6 +350,11 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
                 vec![value],
             )
+        } else if callee_name == "Number" && ty == HirType::JsValue {
+            HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                vec![value],
+            )))
         } else if callee_name == "Number"
             && matches!(
                 ty,
@@ -1584,6 +1608,12 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
                     vec![value],
                 ));
+            }
+            if callee_name == "Number" && ty == HirType::JsValue {
+                return Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                    vec![value],
+                ))));
             }
             if callee_name == "Number"
                 && matches!(

@@ -3,22 +3,21 @@ impl<'ctx> HirCompiler<'ctx> {
     /// process entry point that the system linker/CRT expects, for
     /// ordinary (non-Lambda) programs that define `main`.
     fn emit_c_main_entry(&mut self) {
-        let user_main = self.module.get_function(USER_MAIN_SYMBOL).unwrap();
+        let user_main = self.module.get_function(USER_MAIN_SYMBOL);
 
         let (main_fn, entry) = self.new_c_main();
         let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
         self.call_module_init_if_present(cleanup);
-        let call = self
-            .builder
-            .build_call(user_main, &[], "call_thaw_user_main")
-            .unwrap();
-        if user_main.get_type().get_return_type().is_some() {
-            let completion = call
+        let completion = user_main.and_then(|user_main| {
+            self.builder
+                .build_call(user_main, &[], "call_thaw_user_main")
+                .unwrap()
                 .try_as_basic_value()
                 .basic()
-                .unwrap()
-                .into_pointer_value();
+        });
+        if let Some(completion) = completion {
+            let completion = completion.into_pointer_value();
             self.builder
                 .build_call(
                     self.module
@@ -42,6 +41,15 @@ impl<'ctx> HirCompiler<'ctx> {
                         .unwrap(),
                     &[],
                     "drain_detached_promises",
+                )
+                .unwrap();
+        }
+        if self.uses_quickjs {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_js_run_event_loop").unwrap(),
+                    &[],
+                    "run_quickjs_event_loop",
                 )
                 .unwrap();
         }

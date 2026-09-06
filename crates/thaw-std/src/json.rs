@@ -295,7 +295,13 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
     let value = unsafe { &*value };
-    value.as_bool().unwrap_or(false) as u8
+    match value {
+        Value::Null => 0,
+        Value::Bool(value) => u8::from(*value),
+        Value::Number(value) => u8::from(value.as_f64().is_some_and(|value| value != 0.0)),
+        Value::String(value) => u8::from(!value.is_empty()),
+        Value::Array(_) | Value::Object(_) => 1,
+    }
 }
 
 #[no_mangle]
@@ -992,6 +998,23 @@ mod tests {
         let stable_key = CString::new("stable").unwrap();
         let stable = thaw_json_get(value, stable_key.as_ptr());
         assert_eq!(thaw_json_as_bool(stable), 0);
+    }
+
+    #[test]
+    fn applies_javascript_truthiness_to_json_values() {
+        for (source, expected) in [
+            ("null", 0),
+            ("false", 0),
+            ("true", 1),
+            ("0", 0),
+            ("1", 1),
+            (r#"""#, 0),
+            (r#""text""#, 1),
+            ("[]", 1),
+            ("{}", 1),
+        ] {
+            assert_eq!(thaw_json_as_bool(parse(source)), expected, "{source}");
+        }
     }
 
     #[test]

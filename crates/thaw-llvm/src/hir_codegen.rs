@@ -273,12 +273,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             (true, None) => self.emit_c_main_entry(),
             (false, Some(handler)) => self.emit_lambda_entry(handler)?,
-            (false, None) => {
-                return Err(
-                    "no `function main(): void { ... }`, `function handler(event: string): string { ... }`, or `function handler(event: Json): Json { ... }` found"
-                        .to_string(),
-                )
-            }
+            (false, None) => self.emit_c_main_entry(),
         }
 
         self.module
@@ -731,7 +726,16 @@ impl<'ctx> HirCompiler<'ctx> {
             .iter()
             .enumerate()
             .map(|(index, arg)| {
-                let value = self.compile_expr(arg)?;
+                let outer = self.compiling_quickjs_dynamic_arguments;
+                if param_types
+                    .get(index)
+                    .is_some_and(|ty| ty.is_pointer_type())
+                {
+                    self.compiling_quickjs_dynamic_arguments = true;
+                }
+                let value = self.compile_expr(arg);
+                self.compiling_quickjs_dynamic_arguments = outer;
+                let value = value?;
                 let value = if value.is_int_value()
                     && param_types
                         .get(index)

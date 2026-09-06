@@ -178,7 +178,7 @@ impl<'a> FnLowerer<'a> {
             self.ret_type = declared_async_result
                 .clone()
                 .or_else(|| declared_return.clone())
-                .or_else(|| (!arrow.is_async).then(|| arrow_return_hint.clone()).flatten())
+                .or(arrow_return_hint)
                 .unwrap_or(HirType::Dynamic);
             let (body, inferred_return) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
@@ -531,10 +531,10 @@ impl<'a> FnLowerer<'a> {
             }
             if contextual.return_type.is_none() {
                 if let Some(expected) = expected_return {
-                    contextual.return_type = Some(Box::new(swc_ecma_ast::TsTypeAnn {
-                        span: swc_common::DUMMY_SP,
-                        type_ann: Box::new(hir_type_as_ts_type(expected)?),
-                    }));
+                    self.expected_arrow_return_hint = Some(match expected {
+                        HirType::Promise(resolved) => resolved.as_ref().clone(),
+                        other => other.clone(),
+                    });
                 }
             }
             return self.lower_arrow(&contextual);
@@ -718,16 +718,20 @@ impl<'a> FnLowerer<'a> {
                 }
             };
             if let Some(expected) = expected_return {
-                if inferred != *expected && inferred != HirType::Dynamic {
+                if inferred != *expected
+                    && inferred != HirType::Dynamic
+                    && *expected != HirType::JsValue
+                {
                     return Err(format!(
                         "Promise callback returns {inferred:?}, expected {expected:?}"
                     ));
                 }
             }
-            let ret = expected_return.cloned().unwrap_or(inferred);
-            if let Some(expected) = expected_return {
-                debug_assert_eq!(&ret, expected);
-            }
+            let ret = match expected_return {
+                Some(HirType::JsValue) if inferred != HirType::Dynamic => inferred,
+                Some(expected) => expected.clone(),
+                None => inferred,
+            };
             let mut referenced = BTreeSet::new();
             collect_referenced_bindings(&body, &mut referenced);
             let captures = referenced

@@ -310,12 +310,42 @@ fn finish_with_platform_events<'js>(
     }
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_js_run_event_loop() {
+    with_context(|ctx| loop {
+        if let Ok(poll) = ctx
+            .globals()
+            .get::<_, Function>("__thaw_poll_platform_events")
+        {
+            let _ = poll.call::<_, ()>(());
+        }
+        poll_napi_bridge(&ctx);
+        while ctx.execute_pending_job() {}
+        let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
+            return;
+        };
+        let Ok(delay) = next_delay.call::<_, i64>(()) else {
+            return;
+        };
+        if delay < 0 {
+            return;
+        }
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay as u64));
+        }
+        let Ok(run_due) = ctx.globals().get::<_, Function>("__thaw_run_due_timers") else {
+            return;
+        };
+        let _ = run_due.call::<_, usize>(());
+    });
+}
+
 /// Retains a global JavaScript value in the realm and returns a stable opaque
 /// handle. Zero denotes failure or a missing value.
 #[no_mangle]
 pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
     let name = to_str(name);
-    with_context(|ctx| {
+    with_active_or_context(|ctx| {
         let Ok(value) = ctx.globals().get::<_, Value>(name.as_str()) else {
             return 0;
         };
@@ -325,7 +355,7 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
-    let text = with_context(|ctx| -> Result<String, String> {
+    let text = with_active_or_context(|ctx| -> Result<String, String> {
         let value = value_for_handle(&ctx, handle)?;
         let string: Function = ctx
             .globals()
@@ -517,7 +547,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_result(
     handles: *const u8,
 ) -> ThawResult {
     let args_json = to_str(args_json);
-    let result = with_context(|ctx| {
+    let result = with_active_or_context(|ctx| {
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         let value = unsafe { invoke_mixed(ctx.clone(), target, &args_json, handles)? };
@@ -634,9 +664,11 @@ pub extern "C" fn thaw_js_register_native_callback(
     adapter: *const c_void,
     closure: *const c_void,
     jsvalue_param_mask: u64,
+    finish: *const c_void,
 ) -> ThawHandleResult {
     let adapter = adapter as usize;
     let closure = closure as usize;
+    let finish = finish as usize;
     let result: Result<u64, String> = with_context(|ctx| {
         // The Rust-backed half stays a plain `String -> String` closure --
         // no `Value<'js>` anywhere in its own signature -- deliberately:
@@ -675,15 +707,40 @@ pub extern "C" fn thaw_js_register_native_callback(
             // compiled program keeps the whole closure alive for as long
             // as this registered callback might be called).
             let adapter_fn: NativeCallbackAdapter = unsafe { std::mem::transmute(adapter) };
-            let result_json =
-                unsafe { adapter_fn(closure as *const c_void, args_json.as_ptr()) };
-            to_str(result_json)
+            let result = unsafe { adapter_fn(closure as *const c_void, args_json.as_ptr()) };
+            if finish == 0 {
+                to_str(result)
+            } else {
+                format!("promise:{:x}", result as usize)
+            }
         })
         .map_err(|error| error.to_string())?;
         let raw_name = format!("__thaw_native_callback_raw_{id}");
         ctx.globals()
             .set(raw_name.as_str(), raw)
             .map_err(|error| error.to_string())?;
+        let poll_name = format!("__thaw_native_callback_poll_{id}");
+        if finish != 0 {
+            let poll = Function::new(ctx.clone(), move |ticket: String| -> String {
+                let Some(address) = ticket.strip_prefix("promise:") else {
+                    return "error:invalid native Promise ticket".to_string();
+                };
+                let Ok(address) = usize::from_str_radix(address, 16) else {
+                    return "error:invalid native Promise address".to_string();
+                };
+                let promise = address as *const c_void;
+                let finish_fn: NativeCallbackAdapter = unsafe { std::mem::transmute(finish) };
+                let result = unsafe { finish_fn(promise, std::ptr::null()) };
+                if result.is_null() {
+                    return String::new();
+                }
+                to_str(result)
+            })
+            .map_err(|error| error.to_string())?;
+            ctx.globals()
+                .set(poll_name.as_str(), poll)
+                .map_err(|error| error.to_string())?;
+        }
         // Exposes `retain_value` to JS via a plain named function (not a
         // closure literal): `ctx`/`value` need the *same* `'js`
         // (`retain_value` requires it), and a closure's own two
@@ -727,7 +784,16 @@ pub extern "C" fn thaw_js_register_native_callback(
              }} \
              }} \
              var result = raw(JSON.stringify(args)); \
-             return JSON.parse(result, globalThis.__thaw_json_date_reviver); \
+             if (result.slice(0, 8) !== 'promise:') return JSON.parse(result, globalThis.__thaw_json_date_reviver); \
+             return new Promise(function(resolve, reject) {{ \
+             function check() {{ \
+             var settled = globalThis['{poll_name}'](result); \
+             if (!settled) return setTimeout(check, 0); \
+             if (settled.slice(0, 6) === 'error:') return reject(new Error(settled.slice(6))); \
+             try {{ resolve(JSON.parse(settled, globalThis.__thaw_json_date_reviver)); }} catch (error) {{ reject(error); }} \
+             }} \
+             check(); \
+             }}); \
              }}; \
              }})()"
         );
@@ -800,7 +866,7 @@ pub extern "C" fn thaw_js_call_handle_value_result(handle: u64, argument: u64) -
 
 #[no_mangle]
 pub extern "C" fn thaw_js_release_handle(handle: u64) -> u8 {
-    with_context(|ctx| {
+    with_active_or_context(|ctx| {
         if handle == 0 {
             return 0;
         }
@@ -1011,7 +1077,7 @@ pub extern "C" fn thaw_js_call_method_handle_result(
 
 #[no_mangle]
 pub extern "C" fn thaw_js_resolve_handle_result(handle: u64) -> ThawResult {
-    let result = with_context(|ctx| {
+    let result = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
         resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"))
     });

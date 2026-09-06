@@ -9691,8 +9691,7 @@ fn a_promise_returning_native_closure_can_be_passed_as_a_dynamic_method_call_arg
         "module.exports = { makeHolder: function() { \
          return { \
          check: function(pred) { \
-         var result = pred(5); \
-         console.log('got:' + result); \
+         Promise.resolve(pred(5)).then(function(result) { console.log('got:' + result); }); \
          } \
          }; \
          } };\n",
@@ -9748,8 +9747,7 @@ fn a_promise_void_returning_native_closure_argument_still_produces_a_null_result
         "module.exports = { makeHolder: function() { \
          return { \
          check: function(pred) { \
-         var result = pred(5); \
-         console.log('got:' + result); \
+         Promise.resolve(pred(5)).then(function(result) { console.log('got:' + result); }); \
          } \
          }; \
          } };\n",
@@ -10208,12 +10206,17 @@ function main(): void {
     console.log(appA.request('/').status);
 
     const appB: JsValue = makeRouter();
-    appB.get('/', (c: JsValue) => { return c.text('two'); });
+    appB.get('/', (c) => { return c.text('two'); });
     console.log(appB.request('/').status);
 
     const appC: JsValue = makeRouter();
-    appC.get('/', (c: JsValue) => c.text('three'));
+    appC.get('/', (c) => c.text('three'));
     console.log(appC.request('/').status);
+
+    const appD: JsValue = makeRouter();
+    appD.get('/', (c) => c.text(c.missing || 'fallback'));
+    console.log(appD.request('/').body);
+
 }
 "#,
     )
@@ -10226,7 +10229,10 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "200\n200\n200\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "200\n200\n200\n\"fallback\"\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

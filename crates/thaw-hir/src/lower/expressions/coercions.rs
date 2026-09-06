@@ -59,9 +59,17 @@ impl<'a> FnLowerer<'a> {
         rhs: HirExpr,
         is_and: bool,
     ) -> Result<HirExpr, String> {
-        let lhs_type = self.infer_expr_type(&lhs)?;
+        let mut lhs = lhs;
+        let mut lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
-        if lhs_type != rhs_type {
+        if lhs_type == HirType::JsValue && rhs_type != HirType::JsValue {
+            lhs = HirExpr::Call(
+                Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                vec![lhs],
+            );
+            lhs_type = HirType::Json;
+        }
+        if lhs_type != rhs_type && lhs_type != HirType::Json {
             return Err(format!(
                 "logical operands have incompatible types {lhs_type:?} and {rhs_type:?}"
             ));
@@ -71,7 +79,16 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(name.clone(), lhs_type.clone());
         let left = HirExpr::Var(name.clone());
         let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
-        let (then_value, else_value) = if is_and { (rhs, left) } else { (left, rhs) };
+        let left_value = if lhs_type == HirType::Json && rhs_type != HirType::Json {
+            self.coerce_to_declared(&rhs_type, left.clone())?
+        } else {
+            left
+        };
+        let (then_value, else_value) = if is_and {
+            (rhs, left_value)
+        } else {
+            (left_value, rhs)
+        };
         let result = HirExpr::Block(vec![HirStmt::If(
             condition,
             vec![HirStmt::Return(Some(then_value))],
@@ -311,6 +328,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
                 vec![value],
             )),
+            HirType::Json => Ok(HirExpr::JsonAsString(Box::new(value))),
             HirType::Object(fields) => {
                 // A class extending `Error`/`TypeError`/etc. (see
                 // `lower/module/classes.rs`) is a real object with an
@@ -531,6 +549,10 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
                 vec![value],
             )),
+            HirType::JsValue => Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                vec![value],
+            )))),
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 let string = self.coerce_primitive_to_string(value)?;
                 Ok(HirExpr::Call(

@@ -1769,6 +1769,55 @@ fn reexported_function_declarations(
             }
         }
     }
+    if declarations.is_empty() {
+        let local_name = module.body.iter().find_map(|item| {
+            let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+                return None;
+            };
+            if export.type_only || export.src.is_some() {
+                return None;
+            }
+            export.specifiers.iter().find_map(|specifier| {
+                let ExportSpecifier::Named(named) = specifier else {
+                    return None;
+                };
+                let exported = named.exported.as_ref().unwrap_or(&named.orig);
+                let ModuleExportName::Ident(exported) = exported else {
+                    return None;
+                };
+                if exported.sym.as_ref() != name {
+                    return None;
+                }
+                let ModuleExportName::Ident(original) = &named.orig else {
+                    return None;
+                };
+                Some(original.sym.to_string())
+            })
+        });
+        if let Some(local_name) = local_name {
+            for item in &module.body {
+                let ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Var(var_decl))) = item
+                else {
+                    continue;
+                };
+                for declarator in &var_decl.decls {
+                    let thaw_parser::ast::Pat::Ident(binding) = &declarator.name else {
+                        continue;
+                    };
+                    if binding.id.sym == local_name {
+                        if let Some(snippet) = callable_const_declaration_snippet(
+                            &module,
+                            &source_map,
+                            var_decl.span(),
+                            binding,
+                        )? {
+                            declarations.push(snippet);
+                        }
+                    }
+                }
+            }
+        }
+    }
     if !declarations.is_empty() {
         return Ok(declarations);
     }

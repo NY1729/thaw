@@ -41,6 +41,12 @@ impl<'a> FnLowerer<'a> {
                         "NaN" => return Ok(HirExpr::Lit(HirLit::F64(f64::NAN))),
                         "Infinity" => return Ok(HirExpr::Lit(HirLit::F64(f64::INFINITY))),
                         "undefined" => return Ok(HirExpr::Lit(HirLit::Undefined)),
+                        "crypto" => {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                                vec![HirExpr::Lit(HirLit::Str("crypto".to_string()))],
+                            ))
+                        }
                         _ => {}
                     }
                 }
@@ -531,6 +537,18 @@ impl<'a> FnLowerer<'a> {
                                 self.coerce_primitive_to_string(lhs)?,
                                 self.coerce_primitive_to_string(rhs)?,
                             ],
+                        )
+                    }
+                    other
+                        if (self.infer_expr_type(&lhs)? == HirType::JsValue
+                            && self.infer_expr_type(&rhs)? == HirType::F64)
+                            || (self.infer_expr_type(&lhs)? == HirType::F64
+                                && self.infer_expr_type(&rhs)? == HirType::JsValue) =>
+                    {
+                        HirExpr::BinOp(
+                            lower_bin_op(other)?,
+                            Box::new(self.coerce_primitive_to_number(lhs)?),
+                            Box::new(self.coerce_primitive_to_number(rhs)?),
                         )
                     }
                     other => HirExpr::BinOp(
@@ -1135,7 +1153,21 @@ impl<'a> FnLowerer<'a> {
                         Ok(HirExpr::AwaitPromise(Box::new(value), *resolved))
                     }
                 } else {
-                    Ok(HirExpr::Await(Box::new(value)))
+                    let resolves_at_dynamic_boundary = matches!(
+                        &value,
+                        HirExpr::Call(callee, _)
+                            if matches!(callee.as_ref(), HirExpr::Var(name)
+                                if matches!(name.as_str(),
+                                    "callDynamic"
+                                        | "callDynamicHandle"
+                                        | "callDynamicMethod"
+                                        | "callDynamicMethodHandle"))
+                    );
+                    if resolves_at_dynamic_boundary {
+                        Ok(value)
+                    } else {
+                        Ok(HirExpr::Await(Box::new(value)))
+                    }
                 }
             }
 
