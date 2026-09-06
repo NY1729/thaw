@@ -30,7 +30,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw build <input.ts> [-o <output>] [--static] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>]"
+                "usage: thaw build <input.ts> [-o <output>] [--static] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
             );
             std::process::exit(1);
         }
@@ -102,7 +102,7 @@ fn artifact_manifest_from_bytes(bytes: &[u8]) -> Result<serde_json::Value, Strin
 fn run_registry(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("add") => run_registry_add(&args[1..]),
-        _ => Err("usage: thaw registry add <package>[@<version>] [--registry <dir>]".to_string()),
+        _ => Err("usage: thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]".to_string()),
     }
 }
 
@@ -114,6 +114,7 @@ fn run_registry(args: &[String]) -> Result<(), String> {
 fn run_registry_add(args: &[String]) -> Result<(), String> {
     let mut package: Option<String> = None;
     let mut registry_dir = PathBuf::from("thaw_modules");
+    let mut installed_dir: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -122,6 +123,13 @@ fn run_registry_add(args: &[String]) -> Result<(), String> {
                 i += 1;
                 let value = args.get(i).ok_or("--registry requires a path argument")?;
                 registry_dir = PathBuf::from(value);
+            }
+            "--from-node-modules" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or("--from-node-modules requires a path argument")?;
+                installed_dir = Some(PathBuf::from(value));
             }
             other => {
                 if package.is_some() {
@@ -143,8 +151,13 @@ fn run_registry_add(args: &[String]) -> Result<(), String> {
     // purposes.
     let name = thaw_registry::package_name(&package);
 
-    println!("fetching `{package}`...");
-    let added = thaw_registry::add(&registry_dir, &package)?;
+    let added = if let Some(node_modules) = installed_dir {
+        println!("adding installed `{name}`...");
+        thaw_registry::add_installed(&registry_dir, &node_modules, name)?
+    } else {
+        println!("fetching `{package}`...");
+        thaw_registry::add(&registry_dir, &package)?
+    };
     let bundle_note = if added.bundled_file_count > 1 {
         format!(" (bundled {} files)", added.bundled_file_count)
     } else {

@@ -102,7 +102,10 @@ fn bundle_commonjs_package(
     record_package_version(&mut dependency_versions, root_package, root_package_dir);
 
     while let Some((key, abs_path, pkg_name, pkg_dir)) = worklist.pop() {
-        if abs_path.extension().is_some_and(|extension| extension == "node") {
+        if abs_path
+            .extension()
+            .is_some_and(|extension| extension == "node" || extension == "wasm")
+        {
             continue;
         }
         let source = fs::read_to_string(&abs_path)
@@ -247,9 +250,18 @@ fn bundle_commonjs_package(
         {
             let (resolution_spec, suffix) = split_module_suffix(&spec);
             if resolution_spec.starts_with('#') {
-                if let Some((resolved_relative, resolved_abs)) =
-                    resolve_package_import(&pkg_dir, resolution_spec)
+                if let Some((_, resolved_abs)) =
+                    resolve_package_import(&abs_path, resolution_spec)
                 {
+                    let resolved_relative = resolved_abs
+                        .strip_prefix(&pkg_dir)
+                        .ok()
+                        .and_then(|path| path.to_str())
+                        .map(normalize_path_string)
+                        .unwrap_or_default();
+                    if resolved_relative.is_empty() {
+                        continue;
+                    }
                     let resolved_key = format!("{pkg_name}/{resolved_relative}{suffix}");
                     requires.push((spec, resolved_key.clone()));
                     if !visited.contains(&resolved_key) {

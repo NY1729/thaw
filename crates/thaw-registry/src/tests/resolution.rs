@@ -1447,6 +1447,25 @@ fn resolves_a_deep_import_into_a_scoped_package() {
 }
 
 #[test]
+fn resolves_generated_declarations_from_a_dot_named_package() {
+    let root = temp_registry("generated_dot_package");
+    let node_modules = root.join("node_modules");
+    let entry = node_modules.join("@scope/client/default.d.ts");
+    let generated = node_modules.join(".generated/client/default.d.ts");
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::create_dir_all(generated.parent().unwrap()).unwrap();
+    fs::write(&entry, "export * from '.generated/client/default';").unwrap();
+    fs::write(&generated, "export declare class GeneratedClient {}").unwrap();
+
+    assert_eq!(
+        declaration_reexport_path(&entry, ".generated/client/default"),
+        Some(generated)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn ignores_dynamic_and_malformed_require_calls() {
     // `require(name)` (a variable, not a literal) and a stray
     // "require" that isn't actually a call must not confuse the scan
