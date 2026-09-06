@@ -451,6 +451,8 @@ pub struct Env {
     type_tags: HashMap<usize, NapiTypeTag>,
     property_keys: HashMap<String, NapiValue>,
     quickjs_references: HashMap<u64, NapiValue>,
+    #[cfg(feature = "quickjs")]
+    released_handles: HashSet<usize>,
     module_file_name: CString,
     last_error_info: NapiExtendedErrorInfo,
     // Box keeps the opaque C handle stable when the owning vector grows.
@@ -544,6 +546,8 @@ impl Env {
             type_tags: HashMap::new(),
             property_keys: HashMap::new(),
             quickjs_references: HashMap::new(),
+            #[cfg(feature = "quickjs")]
+            released_handles: HashSet::new(),
             module_file_name: CString::new("").unwrap(),
             last_error_info: NapiExtendedErrorInfo {
                 error_message: ptr::null(),

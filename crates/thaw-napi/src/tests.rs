@@ -10,6 +10,7 @@ static EXTERNAL_STRING_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static PLAIN_EXTERNAL_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static HELD_ASYNC_CLEANUP: AtomicUsize = AtomicUsize::new(0);
 static POSTED_FINALIZER_RAN: AtomicBool = AtomicBool::new(false);
+static RELEASED_HANDLE_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_os = "linux")]
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
@@ -62,6 +63,52 @@ unsafe extern "C" fn external_string_finalize(
 unsafe extern "C" fn plain_external_finalize(_env: NapiEnv, data: *mut c_void, hint: *mut c_void) {
     let total = *(data.cast::<usize>()) + *(hint.cast::<usize>());
     PLAIN_EXTERNAL_FINALIZED.fetch_add(total, Ordering::AcqRel);
+}
+
+unsafe extern "C" fn released_handle_finalize(
+    _env: NapiEnv,
+    _data: *mut c_void,
+    _hint: *mut c_void,
+) {
+    RELEASED_HANDLE_FINALIZED.fetch_add(1, Ordering::AcqRel);
+}
+
+#[test]
+fn released_handle_waits_for_strong_napi_reference() {
+    RELEASED_HANDLE_FINALIZED.store(0, Ordering::Release);
+    let mut env = Box::new(Env::new());
+    let env_ptr = (&mut *env) as NapiEnv;
+    let value = env.alloc(Value::Object(HashMap::new()));
+    let mut reference = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            napi_wrap(
+                env_ptr,
+                value,
+                ptr::null_mut(),
+                Some(released_handle_finalize),
+                ptr::null_mut(),
+                &mut reference,
+            ),
+            NAPI_OK
+        );
+        assert_eq!(
+            napi_reference_ref(env_ptr, reference, ptr::null_mut()),
+            NAPI_OK
+        );
+    }
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+
+    release_napi_handle(value as u64).unwrap();
+    assert_eq!(RELEASED_HANDLE_FINALIZED.load(Ordering::Acquire), 0);
+    unsafe {
+        assert_eq!(
+            napi_reference_unref(env_ptr, reference, ptr::null_mut()),
+            NAPI_OK
+        );
+    }
+    assert_eq!(RELEASED_HANDLE_FINALIZED.load(Ordering::Acquire), 1);
+    HOST.with(|host| host.borrow_mut().module_envs.clear());
 }
 
 include!("tests/objects_classes.rs");
