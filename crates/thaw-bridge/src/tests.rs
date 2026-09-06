@@ -770,6 +770,22 @@ fn preserves_indexed_access_inside_generic_callback_aliases() {
 }
 
 #[test]
+fn expands_nested_generic_callback_aliases_inside_unions() {
+    let functions = parse_dts(
+        "type Iterator<T, Result> = (value: T, index: number) => Result;\ntype Iteratee<T> = Iterator<T, boolean> | string;\nexport declare function every<T>(values: T[], iteratee: Iteratee<T>): boolean;",
+    )
+    .unwrap();
+    assert_eq!(
+        functions[0]
+            .generic
+            .as_ref()
+            .unwrap()
+            .contextual_param_types,
+        vec!["T[]", "(value: T, index: number) => boolean | string"]
+    );
+}
+
+#[test]
 fn classifies_primitive_constrained_generic_function_as_fast_path() {
     let funcs =
         parse_dts("export declare function nanoid<Type extends string>(size?: number): Type;")
