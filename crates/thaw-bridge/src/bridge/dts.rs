@@ -351,6 +351,20 @@ fn lower_dts_call_signature(
                 _ => "Json".into(),
             })
             .collect(),
+        contextual_param_types: call
+            .params
+            .iter()
+            .map(|parameter| match parameter {
+                TsFnParam::Ident(binding) => binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| {
+                        describe_generic_parameter_type(&annotation.type_ann, generic_interfaces)
+                    })
+                    .unwrap_or_else(|| "Json".into()),
+                _ => "Json".into(),
+            })
+            .collect(),
         return_type: call
             .type_ann
             .as_ref()
@@ -486,6 +500,20 @@ fn lower_dts_fn_type(
                     .type_ann
                     .as_ref()
                     .map(|annotation| describe_ts_type(&annotation.type_ann))
+                    .unwrap_or_else(|| "Json".into()),
+                _ => "Json".into(),
+            })
+            .collect(),
+        contextual_param_types: function
+            .params
+            .iter()
+            .map(|parameter| match parameter {
+                TsFnParam::Ident(binding) => binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| {
+                        describe_generic_parameter_type(&annotation.type_ann, generic_interfaces)
+                    })
                     .unwrap_or_else(|| "Json".into()),
                 _ => "Json".into(),
             })
@@ -2031,6 +2059,20 @@ fn lower_dts_function(
                 _ => "Json".into(),
             })
             .collect(),
+        contextual_param_types: func
+            .params
+            .iter()
+            .map(|parameter| match &parameter.pat {
+                Pat::Ident(binding) => binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| {
+                        describe_generic_parameter_type(&annotation.type_ann, generic_interfaces)
+                    })
+                    .unwrap_or_else(|| "Json".into()),
+                _ => "Json".into(),
+            })
+            .collect(),
         return_type: func
             .return_type
             .as_ref()
@@ -2165,6 +2207,20 @@ fn lower_dts_method_signature(
                     .type_ann
                     .as_ref()
                     .map(|annotation| describe_ts_type(&annotation.type_ann))
+                    .unwrap_or_else(|| "Json".into()),
+                _ => "Json".into(),
+            })
+            .collect(),
+        contextual_param_types: method
+            .params
+            .iter()
+            .map(|parameter| match parameter {
+                TsFnParam::Ident(binding) => binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| {
+                        describe_generic_parameter_type(&annotation.type_ann, generic_interfaces)
+                    })
                     .unwrap_or_else(|| "Json".into()),
                 _ => "Json".into(),
             })
@@ -2373,6 +2429,87 @@ fn describe_ts_type(ty: &TsType) -> String {
         TsType::TsTypePredicate(_) => "a type predicate".to_string(),
         TsType::TsImportType(_) => "an `import()` type".to_string(),
     }
+}
+
+fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>) -> String {
+    let TsType::TsTypeRef(reference) = ty else {
+        return describe_ts_type(ty);
+    };
+    let TsEntityName::Ident(name) = &reference.type_name else {
+        return describe_ts_type(ty);
+    };
+    let Some(alias) = generic.aliases.get(name.sym.as_str()) else {
+        return describe_ts_type(ty);
+    };
+    let Some(parameters) = &alias.type_params else {
+        return describe_ts_type(ty);
+    };
+    let Some(arguments) = &reference.type_params else {
+        return describe_ts_type(ty);
+    };
+    if parameters.params.len() != arguments.params.len() {
+        return describe_ts_type(ty);
+    }
+    let substitutions = parameters
+        .params
+        .iter()
+        .zip(&arguments.params)
+        .map(|(parameter, argument)| {
+            (
+                parameter.name.sym.to_string(),
+                describe_ts_type(argument),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    fn render(ty: &TsType, substitutions: &HashMap<String, String>) -> String {
+        match ty {
+            TsType::TsTypeRef(reference) => {
+                if let TsEntityName::Ident(name) = &reference.type_name {
+                    if reference.type_params.is_none() {
+                        if let Some(substitution) = substitutions.get(name.sym.as_str()) {
+                            return substitution.clone();
+                        }
+                    }
+                }
+                describe_ts_type(ty)
+            }
+            TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+                let params = function
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| match parameter {
+                        TsFnParam::Ident(parameter) => format!(
+                            "{}{}: {}",
+                            parameter.id.sym,
+                            if parameter.id.optional { "?" } else { "" },
+                            parameter
+                                .type_ann
+                                .as_ref()
+                                .map(|annotation| render(&annotation.type_ann, substitutions))
+                                .unwrap_or_else(|| "Json".into())
+                        ),
+                        _ => format!("arg{index}: Json"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "({params}) => {}",
+                    render(&function.type_ann.type_ann, substitutions)
+                )
+            }
+            TsType::TsArrayType(array) => {
+                format!("{}[]", render(&array.elem_type, substitutions))
+            }
+            TsType::TsParenthesizedType(parenthesized) => {
+                format!("({})", render(&parenthesized.type_ann, substitutions))
+            }
+            _ => describe_ts_type(ty),
+        }
+    }
+
+    render(&alias.type_ann, &substitutions)
 }
 
 /// The TS keyword spelling for a `TsKeywordTypeKind` (`number`/`string`/
