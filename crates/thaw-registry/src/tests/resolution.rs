@@ -1015,6 +1015,38 @@ fn selects_a_platform_optional_dependency_node_addon() {
 }
 
 #[test]
+fn selects_a_node_addon_behind_a_platform_dependency_js_entry() {
+    let node_modules = temp_registry("optional_wrapped_native_prebuild");
+    let (platform, arch, libc) = target_prebuild_components();
+    let dependency = if platform == "linux" && libc == "musl" {
+        format!("@example/addon-linuxmusl-{arch}")
+    } else {
+        format!("@example/addon-{platform}-{arch}")
+    };
+    let dependency_dir = node_modules.join(&dependency);
+    fs::create_dir_all(dependency_dir.join("lib")).unwrap();
+    fs::write(
+        dependency_dir.join("package.json"),
+        format!(r#"{{"name":"{dependency}","main":"index.js"}}"#),
+    )
+    .unwrap();
+    fs::write(dependency_dir.join("index.js"), "module.exports = require('./lib/addon.node')").unwrap();
+    fs::write(dependency_dir.join("lib/addon.node"), b"native bytes").unwrap();
+    let manifest = serde_json::json!({
+        "optionalDependencies": { dependency.clone(): "1.0.0" }
+    });
+
+    let selected = select_optional_dependency_addon(&node_modules, &manifest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.path, dependency_dir.join("lib/addon.node"));
+    assert_eq!(selected.platform, platform);
+    assert_eq!(selected.arch, arch);
+    assert_eq!(selected.libc, libc);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn resolves_a_packages_lock_json_when_present() {
     let registry = temp_registry("with_lock");
     let pkg_dir = registry.join("qs");

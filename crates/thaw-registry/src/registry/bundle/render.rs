@@ -62,6 +62,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20return { key: factory + spec.slice(suffixAt), factory: factory };\n\
          }\n\
          function __thaw_bundle_require(key, factoryKey) {\n\
+         \x20\x20if (String(factoryKey || key).endsWith('.node') && require.addon) return require.addon();\n\
          \x20\x20if (!(key in __thaw_bundle_cache)) {\n\
          \x20\x20\x20\x20factoryKey = factoryKey || key;\n\
          \x20\x20\x20\x20var mod = { exports: {} };\n\
