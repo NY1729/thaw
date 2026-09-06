@@ -6838,6 +6838,53 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn generic_rest_callbacks_are_inferred_and_passed_without_array_marshalling() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-rest-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("order-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function orderBy<T>(values: T[], ...iteratees: Array<(value: T) => number>): T[];\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.orderBy = function(values) { \
+         var iteratees = Array.prototype.slice.call(arguments, 1); \
+         iteratees.forEach(function(iteratee) { values.forEach(iteratee); }); \
+         return values; \
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { orderBy } from "order-kit";
+function main(): void {
+    let total: number = 0;
+    console.log(orderBy([3, 1, 2], value => { total = total + value; return value; }).length);
+    console.log(total);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n6\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A generic Fallback function (any single param/return referencing its
 /// own unconstrained type parameter classifies Fallback, since that's an
 /// unresolved reference as far as `classify` is concerned) declared as

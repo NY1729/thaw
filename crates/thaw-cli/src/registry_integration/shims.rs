@@ -20080,9 +20080,6 @@ fn typed_dynamic_rest_declaration(
     base_symbol: &str,
     observed_call_arities: &std::collections::BTreeSet<usize>,
 ) -> Option<(String, String)> {
-    if function.generic.is_some() {
-        return None;
-    }
     let fixed_params = function
         .params
         .iter()
@@ -20093,16 +20090,20 @@ fn typed_dynamic_rest_declaration(
             thaw_bridge::DtsType::Unsupported(_) => Some((name.clone(), "Json".to_string())),
         })
         .collect::<Option<Vec<_>>>()?;
-    let thaw_bridge::DtsType::Native(ret_ty) = &function.ret else {
-        return None;
+    let ret_ty = match &function.ret {
+        thaw_bridge::DtsType::Native(ty) => ty.clone(),
+        thaw_bridge::DtsType::Unsupported(_) if function.generic.is_some() => {
+            thaw_hir::HirType::JsValue
+        }
+        thaw_bridge::DtsType::Unsupported(_) => return None,
     };
     let ret = if matches!(
-        ret_ty,
+        &ret_ty,
         thaw_hir::HirType::Function(_, _) | thaw_hir::HirType::CallableFunction(..)
     ) {
         "JsValue".to_string()
     } else {
-        render_dynamic_type(ret_ty)?
+        render_dynamic_type(&ret_ty)?
     };
 
     let fixed_count = fixed_params.len();
@@ -20217,7 +20218,7 @@ fn typed_dynamic_rest_declaration(
         &fixed_params,
         function.required_params,
         napi,
-        ret_ty,
+        &ret_ty,
     )
 }
 
@@ -22557,12 +22558,37 @@ fn generate_registry_shims(
                     {
                         fallback_function_overload_rewrites.push((
                             function.name.clone(),
-                            symbol,
+                            symbol.clone(),
                             function.required_params,
                             function.params.len(),
                             dts_function_param_hir_types(function),
                             function.generic.clone(),
                         ));
+                    }
+                    if let (Some(generic), Some(arities)) = (
+                        function.generic.as_ref(),
+                        observed_identifier_arities.get(&function.name),
+                    ) {
+                        if function.rest_param.is_some()
+                            && generic.contextual_rest_param_type.is_some()
+                        {
+                            let direct = symbol.replace(
+                                "__thaw_typed_wrapper_",
+                                "__thaw_typed_",
+                            );
+                            for &arity in arities {
+                                let mut params = dts_function_param_hir_types(function);
+                                params.resize(arity, thaw_hir::HirType::Json);
+                                fallback_function_overload_rewrites.push((
+                                    function.name.clone(),
+                                    format!("{direct}__arity_{arity}"),
+                                    arity,
+                                    arity,
+                                    params,
+                                    Some(generic.clone()),
+                                ));
+                            }
+                        }
                     }
                     if jit_operation.is_some() {
                         jit_targets.insert((pkg.name.clone(), function.name.clone()));

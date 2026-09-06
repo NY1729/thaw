@@ -52,6 +52,9 @@ pub struct DtsGenericFunction {
     /// Parameter spellings with local generic callback aliases expanded.
     /// Kept separate so existing fallback ABI rendering remains unchanged.
     pub contextual_param_types: Vec<String>,
+    /// Expanded contextual type for a trailing rest parameter. Call-site
+    /// inference repeats this type for every supplied rest argument.
+    pub contextual_rest_param_type: Option<String>,
     /// The declared return type, rendered the same crude way
     /// `param_types` are (`describe_ts_type`) -- used to recognize the
     /// specific, safe-to-preserve shape of a type parameter that appears
