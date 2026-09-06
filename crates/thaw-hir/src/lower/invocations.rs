@@ -1679,7 +1679,8 @@ impl<'a> FnLowerer<'a> {
                     self.lower_expr(&argument.expr)?
                 }
             } else {
-                self.lower_expr(&argument.expr)?
+                let expected = param_types.as_ref().and_then(|params| params.get(index));
+                self.lower_expr_with_expected_type(&argument.expr, expected)?
             };
             lowered.push(value);
         }

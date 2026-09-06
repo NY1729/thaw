@@ -1086,7 +1086,7 @@ impl<'a> FnLowerer<'a> {
                 )
             }
 
-            Expr::Object(obj_lit) => self.lower_object_lit(obj_lit),
+            Expr::Object(obj_lit) => self.lower_object_lit(obj_lit, None),
 
             Expr::Member(member) => self.lower_member_read(member),
 
@@ -1571,6 +1571,9 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        if let (Expr::Object(object), Some(HirType::Object(fields))) = (expr, expected) {
+            return self.lower_object_lit(object, Some(fields));
+        }
         // `Expr::Await` is included alongside `Expr::Call` -- an awaited
         // expression's own expected type is really about the *resolved*
         // value the await produces, which for a dynamic method call

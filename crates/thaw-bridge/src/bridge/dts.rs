@@ -2968,6 +2968,7 @@ fn classify_ts_type(
                     &ref_name,
                     decl,
                     ty_ref,
+                    None,
                     interfaces,
                     generic_interfaces,
                     &mut Vec::new(),
@@ -3129,6 +3130,7 @@ fn resolve_generic_interface(
     name: &str,
     decl: &TsInterfaceDecl,
     ty_ref: &swc_ecma_ast::TsTypeRef,
+    outer_substitution: Option<&HashMap<String, HirType>>,
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
     in_progress: &mut Vec<String>,
@@ -3169,7 +3171,19 @@ fn resolve_generic_interface(
 
     let mut substitution: HashMap<String, HirType> = HashMap::new();
     for (param_name, arg) in type_param_names.into_iter().zip(type_args) {
-        match classify_ts_type(arg, interfaces, generic_interfaces) {
+        let resolved = outer_substitution.map_or_else(
+            || classify_ts_type(arg, interfaces, generic_interfaces),
+            |outer| {
+                resolve_ts_type_with_substitution(
+                    arg,
+                    outer,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )
+            },
+        );
+        match resolved {
             DtsType::Native(ty) => {
                 substitution.insert(param_name, ty);
             }
@@ -3407,6 +3421,7 @@ fn resolve_ts_type_with_substitution(
                     ref_name,
                     decl,
                     ty_ref,
+                    Some(substitution),
                     interfaces,
                     generic_interfaces,
                     in_progress,
