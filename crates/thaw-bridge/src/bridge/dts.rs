@@ -2502,6 +2502,11 @@ fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>)
             TsType::TsArrayType(array) => {
                 format!("{}[]", render(&array.elem_type, substitutions))
             }
+            TsType::TsIndexedAccessType(indexed) => format!(
+                "{}[{}]",
+                render(&indexed.obj_type, substitutions),
+                render(&indexed.index_type, substitutions)
+            ),
             TsType::TsParenthesizedType(parenthesized) => {
                 format!("({})", render(&parenthesized.type_ann, substitutions))
             }
