@@ -495,17 +495,44 @@ pub unsafe extern "C" fn napi_get_version(env: NapiEnv, out: *mut u32) -> NapiSt
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_global(env: NapiEnv, out: *mut NapiValue) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if out.is_null() {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    if env.global.is_null() {
-        env.global = env.alloc(Value::Object(HashMap::new()));
+    if env_ref.global.is_null() {
+        env_ref.global = env_ref.alloc(Value::Object(HashMap::new()));
+        let global = env_ref.global;
+        for name in [c"Date", c"RegExp"] {
+            let mut constructor = ptr::null_mut();
+            let mut prototype = ptr::null_mut();
+            if napi_create_function(
+                env,
+                name.as_ptr(),
+                NAPI_AUTO_LENGTH,
+                Some(napi_builtin_constructor),
+                ptr::null_mut(),
+                &mut constructor,
+            ) != NAPI_OK
+                || napi_create_object(env, &mut prototype) != NAPI_OK
+                || napi_set_named_property(env, constructor, c"prototype".as_ptr(), prototype)
+                    != NAPI_OK
+                || napi_set_named_property(env, global, name.as_ptr(), constructor) != NAPI_OK
+            {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            }
+        }
     }
-    *out = env.global;
+    *out = env_mut(env).unwrap().global;
     NAPI_OK
+}
+
+unsafe extern "C" fn napi_builtin_constructor(
+    _env: NapiEnv,
+    _info: NapiCallbackInfo,
+) -> NapiValue {
+    ptr::null_mut()
 }
 
 #[no_mangle]
