@@ -363,6 +363,29 @@ fn value_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Value<'js>, Stri
     Ok(value)
 }
 
+fn object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, String> {
+    let value = value_for_handle(ctx, handle)?;
+    value
+        .as_object()
+        .cloned()
+        .or_else(|| {
+            value
+                .as_function()
+                .map(|function| AsRef::<Object>::as_ref(function).clone())
+        })
+        .or_else(|| {
+            value
+                .as_proxy()
+                .map(|proxy| AsRef::<Object>::as_ref(proxy).clone())
+        })
+        .ok_or_else(|| {
+            format!(
+                "JavaScript value handle {handle} has non-object type {:?}",
+                value.type_of()
+            )
+        })
+}
+
 /// Retains `value` in the realm-global handle registry and returns a
 /// stable opaque handle, lazily creating the registry itself (`__thaw_
 /// value_handles`/`__thaw_value_handle_live`) on first use -- unlike
@@ -824,9 +847,7 @@ pub extern "C" fn thaw_js_get_property_result(
 ) -> ThawHandleResult {
     let name = to_str(name);
     let result: Result<u64, String> = with_active_or_context(|ctx| {
-        let object = value_for_handle(&ctx, handle)?
-            .into_object()
-            .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
+        let object = object_for_handle(&ctx, handle)?;
         let value = object.get(name.as_str()).map_err(|error| match error {
             rquickjs::Error::Exception => describe_exception(&ctx),
             error => error.to_string(),
@@ -853,9 +874,7 @@ pub extern "C" fn thaw_js_set_property_result(
 ) -> ThawHandleResult {
     let name = to_str(name);
     let result: Result<u64, String> = with_active_or_context(|ctx| {
-        let object = value_for_handle(&ctx, handle)?
-            .into_object()
-            .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
+        let object = object_for_handle(&ctx, handle)?;
         let value = value_for_handle(&ctx, value_handle)?;
         object
             .set(name.as_str(), value)
@@ -883,9 +902,7 @@ fn invoke_method<'js>(
     name: &str,
     args_json: &str,
 ) -> Result<Value<'js>, String> {
-    let object = value_for_handle(ctx, handle)?
-        .into_object()
-        .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
+    let object = object_for_handle(ctx, handle)?;
     let method: Function = object.get(name).map_err(|error| match error {
         rquickjs::Error::Exception => describe_exception(ctx),
         error => error.to_string(),
