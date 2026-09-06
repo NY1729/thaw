@@ -804,6 +804,24 @@ impl Host {
     }
 }
 
+impl Drop for Host {
+    fn drop(&mut self) {
+        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
+            || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
+            || ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0
+        {
+            // ponytail: At process exit the OS reclaims these environments; running
+            // addon finalizers after thread-local HOST destruction is invalid.
+            for env in self.module_envs.drain(..) {
+                Box::leak(env);
+            }
+            for env in self.pending_call_envs.drain(..) {
+                Box::leak(env);
+            }
+        }
+    }
+}
+
 thread_local! {
     static HOST: RefCell<Host> = RefCell::new(Host::new());
     static PENDING_MODULE: RefCell<Option<NapiModule>> = const { RefCell::new(None) };
