@@ -30,6 +30,16 @@ fn exposes_the_node_global_alias() {
 }
 
 #[test]
+fn process_env_reads_the_host_environment() {
+    let path = std::env::var("PATH").unwrap();
+    assert_eq!(load("function hostPath() { return process.env.PATH; }"), 1);
+    assert_eq!(
+        call("hostPath", "[]"),
+        serde_json::to_string(&path).unwrap()
+    );
+}
+
+#[test]
 fn console_methods_remain_callable_when_detached() {
     assert_eq!(
         load("function detachedConsoleLog() { const log = console.log; log('detached'); return true; }") ,
