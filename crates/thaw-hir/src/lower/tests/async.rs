@@ -1,4 +1,13 @@
 #[test]
+fn contextual_callback_may_ignore_supplied_parameters() {
+    lower(
+        r#"async function main(): Promise<void> {
+            await new Promise<number>((resolve) => resolve(1)).then(() => {});
+        }"#,
+    );
+}
+
+#[test]
 fn desugars_for_await_of_promise_array_to_awaited_items() {
     let program = lower(
         r#"async function main(): Promise<void> {
@@ -330,4 +339,3 @@ fn lowers_fetch_and_json_parse_field_access() {
         )
     );
 }
-

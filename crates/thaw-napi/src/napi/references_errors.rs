@@ -73,8 +73,24 @@ pub unsafe extern "C" fn napi_reference_unref(
         return record_status(env, NAPI_GENERIC_FAILURE);
     }
     reference.count -= 1;
+    #[cfg(feature = "quickjs")]
+    let value = reference.value;
+    #[cfg(feature = "quickjs")]
+    let released = reference.count == 0
+        && env_mut(env).is_ok_and(|env| {
+            let still_referenced = env.references.iter().any(|reference| {
+                !reference.deleted && reference.value == value && reference.count > 0
+            });
+            !still_referenced && env.released_handles.remove(&(value as usize))
+        });
     if !result.is_null() {
         *result = reference.count;
+    }
+    #[cfg(feature = "quickjs")]
+    if released {
+        release_napi_handle(value as u64).unwrap_or_else(|error| {
+            HOST.with(|host| host.borrow_mut().last_error = error);
+        });
     }
     NAPI_OK
 }
@@ -380,4 +396,3 @@ pub unsafe extern "C" fn node_api_get_module_file_name(
     *result = env_ref.module_file_name.as_ptr();
     NAPI_OK
 }
-

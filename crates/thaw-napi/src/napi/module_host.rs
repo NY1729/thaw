@@ -257,6 +257,14 @@ fn release_napi_handle(handle: u64) -> Result<(), String> {
             .find(|env| env.values.contains(&(handle as NapiValue)))
             .ok_or_else(|| "unknown native addon handle".to_string())?;
         let value = handle as NapiValue;
+        if env
+            .references
+            .iter()
+            .any(|reference| !reference.deleted && reference.value == value && reference.count > 0)
+        {
+            env.released_handles.insert(handle as usize);
+            return Ok::<_, String>(None);
+        }
         for reference in &mut env.references {
             if reference.count == 0 && reference.value == value {
                 reference.value = ptr::null_mut();
@@ -267,9 +275,11 @@ fn release_napi_handle(handle: u64) -> Result<(), String> {
             .object_finalizers
             .remove(&(value as usize))
             .unwrap_or_default();
-        Ok::<_, String>((&mut **env as NapiEnv, wrap, finalizers))
+        Ok::<_, String>(Some((&mut **env as NapiEnv, wrap, finalizers)))
     })?;
-    let (env, wrap, finalizers) = released;
+    let Some((env, wrap, finalizers)) = released else {
+        return Ok(());
+    };
     if let Some(wrap) = wrap {
         if let Some(finalize) = wrap.finalize {
             unsafe { finalize(env, wrap.data, wrap.hint) };
