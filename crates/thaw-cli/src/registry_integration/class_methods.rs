@@ -99,12 +99,17 @@ fn rewrite_external_class_methods_with_static(
         let Callee::Expr(callee) = &call.callee else {
             return None;
         };
-        let Expr::Ident(function) = callee.as_ref() else {
-            return None;
+        let function = match callee.as_ref() {
+            Expr::Ident(function) => function.sym.as_str(),
+            Expr::Member(member) => match &member.prop {
+                MemberProp::Ident(function) => function.sym.as_str(),
+                _ => return None,
+            },
+            _ => return None,
         };
         factories
             .iter()
-            .find(|(name, _)| name == function.sym.as_str())
+            .find(|(name, _)| name == function)
             .map(|(_, class)| class.as_str())
     }
 
@@ -1387,6 +1392,10 @@ fn rewrite_external_class_methods_with_static(
     fn overload_type_score(declared: &thaw_hir::HirType, actual: &thaw_hir::HirType) -> Option<u8> {
         match (declared, actual) {
             (thaw_hir::HirType::Json, _) => Some(0),
+            (thaw_hir::HirType::Union(elements), actual) => elements
+                .iter()
+                .filter_map(|element| overload_type_score(element, actual))
+                .max(),
             (thaw_hir::HirType::Nullable(payload), thaw_hir::HirType::Null) => {
                 source_collection_element_supported(payload).then_some(2)
             }

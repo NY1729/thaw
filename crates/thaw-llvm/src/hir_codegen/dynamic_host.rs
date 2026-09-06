@@ -274,6 +274,15 @@ impl<'ctx> HirCompiler<'ctx> {
         ret: &HirType,
     ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>), String> {
         let closure = self.compile_expr(callback)?.into_pointer_value();
+        self.compile_napi_value_callback_from_closure(closure, params, ret)
+    }
+
+    fn compile_napi_value_callback_from_closure(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+    ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>), String> {
         let callback_name = format!("__thaw_napi_value_callback_{}", self.next_lambda);
         self.next_lambda += 1;
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -475,13 +484,26 @@ impl<'ctx> HirCompiler<'ctx> {
         // case, the matching native-side decoder. A `u64` is plenty (32
         // real params would already be an extraordinary callback), and
         // JS's own bitwise operators only ever work on 32 bits anyway.
+        let closure = self.compile_expr(closure_expr)?.into_pointer_value();
+        self.compile_register_native_callback_from_closure(closure, &params, &ret)
+    }
+
+    pub(super) fn compile_register_native_callback_from_closure(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
         let jsvalue_param_mask: u64 = params
             .iter()
             .enumerate()
             .filter(|(_, param)| **param == HirType::JsValue)
             .map(|(index, _)| 1u64 << index)
             .sum();
-        let (adapter, closure) = self.compile_napi_value_callback(closure_expr, &params, &ret)?;
+        let (adapter, closure) =
+            self.compile_napi_value_callback_from_closure(closure, params, ret)?;
         let jsvalue_param_mask = self
             .context
             .i64_type()

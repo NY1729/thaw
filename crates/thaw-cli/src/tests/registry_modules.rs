@@ -10449,3 +10449,56 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "Hello Thaw\nTyped\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn fallback_object_callback_is_contextually_typed_and_runs_as_native_code() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-contextual-object-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("server-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export type Handler<T = unknown> = (request: T, toolkit: T, error?: T) => T;\n\
+         export interface Route<T = unknown> { method: string; path: string; handler?: Handler<T> | object | undefined; }\n\
+         export declare class Server { route<T = unknown>(route: Route<T> | Route<T>[]): void; }\n\
+         export declare function server(): Server;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Server() {} Server.prototype.route = function(route) { console.log(route.handler({ path: route.path }, { response: function(value) { return value; } })); }; function server() { return new Server(); } module.exports = { Server: Server, server: server };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import * as Kit from "server-kit";
+function main(): void {
+    const server = Kit.server();
+    server.route({ method: "GET", path: "/jit", handler: (request, toolkit) => toolkit.response(request.path) });
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["server-kit".into()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "/jit\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

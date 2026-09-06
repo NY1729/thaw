@@ -171,6 +171,19 @@ fn omitted_parameter_value(ty: &HirType) -> Result<HirExpr, String> {
     match ty {
         HirType::Optional(payload) => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
         HirType::Nullish(payload) => Ok(HirExpr::NullishUndefined(payload.as_ref().clone())),
+        HirType::Union(elements) => elements
+            .iter()
+            .position(|element| *element == HirType::Undefined)
+            .map(|index| {
+                HirExpr::UnionInject(
+                    Box::new(HirExpr::Lit(HirLit::Undefined)),
+                    index,
+                    elements.clone(),
+                )
+            })
+            .ok_or_else(|| {
+                format!("omittable callable parameter needs an undefined-capable ABI type, got {ty:?}")
+            }),
         other => Err(format!(
             "omittable callable parameter needs an undefined-capable ABI type, got {other:?}"
         )),

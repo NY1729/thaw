@@ -1,3 +1,29 @@
+fn callback_signature(ty: &HirType, supplied: usize) -> Option<(Vec<HirType>, HirType)> {
+    match ty {
+        HirType::Function(params, ret) if supplied == usize::MAX || params.len() == supplied => {
+            Some((params.clone(), ret.as_ref().clone()))
+        }
+        HirType::CallableFunction(params, optional, rest, ret) => {
+            let mut params = params.clone();
+            if let Some(rest) = rest {
+                params.push(HirType::Array(rest.clone()));
+            }
+            let required = params.len().saturating_sub(optional.count() as usize);
+            if supplied >= required && supplied <= params.len() {
+                params.truncate(supplied);
+            }
+            Some((params, ret.as_ref().clone()))
+        }
+        HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+            callback_signature(payload, supplied)
+        }
+        HirType::Union(elements) => elements
+            .iter()
+            .find_map(|element| callback_signature(element, supplied)),
+        _ => None,
+    }
+}
+
 impl<'a> FnLowerer<'a> {
     /// Lowers an object literal's own `key: value` field value -- almost
     /// always just `lower_expr`, with one narrow exception: a method
@@ -30,17 +56,12 @@ impl<'a> FnLowerer<'a> {
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
         if let Some(expected) = expected {
-            let contextual = match expected {
-                HirType::Function(params, ret) => Some((params.clone(), ret.as_ref().clone())),
-                HirType::CallableFunction(params, _, rest, ret) => {
-                    let mut params = params.clone();
-                    if let Some(rest) = rest {
-                        params.push(HirType::Array(rest.clone()));
-                    }
-                    Some((params, ret.as_ref().clone()))
-                }
-                _ => None,
+            let supplied = match value {
+                Expr::Arrow(arrow) => arrow.params.len(),
+                Expr::Fn(function) => function.function.params.len(),
+                _ => usize::MAX,
             };
+            let contextual = callback_signature(expected, supplied);
             if let Some((params, ret)) = contextual {
                 let needs_context = match value {
                     Expr::Arrow(arrow) => arrow.params.iter().any(
