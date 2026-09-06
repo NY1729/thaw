@@ -266,6 +266,7 @@ pub fn generate_native_addon_shim(
 pub struct NativeAddon<'a> {
     pub package_name: &'a str,
     pub bytes: &'a [u8],
+    pub dependencies: Vec<&'a [u8]>,
     pub root_export: Option<&'a str>,
 }
 
@@ -276,6 +277,15 @@ pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
     let mut out = String::from("function __thaw_native_module_init(): void {\n");
     for addon in addons {
         out.push_str(&format!("    // {}\n", addon.package_name));
+        for dependency in &addon.dependencies {
+            let hex: String = dependency
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            out.push_str(&format!(
+                "    loadNativeSharedLibraryEmbedded(\"{hex}\");\n"
+            ));
+        }
         let hex: String = addon
             .bytes
             .iter()

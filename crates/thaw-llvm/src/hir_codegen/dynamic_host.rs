@@ -1107,6 +1107,40 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_load_embedded_native_dependency(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_napi = true;
+        if args.len() != 1 {
+            return Err("loadNativeSharedLibraryEmbedded expects shared library bytes".into());
+        }
+        let bytes = self.compile_expr(&args[0])?;
+        let loaded = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_napi_load_embedded_shared_hex")
+                    .unwrap(),
+                &[bytes.into()],
+                "load_embedded_native_dependency_u8",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_napi_load_embedded_shared_hex did not return a value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                loaded,
+                self.context.i8_type().const_zero(),
+                "load_embedded_native_dependency_ok",
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
     /// `callDynamic(name, args): Json` -- the QuickJS-NG fallback path
     /// (docs/design/bridge.md section 7). Composes thaw-std's
     /// `thaw_json_stringify`/`thaw_json_parse` with thaw-quickjs's
