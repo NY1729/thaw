@@ -30,7 +30,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw build <input.ts> [-o <output>] [--static] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>]"
+                "usage: thaw build <input.ts> [-o <output>] [--static] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>]"
             );
             std::process::exit(1);
         }
@@ -190,6 +190,8 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut ffi_metadata: Vec<PathBuf> = Vec::new();
     let mut registry_dir = PathBuf::from("thaw_modules");
     let mut use_packages: Vec<String> = Vec::new();
+    let mut assets: Option<PathBuf> = None;
+    let mut vite: Option<PathBuf> = None;
     let mut static_link = false;
 
     let mut i = 0;
@@ -229,6 +231,18 @@ fn run_build(args: &[String]) -> Result<(), String> {
                     .ok_or("--use requires a package name argument")?;
                 use_packages.push(value.clone());
             }
+            "--assets" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or("--assets requires a directory argument")?;
+                assets = Some(PathBuf::from(value));
+            }
+            "--vite" => {
+                i += 1;
+                let value = args.get(i).ok_or("--vite requires a directory argument")?;
+                vite = Some(PathBuf::from(value));
+            }
             "--static" => static_link = true,
             other => {
                 if input.is_some() {
@@ -245,17 +259,65 @@ fn run_build(args: &[String]) -> Result<(), String> {
         let stem = input.file_stem().unwrap_or_default();
         PathBuf::from(stem)
     });
+    if assets.is_some() && vite.is_some() {
+        return Err("--assets and --vite cannot be used together".into());
+    }
+    if let Some(directory) = vite {
+        assets = Some(build_vite_project(&directory)?);
+    }
 
-    build_with_link_mode(
-        &input,
-        &output,
-        &extra_links,
-        &bridge_dts,
-        &ffi_metadata,
-        &registry_dir,
-        &use_packages,
-        static_link,
-    )
+    if let Some(assets) = assets {
+        build_with_assets(
+            &input,
+            &output,
+            &extra_links,
+            &bridge_dts,
+            &ffi_metadata,
+            &registry_dir,
+            &use_packages,
+            static_link,
+            Some(&assets),
+        )
+    } else {
+        build_with_link_mode(
+            &input,
+            &output,
+            &extra_links,
+            &bridge_dts,
+            &ffi_metadata,
+            &registry_dir,
+            &use_packages,
+            static_link,
+        )
+    }
+}
+
+fn build_vite_project(directory: &Path) -> Result<PathBuf, String> {
+    if !directory.join("package.json").is_file() {
+        return Err(format!(
+            "--vite expects a project containing package.json, got `{}`",
+            directory.display()
+        ));
+    }
+    let output = Command::new("npm")
+        .args(["run", "build", "--prefix"])
+        .arg(directory)
+        .output()
+        .map_err(|error| format!("failed to run the Vite build: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Vite build failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let dist = directory.join("dist");
+    if !dist.is_dir() {
+        return Err(format!(
+            "Vite build did not create `{}`; use --assets for a custom outDir",
+            dist.display()
+        ));
+    }
+    Ok(dist)
 }
 
 /// Reads each `.d.ts` in `bridge_dts`, classifies its functions (thaw-bridge,
