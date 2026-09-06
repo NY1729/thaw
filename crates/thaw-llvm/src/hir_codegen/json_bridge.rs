@@ -370,7 +370,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// this, which reaches it only for an *ordinary* function call
     /// (never N-API, which rejects a `JsValue` argument outright well
     /// before codegen).
-    fn compile_dynamic_value_placeholder_unchecked(
+    pub(super) fn compile_dynamic_value_placeholder_unchecked(
         &mut self,
         handle: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
