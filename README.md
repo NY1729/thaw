@@ -3173,7 +3173,7 @@ real zod, hono, drizzle, lodash, dayjs and uuid packages. Plain fallback
 functions emit every overload and select the best candidate per call by arity
 and argument shape, rather than declaration order. Generic callback aliases,
 indexed-access element types and generic collection wrappers contextually type
-unannotated callback parameters; real Lodash `map`, `filter` and `reduce`
+unannotated callback parameters; real Lodash `map`, `filter`, `reduce` and `find`
 calls are covered. Typed non-callable package
 values are captured once after module initialization, covering uuid-style
 string constants and mime-style pre-created singleton objects. Fallback class

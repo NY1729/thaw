@@ -2462,13 +2462,41 @@ fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>)
         })
         .collect::<HashMap<_, _>>();
 
-    fn render(ty: &TsType, substitutions: &HashMap<String, String>) -> String {
+    fn render(
+        ty: &TsType,
+        substitutions: &HashMap<String, String>,
+        generic: &GenericInterfaces<'_>,
+        depth: u8,
+    ) -> String {
         match ty {
             TsType::TsTypeRef(reference) => {
                 if let TsEntityName::Ident(name) = &reference.type_name {
                     if reference.type_params.is_none() {
                         if let Some(substitution) = substitutions.get(name.sym.as_str()) {
                             return substitution.clone();
+                        }
+                    }
+                    if depth < 8 {
+                        if let (Some(alias), Some(arguments)) = (
+                            generic.aliases.get(name.sym.as_str()),
+                            &reference.type_params,
+                        ) {
+                            if let Some(parameters) = &alias.type_params {
+                                if parameters.params.len() == arguments.params.len() {
+                                    let nested = parameters
+                                        .params
+                                        .iter()
+                                        .zip(&arguments.params)
+                                        .map(|(parameter, argument)| {
+                                            (
+                                                parameter.name.sym.to_string(),
+                                                render(argument, substitutions, generic, depth + 1),
+                                            )
+                                        })
+                                        .collect();
+                                    return render(&alias.type_ann, &nested, generic, depth + 1);
+                                }
+                            }
                         }
                     }
                 }
@@ -2487,7 +2515,9 @@ fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>)
                             parameter
                                 .type_ann
                                 .as_ref()
-                                .map(|annotation| render(&annotation.type_ann, substitutions))
+                                .map(|annotation| {
+                                    render(&annotation.type_ann, substitutions, generic, depth)
+                                })
                                 .unwrap_or_else(|| "Json".into())
                         ),
                         _ => format!("arg{index}: Json"),
@@ -2496,25 +2526,27 @@ fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>)
                     .join(", ");
                 format!(
                     "({params}) => {}",
-                    render(&function.type_ann.type_ann, substitutions)
+                    render(&function.type_ann.type_ann, substitutions, generic, depth)
                 )
             }
             TsType::TsArrayType(array) => {
-                format!("{}[]", render(&array.elem_type, substitutions))
+                format!("{}[]", render(&array.elem_type, substitutions, generic, depth))
             }
             TsType::TsIndexedAccessType(indexed) => format!(
                 "{}[{}]",
-                render(&indexed.obj_type, substitutions),
-                render(&indexed.index_type, substitutions)
+                render(&indexed.obj_type, substitutions, generic, depth),
+                render(&indexed.index_type, substitutions, generic, depth)
             ),
+            TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) =>
+                union.types.iter().map(|ty| render(ty, substitutions, generic, depth)).collect::<Vec<_>>().join(" | "),
             TsType::TsParenthesizedType(parenthesized) => {
-                format!("({})", render(&parenthesized.type_ann, substitutions))
+                format!("({})", render(&parenthesized.type_ann, substitutions, generic, depth))
             }
             _ => describe_ts_type(ty),
         }
     }
 
-    render(&alias.type_ann, &substitutions)
+    render(&alias.type_ann, &substitutions, generic, 0)
 }
 
 /// The TS keyword spelling for a `TsKeywordTypeKind` (`number`/`string`/

@@ -1552,7 +1552,7 @@ fn registry_add_builds_and_calls_real_lodash_when_enabled() {
         &source,
         r#"import _ from "lodash";
 import * as ns from "lodash";
-import { filter, map, reduce } from "lodash";
+import { filter, find, map, reduce } from "lodash";
 function main(): void {
     console.log(_.chunk([1, 2, 3, 4], 2).length);
     console.log(_.capitalize("hello"));
@@ -1561,6 +1561,7 @@ function main(): void {
     console.log(map([1, 2, 3], value => value * 2).length);
     console.log(filter([1, 2, 3], value => value > 1).length);
     console.log(reduce([1, 2, 3], (sum, value) => sum + value, 0));
+    console.log(find([1, 2, 3], value => value > 1));
 }"#,
     )
     .unwrap();
@@ -1581,6 +1582,7 @@ function main(): void {
     assert_eq!(lines.next(), Some("3"));
     assert_eq!(lines.next(), Some("2"));
     assert_eq!(lines.next(), Some("6"));
+    assert_eq!(lines.next(), Some("2"));
     assert_eq!(lines.next(), None);
     let _ = std::fs::remove_dir_all(dir);
 }
