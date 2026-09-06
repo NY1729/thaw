@@ -1501,6 +1501,26 @@ fn await_sleep_is_driven_by_the_runtime_event_loop() {
 }
 
 #[test]
+fn async_main_drains_napi_before_destroying_its_promise() {
+    let source = r#"
+        async function main(): Promise<void> {
+            pollNativeAddonEvents();
+            await Promise.resolve(undefined);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "async_napi_entry");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let drain = ir.find("drain_napi_for_async_main").unwrap();
+    let resume = ir.find("resume_async_main_after_napi").unwrap();
+    let destroy = ir[resume..].find("call void @thaw_promise_destroy").unwrap();
+    assert!(drain < resume && destroy > 0);
+}
+
+#[test]
 fn frame_split_async_main_has_resume_function_and_multiple_states() {
     let source = r#"
         async function main(): Promise<void> {

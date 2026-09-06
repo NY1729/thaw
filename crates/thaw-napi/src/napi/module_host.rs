@@ -198,7 +198,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             }
             "set" => {
                 let name = CString::new(name).map_err(|_| "property contains NUL")?;
-                let result = set_property_impl(handle, name.as_ptr(), args, true);
+                let result = set_property_impl(handle, name.as_ptr(), args, true, true);
                 if result.error.is_null() {
                     Ok(serde_json::json!({ "kind": "value", "value": true }))
                 } else {
@@ -566,6 +566,9 @@ unsafe fn json_from_value_with_undefined(
                 })
                 .collect::<Result<_, _>>()?,
         ),
+        Value::Object(_) if is_native_instance(value as usize) => {
+            serde_json::json!({ "__thaw_napi_handle__": (value as u64).to_string() })
+        }
         Value::Object(values) => JsonValue::Object(
             values
                 .iter()
@@ -627,6 +630,15 @@ unsafe fn json_from_value_with_undefined(
                 return Err(message);
             }
         },
+    })
+}
+
+fn is_native_instance(value: usize) -> bool {
+    HOST.with(|host| {
+        host.borrow()
+            .module_envs
+            .iter()
+            .any(|env| env.instances.contains_key(&value))
     })
 }
 
@@ -1107,6 +1119,7 @@ unsafe fn set_property_impl(
     property: *const c_char,
     args: *const c_char,
     preserve_undefined: bool,
+    discard_result: bool,
 ) -> ThawResult {
     let result = (|| -> Result<String, String> {
         let env = module_env_for_handle(receiver)?;
@@ -1125,8 +1138,12 @@ unsafe fn set_property_impl(
                 "failed to set native property `{property_name}`: status {status}"
             ));
         }
-        serde_json::to_string(&json_from_value_with_undefined(*value, preserve_undefined)?)
-            .map_err(|error| error.to_string())
+        if discard_result {
+            Ok("true".into())
+        } else {
+            serde_json::to_string(&json_from_value_with_undefined(*value, preserve_undefined)?)
+                .map_err(|error| error.to_string())
+        }
     })();
     text_result(result)
 }
@@ -1137,7 +1154,7 @@ pub unsafe extern "C" fn thaw_napi_set_property_result(
     property: *const c_char,
     args: *const c_char,
 ) -> ThawResult {
-    set_property_impl(receiver, property, args, false)
+    set_property_impl(receiver, property, args, false, false)
 }
 
 #[no_mangle]
@@ -1146,7 +1163,7 @@ pub unsafe extern "C" fn thaw_napi_set_property_typed_result(
     property: *const c_char,
     args: *const c_char,
 ) -> ThawResult {
-    set_property_impl(receiver, property, args, true)
+    set_property_impl(receiver, property, args, true, false)
 }
 
 unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
