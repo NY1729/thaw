@@ -360,7 +360,11 @@ fn lower_dts_call_signature(
     let mut substitution = HashMap::new();
     if let Some(type_params) = &call.type_params {
         for parameter in &type_params.params {
-            let Some(constraint) = &parameter.constraint else {
+            let Some(constraint) = parameter
+                .default
+                .as_deref()
+                .or(parameter.constraint.as_deref())
+            else {
                 continue;
             };
             if let DtsType::Native(constraint) = resolve_ts_type_with_substitution(
@@ -491,7 +495,11 @@ fn lower_dts_fn_type(
     let mut substitution = HashMap::new();
     if let Some(type_params) = &function.type_params {
         for parameter in &type_params.params {
-            let Some(constraint) = &parameter.constraint else {
+            let Some(constraint) = parameter
+                .default
+                .as_deref()
+                .or(parameter.constraint.as_deref())
+            else {
                 continue;
             };
             if let DtsType::Native(constraint) = resolve_ts_type_with_substitution(
@@ -1054,6 +1062,274 @@ fn is_public_member(accessibility: Option<Accessibility>) -> bool {
     accessibility.is_none_or(|accessibility| accessibility == Accessibility::Public)
 }
 
+fn hir_type_contains_callback(ty: &HirType) -> bool {
+    match ty {
+        HirType::Function(..) | HirType::CallableFunction(..) => true,
+        HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner)
+        | HirType::Array(inner) => hir_type_contains_callback(inner),
+        HirType::Tuple(elements) | HirType::Union(elements) => {
+            elements.iter().any(hir_type_contains_callback)
+        }
+        HirType::Object(fields) => fields
+            .iter()
+            .any(|(_, field)| hir_type_contains_callback(field)),
+        _ => false,
+    }
+}
+
+fn contextualize_native_callbacks(ty: HirType) -> HirType {
+    match ty {
+        HirType::CallableFunction(params, optional, rest, ret) if rest.is_none() => {
+            let required = optional
+                .first_at_or_after(0)
+                .unwrap_or(params.len())
+                .min(params.len());
+            let params = params
+                .into_iter()
+                .map(|param| match param {
+                    HirType::Optional(payload) => *payload,
+                    other => other,
+                })
+                .collect::<Vec<_>>();
+            HirType::Union(
+                (required..=params.len())
+                    .map(|arity| {
+                        HirType::Function(
+                            params[..arity].to_vec(),
+                            Box::new(contextualize_native_callbacks(ret.as_ref().clone())),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        HirType::Object(fields) => HirType::Object(
+            fields
+                .into_iter()
+                .map(|(name, ty)| (name, contextualize_native_callbacks(ty)))
+                .collect(),
+        ),
+        HirType::Array(inner) => {
+            HirType::Array(Box::new(contextualize_native_callbacks(*inner)))
+        }
+        HirType::Optional(inner) => {
+            HirType::Optional(Box::new(contextualize_native_callbacks(*inner)))
+        }
+        HirType::Nullable(inner) => {
+            HirType::Nullable(Box::new(contextualize_native_callbacks(*inner)))
+        }
+        HirType::Nullish(inner) => {
+            HirType::Nullish(Box::new(contextualize_native_callbacks(*inner)))
+        }
+        HirType::Tuple(elements) => HirType::Tuple(
+            elements
+                .into_iter()
+                .map(contextualize_native_callbacks)
+                .collect(),
+        ),
+        HirType::Union(elements) => HirType::Union(
+            elements
+                .into_iter()
+                .flat_map(|element| match contextualize_native_callbacks(element) {
+                    HirType::Union(nested) => nested,
+                    other => vec![other],
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Best-effort type used only to contextually type callbacks nested in a
+/// fallback class method's dynamic object argument. Unknown callback values
+/// stay as live `JsValue`s; unrelated object fields degrade to JSON.
+fn contextual_dynamic_type(
+    ty: &TsType,
+    substitution: &HashMap<String, HirType>,
+    interfaces: &HashMap<String, DtsType>,
+    generic: &GenericInterfaces,
+    dynamic_leaf: bool,
+    in_progress: &mut Vec<String>,
+) -> HirType {
+    if let DtsType::Native(native) = resolve_ts_type_with_substitution(
+        ty,
+        substitution,
+        interfaces,
+        generic,
+        &mut Vec::new(),
+    ) {
+        return contextualize_native_callbacks(native);
+    }
+    if dynamic_leaf {
+        return HirType::JsValue;
+    }
+    match ty {
+        TsType::TsParenthesizedType(value) => contextual_dynamic_type(
+            &value.type_ann,
+            substitution,
+            interfaces,
+            generic,
+            false,
+            in_progress,
+        ),
+        TsType::TsArrayType(array) => HirType::Array(Box::new(contextual_dynamic_type(
+            &array.elem_type,
+            substitution,
+            interfaces,
+            generic,
+            false,
+            in_progress,
+        ))),
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            let DtsType::Native(result) = classify_native_union(union, |element| {
+                DtsType::Native(contextual_dynamic_type(
+                    element,
+                    substitution,
+                    interfaces,
+                    generic,
+                    false,
+                    in_progress,
+                ))
+            }) else {
+                unreachable!("contextual union classifier always returns native members")
+            };
+            result
+        }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            let mut params = Vec::new();
+            let mut optional = Vec::new();
+            for parameter in &function.params {
+                let TsFnParam::Ident(parameter) = parameter else {
+                    continue;
+                };
+                if parameter.id.sym == "this" {
+                    continue;
+                }
+                params.push(parameter.type_ann.as_ref().map_or(HirType::JsValue, |annotation| {
+                    contextual_dynamic_type(
+                        &annotation.type_ann,
+                        substitution,
+                        interfaces,
+                        generic,
+                        true,
+                        in_progress,
+                    )
+                }));
+                optional.push(parameter.id.optional);
+            }
+            let ret = contextual_dynamic_type(
+                &function.type_ann.type_ann,
+                substitution,
+                interfaces,
+                generic,
+                true,
+                in_progress,
+            );
+            if optional.iter().any(|optional| *optional) {
+                let required = optional
+                    .iter()
+                    .position(|optional| *optional)
+                    .unwrap_or(params.len());
+                HirType::Union(
+                    (required..=params.len())
+                        .map(|arity| {
+                            HirType::Function(params[..arity].to_vec(), Box::new(ret.clone()))
+                        })
+                        .collect(),
+                )
+            } else {
+                HirType::Function(params, Box::new(ret))
+            }
+        }
+        TsType::TsTypeRef(reference) => {
+            let name = match &reference.type_name {
+                TsEntityName::Ident(name) => name.sym.to_string(),
+                TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
+            };
+            if let Some(value) = substitution.get(&name) {
+                return value.clone();
+            }
+            let declaration = if let Some(declaration) = generic.interfaces.get(&name) {
+                declaration
+            } else if let Some(alias) = generic.aliases.get(&name) {
+                if in_progress.contains(&name) {
+                    return HirType::Json;
+                }
+                in_progress.push(name.clone());
+                let result = contextual_dynamic_type(
+                    &alias.type_ann,
+                    substitution,
+                    interfaces,
+                    generic,
+                    false,
+                    in_progress,
+                );
+                in_progress.pop();
+                return result;
+            } else {
+                return HirType::Json;
+            };
+            if in_progress.contains(&name) {
+                return HirType::Json;
+            }
+            let mut local = substitution.clone();
+            if let Some(parameters) = &declaration.type_params {
+                let arguments = reference
+                    .type_params
+                    .as_ref()
+                    .map(|arguments| arguments.params.as_slice())
+                    .unwrap_or_default();
+                for (index, parameter) in parameters.params.iter().enumerate() {
+                    let value = arguments
+                        .get(index)
+                        .map(|argument| {
+                            contextual_dynamic_type(
+                                argument,
+                                substitution,
+                                interfaces,
+                                generic,
+                                true,
+                                in_progress,
+                            )
+                        })
+                        .unwrap_or(HirType::JsValue);
+                    local.insert(parameter.name.sym.to_string(), value);
+                }
+            }
+            in_progress.push(name);
+            let fields = declaration
+                .body
+                .body
+                .iter()
+                .filter_map(|member| {
+                    let TsTypeElement::TsPropertySignature(property) = member else {
+                        return None;
+                    };
+                    let name = type_property_name(&property.key)?;
+                    let mut value = property.type_ann.as_ref().map_or(HirType::Json, |annotation| {
+                        contextual_dynamic_type(
+                            &annotation.type_ann,
+                            &local,
+                            interfaces,
+                            generic,
+                            false,
+                            in_progress,
+                        )
+                    });
+                    if property.optional {
+                        value = optional_hir_type(value);
+                    }
+                    Some((name, value))
+                })
+                .collect();
+            in_progress.pop();
+            HirType::Object(fields)
+        }
+        _ => HirType::Json,
+    }
+}
+
 fn lower_dts_class(
     name: &str,
     class: &Class,
@@ -1105,7 +1381,35 @@ fn lower_dts_class(
                     interfaces,
                     generic_interfaces,
                 );
-                let params = function.params;
+                let mut params = function.params;
+                let mut substitution = HashMap::new();
+                if let Some(parameters) = &method.function.type_params {
+                    for parameter in &parameters.params {
+                        substitution.insert(parameter.name.sym.to_string(), HirType::JsValue);
+                    }
+                }
+                for (parameter, (_, classified)) in method.function.params.iter().zip(&mut params) {
+                    if !matches!(classified, DtsType::Unsupported(_)) {
+                        continue;
+                    }
+                    let Pat::Ident(parameter) = &parameter.pat else {
+                        continue;
+                    };
+                    let Some(annotation) = &parameter.type_ann else {
+                        continue;
+                    };
+                    let contextual = contextual_dynamic_type(
+                        &annotation.type_ann,
+                        &substitution,
+                        interfaces,
+                        generic_interfaces,
+                        false,
+                        &mut Vec::new(),
+                    );
+                    if hir_type_contains_callback(&contextual) {
+                        *classified = DtsType::Native(contextual);
+                    }
+                }
                 let rest_param = function.rest_param;
                 methods.push(DtsMethod {
                     name: function.name,
@@ -1736,7 +2040,11 @@ fn lower_dts_function(
     let mut substitution = HashMap::new();
     if let Some(type_params) = &func.type_params {
         for parameter in &type_params.params {
-            let Some(constraint) = &parameter.constraint else {
+            let Some(constraint) = parameter
+                .default
+                .as_deref()
+                .or(parameter.constraint.as_deref())
+            else {
                 continue;
             };
             if let DtsType::Native(constraint) = resolve_ts_type_with_substitution(
@@ -1870,7 +2178,11 @@ fn lower_dts_method_signature(
     let mut substitution = HashMap::new();
     if let Some(type_params) = &method.type_params {
         for parameter in &type_params.params {
-            let Some(constraint) = &parameter.constraint else {
+            let Some(constraint) = parameter
+                .default
+                .as_deref()
+                .or(parameter.constraint.as_deref())
+            else {
                 continue;
             };
             if let DtsType::Native(constraint) = resolve_ts_type_with_substitution(

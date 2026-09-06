@@ -1571,8 +1571,24 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
-        if let (Expr::Object(object), Some(HirType::Object(fields))) = (expr, expected) {
-            return self.lower_object_lit(object, Some(fields));
+        if let (Expr::Object(object), Some(expected)) = (expr, expected) {
+            let fields = match expected {
+                HirType::Object(fields) => Some(fields.as_slice()),
+                HirType::Optional(payload)
+                | HirType::Nullable(payload)
+                | HirType::Nullish(payload) => match payload.as_ref() {
+                    HirType::Object(fields) => Some(fields.as_slice()),
+                    _ => None,
+                },
+                HirType::Union(elements) => elements.iter().find_map(|element| match element {
+                    HirType::Object(fields) => Some(fields.as_slice()),
+                    _ => None,
+                }),
+                _ => None,
+            };
+            if let Some(fields) = fields {
+                return self.lower_object_lit(object, Some(fields));
+            }
         }
         // `Expr::Await` is included alongside `Expr::Call` -- an awaited
         // expression's own expected type is really about the *resolved*
