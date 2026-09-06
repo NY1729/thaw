@@ -5463,6 +5463,55 @@ fn generates_typed_napi_static_method_shims_without_instance_receivers() {
 }
 
 #[test]
+fn generates_napi_method_arity_that_omits_an_unsupported_optional_parameter() {
+    let class = thaw_bridge::DtsClass {
+        name: "Database".into(),
+        extends: None,
+        constructible: true,
+        constructors: vec![],
+        methods: vec![thaw_bridge::DtsMethod {
+            name: "run".into(),
+            params: vec![
+                (
+                    "sql".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Str),
+                ),
+                (
+                    "params".into(),
+                    thaw_bridge::DtsType::Unsupported("`any` is not supported".into()),
+                ),
+                (
+                    "callback".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(
+                        vec![thaw_hir::HirType::Json],
+                        Box::new(thaw_hir::HirType::Void),
+                    )),
+                ),
+            ],
+            required_params: 2,
+            rest_param: None,
+            ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Void),
+            is_static: false,
+            kind: thaw_bridge::DtsMethodKind::Method,
+            overloaded: false,
+        }],
+        properties: vec![],
+    };
+    let mut shim = String::new();
+    let generated = generate_napi_class_method_overloads(
+        &class,
+        false,
+        &std::collections::HashMap::new(),
+        &mut shim,
+        true,
+    );
+    assert_eq!(generated.len(), 2);
+    assert_eq!(generated[0].2, 2);
+    assert_eq!(generated[1].2, 3);
+    assert!(shim.contains("receiver: JsValue, sql: string, params: Json"));
+}
+
+#[test]
 fn rewrites_zero_argument_external_class_methods() {
     let source = "const box = new NativeBox(42); const value = box.get();";
     let rewritten = rewrite_external_class_methods(
