@@ -669,7 +669,7 @@ pub extern "C" fn thaw_js_register_native_callback(
     let adapter = adapter as usize;
     let closure = closure as usize;
     let finish = finish as usize;
-    let result: Result<u64, String> = with_context(|ctx| {
+    let result: Result<u64, String> = with_active_or_context(|ctx| {
         // The Rust-backed half stays a plain `String -> String` closure --
         // no `Value<'js>` anywhere in its own signature -- deliberately:
         // an `IntoJsFunc` closure returning a value borrowed from `Ctx<'js>`
@@ -721,7 +721,8 @@ pub extern "C" fn thaw_js_register_native_callback(
             .map_err(|error| error.to_string())?;
         let poll_name = format!("__thaw_native_callback_poll_{id}");
         if finish != 0 {
-            let poll = Function::new(ctx.clone(), move |ticket: String| -> String {
+            let poll = Function::new(ctx.clone(), move |ctx: Ctx<'_>, ticket: String| -> String {
+                let _active = ActiveNapiContext::enter(&ctx);
                 let Some(address) = ticket.strip_prefix("promise:") else {
                     return "error:invalid native Promise ticket".to_string();
                 };
