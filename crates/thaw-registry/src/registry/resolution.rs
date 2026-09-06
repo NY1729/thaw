@@ -221,7 +221,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare function homedir(argsArray: any): any;\nexport declare function hostname(argsArray: any): any;\nexport declare function cpus(argsArray: any): any;\nexport declare function totalmem(argsArray: any): any;\nexport declare function freemem(argsArray: any): any;\nexport declare function uptime(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
         "url" => {
-            "export declare const URL: any;\nexport declare const URLSearchParams: any;\nexport declare function pathToFileURL(argsArray: any): any;\nexport declare function fileURLToPath(argsArray: any): any;\nexport declare function urlToHttpOptions(argsArray: any): any;\n"
+            "export declare const URL: any;\nexport declare const URLSearchParams: any;\nexport declare function parse(argsArray: any): any;\nexport declare function format(argsArray: any): any;\nexport declare function pathToFileURL(argsArray: any): any;\nexport declare function fileURLToPath(argsArray: any): any;\nexport declare function urlToHttpOptions(argsArray: any): any;\n"
         }
         "querystring" => {
             "export declare function stringify(argsArray: any): any;\nexport declare function encode(argsArray: any): any;\nexport declare function parse(argsArray: any): any;\nexport declare function decode(argsArray: any): any;\nexport declare function escape(argsArray: any): any;\nexport declare function unescape(argsArray: any): any;\n"
@@ -265,4 +265,3 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         dependency_versions: None,
     })
 }
-

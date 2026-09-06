@@ -43,6 +43,37 @@ fn process_builtin_polyfill_actually_runs_through_quickjs() {
 }
 
 #[test]
+fn url_builtin_supports_legacy_parse_and_format() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_url_legacy");
+    fs::write(
+        dir.join("index.js"),
+        "var url = require('url'); module.exports = function () { var relative = url.parse('/route?q=1'); var absolute = url.parse('https://user:pass@example.com:8443/a?q=2#h'); return [relative.pathname, relative.path, relative.host, absolute.protocol, absolute.hostname, absolute.port, url.format(relative), url.format(absolute)]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_url_legacy_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUrl = module.exports;"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseUrl").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"["/route","/route?q=1",null,"https:","example.com","8443","/route?q=1","https://user:pass@example.com:8443/a?q=2#h"]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn querystring_builtin_runs_through_bundled_commonjs_require() {
     use std::ffi::{CStr, CString};
 
