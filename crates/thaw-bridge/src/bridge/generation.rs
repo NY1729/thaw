@@ -540,6 +540,8 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20}};\n\
          \x20\x20}});\n\
          \x20\x20globalThis.require.addon = function() {{ return __thaw_addon; }};\n\
+         \x20\x20globalThis.process.dlopen = function(target) {{ target.exports = __thaw_addon; return target.exports; }};\n\
+         \x20\x20if (__thaw_addon.QueryEngine && !globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY) globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY = '/proc/self/exe';\n\
          }}\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\

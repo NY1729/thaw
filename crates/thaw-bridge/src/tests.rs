@@ -2303,6 +2303,8 @@ fn native_class_proxies_retain_js_properties_and_release_native_handles() {
     assert!(wrapped.contains("'release_handle'"));
     assert!(wrapped.contains("Reflect.set(_, name, value, receiver)"));
     assert!(wrapped.contains("result.value['$__thaw_napi_undefined$'] === true"));
+    assert!(wrapped.contains("globalThis.process.dlopen = function(target)"));
+    assert!(wrapped.contains("__thaw_addon.QueryEngine"));
 }
 
 /// The exact shape thaw-registry's ESM rewrite produces for a real

@@ -1466,6 +1466,22 @@ fn resolves_generated_declarations_from_a_dot_named_package() {
 }
 
 #[test]
+fn selects_a_single_addon_from_a_hidden_generated_package() {
+    let node_modules = temp_registry("generated_native_addon");
+    let addon = node_modules.join(".generated/client/engine.so.node");
+    fs::create_dir_all(addon.parent().unwrap()).unwrap();
+    fs::create_dir_all(node_modules.join(".bin")).unwrap();
+    fs::write(&addon, b"addon").unwrap();
+
+    assert_eq!(
+        select_generated_addon(&node_modules).unwrap().unwrap().path,
+        addon
+    );
+
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn ignores_dynamic_and_malformed_require_calls() {
     // `require(name)` (a variable, not a literal) and a stray
     // "require" that isn't actually a call must not confuse the scan

@@ -288,6 +288,37 @@ fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
     Ok(matches.pop())
 }
 
+fn select_generated_addon(node_modules_dir: &Path) -> Result<Option<SelectedPrebuild>, String> {
+    let mut matches = fs::read_dir(node_modules_dir)
+        .map_err(|error| format!("failed to inspect `{}`: {error}", node_modules_dir.display()))?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path().is_dir()
+                && entry.file_name().to_string_lossy().starts_with('.')
+                && entry.file_name() != ".bin"
+        })
+        .filter_map(|entry| match find_node_file(&entry.path()) {
+            Ok(Some(path)) => Some(Ok(path)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if matches.len() > 1 {
+        return Err("generated packages contain multiple native addons".into());
+    }
+    let Some(path) = matches.pop() else {
+        return Ok(None);
+    };
+    let (platform, arch, libc) = target_prebuild_components();
+    Ok(Some(SelectedPrebuild {
+        source: path.display().to_string(),
+        path,
+        platform: platform.to_string(),
+        arch: arch.to_string(),
+        libc: libc.to_string(),
+    }))
+}
+
 fn platform_shared_libraries(
     node_modules_dir: &Path,
     manifest: &serde_json::Value,
@@ -551,7 +582,11 @@ fn add_installed_inner(
     }
     let selected_addon = select_prebuilt_addon(&package_dir).and_then(|selected| match selected {
         Some(selected) => Ok(Some(selected)),
-        None => select_optional_dependency_addon(node_modules_dir, &manifest),
+        None => select_optional_dependency_addon(node_modules_dir, &manifest)
+            .and_then(|selected| match selected {
+                Some(selected) => Ok(Some(selected)),
+                None => select_generated_addon(node_modules_dir),
+            }),
     });
     let (native_addon, native_diagnostic) = match selected_addon {
         Ok(Some(selected)) => {

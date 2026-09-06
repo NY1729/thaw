@@ -756,10 +756,13 @@ fn wait_for_promise(value: NapiValue) -> Result<NapiValue, String> {
             };
             return Err(message);
         }
-        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0 {
+        thaw_napi_poll_async_work();
+        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
+            && LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
+            && !unsafe { poll_uv_loop() }
+        {
             return Err("native addon returned a Promise with no pending work".into());
         }
-        thaw_napi_poll_async_work();
         std::thread::sleep(Duration::from_millis(1));
     }
 }
