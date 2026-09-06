@@ -840,7 +840,13 @@ fn dts_source_with_reexported_functions(
             let declarations = match &target_path {
                 Some(target_path) => {
                     let mut visited = std::collections::BTreeSet::new();
-                    reexported_function_declarations(target_path, &original, &mut visited)?
+                    let functions =
+                        reexported_function_declarations(target_path, &original, &mut visited)?;
+                    if !functions.is_empty() {
+                        functions
+                    } else {
+                        reexported_class_or_interface_declarations(target_path, &original)?
+                    }
                 }
                 None => match import_equals_targets.get(&original) {
                     Some(target_path) => export_assignment_function_declarations(target_path)?,
@@ -926,19 +932,24 @@ fn dts_source_with_reexported_functions(
             output.push_str(&snippet);
         }
     }
+    let mut visited_types = std::collections::BTreeSet::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) = item else {
             continue;
         };
-        if export.type_only {
-            continue;
-        }
         let Some(source) = export.src.value.as_str() else {
             continue;
         };
         let Some(target_path) = declaration_reexport_path(entry_path, source) else {
             continue;
         };
+        for snippet in all_reexported_type_declarations(&target_path, &mut visited_types)? {
+            output.push('\n');
+            output.push_str(&snippet);
+        }
+        if export.type_only {
+            continue;
+        }
         let mut visited = std::collections::BTreeSet::new();
         let declarations = all_reexported_function_declarations(&target_path, &mut visited)?;
         let names = declarations
@@ -1010,6 +1021,53 @@ fn dts_source_with_reexported_functions(
         output.push_str(&snippet);
     }
     Ok(output)
+}
+
+fn all_reexported_type_declarations(
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    if !visited.insert(path.to_path_buf()) {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read re-exported declarations `{}`: {error}",
+            path.display()
+        )
+    })?;
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let mut declarations = Vec::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export))
+                if matches!(
+                    &export.decl,
+                    Decl::Class(_)
+                        | Decl::TsInterface(_)
+                        | Decl::TsTypeAlias(_)
+                        | Decl::TsEnum(_)
+                        | Decl::TsModule(_)
+                ) =>
+            {
+                declarations.push(source_map.span_to_snippet(export.span()).map_err(|error| {
+                    format!("failed to read type declaration in `{}`: {error:?}", path.display())
+                })?);
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) => {
+                if let Some(source) = export.src.value.as_str() {
+                    if let Some(target) = declaration_reexport_path(path, source) {
+                        declarations.extend(all_reexported_type_declarations(&target, visited)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(declarations)
 }
 
 /// A same-file `import * as X from "SOURCE"; export { X[, X as Y], ... };`
@@ -1949,8 +2007,21 @@ fn reexported_class_or_interface_declarations(
     path: &Path,
     name: &str,
 ) -> Result<Vec<String>, String> {
-    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem};
+    let mut visited = std::collections::BTreeSet::new();
+    reexported_class_or_interface_declarations_inner(path, name, &mut visited)
+}
+
+fn reexported_class_or_interface_declarations_inner(
+    path: &Path,
+    name: &str,
+    visited: &mut std::collections::BTreeSet<(PathBuf, String)>,
+) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, Stmt};
     use thaw_parser::common::{SourceMapper, Spanned};
+
+    if !visited.insert((path.to_path_buf(), name.to_string())) {
+        return Ok(Vec::new());
+    }
 
     let source = fs::read_to_string(path).map_err(|error| {
         format!(
@@ -1959,22 +2030,78 @@ fn reexported_class_or_interface_declarations(
         )
     })?;
     let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
-    let mut declarations = Vec::new();
+    let mut local_name = name.to_string();
     for item in &module.body {
-        let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) = item else {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
         };
-        let matches = match &declaration.decl {
-            Decl::Class(class) => class.ident.sym == name,
-            Decl::TsInterface(interface) => interface.id.sym == name,
+        if export.src.is_some() {
+            continue;
+        }
+        for specifier in &export.specifiers {
+            let ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            let exported = named.exported.as_ref().unwrap_or(&named.orig);
+            let (ModuleExportName::Ident(exported), ModuleExportName::Ident(original)) =
+                (exported, &named.orig)
+            else {
+                continue;
+            };
+            if exported.sym == name {
+                local_name = original.sym.to_string();
+            }
+        }
+    }
+
+    let mut declarations = Vec::new();
+    let mut superclass = None;
+    for item in &module.body {
+        let declaration = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) => Some(&declaration.decl),
+            ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+            _ => None,
+        };
+        let Some(declaration) = declaration else {
+            continue;
+        };
+        let matches = match declaration {
+            Decl::Class(class) => {
+                if class.ident.sym == local_name {
+                    superclass = class.class.super_class.as_deref().and_then(|expr| match expr {
+                        thaw_parser::ast::Expr::Ident(ident) => Some(ident.sym.to_string()),
+                        _ => None,
+                    });
+                    true
+                } else {
+                    false
+                }
+            }
+            Decl::TsInterface(interface) => interface.id.sym == local_name,
             _ => false,
         };
         if matches {
-            declarations.push(
+            let mut snippet =
                 source_map
                     .span_to_snippet(declaration.span())
-                    .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?,
-            );
+                    .map_err(|error| format!("failed to read declaration for `{name}`: {error:?}"))?;
+            if local_name != name {
+                snippet = rename_declared_function(snippet, name);
+            }
+            if !snippet.trim_start().starts_with("export ") {
+                snippet = format!("export {snippet}");
+            }
+            declarations.push(snippet);
+        }
+    }
+    if let Some(superclass) = superclass {
+        if let Some((target_path, target_name)) = named_import_targets(path, &module).get(&superclass)
+        {
+            declarations.extend(reexported_class_or_interface_declarations_inner(
+                target_path,
+                target_name,
+                visited,
+            )?);
         }
     }
     Ok(declarations)

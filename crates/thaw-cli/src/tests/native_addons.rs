@@ -1884,3 +1884,81 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn registry_add_runs_a_real_hono_route_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-hono-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "hono@4.13.7").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Hono, Context } from "hono";
+async function main(): Promise<void> {
+    const app = new Hono();
+    app.get("/", (c: Context) => c.text("Hello Thaw"));
+    const response = await app.request("/");
+    const body: string = await response.text();
+    console.log(response.status);
+    console.log(body);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["hono".into()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "200\nHello Thaw\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn registry_add_infers_a_real_commander_action_callback_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-commander-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "commander@14.0.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Command } from "commander";
+function main(): void {
+    const program = new Command();
+    program.argument("<name>");
+    program.action((name) => console.log(name));
+    program.parse(["node", "app", "Thaw"]);
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["commander".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"Thaw\"\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
