@@ -159,6 +159,16 @@ impl<'a> FnLowerer<'a> {
         if let Some(adapted) = self.adapt_named_function_to_callable(declared, &value)? {
             return Ok(adapted);
         }
+        if let HirType::CallableFunction(fixed, _, rest, ret) = declared {
+            let actual = self.infer_expr_type(&value)?;
+            let mut abi_params = fixed.clone();
+            if let Some(rest) = rest {
+                abi_params.push(HirType::Array(rest.clone()));
+            }
+            if actual == HirType::Function(abi_params, ret.clone()) {
+                return Ok(HirExpr::TypedClosure(declared.clone(), Box::new(value)));
+            }
+        }
         if let HirType::Dictionary(element) = declared {
             if self.infer_expr_type(&value)? == *declared {
                 return Ok(value);

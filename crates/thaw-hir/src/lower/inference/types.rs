@@ -29,6 +29,25 @@ impl<'a> FnLowerer<'a> {
             || *expected == HirType::Dynamic
             || actual == *expected
             || callable_compatible
+            || match (expected, value) {
+                (HirType::Tuple(types), HirExpr::ArrayLit(values)) => {
+                    types.len() == values.len()
+                        && types
+                            .iter()
+                            .zip(values)
+                            .all(|(ty, value)| self.expect_type(ty, value, context).is_ok())
+                }
+                (HirType::Object(types), HirExpr::ObjectLit(values)) => {
+                    types.len() == values.len()
+                        && types.iter().all(|(name, ty)| {
+                            values.iter().any(|(value_name, value)| {
+                                value_name == name
+                                    && self.expect_type(ty, value, context).is_ok()
+                            })
+                        })
+                }
+                _ => false,
+            }
         {
             Ok(())
         } else {
