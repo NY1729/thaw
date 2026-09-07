@@ -34,6 +34,23 @@ fn install_requires_a_package_manifest() {
 }
 
 #[test]
+fn run_uses_the_named_script_and_project_directory() {
+    let command = npm_run_command("build", Path::new("web"));
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["run", "build", "--prefix", "web"]
+    );
+}
+
+#[test]
+fn run_requires_a_script_name() {
+    assert_eq!(
+        run_script(&[]).unwrap_err(),
+        "usage: thaw run <script> [--prefix <directory>]"
+    );
+}
+
+#[test]
 fn vite_assets_are_embedded_with_routes_and_content_types() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-assets-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("assets")).unwrap();
