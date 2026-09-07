@@ -438,6 +438,50 @@ fn project_build_reads_package_defaults() {
 }
 
 #[test]
+fn project_build_uses_standard_npm_entry_and_vite_fields() {
+    assert_eq!(
+        project_build_defaults(r#"{"source":"src/server.ts","scripts":{"build":"vite build"}}"#)
+            .unwrap(),
+        (
+            Some(PathBuf::from("src/server.ts")),
+            Some(PathBuf::from(".")),
+            None
+        )
+    );
+    assert_eq!(
+        project_build_defaults(r#"{"main":"index.ts"}"#).unwrap().0,
+        Some(PathBuf::from("index.ts"))
+    );
+    assert_eq!(
+        project_build_defaults(r#"{"module":"server.mjs","main":"index.cjs"}"#)
+            .unwrap()
+            .0,
+        Some(PathBuf::from("server.mjs"))
+    );
+}
+
+#[test]
+fn build_accepts_an_npm_project_directory() {
+    let directory = std::env::temp_dir().join(format!("thaw-npm-project-{}", std::process::id()));
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"main":"dist/index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/index.ts"),
+        "function main(): void { console.log('npm project'); }\n",
+    )
+    .unwrap();
+    run_build(&[directory.display().to_string()]).unwrap();
+    let result = Command::new(directory.join("app")).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "npm project\n");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn vite_assets_are_embedded_with_routes_and_content_types() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-assets-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("assets")).unwrap();
