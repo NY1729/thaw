@@ -208,6 +208,17 @@ thaw build
 thaw dev
 ```
 
+An ordinary npm project directory can also be compiled directly. Thaw reads
+`thaw.entry`, then the standard `source`, `module`, or `main` field, and otherwise checks
+`server.ts`, `src/server.ts`, `index.ts`, and `src/index.ts`. A `vite build`
+script enables frontend asset embedding automatically:
+
+```bash
+thaw install ./my-app
+thaw build ./my-app
+./my-app/app
+```
+
 `thaw dev` uses the same entry and Vite directory, rebuilds the frontend only
 when its sources change, and otherwise reuses the existing `dist/` assets.
 
