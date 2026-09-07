@@ -184,14 +184,13 @@ target/release/thaw dev examples/hono-react-prisma-board/server.ts \
 ```
 
 Native registry addons are embedded by default for a single-file executable.
-For smaller local builds, keep them in `thaw_modules` and load them dynamically:
+For smaller local builds, place them in an adjacent sidecar directory:
 
 ```bash
 target/release/thaw build server.ts --external-native -o app
 ```
 
-The external mode records absolute library paths, so the registry must remain
-available on the target machine.
+This produces `app` and `app.native/`; copy both when moving the application.
 
 A project can put its defaults in `package.json`, then build without arguments:
 

@@ -356,6 +356,7 @@ fn build_with_native_mode(
         &resolved_packages,
         &user_source,
         embed_native_addons,
+        output,
     )?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     // `qs.stringify(x)`-style calls, for a name that collided across two

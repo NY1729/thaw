@@ -102,7 +102,7 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let request = |path: &str| {
+    let request = |method: &str, path: &str, body: &str| {
         let mut stream = (0..200)
             .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => Some(stream),
@@ -114,16 +114,29 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
             .expect("compiled bulletin board did not start");
         stream
             .write_all(
-                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
+                format!(
+                    "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
             )
             .unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
     };
-    assert!(request("/api/posts").contains(r#"{"posts":[]}"#));
-    assert!(request("/").contains("<title>Thaw掲示板</title>"));
+    assert!(request("GET", "/api/posts", "").contains(r#"{"posts":[]}"#));
+    let created = request(
+        "POST",
+        "/api/posts",
+        r#"{"author":"Yuu","message":"compiled"}"#,
+    );
+    assert!(created.contains(r#""author":"Yuu""#));
+    assert!(created.contains(r#""message":"compiled""#));
+    let listed = request("GET", "/api/posts", "");
+    assert!(listed.contains(r#""author":"Yuu""#));
+    assert!(listed.contains(r#""message":"compiled""#));
+    assert!(request("GET", "/", "").contains("<title>Thaw掲示板</title>"));
     child.kill().unwrap();
     child.wait().unwrap();
     let _ = std::fs::remove_dir_all(dir);
