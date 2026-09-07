@@ -23,6 +23,7 @@ fn vite_assets_are_embedded_with_routes_and_content_types() {
     std::fs::write(directory.join("assets/app.js"), "console.log('hello')").unwrap();
 
     let shim = generate_asset_shim(&directory).unwrap();
+    assert!(shim.contains("path = thawAssetPath(path);"));
     assert!(shim.contains("if (path === \"/\") { return \"text/html; charset=utf-8\"; }"));
     assert!(shim.contains("if (path === \"/assets/app.js\") { return \"console.log('hello')\"; }"));
 
