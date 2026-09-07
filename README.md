@@ -143,13 +143,9 @@ npm install --prefix examples/hono-react-prisma-board
 touch examples/hono-react-prisma-board/board.db
 DATABASE_URL="file:$PWD/examples/hono-react-prisma-board/board.db" npm run db:push \
   --prefix examples/hono-react-prisma-board
-target/release/thaw registry add hono
-target/release/thaw registry add @hono/node-server
-target/release/thaw registry add @prisma/client \
-  --from-node-modules examples/hono-react-prisma-board/node_modules
 target/release/thaw build examples/hono-react-prisma-board/server.ts \
   --vite examples/hono-react-prisma-board \
-  --use hono --use @hono/node-server --use @prisma/client -o thaw-board
+  -o thaw-board
 DATABASE_URL="file:$PWD/examples/hono-react-prisma-board/board.db" ./thaw-board
 ```
 
