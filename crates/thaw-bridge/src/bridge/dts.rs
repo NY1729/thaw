@@ -928,7 +928,54 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
             method.overloaded = counts[&(method.name.clone(), method.is_static)] > 1;
         }
     }
+    let aliases = class_constructor_aliases(&module);
+    for (alias, target) in aliases {
+        if classes.iter().any(|class| class.name == alias) {
+            continue;
+        }
+        if let Some(mut class) = classes.iter().find(|class| class.name == target).cloned() {
+            class.name = alias;
+            classes.push(class);
+        }
+    }
     Ok(classes)
+}
+
+/// TypeScript packages often publish a private class through a public
+/// constructor-valued constant (`export const Public: typeof Internal`).
+/// Treat that value as the same class shape under its runtime export name.
+fn class_constructor_aliases(module: &Module) -> Vec<(String, String)> {
+    module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(declaration))) => {
+                Some(declaration.as_ref())
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+                Decl::Var(declaration) => Some(declaration.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .flat_map(|declaration| &declaration.decls)
+        .filter_map(|declarator| {
+            let Pat::Ident(binding) = &declarator.name else {
+                return None;
+            };
+            let TsType::TsTypeQuery(query) = binding.type_ann.as_ref()?.type_ann.as_ref() else {
+                return None;
+            };
+            let swc_ecma_ast::TsTypeQueryExpr::TsEntityName(target) = &query.expr_name else {
+                return None;
+            };
+            let target = match target {
+                TsEntityName::Ident(target) => target.sym.to_string(),
+                TsEntityName::TsQualifiedName(target) => target.right.sym.to_string(),
+            };
+            Some((binding.id.sym.to_string(), target))
+        })
+        .collect()
 }
 
 fn inherited_class_constructors(
@@ -1220,14 +1267,28 @@ fn contextual_dynamic_type(
     dynamic_leaf: bool,
     in_progress: &mut Vec<String>,
 ) -> HirType {
-    if let DtsType::Native(native) = resolve_ts_type_with_substitution(
+    if !matches!(
         ty,
-        substitution,
-        interfaces,
-        generic,
-        &mut Vec::new(),
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function))
+            if !function.params.iter().any(|parameter| matches!(parameter, TsFnParam::Rest(_)))
     ) {
-        return contextualize_native_callbacks(native);
+        if let DtsType::Native(native) = resolve_ts_type_with_substitution(
+            ty,
+            substitution,
+            interfaces,
+            generic,
+            &mut Vec::new(),
+        ) {
+            let explicitly_json = matches!(
+                ty,
+                TsType::TsTypeRef(reference)
+                    if matches!(&reference.type_name, TsEntityName::Ident(name) if name.sym == *"JsValue" || name.sym == *"Json")
+            );
+            if dynamic_leaf && native == HirType::Json && !explicitly_json {
+                return HirType::JsValue;
+            }
+            return contextualize_native_callbacks(native);
+        }
     }
     if dynamic_leaf {
         return HirType::JsValue;
@@ -1404,6 +1465,93 @@ fn lower_dts_class(
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
 ) -> DtsClass {
+    let class_type_defaults = class
+        .type_params
+        .iter()
+        .flat_map(|params| &params.params)
+        .filter_map(|parameter| {
+            let TsType::TsTypeQuery(query) = parameter.default.as_deref()? else {
+                return None;
+            };
+            let swc_ecma_ast::TsTypeQueryExpr::TsEntityName(entity) = &query.expr_name else {
+                return None;
+            };
+            let name = match entity {
+                TsEntityName::Ident(name) => name.sym.to_string(),
+                TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
+            };
+            Some((parameter.name.sym.to_string(), name))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let callback_instance_classes = |function: &Function| {
+        function
+            .params
+            .iter()
+            .map(|parameter| {
+                let Pat::Ident(parameter) = &parameter.pat else {
+                    return Vec::new();
+                };
+                let Some(annotation) = &parameter.type_ann else {
+                    return Vec::new();
+                };
+                let TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(callback)) =
+                    annotation.type_ann.as_ref()
+                else {
+                    return Vec::new();
+                };
+                callback
+                    .params
+                    .iter()
+                    .filter_map(|parameter| match parameter {
+                        TsFnParam::Ident(parameter) if parameter.id.sym == *"this" => None,
+                        TsFnParam::Ident(parameter) => Some(parameter.type_ann.as_ref()),
+                        TsFnParam::Array(parameter) => Some(parameter.type_ann.as_ref()),
+                        TsFnParam::Rest(parameter) => Some(parameter.type_ann.as_ref()),
+                        TsFnParam::Object(parameter) => Some(parameter.type_ann.as_ref()),
+                    })
+                    .map(|annotation| {
+                        let TsType::TsTypeRef(instance) = annotation?.type_ann.as_ref() else {
+                            return None;
+                        };
+                        let TsEntityName::Ident(wrapper) = &instance.type_name else {
+                            return None;
+                        };
+                        if wrapper.sym != *"InstanceType" {
+                            return None;
+                        }
+                        let argument = instance.type_params.as_ref()?.params.first()?;
+                        let TsType::TsTypeRef(reference) = argument.as_ref() else {
+                            return None;
+                        };
+                        let TsEntityName::Ident(parameter) = &reference.type_name else {
+                            return None;
+                        };
+                        class_type_defaults.get(parameter.sym.as_str()).cloned()
+                    })
+                    .collect()
+            })
+            .collect::<Vec<_>>()
+    };
+    let literal_params = |function: &Function| {
+        function
+            .params
+            .iter()
+            .map(|parameter| {
+                let Pat::Ident(parameter) = &parameter.pat else {
+                    return None;
+                };
+                let TsType::TsLitType(literal) = parameter.type_ann.as_ref()?.type_ann.as_ref()
+                else {
+                    return None;
+                };
+                match &literal.lit {
+                    TsLit::Str(value) => Some(value.value.to_string_lossy().into_owned()),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
     let extends = class
         .super_class
         .as_deref()
@@ -1457,9 +1605,6 @@ fn lower_dts_class(
                     }
                 }
                 for (parameter, (_, classified)) in method.function.params.iter().zip(&mut params) {
-                    if !matches!(classified, DtsType::Unsupported(_)) {
-                        continue;
-                    }
                     let Pat::Ident(parameter) = &parameter.pat else {
                         continue;
                     };
@@ -1494,6 +1639,8 @@ fn lower_dts_class(
                         .count(),
                     rest_param,
                     ret: function.ret,
+                    callback_instance_classes: callback_instance_classes(&method.function),
+                    literal_params: literal_params(&method.function),
                     is_static: method.is_static,
                     kind: match method.kind {
                         MethodKind::Method => DtsMethodKind::Method,
@@ -1523,6 +1670,8 @@ fn lower_dts_class(
                         required_params: function.required_params,
                         rest_param: function.rest_param,
                         ret: function.ret,
+                        callback_instance_classes: Vec::new(),
+                        literal_params: Vec::new(),
                         is_static: property.is_static,
                         kind: DtsMethodKind::Method,
                         overloaded: false,

@@ -92,6 +92,10 @@ pub struct DtsMethod {
     /// the array type written in TypeScript.
     pub rest_param: Option<(String, DtsType)>,
     pub ret: DtsType,
+    /// For each method parameter, class identities of values delivered to
+    /// its callback parameters. `None` means an ordinary non-class value.
+    pub callback_instance_classes: Vec<Vec<Option<String>>>,
+    pub literal_params: Vec<Option<String>>,
     pub is_static: bool,
     pub kind: DtsMethodKind,
     pub overloaded: bool,

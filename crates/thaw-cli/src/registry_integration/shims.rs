@@ -21398,6 +21398,10 @@ type ClassConstructorRewrite = (
 );
 /// `(class, method, helper, argument_count, has_callback, parameter_types)`.
 type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::HirType>);
+enum ClassMethodContext {
+    CallbackInstance(String, usize, usize, String),
+    LiteralArgument(String, usize, String),
+}
 /// `(function name, helper symbol, min arity, max arity, parameter
 /// types)` -- a registry Fallback function with more than one `.d.ts`
 /// overload (real example: uuid's `v4`, a `(options?): string` overload
@@ -21526,24 +21530,22 @@ fn generate_napi_class_constructors(
     let prefix = if napi { "napi" } else { "js" };
     let mut helpers = Vec::new();
     for (overload_index, constructor) in class.constructors.iter().enumerate() {
-        // Checked per arity, not once for the whole constructor: an
-        // optional trailing parameter with an unsupported type (real
-        // example: hono's `constructor(options?: HonoOptions<E>)`)
-        // shouldn't block the *lower* arities that never need to render
-        // it at all -- only `new Class()` (arity 0) needs to work for
-        // `options` to never come up.
+        // Checked per arity, not once for the whole constructor. Types the
+        // declaration parser cannot classify still cross the dynamic ABI as
+        // Json, matching ordinary Fallback function parameters.
         for arity in constructor.required_params..=constructor.params.len() {
             let params = &constructor.params[..arity];
-            if !params.iter().all(|(_, ty)| {
-                matches!(ty, thaw_bridge::DtsType::Native(native) if render_dynamic_type(native).is_some())
+            if !params.iter().all(|(_, ty)| match ty {
+                thaw_bridge::DtsType::Native(native) => render_dynamic_type(native).is_some(),
+                thaw_bridge::DtsType::Unsupported(_) => true,
             }) {
                 continue;
             }
             let parameter_types = params
                 .iter()
-                .filter_map(|(_, ty)| match ty {
-                    thaw_bridge::DtsType::Native(ty) => Some(ty.clone()),
-                    thaw_bridge::DtsType::Unsupported(_) => None,
+                .map(|(_, ty)| match ty {
+                    thaw_bridge::DtsType::Native(ty) => ty.clone(),
+                    thaw_bridge::DtsType::Unsupported(_) => thaw_hir::HirType::Json,
                 })
                 .collect::<Vec<_>>();
             if helpers.iter().any(|(existing_arity, _, existing_types)| {
@@ -21557,7 +21559,7 @@ fn generate_napi_class_constructors(
                     thaw_bridge::DtsType::Native(ty) => {
                         format!("{name}: {}", render_dynamic_type(ty).unwrap())
                     }
-                    thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+                    thaw_bridge::DtsType::Unsupported(_) => format!("{name}: Json"),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -21666,12 +21668,31 @@ fn generate_napi_class_property_setter(
 /// dayjs's `Dayjs`) alike. A trailing callback parameter is excluded for
 /// the QuickJS-NG backend, which doesn't marshal one yet (see
 /// `compile_typed_napi_method`'s explicit guard).
+#[cfg(test)]
 fn generate_napi_class_method_overloads(
     class: &thaw_bridge::DtsClass,
     is_static: bool,
     observed_arities: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
     shim: &mut String,
     napi: bool,
+) -> Vec<(String, String, usize, bool, Vec<thaw_hir::HirType>)> {
+    generate_napi_class_method_overloads_with_callback_instances(
+        class,
+        is_static,
+        observed_arities,
+        shim,
+        napi,
+        &mut Vec::new(),
+    )
+}
+
+fn generate_napi_class_method_overloads_with_callback_instances(
+    class: &thaw_bridge::DtsClass,
+    is_static: bool,
+    observed_arities: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+    shim: &mut String,
+    napi: bool,
+    method_contexts: &mut Vec<ClassMethodContext>,
 ) -> Vec<(String, String, usize, bool, Vec<thaw_hir::HirType>)> {
     let mut generated = Vec::new();
     let mut method_names = std::collections::HashSet::new();
@@ -21811,6 +21832,33 @@ fn generate_napi_class_method_overloads(
                 shim.push_str(&format!(
                     "declare function {symbol}({params}): {return_type};\n"
                 ));
+                for (argument_index, classes) in overload.callback_instance_classes
+                    [..fixed_count]
+                    .iter()
+                    .enumerate()
+                {
+                    for (parameter_index, class) in classes.iter().enumerate() {
+                        if let Some(class) = class {
+                            method_contexts.push(ClassMethodContext::CallbackInstance(
+                                symbol.clone(),
+                                argument_index,
+                                parameter_index,
+                                class.clone(),
+                            ));
+                        }
+                    }
+                }
+                for (argument_index, literal) in
+                    overload.literal_params[..fixed_count].iter().enumerate()
+                {
+                    if let Some(literal) = literal {
+                        method_contexts.push(ClassMethodContext::LiteralArgument(
+                            symbol.clone(),
+                            argument_index,
+                            literal.clone(),
+                        ));
+                    }
+                }
                 generated.push((
                     method.name.clone(),
                     symbol,
@@ -21844,6 +21892,7 @@ type RegistryShims = (
     Vec<QualifiedCallRewrite>,
     Vec<ClassConstructorRewrite>,
     Vec<ClassMethodRewrite>,
+    Vec<ClassMethodContext>,
     Vec<StaticClassMethodRewrite>,
     Vec<ClassGetterRewrite>,
     Vec<ClassSetterRewrite>,
@@ -22344,6 +22393,7 @@ fn generate_registry_shims(
         })
         .collect();
     let mut class_method_rewrites = Vec::new();
+    let mut callback_instance_rewrites = Vec::new();
     let mut static_class_method_rewrites = Vec::new();
     let mut class_getter_rewrites = Vec::new();
     let mut class_setter_rewrites = Vec::new();
@@ -22376,12 +22426,13 @@ fn generate_registry_shims(
                 ));
 
                 for (method, symbol, argument_count, has_callback, parameter_types) in
-                    generate_napi_class_method_overloads(
+                    generate_napi_class_method_overloads_with_callback_instances(
                         class,
                         false,
                         &observed_arities,
                         &mut shim,
                         true,
+                        &mut callback_instance_rewrites,
                     )
                 {
                     class_method_rewrites.push((
@@ -22577,12 +22628,13 @@ fn generate_registry_shims(
                     }
                 }
                 for (method, symbol, argument_count, has_callback, parameter_types) in
-                    generate_napi_class_method_overloads(
+                    generate_napi_class_method_overloads_with_callback_instances(
                         class,
                         true,
                         &observed_arities,
                         &mut shim,
                         true,
+                        &mut callback_instance_rewrites,
                     )
                 {
                     static_class_method_rewrites.push((
@@ -22629,12 +22681,13 @@ fn generate_registry_shims(
                     ));
                 }
                 for (method, symbol, argument_count, has_callback, parameter_types) in
-                    generate_napi_class_method_overloads(
+                    generate_napi_class_method_overloads_with_callback_instances(
                         class,
                         false,
                         &observed_arities,
                         &mut shim,
                         false,
+                        &mut callback_instance_rewrites,
                     )
                 {
                     class_method_rewrites.push((
@@ -23323,13 +23376,13 @@ fn generate_registry_shims(
         }
         external_exports.insert(pkg.name.clone(), package_exports);
     }
-
     Ok((
         shim,
         native_libs,
         rewrites,
         class_rewrites,
         class_method_rewrites,
+        callback_instance_rewrites,
         static_class_method_rewrites,
         class_getter_rewrites,
         class_setter_rewrites,

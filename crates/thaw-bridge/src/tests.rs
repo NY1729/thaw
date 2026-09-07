@@ -2704,7 +2704,7 @@ fn extracts_class_constructors_methods_properties_and_overloads() {
     assert_eq!(
         close.params[0].1,
         DtsType::Native(HirType::Function(
-            vec![HirType::Json],
+            vec![HirType::JsValue],
             Box::new(HirType::Void)
         ))
     );
@@ -2735,6 +2735,68 @@ fn extracts_class_constructors_methods_properties_and_overloads() {
     assert_eq!(database.properties.len(), 1);
     assert_eq!(database.properties[0].name, "open");
     assert!(database.properties[0].readonly);
+}
+
+#[test]
+fn extracts_constructor_value_aliases_as_classes() {
+    let classes = parse_dts_classes(
+        r#"declare class InternalServer {
+                constructor(options?: { port?: number });
+                close(callback?: () => void): void;
+            }
+            export const PublicServer: typeof InternalServer;
+            export interface PublicServer extends InternalServer {}"#,
+    )
+    .unwrap();
+    let public = classes
+        .iter()
+        .find(|class| class.name == "PublicServer")
+        .unwrap();
+    assert_eq!(public.constructors.len(), 1);
+    assert!(public.methods.iter().any(|method| method.name == "close"));
+}
+
+#[test]
+fn retains_defaulted_instance_types_delivered_to_method_callbacks() {
+    let classes = parse_dts_classes(
+        r#"declare class Socket { send(value: string): void; }
+            declare class Server<T extends typeof Socket = typeof Socket> {
+                on(event: "connection", callback: (socket: InstanceType<T>) => void): this;
+            }
+            export const PublicServer: typeof Server;"#,
+    )
+    .unwrap();
+    let method = classes
+        .iter()
+        .find(|class| class.name == "PublicServer")
+        .unwrap()
+        .methods
+        .iter()
+        .find(|method| method.name == "on")
+        .unwrap();
+    assert_eq!(
+        method.callback_instance_classes[1],
+        vec![Some("Socket".into())]
+    );
+}
+
+#[test]
+fn keeps_opaque_dynamic_callback_values_as_live_handles() {
+    let classes = parse_dts_classes(
+        r#"type RawData = Buffer | ArrayBuffer | Buffer[];
+            declare class Socket {
+                on(event: "message", callback: (data: RawData) => void): this;
+            }"#,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            &classes[0].methods[0].params[1].1,
+            DtsType::Native(HirType::Function(params, _)) if params == &[HirType::JsValue]
+        ),
+        "{:?}",
+        classes[0].methods[0].params[1].1
+    );
 }
 
 #[test]

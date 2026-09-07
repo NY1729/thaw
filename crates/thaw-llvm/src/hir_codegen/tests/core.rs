@@ -1654,6 +1654,29 @@ fn compiles_quickjs_fallback_path() {
 }
 
 #[test]
+fn passes_callbacks_to_typed_quickjs_calls() {
+    let source = r#"
+        declare function __thaw_typed_js_72756e43616c6c6261636b(
+            callback?: (value: number) => number,
+        ): JsValue;
+
+        function main(): void {
+            loadScript("globalThis.runCallback = callback => { queueMicrotask(() => callback(21)); return null; };");
+            __thaw_typed_js_72756e43616c6c6261636b(
+                (value: number): number => {
+                    console.log(value * 2);
+                    return value;
+                },
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_callback_argument"),
+        "42\n"
+    );
+}
+
+#[test]
 fn registers_a_callback_with_an_optional_void_result() {
     let source = r#"
         function main(): void {
