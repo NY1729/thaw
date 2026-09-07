@@ -467,12 +467,24 @@ fn build_with_native_mode(
     let jit_lib = build_staticlib("thaw-jit")?;
     let uses_wasm = source_uses_wasm(&shim_source) || source_uses_wasm(&user_source);
     let uses_tls = source_uses_tls(&shim_source) || source_uses_tls(&user_source);
+    let uses_brotli = source_uses_brotli(&shim_source) || source_uses_brotli(&user_source);
     let quickjs_lib = uses_quickjs
-        .then(|| match (uses_tls, uses_wasm) {
-            (true, true) => build_staticlib("thaw-quickjs"),
-            (true, false) => build_staticlib_with_features("thaw-quickjs", &["tls"]),
-            (false, true) => build_staticlib_with_features("thaw-quickjs", &["wasm"]),
-            (false, false) => build_staticlib_without_default_features("thaw-quickjs"),
+        .then(|| {
+            let mut features = Vec::new();
+            if uses_brotli {
+                features.push("brotli");
+            }
+            if uses_tls {
+                features.push("tls");
+            }
+            if uses_wasm {
+                features.push("wasm");
+            }
+            if features.len() == 3 {
+                build_staticlib("thaw-quickjs")
+            } else {
+                build_staticlib_with_features("thaw-quickjs", &features)
+            }
         })
         .transpose()?;
     let napi_lib = uses_napi.then(|| {
@@ -584,6 +596,10 @@ fn source_uses_wasm(source: &str) -> bool {
 
 fn source_uses_tls(source: &str) -> bool {
     source.contains("__thaw_tls_")
+}
+
+fn source_uses_brotli(source: &str) -> bool {
+    source.contains("brotli") || source.contains("Brotli")
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
