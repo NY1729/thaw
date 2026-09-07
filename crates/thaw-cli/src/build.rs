@@ -62,7 +62,11 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
         ));
     }
 
-    fn collect(root: &Path, directory: &Path, files: &mut Vec<(String, String)>) -> Result<(), String> {
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        files: &mut Vec<(String, String, &'static str)>,
+    ) -> Result<(), String> {
         let entries = std::fs::read_dir(directory)
             .map_err(|error| format!("failed to read asset directory `{}`: {error}", directory.display()))?;
         for entry in entries {
@@ -80,13 +84,14 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
                 let url = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
                 let bytes = std::fs::read(&path)
                     .map_err(|error| format!("failed to read asset `{}`: {error}", path.display()))?;
-                let content = String::from_utf8(bytes).map_err(|_| {
-                    format!(
-                        "asset `{}` is not UTF-8; binary asset embedding is not implemented yet",
-                        path.display()
-                    )
-                })?;
-                files.push((url, content));
+                let (content, encoding) = match String::from_utf8(bytes.clone()) {
+                    Ok(content) => (content, "utf8"),
+                    Err(_) => (
+                        bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+                        "hex",
+                    ),
+                };
+                files.push((url, content, encoding));
             }
         }
         Ok(())
@@ -106,31 +111,38 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             Some("js" | "mjs") => "text/javascript; charset=utf-8",
             Some("json" | "map") => "application/json; charset=utf-8",
             Some("svg") => "image/svg+xml",
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            Some("ico") => "image/x-icon",
+            Some("woff") => "font/woff",
+            Some("woff2") => "font/woff2",
             Some("txt") => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         }
     }
 
     let mut routes = Vec::new();
-    for (path, content) in files {
+    for (path, content, encoding) in files {
         let content_type = mime(&path);
         if path == "/index.html" {
-            routes.push(("/".to_string(), content.clone(), content_type));
+            routes.push(("/".to_string(), content.clone(), content_type, encoding));
         }
-        routes.push((path, content, content_type));
+        routes.push((path, content, content_type, encoding));
     }
 
     let mut source = String::from(
         "function thawAssetPath(path: string): string {\nreturn path.split(\"?\")[0].split(\"#\")[0];\n}\nfunction thawHasAsset(path: string): boolean {\npath = thawAssetPath(path);\n",
     );
-    for (path, _, _) in &routes {
+    for (path, _, _, _) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return true; }}\n",
             serde_json::to_string(path).unwrap()
         ));
     }
     source.push_str("return false;\n}\nfunction thawAsset(path: string): string {\npath = thawAssetPath(path);\n");
-    for (path, content, _) in &routes {
+    for (path, content, _, _) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
             serde_json::to_string(path).unwrap(),
@@ -138,14 +150,22 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
         ));
     }
     source.push_str("return \"\";\n}\nfunction thawAssetContentType(path: string): string {\npath = thawAssetPath(path);\n");
-    for (path, _, content_type) in &routes {
+    for (path, _, content_type, _) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
             serde_json::to_string(path).unwrap(),
             serde_json::to_string(content_type).unwrap()
         ));
     }
-    source.push_str("return \"application/octet-stream\";\n}\n");
+    source.push_str("return \"application/octet-stream\";\n}\nfunction thawAssetEncoding(path: string): string {\npath = thawAssetPath(path);\n");
+    for (path, _, _, encoding) in &routes {
+        source.push_str(&format!(
+            "if (path === {}) {{ return {}; }}\n",
+            serde_json::to_string(path).unwrap(),
+            serde_json::to_string(encoding).unwrap()
+        ));
+    }
+    source.push_str("return \"utf8\";\n}\n");
     Ok(source)
 }
 
