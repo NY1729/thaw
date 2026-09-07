@@ -166,6 +166,9 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
         ));
     }
     source.push_str("return \"utf8\";\n}\n");
+    source.push_str(
+        "function thawAssetRoute(path: string): string {\npath = thawAssetPath(path);\nif (thawHasAsset(path)) { return path; }\nif (path.indexOf(\".\") < 0 && thawHasAsset(\"/\")) { return \"/\"; }\nreturn path;\n}\nfunction thawServeAsset(response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }, path: string): boolean {\npath = thawAssetRoute(path);\nif (!thawHasAsset(path)) { return false; }\nresponse.setHeader(\"Content-Type\", thawAssetContentType(path));\nreturn response.endEncoded(thawAsset(path), thawAssetEncoding(path));\n}\n",
+    );
     Ok(source)
 }
 

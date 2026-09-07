@@ -16,12 +16,8 @@ function main(): void {
       response.setHeader("Content-Type", "application/json; charset=utf-8");
       return response.end('{"message":"Hello from the Thaw API"}');
     }
-    if (request.method === "GET" && thawHasAsset(request.url)) {
-      response.setHeader("Content-Type", thawAssetContentType(request.url));
-      return response.endEncoded(
-        thawAsset(request.url),
-        thawAssetEncoding(request.url),
-      );
+    if (request.method === "GET" && thawServeAsset(response, request.url)) {
+      return true;
     }
     response.statusCode = 404;
     return response.end("Not Found");
