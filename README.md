@@ -181,6 +181,22 @@ target/release/thaw build server.ts --external-native -o app
 The external mode records absolute library paths, so the registry must remain
 available on the target machine.
 
+A project can put its defaults in `package.json`, then build without arguments:
+
+```json
+{"thaw":{"entry":"server.ts","vite":".","output":"app"}}
+```
+
+```bash
+thaw build
+```
+
+Add dependencies with npm-compatible package specifiers:
+
+```bash
+thaw add zod nanoid@5
+```
+
 The complete install, Prisma setup, compile, API, and React serving path can
 be checked with:
 
