@@ -1,0 +1,9 @@
+:root { font-family: system-ui, sans-serif; background: #f5f7fb; color: #182033; }
+body { margin: 0; }
+main { width: min(42rem, calc(100% - 2rem)); margin: 3rem auto; }
+form, article { display: grid; gap: .75rem; padding: 1rem; margin-bottom: 1rem; background: white; border-radius: .75rem; box-shadow: 0 2px 12px #18203318; }
+input, textarea, button { box-sizing: border-box; width: 100%; padding: .75rem; font: inherit; }
+textarea { min-height: 7rem; resize: vertical; }
+button { border: 0; border-radius: .5rem; background: #4856d8; color: white; cursor: pointer; }
+article p { margin: 0; white-space: pre-wrap; }
+time { color: #667085; font-size: .8rem; }

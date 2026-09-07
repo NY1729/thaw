@@ -2,3 +2,6 @@
 /examples/react-vite-fullstack/frontend/node_modules
 /examples/react-vite-fullstack/frontend/dist
 /examples/hono-prisma-postgres/node_modules
+/examples/hono-react-prisma-board/node_modules
+/examples/hono-react-prisma-board/dist
+/examples/hono-react-prisma-board/board.db
