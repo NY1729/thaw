@@ -1,3 +1,4 @@
 /target
 /examples/react-vite-fullstack/frontend/node_modules
 /examples/react-vite-fullstack/frontend/dist
+/examples/hono-prisma-postgres/node_modules
