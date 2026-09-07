@@ -664,12 +664,7 @@ fn add_installed_inner(
             dest_dir.join("package.d.ts").display()
         )
     })?;
-    fs::write(dest_dir.join("bundle.js"), js_source).map_err(|e| {
-        format!(
-            "failed to write `{}`: {e}",
-            dest_dir.join("bundle.js").display()
-        )
-    })?;
+    write_bundle(&dest_dir, &js_source)?;
     let subpaths_dir = dest_dir.join("subpaths");
     if subpaths_dir.is_dir() {
         fs::remove_dir_all(&subpaths_dir).map_err(|error| {
@@ -778,9 +773,25 @@ fn write_installed_subpath(
         .map_err(|error| format!("failed to create `{}`: {error}", destination.display()))?;
     fs::write(destination.join("package.d.ts"), subpath_dts)
         .map_err(|error| format!("failed to write `{}`: {error}", destination.join("package.d.ts").display()))?;
-    fs::write(destination.join("bundle.js"), subpath_js)
-        .map_err(|error| format!("failed to write `{}`: {error}", destination.join("bundle.js").display()))?;
+    write_bundle(&destination, &subpath_js)?;
     Ok(dependencies)
+}
+
+fn write_bundle(directory: &Path, source: &str) -> Result<(), String> {
+    let path = directory.join("bundle.js.gz");
+    let file = fs::File::create(&path)
+        .map_err(|error| format!("failed to create `{}`: {error}", path.display()))?;
+    let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    encoder
+        .write_all(source.as_bytes())
+        .and_then(|_| encoder.finish())
+        .map_err(|error| format!("failed to write `{}`: {error}", path.display()))?;
+    let legacy = directory.join("bundle.js");
+    if legacy.is_file() {
+        fs::remove_file(&legacy)
+            .map_err(|error| format!("failed to remove `{}`: {error}", legacy.display()))?;
+    }
+    Ok(())
 }
 
 /// Follows `/// <reference path="..." />` directives (the classic
