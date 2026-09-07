@@ -523,6 +523,52 @@ pub unsafe extern "C" fn napi_get_global(env: NapiEnv, out: *mut NapiValue) -> N
                 return record_status(env, NAPI_GENERIC_FAILURE);
             }
         }
+        let mut symbol = ptr::null_mut();
+        if napi_create_function(
+            env,
+            c"Symbol".as_ptr(),
+            NAPI_AUTO_LENGTH,
+            Some(napi_builtin_constructor),
+            ptr::null_mut(),
+            &mut symbol,
+        ) != NAPI_OK
+        {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        }
+        for name in [
+            c"asyncDispose",
+            c"asyncIterator",
+            c"dispose",
+            c"hasInstance",
+            c"isConcatSpreadable",
+            c"iterator",
+            c"match",
+            c"matchAll",
+            c"replace",
+            c"search",
+            c"species",
+            c"split",
+            c"toPrimitive",
+            c"toStringTag",
+            c"unscopables",
+        ] {
+            let mut description = ptr::null_mut();
+            let mut value = ptr::null_mut();
+            if napi_create_string_utf8(
+                env,
+                name.as_ptr(),
+                NAPI_AUTO_LENGTH,
+                &mut description,
+            ) != NAPI_OK
+                || napi_create_symbol(env, description, &mut value) != NAPI_OK
+                || napi_set_named_property(env, symbol, name.as_ptr(), value) != NAPI_OK
+            {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            }
+        }
+        if napi_set_named_property(env, global, c"Symbol".as_ptr(), symbol) != NAPI_OK {
+            return record_status(env, NAPI_GENERIC_FAILURE);
+        }
     }
     *out = env_mut(env).unwrap().global;
     NAPI_OK

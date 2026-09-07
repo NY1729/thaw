@@ -87,13 +87,13 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     match value_ref(exports).map_err(|_| "invalid exports value")? {
         Value::Object(object) => {
             for (name, value) in object {
-                if let Value::Function(function) =
-                    value_ref(*value).map_err(|_| "invalid export value")?
-                {
-                    if let PropertyKey::String(name) = name {
+                if let PropertyKey::String(name) = name {
+                    if let Value::Function(function) =
+                        value_ref(*value).map_err(|_| "invalid export value")?
+                    {
                         functions.push((name.clone(), function.clone()));
-                        exported_values.push((name.clone(), *value));
                     }
+                    exported_values.push((name.clone(), *value));
                 }
             }
         }
@@ -1004,49 +1004,94 @@ pub unsafe extern "C" fn thaw_napi_call_export_handle_with_function_typed_result
     callback: Option<ThawNativeValueCallback>,
     context: *mut c_void,
 ) -> ThawNapiHandleResult {
-    let result = (|| -> Result<u64, String> {
-        let name = text(name)?;
-        let callable = thaw_napi_get_export(CString::new(name.as_str()).unwrap().as_ptr());
-        let callback = callback.ok_or("native addon function argument is null")?;
-        let env = module_env_for_handle(callable)?;
-        let mut values = module_arguments(env, args, true)?;
-        if function_index > values.len() {
+    let argument = ThawNativeFunctionArgument {
+        index: function_index,
+        callback,
+        context,
+    };
+    thaw_napi_call_export_handle_with_functions_typed_result(name, args, &argument, 1)
+}
+
+#[repr(C)]
+pub struct ThawNativeFunctionArgument {
+    index: usize,
+    callback: Option<ThawNativeValueCallback>,
+    context: *mut c_void,
+}
+
+unsafe fn call_export_with_functions(
+    name: *const c_char,
+    args: *const c_char,
+    functions: *const ThawNativeFunctionArgument,
+    function_count: usize,
+) -> Result<NapiValue, String> {
+    if function_count != 0 && functions.is_null() {
+        return Err("native addon function argument list is null".into());
+    }
+    let name = text(name)?;
+    let callable = thaw_napi_get_export(CString::new(name.as_str()).unwrap().as_ptr());
+    let env = module_env_for_handle(callable)?;
+    let mut values = module_arguments(env, args, true)?;
+    let functions = if function_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(functions, function_count)
+    };
+    for function in functions {
+        if function.index > values.len() {
             return Err(format!(
-                "function argument index {function_index} exceeds argument count {}",
+                "function argument index {} exceeds argument count {}",
+                function.index,
                 values.len()
             ));
         }
-        let bridge = Arc::new(ThawCallbackBridge {
-            callback: ThawCallback::Value(callback),
-            context: context as usize,
-        });
-        let function = env_mut(env)
-            .map_err(|_| "invalid native addon environment")?
-            .alloc(Value::Function(Function {
-                callback: thaw_compiled_callback,
-                data: Arc::as_ptr(&bridge) as *mut c_void,
-                properties: HashMap::new(),
-                _thaw_bridge: Some(bridge),
-            }));
-        values.insert(function_index, function);
-        let exported = match value_ref(callable as NapiValue)
-            .map_err(|_| "invalid function handle")?
-        {
-            Value::Function(exported) => exported.clone(),
-            _ => return Err(format!("native addon export `{name}` is not callable")),
+        let value = if let Some(callback) = function.callback {
+            let bridge = Arc::new(ThawCallbackBridge {
+                callback: ThawCallback::Value(callback),
+                context: function.context as usize,
+            });
+            env_mut(env)
+                .map_err(|_| "invalid native addon environment")?
+                .alloc(Value::Function(Function {
+                    callback: thaw_compiled_callback,
+                    data: Arc::as_ptr(&bridge) as *mut c_void,
+                    properties: HashMap::new(),
+                    _thaw_bridge: Some(bridge),
+                }))
+        } else {
+            env_mut(env)
+                .map_err(|_| "invalid native addon environment")?
+                .alloc(Value::Undefined)
         };
-        let this_arg = env_mut(env)
-            .map_err(|_| "invalid native addon environment")?
-            .alloc(Value::Undefined);
-        let mut info = CallbackInfo {
-            args: values,
-            this_arg,
-            new_target: ptr::null_mut(),
-            data: exported.data,
-        };
-        let value = (exported.callback)(env, &mut info);
-        take_env_exception(env)?;
-        Ok(wait_for_promise(value)? as u64)
+        values.insert(function.index, value);
+    }
+    let exported = match value_ref(callable as NapiValue).map_err(|_| "invalid function handle")? {
+        Value::Function(exported) => exported.clone(),
+        _ => return Err(format!("native addon export `{name}` is not callable")),
+    };
+    let this_arg = env_mut(env)
+        .map_err(|_| "invalid native addon environment")?
+        .alloc(Value::Undefined);
+    let mut info = CallbackInfo {
+        args: values,
+        this_arg,
+        new_target: ptr::null_mut(),
+        data: exported.data,
+    };
+    let value = (exported.callback)(env, &mut info);
+    take_env_exception(env)?;
+    wait_for_promise(value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_export_handle_with_functions_typed_result(
+    name: *const c_char,
+    args: *const c_char,
+    functions: *const ThawNativeFunctionArgument,
+    function_count: usize,
+) -> ThawNapiHandleResult {
+    let result = (|| -> Result<u64, String> {
+        Ok(call_export_with_functions(name, args, functions, function_count)? as u64)
     })();
     match result {
         Ok(value) => ThawNapiHandleResult {
@@ -1055,6 +1100,21 @@ pub unsafe extern "C" fn thaw_napi_call_export_handle_with_function_typed_result
         },
         Err(error) => handle_error(error),
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_with_functions_typed_result(
+    name: *const c_char,
+    args: *const c_char,
+    functions: *const ThawNativeFunctionArgument,
+    function_count: usize,
+) -> ThawResult {
+    text_result(
+        call_export_with_functions(name, args, functions, function_count).and_then(|value| {
+            serde_json::to_string(&json_from_value_with_undefined(value, true)?)
+                .map_err(|error| error.to_string())
+        }),
+    )
 }
 
 #[no_mangle]

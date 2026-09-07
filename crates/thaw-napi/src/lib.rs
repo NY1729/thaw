@@ -88,7 +88,13 @@ struct AsyncPool {
     ready: Condvar,
 }
 
-static ASYNC_COMPLETIONS: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadyEvent {
+    AsyncCompletion(usize),
+    ThreadsafeFunction(usize),
+}
+
+static READY_EVENTS: OnceLock<Mutex<VecDeque<ReadyEvent>>> = OnceLock::new();
 static ASYNC_POOL: OnceLock<Option<Arc<AsyncPool>>> = OnceLock::new();
 static ACTIVE_ASYNC_WORK: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
@@ -97,7 +103,6 @@ static FATAL_EXCEPTION_PENDING: AtomicBool = AtomicBool::new(false);
 static ACTIVE_ASYNC_CLEANUP_HOOKS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SYMBOL_ID: AtomicU64 = AtomicU64::new(1);
 static GLOBAL_SYMBOLS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-static THREADSAFE_READY: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
 #[allow(clippy::vec_box)]
 static THREADSAFE_FUNCTIONS: OnceLock<Mutex<Vec<Box<ThreadsafeFunction>>>> = OnceLock::new();
 #[allow(clippy::vec_box)]
@@ -137,8 +142,8 @@ struct ThreadsafeState {
     scheduled: bool,
 }
 
-fn threadsafe_ready() -> &'static Mutex<VecDeque<usize>> {
-    THREADSAFE_READY.get_or_init(|| Mutex::new(VecDeque::new()))
+fn ready_events() -> &'static Mutex<VecDeque<ReadyEvent>> {
+    READY_EVENTS.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 #[allow(clippy::vec_box)]
@@ -181,15 +186,11 @@ unsafe fn record_threadsafe_status(
 fn schedule_threadsafe(function: *mut ThreadsafeFunction, state: &mut ThreadsafeState) {
     if !state.scheduled {
         state.scheduled = true;
-        threadsafe_ready()
+        ready_events()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_back(function as usize);
+            .push_back(ReadyEvent::ThreadsafeFunction(function as usize));
     }
-}
-
-fn async_completions() -> &'static Mutex<VecDeque<usize>> {
-    ASYNC_COMPLETIONS.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 fn async_worker_count() -> usize {
@@ -245,10 +246,10 @@ fn async_worker(pool: Arc<AsyncPool>) {
         }
         work.completion_status.store(NAPI_OK, Ordering::Release);
         work.state.store(ASYNC_COMPLETE_PENDING, Ordering::Release);
-        async_completions()
+        ready_events()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_back(work_address);
+            .push_back(ReadyEvent::AsyncCompletion(work_address));
     }
 }
 

@@ -51,6 +51,21 @@ fn poll_uv_loop_drives_the_default_libuv_loop() {
     }
 }
 
+#[test]
+fn async_sources_share_readiness_order() {
+    let _guard = lock_async_test();
+    let mut ready = ready_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ready.clear();
+    ready.push_back(ReadyEvent::AsyncCompletion(1));
+    ready.push_back(ReadyEvent::ThreadsafeFunction(2));
+    ready.push_back(ReadyEvent::AsyncCompletion(3));
+    assert_eq!(ready.pop_front(), Some(ReadyEvent::AsyncCompletion(1)));
+    assert_eq!(ready.pop_front(), Some(ReadyEvent::ThreadsafeFunction(2)));
+    assert_eq!(ready.pop_front(), Some(ReadyEvent::AsyncCompletion(3)));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn async_drain_drives_registered_private_libuv_loops() {

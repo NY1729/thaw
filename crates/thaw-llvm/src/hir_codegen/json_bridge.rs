@@ -46,6 +46,16 @@ impl<'ctx> HirCompiler<'ctx> {
         args_json_val: BasicValueEnum<'ctx>,
         backend_symbol: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_json_backend_values_with_extra(name_val, args_json_val, backend_symbol, &[])
+    }
+
+    fn compile_json_backend_values_with_extra(
+        &mut self,
+        name_val: BasicValueEnum<'ctx>,
+        args_json_val: BasicValueEnum<'ctx>,
+        backend_symbol: &str,
+        extra: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let stringify_fn = self.module.get_function("thaw_json_stringify").unwrap();
         let args_json_str = self
             .builder
@@ -60,11 +70,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("thaw_json_stringify did not return a value")?;
 
         let call_fn = self.module.get_function(backend_symbol).unwrap();
+        let mut call_args = vec![name_val.into(), args_json_str.into()];
+        call_args.extend_from_slice(extra);
         let result = self
             .builder
             .build_call(
                 call_fn,
-                &[name_val.into(), args_json_str.into()],
+                &call_args,
                 "call_dynamic_result_abi",
             )
             .map_err(|e| e.to_string())?
@@ -1252,6 +1264,14 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json | HirType::Dictionary(_) => Ok(json),
+            HirType::Optional(payload) => {
+                let absent = self.compile_json_is_napi_undefined(json)?;
+                let present = self
+                    .builder
+                    .build_not(absent, "json_optional_present")
+                    .map_err(|error| error.to_string())?;
+                self.compile_json_to_optional_value(json, payload, present)
+            }
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(json, ty)
             }
@@ -1347,6 +1367,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?
         };
+        self.compile_json_to_optional_value(json, payload, present)
+    }
+
+    fn compile_json_to_optional_value(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        payload: &HirType,
+        present: IntValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let function = self.current_function();
         let value_block = self.context.append_basic_block(function, "json_tagged_value");
         let absent_block = self.context.append_basic_block(function, "json_tagged_absent");
