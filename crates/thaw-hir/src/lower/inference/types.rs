@@ -524,6 +524,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_string_slice" => {
+                        if args.len() != 3 {
+                            return Err("string slice expects three operands".into());
+                        }
+                        self.expect_type(&HirType::Str, &args[0], "string slice receiver")?;
+                        self.expect_type(&HirType::F64, &args[1], "string slice start")?;
+                        self.expect_type(&HirType::F64, &args[2], "string slice end")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_encode_uri_component" => {
                         let [argument] = args.as_slice() else {
                             return Err("encodeURIComponent expects one operand".into());

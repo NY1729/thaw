@@ -451,6 +451,34 @@ pub unsafe extern "C" fn thaw_string_ends_with(
     (value.get(end - search.len()..end) == Some(search.as_slice())).into()
 }
 
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_string_slice(
+    value: *const c_char,
+    start: f64,
+    end: f64,
+) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let units = value.encode_utf16().collect::<Vec<_>>();
+    let index = |position: f64| {
+        if position.is_nan() {
+            0
+        } else if position < 0.0 {
+            (units.len() as f64 + position.trunc()).max(0.0) as usize
+        } else {
+            position.trunc().min(units.len() as f64) as usize
+        }
+    };
+    let start = index(start);
+    let end = index(end).max(start);
+    arena_c_string(&String::from_utf16_lossy(&units[start..end]))
+        .map_or(std::ptr::null(), |value| value.cast())
+}
+
 fn is_javascript_whitespace(character: char) -> bool {
     matches!(
         character,

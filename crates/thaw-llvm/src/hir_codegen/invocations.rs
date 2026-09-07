@@ -778,6 +778,23 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return Ok(result);
             }
+            "__thaw_string_slice" => {
+                let arguments = args
+                    .iter()
+                    .map(|argument| self.compile_expr(argument).map(Into::into))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_string_slice").unwrap(),
+                        &arguments,
+                        "string_slice",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string slice returned no value".to_string());
+            }
             "__thaw_string_trim"
             | "__thaw_string_trim_start"
             | "__thaw_string_trim_end"
