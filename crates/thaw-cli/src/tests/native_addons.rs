@@ -1996,6 +1996,71 @@ async function main(): Promise<void> {
 }
 
 #[test]
+fn registry_add_runs_a_real_fastify_route_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-fastify-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "fastify@5.6.2").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import fastify from "fastify";
+async function main(): Promise<void> {
+    const app = fastify();
+    app.get("/users/:id", async (request) => ({ id: request.params.id }));
+    await app.listen({ host: "127.0.0.1", port: Number(process.env.PORT) });
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["fastify".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stream = (0..500)
+        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("compiled Fastify server did not start");
+    stream
+        .write_all(b"GET /users/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    assert!(response
+        .windows(b"{\"id\":\"42\"}".len())
+        .any(|bytes| bytes == b"{\"id\":\"42\"}"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_processes_a_real_hono_sharp_image_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
