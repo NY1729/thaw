@@ -33,6 +33,14 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
     }
 }
 
+fn quickjs_callback_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Function(_, _) | HirType::CallableFunction(..) => true,
+        HirType::Optional(inner) => quickjs_callback_type(inner),
+        _ => false,
+    }
+}
+
 fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str => Some(1),
@@ -660,8 +668,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let [closure_expr] = args else {
             return Err("registerNativeCallback expects exactly one argument".into());
         };
-        let (params, ret) = match self.expr_hir_type(closure_expr) {
-            Some(HirType::Function(params, ret)) => (params, *ret),
+        let (params, ret, optional) = match self.expr_hir_type(closure_expr) {
+            Some(HirType::Function(params, ret)) => (params, *ret, false),
+            Some(HirType::Optional(inner)) => match *inner {
+                HirType::Function(params, ret) => (params, *ret, true),
+                _ => {
+                    return Err(
+                        "registerNativeCallback: could not determine the callback's own function type"
+                            .into(),
+                    );
+                }
+            },
             _ => {
                 return Err(
                     "registerNativeCallback: could not determine the callback's own function type"
@@ -678,7 +695,15 @@ impl<'ctx> HirCompiler<'ctx> {
         // case, the matching native-side decoder. A `u64` is plenty (32
         // real params would already be an extraordinary callback), and
         // JS's own bitwise operators only ever work on 32 bits anyway.
-        let closure = self.compile_expr(closure_expr)?.into_pointer_value();
+        let closure = self.compile_expr(closure_expr)?;
+        let closure = if optional {
+            self.builder
+                .build_extract_value(closure.into_struct_value(), 1, "optional_native_callback")
+                .map_err(|error| error.to_string())?
+        } else {
+            closure
+        }
+        .into_pointer_value();
         self.compile_register_native_callback_from_closure(closure, &params, &ret)
     }
 
@@ -2499,14 +2524,24 @@ impl<'ctx> HirCompiler<'ctx> {
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = signature.backend == DynamicBackend::QuickJs;
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
-            if function_argument
-                .first()
-                .is_some_and(|(function_index, _, _)| *function_index == index)
+            if signature.backend == DynamicBackend::Napi
+                && function_argument
+                    .first()
+                    .is_some_and(|(function_index, _, _)| *function_index == index)
             {
                 continue;
             }
-            let value = self.compile_expr(arg)?;
-            self.compile_typed_dynamic_argument(array, value, ty)
+            let (value, marshalled_type) = if signature.backend == DynamicBackend::QuickJs
+                && quickjs_callback_type(ty)
+            {
+                (
+                    self.compile_register_native_callback(std::slice::from_ref(arg))?,
+                    &HirType::JsValue,
+                )
+            } else {
+                (self.compile_expr(arg)?, ty)
+            };
+            self.compile_typed_dynamic_argument(array, value, marshalled_type)
                 .map_err(|error| {
                     format!("typed dynamic argument {} ({ty:?}): {error}", index + 1)
                 })?;
@@ -3030,7 +3065,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .enumerate()
         {
             let (value, marshalled_type) = if signature.backend == DynamicBackend::QuickJs
-                && matches!(ty, HirType::Function(_, _) | HirType::CallableFunction(..))
+                && quickjs_callback_type(ty)
             {
                 (
                     self.compile_register_native_callback(std::slice::from_ref(argument))?,

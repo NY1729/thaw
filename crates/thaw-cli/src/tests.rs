@@ -5477,6 +5477,75 @@ fn rewrites_external_class_constructors_without_touching_other_new_expressions()
 }
 
 #[test]
+fn rewrites_methods_on_instances_received_by_callbacks() {
+    let source =
+        "const server = new Server(); server.on(\"connection\", (socket) => socket.send(\"hi\"));";
+    let rewritten = rewrite_external_class_methods_with_static(
+        source,
+        &[(
+            "pkg".into(),
+            "Server".into(),
+            vec![(0, "Server_ctor".into(), vec![])],
+        )],
+        &[
+            (
+                "Server".into(),
+                "on".into(),
+                "Server_on_error".into(),
+                2,
+                true,
+                vec![
+                    thaw_hir::HirType::Str,
+                    thaw_hir::HirType::Function(
+                        vec![thaw_hir::HirType::Json],
+                        Box::new(thaw_hir::HirType::Void),
+                    ),
+                ],
+            ),
+            (
+                "Server".into(),
+                "on".into(),
+                "Server_on".into(),
+                2,
+                true,
+                vec![
+                    thaw_hir::HirType::Str,
+                    thaw_hir::HirType::Function(
+                        vec![thaw_hir::HirType::Json],
+                        Box::new(thaw_hir::HirType::Void),
+                    ),
+                ],
+            ),
+            (
+                "Socket".into(),
+                "send".into(),
+                "Socket_send".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Str],
+            ),
+        ],
+        &[
+            ClassMethodContext::LiteralArgument("Server_on_error".into(), 0, "error".into()),
+            ClassMethodContext::LiteralArgument("Server_on".into(), 0, "connection".into()),
+            ClassMethodContext::CallbackInstance("Server_on".into(), 1, 0, "Socket".into()),
+        ],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        rewritten,
+        "const server = Server_ctor(); Server_on(server, \"connection\", (socket) => Socket_send(socket, \"hi\"));"
+    );
+}
+
+#[test]
 fn rewrites_external_class_constructors_with_erased_type_arguments() {
     let source = "const app = new Hono<{ Bindings: Bindings }>();";
     let rewritten = rewrite_external_class_constructors(
@@ -5598,6 +5667,32 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
     locked.constructible = false;
     assert!(generate_napi_class_constructors(&locked, true, &mut locked_shim).is_empty());
     assert!(locked_shim.is_empty());
+}
+
+#[test]
+fn generates_dynamic_constructor_helpers_for_unclassified_options() {
+    let class = thaw_bridge::DtsClass {
+        name: "Server".into(),
+        extends: None,
+        constructible: true,
+        constructors: vec![thaw_bridge::DtsConstructor {
+            params: vec![(
+                "options".into(),
+                thaw_bridge::DtsType::Unsupported("generic options".into()),
+            )],
+            required_params: 0,
+            overloaded: false,
+        }],
+        methods: vec![],
+        properties: vec![],
+    };
+    let mut shim = String::new();
+    let helpers = generate_napi_class_constructors(&class, false, &mut shim);
+    assert_eq!(
+        helpers.iter().map(|helper| helper.0).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(shim.contains("(options: Json): JsValue;"));
 }
 
 #[test]
@@ -6045,6 +6140,7 @@ fn rewrites_named_and_namespace_static_class_methods() {
         source,
         &[],
         &[],
+        &[],
         &[
             (
                 "addon".into(),
@@ -6091,6 +6187,7 @@ fn rewrites_typed_napi_instance_getters() {
         )],
         &[],
         &[],
+        &[],
         &[(
             "NativeBox".into(),
             "value".into(),
@@ -6122,6 +6219,7 @@ fn rewrites_typed_napi_instance_setters_and_preserves_expression_values() {
         &[],
         &[],
         &[],
+        &[],
         &[(
             "NativeBox".into(),
             "value".into(),
@@ -6145,6 +6243,7 @@ fn rewrites_named_and_namespace_static_accessors() {
     let source = "console.log(NativeBox.version); addon.NativeBox.version = 7; console.log(addon.NativeBox.version);";
     let rewritten = rewrite_external_class_methods_with_static(
         source,
+        &[],
         &[],
         &[],
         &[],
@@ -6189,6 +6288,8 @@ fn generates_typed_napi_static_method_shims_without_instance_receivers() {
             required_params: 1,
             rest_param: None,
             ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            callback_instance_classes: vec![vec![]],
+            literal_params: vec![None],
             is_static: true,
             kind: thaw_bridge::DtsMethodKind::Method,
             overloaded: false,
@@ -6238,6 +6339,8 @@ fn generates_napi_method_arity_that_omits_an_unsupported_optional_parameter() {
             required_params: 2,
             rest_param: None,
             ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Void),
+            callback_instance_classes: vec![vec![], vec![], vec![]],
+            literal_params: vec![None, None, None],
             is_static: false,
             kind: thaw_bridge::DtsMethodKind::Method,
             overloaded: false,
