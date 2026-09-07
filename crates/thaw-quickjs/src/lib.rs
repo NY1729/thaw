@@ -40,15 +40,19 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(feature = "tls")]
 use base64::Engine as _;
 use rquickjs::function::Args;
 #[cfg(feature = "wasm")]
 use rquickjs::Persistent;
 use rquickjs::{Array, ArrayBuffer, Context, Ctx, Function, Object, Runtime, Value};
+#[cfg(feature = "tls")]
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
 };
+#[cfg(feature = "tls")]
 use rustls::server::WebPkiClientVerifier;
+#[cfg(feature = "tls")]
 use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, Error as RustlsError, RootCertStore,
     ServerConfig, ServerConnection, SignatureScheme, StreamOwned,
@@ -167,26 +171,34 @@ fn poll_napi_bridge(ctx: &Ctx<'_>) {
         poll();
     }
 }
+#[cfg(feature = "tls")]
 type TlsStream = StreamOwned<ClientConnection, TcpStream>;
+#[cfg(feature = "tls")]
 type TlsStreamTable = (u32, HashMap<u32, TlsStream>);
+#[cfg(feature = "tls")]
 type TlsServerStream = StreamOwned<ServerConnection, TcpStream>;
+#[cfg(feature = "tls")]
 type TlsServerStreamTable = (u32, HashMap<u32, TlsServerStream>);
 
+#[cfg(feature = "tls")]
 struct TlsListener {
     socket: TcpListener,
     config: Arc<ServerConfig>,
     local_certificate: Vec<u8>,
 }
 
+#[cfg(feature = "tls")]
 #[derive(Default)]
 struct TlsCertificates {
     peer: Option<Vec<u8>>,
     local: Option<Vec<u8>>,
 }
 
+#[cfg(feature = "tls")]
 #[derive(Debug)]
 struct InsecureServerVerifier;
 
+#[cfg(feature = "tls")]
 impl rustls::client::danger::ServerCertVerifier for InsecureServerVerifier {
     fn verify_server_cert(
         &self,
