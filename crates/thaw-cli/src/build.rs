@@ -808,7 +808,8 @@ fn quickjs_fallback_reasons(
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
-            if !shim_source.contains(&format!("__thaw_typed_js_{encoded}"))
+            if !(target.starts_with("__thaw_typed_js_")
+                || shim_source.contains(&format!("__thaw_typed_js_{encoded}")))
                 || !seen_targets.insert(target)
             {
                 continue;
