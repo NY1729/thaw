@@ -22,6 +22,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("add") => {
+            if let Err(err) = run_add(&args[2..]) {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("run") => {
             if let Err(err) = run_script(&args[2..]) {
                 eprintln!("error: {err}");
@@ -48,7 +54,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw install [directory]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts> [build options]\n       thaw build <input.ts> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
+                "usage: thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts> [build options]\n       thaw build <input.ts> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
             );
             std::process::exit(1);
         }
@@ -78,6 +84,40 @@ fn run_install(args: &[String]) -> Result<(), String> {
 fn npm_install_command(directory: &Path) -> Command {
     let mut command = Command::new("npm");
     command.args(["install", "--prefix"]).arg(directory);
+    command
+}
+
+fn run_add(args: &[String]) -> Result<(), String> {
+    let prefix = args.iter().position(|arg| arg == "--prefix");
+    let (packages, directory) = match prefix {
+        Some(index) if index + 2 == args.len() => (&args[..index], Path::new(&args[index + 1])),
+        Some(_) => return Err("usage: thaw add <package>... [--prefix <directory>]".into()),
+        None => (args, Path::new(".")),
+    };
+    if packages.is_empty() {
+        return Err("usage: thaw add <package>... [--prefix <directory>]".into());
+    }
+    if !directory.join("package.json").is_file() {
+        return Err(format!(
+            "`{}` does not contain package.json",
+            directory.display()
+        ));
+    }
+    let status = npm_add_command(packages, directory)
+        .status()
+        .map_err(|error| format!("failed to run npm install: {error}"))?;
+    if !status.success() {
+        return Err(format!("npm install failed with {status}"));
+    }
+    Ok(())
+}
+
+fn npm_add_command(packages: &[String], directory: &Path) -> Command {
+    let mut command = Command::new("npm");
+    command
+        .args(["install", "--prefix"])
+        .arg(directory)
+        .args(packages);
     command
 }
 
@@ -345,7 +385,26 @@ fn run_build(args: &[String]) -> Result<(), String> {
         i += 1;
     }
 
-    let input = input.ok_or("missing input file (usage: thaw build <input.ts> [-o <output>])")?;
+    if input.is_none() {
+        let manifest = std::fs::read_to_string("package.json").map_err(|_| {
+            "missing input file and package.json has no project configuration".to_string()
+        })?;
+        let (configured_input, configured_vite, configured_output) =
+            project_build_defaults(&manifest)?;
+        input = configured_input.or_else(|| {
+            Path::new("server.ts")
+                .is_file()
+                .then(|| PathBuf::from("server.ts"))
+        });
+        if output.is_none() {
+            output = configured_output;
+        }
+        if assets.is_none() && vite.is_none() {
+            vite = configured_vite;
+        }
+    }
+    let input =
+        input.ok_or("missing input file; set `thaw.entry` in package.json or add server.ts")?;
     let output = output.unwrap_or_else(|| {
         let stem = input.file_stem().unwrap_or_default();
         PathBuf::from(stem)
@@ -384,6 +443,21 @@ fn run_build(args: &[String]) -> Result<(), String> {
             embed_native_addons,
         )
     }
+}
+
+#[allow(clippy::type_complexity)]
+fn project_build_defaults(
+    manifest: &str,
+) -> Result<(Option<PathBuf>, Option<PathBuf>, Option<PathBuf>), String> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(manifest).map_err(|error| format!("invalid package.json: {error}"))?;
+    let thaw = manifest.get("thaw").and_then(serde_json::Value::as_object);
+    let path = |name| {
+        thaw.and_then(|config| config.get(name))
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+    };
+    Ok((path("entry"), path("vite"), path("output")))
 }
 
 fn build_vite_project(directory: &Path) -> Result<PathBuf, String> {
