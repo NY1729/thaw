@@ -463,6 +463,8 @@ registry は `native.a` と区別して `native.node` を検出する。bridge �
 `thaw-napi`、`libdl`、Node-API限定の動的symbol exportを追加し、addon が参照する
 `napi_*` / `node_api_*` symbolを解決可能にする。全symbolをexportしないため、
 未使用のTLS/WASM/runtimeコードは通常のsection GCで除去される。
+QuickJSのPromise callback経路が`RTLD_DEFAULT`から参照する
+`thaw_runtime_poll_one` / `thaw_promise_state`だけは同様に限定exportする。
 
 V1 は Linux のローカル `native.node` を対象とする。`node-gyp`、非同期work、
 class/wrap/finalizer、および実パッケージ固有APIは引き続きスコープ外である。

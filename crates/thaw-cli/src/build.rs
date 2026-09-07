@@ -532,6 +532,9 @@ fn build_with_native_mode(
     // docs/design/bridge.md section 6) actually resolve at link time,
     // until thaw-registry can fetch/build that library automatically.
     let mut linker = Command::new("cc");
+    if let Some(arg) = preferred_linker_arg(static_link, lld_available()) {
+        linker.arg(arg);
+    }
     if static_link {
         linker
             .arg("-static")
@@ -564,11 +567,18 @@ fn build_with_native_mode(
         .arg("-Wl,--gc-sections")
         .args(&registry_native_libs)
         .args(extra_links);
-    if !static_link && uses_napi {
-        // Native addons resolve only the public Node-API surface from the
-        // executable. Exporting every Rust symbol keeps otherwise unreachable
-        // TLS/WASM/runtime sections alive and bloats dynamic symbol tables.
-        linker.args(napi_export_args());
+    if !static_link {
+        if uses_napi {
+            // Native addons resolve only the public Node-API surface from the
+            // executable. Exporting every Rust symbol keeps otherwise unreachable
+            // TLS/WASM/runtime sections alive and bloats dynamic symbol tables.
+            linker.args(napi_export_args());
+        }
+        if uses_quickjs {
+            // Promise-valued native callbacks poll these through RTLD_DEFAULT
+            // while they reenter the active QuickJS context.
+            linker.args(quickjs_callback_export_args());
+        }
     }
     let link_output = linker
         .arg("-Wl,--strip-all")
@@ -606,6 +616,26 @@ fn napi_export_args() -> [&'static str; 2] {
     ]
 }
 
+fn quickjs_callback_export_args() -> [&'static str; 2] {
+    [
+        "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
+        "-Wl,--export-dynamic-symbol=thaw_promise_state",
+    ]
+}
+
+fn lld_available() -> bool {
+    Command::new("ld.lld")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn preferred_linker_arg(static_link: bool, lld_available: bool) -> Option<&'static str> {
+    (!static_link && lld_available).then_some("-fuse-ld=lld")
+}
+
 #[test]
 fn native_addons_export_only_node_api_symbols() {
     assert_eq!(
@@ -615,6 +645,24 @@ fn native_addons_export_only_node_api_symbols() {
             "-Wl,--export-dynamic-symbol=node_api_*",
         ]
     );
+}
+
+#[test]
+fn quickjs_callbacks_export_only_their_runtime_poll_symbols() {
+    assert_eq!(
+        quickjs_callback_export_args(),
+        [
+            "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
+            "-Wl,--export-dynamic-symbol=thaw_promise_state",
+        ]
+    );
+}
+
+#[test]
+fn lld_is_preferred_only_for_dynamic_builds_when_installed() {
+    assert_eq!(preferred_linker_arg(false, true), Some("-fuse-ld=lld"));
+    assert_eq!(preferred_linker_arg(false, false), None);
+    assert_eq!(preferred_linker_arg(true, true), None);
 }
 
 /// Returns whether generated or user source explicitly requires the dynamic
