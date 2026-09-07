@@ -900,3 +900,37 @@ fn net_server_accepts_and_replies_to_a_real_tcp_client() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn unreferenced_net_server_does_not_hold_the_event_loop_open() {
+    use std::ffi::{CStr, CString};
+    use std::net::TcpListener;
+
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let dir = temp_registry("builtin_unref_net_server");
+    fs::write(
+        dir.join("index.js"),
+        "var net = require('node:net'), server; module.exports = { start: function(port) { server = net.createServer(); server.listen(port); server.unref(); return server.listening; }, close: function() { server.close(); } };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_unref_net_server_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.startUnrefServer = module.exports.start; globalThis.closeUnrefServer = module.exports.close;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let start = CString::new("startUnrefServer").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result = thaw_quickjs::thaw_js_call(start.as_ptr(), arguments.as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
+    thaw_quickjs::thaw_js_run_event_loop();
+    let close = CString::new("closeUnrefServer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    thaw_quickjs::thaw_js_call(close.as_ptr(), arguments.as_ptr());
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}

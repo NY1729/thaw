@@ -57,6 +57,7 @@ use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, Error as RustlsError, RootCertStore,
     ServerConfig, ServerConnection, SignatureScheme, StreamOwned,
 };
+use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 #[cfg(feature = "wasm")]
 use wasmi::Linker as WasmLinker;
@@ -372,6 +373,7 @@ fn hex_encode(value: &[u8]) -> String {
 
 fn digest_bytes(algorithm: &str, value: &[u8]) -> Vec<u8> {
     match algorithm {
+        "sha1" => Sha1::digest(value).to_vec(),
         "sha256" => Sha256::digest(value).to_vec(),
         "sha512" => Sha512::digest(value).to_vec(),
         _ => Vec::new(),

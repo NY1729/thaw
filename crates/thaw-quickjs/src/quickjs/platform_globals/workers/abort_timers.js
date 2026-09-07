@@ -69,6 +69,7 @@
     globalThis.AbortController = AbortController;
   }
   globalThis.__thaw_next_timer_delay = () => {
+    if (![...timers.values()].some(timer => timer.refed)) return -1;
     let due = Infinity;
     for (const timer of timers.values()) due = Math.min(due, timer.due);
     return due === Infinity ? -1 : Math.max(0, due - Date.now());
@@ -86,4 +87,3 @@
     }
     return due.length;
   };
-

@@ -67,6 +67,21 @@ fn standalone_event_loop_runs_pending_timers() {
 }
 
 #[test]
+fn standalone_event_loop_ignores_only_unreferenced_timers() {
+    assert_eq!(
+        load(
+            "globalThis.unrefValue = 0; globalThis.unrefTimer = __thaw_set_timeout_ref(() => { unrefValue = 42; }, 0, false); function readUnrefValue() { return unrefValue; } function refTimer() { __thaw_set_timer_ref(unrefTimer, true); }"
+        ),
+        1
+    );
+    thaw_js_run_event_loop();
+    assert_eq!(call("readUnrefValue", "[]"), "0");
+    assert_eq!(call("refTimer", "[]"), "null");
+    thaw_js_run_event_loop();
+    assert_eq!(call("readUnrefValue", "[]"), "42");
+}
+
+#[test]
 fn round_trips_objects_and_arrays() {
     assert_eq!(load("function identity(x) { return x; }"), 1);
     assert_eq!(
