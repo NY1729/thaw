@@ -127,6 +127,22 @@ fn run_requires_a_script_name() {
 }
 
 #[test]
+fn dev_fingerprint_tracks_sources_but_ignores_dependencies() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-dev-{}", std::process::id()));
+    std::fs::create_dir_all(directory.join("node_modules/package")).unwrap();
+    let source = directory.join("main.ts");
+    std::fs::write(&source, "const value = 1;\n").unwrap();
+    let roots = [directory.clone()];
+    let initial = source_fingerprint(&roots).unwrap();
+    std::fs::write(&source, "const value = 200;\n").unwrap();
+    assert_ne!(source_fingerprint(&roots).unwrap(), initial);
+    let changed = source_fingerprint(&roots).unwrap();
+    std::fs::write(directory.join("node_modules/package/index.js"), "changed").unwrap();
+    assert_eq!(source_fingerprint(&roots).unwrap(), changed);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn vite_assets_are_embedded_with_routes_and_content_types() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-assets-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("assets")).unwrap();

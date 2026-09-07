@@ -1474,9 +1474,15 @@ fn selects_a_single_addon_from_a_hidden_generated_package() {
     fs::write(&addon, b"addon").unwrap();
 
     assert_eq!(
-        select_generated_addon(&node_modules).unwrap().unwrap().path,
+        select_generated_addon(&node_modules, "require('.generated/client')")
+            .unwrap()
+            .unwrap()
+            .path,
         addon
     );
+    assert!(select_generated_addon(&node_modules, "module.exports = {}")
+        .unwrap()
+        .is_none());
 
     let _ = fs::remove_dir_all(node_modules);
 }

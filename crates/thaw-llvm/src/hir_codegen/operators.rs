@@ -224,7 +224,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "callDynamic"
                         | "callDynamicValue"
                         | "callDynamicValueWithValue" => return Some(HirType::Json),
-                        "loadNativeAddon" | "loadNativeAddonEmbedded" | "loadNativeSharedLibraryEmbedded" | "loadScript"
+                        "loadNativeAddon" | "loadNativeAddonEmbedded" | "loadNativeSharedLibrary" | "loadNativeSharedLibraryEmbedded" | "loadScript"
                         | "releaseDynamicValue" | "setDynamicProperty" => {
                             return Some(HirType::Bool)
                         }
