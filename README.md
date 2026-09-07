@@ -189,7 +189,11 @@ A project can put its defaults in `package.json`, then build without arguments:
 
 ```bash
 thaw build
+thaw dev
 ```
+
+`thaw dev` uses the same entry and Vite directory, rebuilds the frontend only
+when its sources change, and otherwise reuses the existing `dist/` assets.
 
 Add dependencies with npm-compatible package specifiers:
 
