@@ -199,6 +199,12 @@ fn integer_creation_roundtrips_through_napi_number_accessors() {
             NAPI_OK
         );
         assert_eq!(unsigned32, 4_000_000_000);
+        let negative = env.alloc(Value::Number(-1.0));
+        assert_eq!(
+            napi_get_value_uint32(env_ptr, negative, &mut unsigned32),
+            NAPI_OK
+        );
+        assert_eq!(unsigned32, u32::MAX);
 
         assert_eq!(
             napi_create_int64(env_ptr, 9_007_199_254_740_991, &mut value),
@@ -333,10 +339,11 @@ fn property_operations_record_type_and_state_errors() {
         let mut actual = ptr::null_mut();
         assert_eq!(
             napi_get_property(env_ptr, object, value, &mut actual),
-            NAPI_INVALID_ARG
+            NAPI_OK
         );
+        assert!(matches!(value_ref(actual), Ok(Value::Undefined)));
         assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
-        assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+        assert_eq!((*info).error_code, NAPI_OBJECT_EXPECTED);
     }
 }
 
@@ -969,4 +976,3 @@ fn strict_equality_compares_bigint_values_and_date_coercion_uses_milliseconds() 
         );
     }
 }
-

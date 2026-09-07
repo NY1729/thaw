@@ -113,6 +113,11 @@ unsafe fn property_key(value: NapiValue) -> Result<PropertyKey, NapiStatus> {
     match value_ref(value) {
         Ok(Value::String(value)) => Ok(PropertyKey::String(value.clone())),
         Ok(Value::Symbol { id, .. }) => Ok(PropertyKey::Symbol(*id)),
+        Ok(Value::Number(value)) => Ok(PropertyKey::String(if *value == 0.0 {
+            "0".into()
+        } else {
+            value.to_string()
+        })),
         _ => Err(NAPI_STRING_EXPECTED),
     }
 }
@@ -389,4 +394,3 @@ pub unsafe extern "C" fn napi_has_named_property(
         || find_accessor(env, object, &name).is_some();
     NAPI_OK
 }
-

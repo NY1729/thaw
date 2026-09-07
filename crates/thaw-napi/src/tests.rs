@@ -471,26 +471,215 @@ fn runs_utf8_validate_prebuild_when_supplied() {
 
 #[test]
 fn runs_node_addon_api_official_binding_when_supplied() {
+    fn same_json(left: &JsonValue, right: &JsonValue) -> bool {
+        match (left, right) {
+            (JsonValue::Number(left), JsonValue::Number(right)) => left.as_f64() == right.as_f64(),
+            (JsonValue::Array(left), JsonValue::Array(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| same_json(left, right))
+            }
+            (JsonValue::Object(left), JsonValue::Object(right)) => {
+                left.len() == right.len()
+                    && left.iter().all(|(key, left)| {
+                        right.get(key).is_some_and(|right| same_json(left, right))
+                    })
+            }
+            _ => left == right,
+        }
+    }
+
     let Ok(path) = std::env::var("THAW_NODE_ADDON_API_BINDING") else {
         return;
     };
+    let cases = serde_json::json!([
+        ["basic_types_number", "toInt32", [42.75]],
+        ["basic_types_number", "toUint32", [-1]],
+        ["basic_types_number", "toDouble", [12.5]],
+        ["basic_types_boolean", "operatorBool", [true]],
+        ["basic_types_array", "getLength", [[1, 2, 3]]],
+        ["basic_types_array", "get", [[1, "two"], 1]],
+        ["basic_types_value", "isNull", [null]],
+        ["basic_types_value", "isNumber", [42]],
+        ["basic_types_value", "isString", ["text"]],
+        ["basic_types_value", "isArray", [[1]]],
+        ["basic_types_value", "toBoolean", [0]],
+        ["buffer", "createBuffer", []],
+        ["buffer", "createBufferCopy", []],
+        ["object", "sum", [{"x": 20, "y": 22}]],
+        ["globalObject", "createMockTestObject", []],
+        ["globalObject", "getPropertyWithNapiValue", [2]],
+        ["globalObject", "getPropertyWithCString", ["c_str_key"]],
+        ["globalObject", "getPropertyWithCppString", ["cpp_string_key"]],
+        ["globalObject", "getPropertyWithInt32", [15]],
+        ["promise", "isPromise", [{}]],
+        ["promise", "resolvePromise", ["resolved"]],
+        ["handlescope", "createScope", []],
+        ["handlescope", "createScopeFromExisting", []],
+        ["handlescope", "escapeFromScope", []],
+        ["handlescope", "escapeFromExistingScope", []],
+        ["reference", "refMoveAssignTest", []],
+        ["reference", "referenceRefTest", []],
+        ["reference", "refResetTest", []]
+    ]);
+    let script = r#"
+const binding = require(process.argv[1]);
+const cases = JSON.parse(process.argv[2]);
+(async () => {
+  const results = [];
+  for (const [group, method, args] of cases) {
+    let value = binding[group][method](...args);
+    if (value && typeof value.then === 'function') value = await value;
+    results.push(value === undefined ? { $__thaw_napi_undefined$: true } : value);
+  }
+  process.stdout.write(JSON.stringify(results));
+})().catch(error => { console.error(error); process.exit(1); });
+"#;
+    let node = Command::new("node")
+        .args(["-e", script, &path, &cases.to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected: Vec<JsonValue> = serde_json::from_slice(&node.stdout).unwrap();
     let path = CString::new(path).unwrap();
     unsafe {
         assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+        for (index, case) in cases.as_array().unwrap().iter().enumerate() {
+            let case = case.as_array().unwrap();
+            let group = CString::new(case[0].as_str().unwrap()).unwrap();
+            let method = CString::new(case[1].as_str().unwrap()).unwrap();
+            let args = CString::new(case[2].to_string()).unwrap();
+            let receiver = thaw_napi_get_export(group.as_ptr());
+            assert_ne!(receiver, 0, "missing official group {}", case[0]);
+            let result =
+                thaw_napi_call_method_typed_result(receiver, method.as_ptr(), args.as_ptr());
+            assert!(
+                result.error.is_null(),
+                "{}.{}: {}",
+                case[0],
+                case[1],
+                CStr::from_ptr(result.error).to_string_lossy()
+            );
+            let actual: JsonValue =
+                serde_json::from_str(CStr::from_ptr(result.value).to_str().unwrap()).unwrap();
+            assert!(
+                same_json(&actual, &expected[index]),
+                "{}.{}: {actual} != {}",
+                case[0],
+                case[1],
+                expected[index]
+            );
+        }
 
-        let numbers = thaw_napi_get_export(c"basic_types_number".as_ptr());
-        assert_ne!(numbers, 0);
-        let result =
-            thaw_napi_call_method_result(numbers, c"toInt32".as_ptr(), c"[42.75]".as_ptr());
+        let objectwrap = thaw_napi_get_export(c"objectwrap".as_ptr()) as NapiValue;
+        let env = module_env_for_handle(objectwrap as u64).unwrap();
+        let mut constructor = ptr::null_mut();
+        assert_eq!(
+            napi_get_named_property(env, objectwrap, c"Test".as_ptr(), &mut constructor),
+            NAPI_OK
+        );
+        let mut instance = ptr::null_mut();
+        assert_eq!(
+            napi_new_instance(env, constructor, 0, ptr::null(), &mut instance),
+            NAPI_OK
+        );
+        let result = thaw_napi_call_method_typed_result(
+            instance as u64,
+            c"testMethod".as_ptr(),
+            c"[\"method\"]".as_ptr(),
+        );
         assert!(result.error.is_null());
-        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "42.0");
+        assert_eq!(
+            CStr::from_ptr(result.value).to_str().unwrap(),
+            "\"method instance\""
+        );
 
-        let booleans = thaw_napi_get_export(c"basic_types_boolean".as_ptr());
-        assert_ne!(booleans, 0);
-        let result =
-            thaw_napi_call_method_result(booleans, c"createBoolean".as_ptr(), c"[true]".as_ptr());
-        assert!(result.error.is_null());
-        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "true");
+        let typedarray = thaw_napi_get_export(c"typedarray".as_ptr()) as NapiValue;
+        let mut create = ptr::null_mut();
+        assert_eq!(
+            napi_get_named_property(env, typedarray, c"createTypedArray".as_ptr(), &mut create),
+            NAPI_OK
+        );
+        let kind = env_mut(env).unwrap().alloc(Value::String("int8".into()));
+        let length = env_mut(env).unwrap().alloc(Value::Number(4.0));
+        let mut array = ptr::null_mut();
+        assert_eq!(
+            napi_call_function(
+                env,
+                typedarray,
+                create,
+                2,
+                [kind, length].as_ptr(),
+                &mut array
+            ),
+            NAPI_OK
+        );
+        assert!(matches!(
+            value_ref(array),
+            Ok(Value::TypedArray {
+                array_type: 0,
+                length: 4,
+                ..
+            })
+        ));
+
+        let arraybuffer = thaw_napi_get_export(c"arraybuffer".as_ptr()) as NapiValue;
+        assert_eq!(
+            napi_get_named_property(env, arraybuffer, c"createBuffer".as_ptr(), &mut create),
+            NAPI_OK
+        );
+        let mut buffer = ptr::null_mut();
+        assert_eq!(
+            napi_call_function(env, arraybuffer, create, 0, ptr::null(), &mut buffer),
+            NAPI_OK
+        );
+        assert!(matches!(value_ref(buffer), Ok(Value::ArrayBuffer { .. })));
+
+        let functions = thaw_napi_get_export(c"function".as_ptr()) as NapiValue;
+        let mut plain = ptr::null_mut();
+        assert_eq!(
+            napi_get_named_property(env, functions, c"plain".as_ptr(), &mut plain),
+            NAPI_OK
+        );
+        assert_eq!(
+            napi_get_named_property(env, plain, c"valueCallback".as_ptr(), &mut create),
+            NAPI_OK
+        );
+        let mut object = ptr::null_mut();
+        assert_eq!(
+            napi_call_function(env, plain, create, 0, ptr::null(), &mut object),
+            NAPI_OK
+        );
+        let mut foo = ptr::null_mut();
+        assert_eq!(
+            napi_get_named_property(env, object, c"foo".as_ptr(), &mut foo),
+            NAPI_OK
+        );
+        assert!(matches!(value_ref(foo), Ok(Value::String(value)) if value == "bar"));
+
+        let finalizers = thaw_napi_get_export(c"finalizer_order".as_ptr()) as NapiValue;
+        assert_eq!(
+            napi_get_named_property(
+                env,
+                finalizers,
+                c"createExternalFinalizer".as_ptr(),
+                &mut create,
+            ),
+            NAPI_OK
+        );
+        let mut external = ptr::null_mut();
+        assert_eq!(
+            napi_call_function(env, finalizers, create, 0, ptr::null(), &mut external),
+            NAPI_OK
+        );
+        assert!(matches!(value_ref(external), Ok(Value::External(_))));
+        assert_eq!(thaw_napi_unload_all(), 1);
     }
 }
 

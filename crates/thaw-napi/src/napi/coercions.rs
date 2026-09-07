@@ -46,7 +46,11 @@ pub unsafe extern "C" fn napi_get_value_uint32(
     }
     let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
-            *out = *number as u32;
+            *out = if !number.is_finite() || *number == 0.0 {
+                0
+            } else {
+                number.trunc().rem_euclid(4_294_967_296.0) as u32
+            };
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
