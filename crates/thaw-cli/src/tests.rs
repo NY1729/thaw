@@ -410,6 +410,13 @@ fn quickjs_manifest_detection_tracks_dynamic_host_calls() {
 }
 
 #[test]
+fn wasm_host_detection_only_enables_wasm_users() {
+    assert!(!source_uses_wasm("module.exports = value => value + 1"));
+    assert!(source_uses_wasm("new WebAssembly.Module(bytes)"));
+    assert!(source_uses_wasm("require('wasi')"));
+}
+
+#[test]
 fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     let function = thaw_bridge::DtsFunction {
         name: "add".into(),

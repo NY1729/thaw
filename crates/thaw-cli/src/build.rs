@@ -465,8 +465,15 @@ fn build_with_native_mode(
     let runtime_lib = build_staticlib("thaw-runtime")?;
     let std_lib = build_staticlib("thaw-std")?;
     let jit_lib = build_staticlib("thaw-jit")?;
+    let uses_wasm = source_uses_wasm(&shim_source) || source_uses_wasm(&user_source);
     let quickjs_lib = uses_quickjs
-        .then(|| build_staticlib("thaw-quickjs"))
+        .then(|| {
+            if uses_wasm {
+                build_staticlib("thaw-quickjs")
+            } else {
+                build_staticlib_without_default_features("thaw-quickjs")
+            }
+        })
         .transpose()?;
     let napi_lib = uses_napi.then(|| {
         if uses_quickjs {
@@ -567,6 +574,12 @@ fn source_uses_quickjs(source: &str) -> bool {
     ]
     .iter()
     .any(|marker| source.contains(marker))
+}
+
+fn source_uses_wasm(source: &str) -> bool {
+    ["WebAssembly", "node:wasi", "require('wasi')", "require(\"wasi\")"]
+        .iter()
+        .any(|marker| source.contains(marker))
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
