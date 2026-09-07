@@ -302,8 +302,9 @@ type NapiValue = *mut NapiValueData; // Box::into_raw で確保、そのまま�
 `#[no_mangle] pub extern "C" fn napi_xxx(...)` として**エクスポート**して
 いる必要がある。Rust の cdylib/bin ターゲットではデフォルトでシンボルが
 外部から見えないことがあるため、リンカフラグ（Linux なら
-`-Wl,--export-dynamic`、`thaw-cli` が `cc` を呼ぶ最終リンクコマンドに
-追加する）が必要になる可能性が高い -- 実装時に最初にリンクエラー/
+`-Wl,--export-dynamic-symbol=napi_*` と
+`-Wl,--export-dynamic-symbol=node_api_*` を `thaw-cli` が `cc` を呼ぶ
+最終リンクコマンドに追加する）が必要になる可能性が高い -- 実装時に最初にリンクエラー/
 `undefined symbol` で気づく類の問題なので、"実際に試して見つかった穴を
 塞ぐ" といういつもの手順で確認すること。
 
@@ -459,8 +460,9 @@ object・array・Buffer、同期callback、例外、no-op handle scope を提供
 registry は `native.a` と区別して `native.node` を検出する。bridge は
 `callNativeAddon` wrapper と `__thaw_native_module_init` を生成し、LLVM は
 `thaw_napi_load`/`thaw_napi_call_result` を呼ぶ。CLI の最終リンクでは
-`thaw-napi`、`libdl`、`--export-dynamic` を追加し、addon が参照する
-`napi_*` symbol を解決可能にする。
+`thaw-napi`、`libdl`、Node-API限定の動的symbol exportを追加し、addon が参照する
+`napi_*` / `node_api_*` symbolを解決可能にする。全symbolをexportしないため、
+未使用のTLS/WASM/runtimeコードは通常のsection GCで除去される。
 
 V1 は Linux のローカル `native.node` を対象とする。`node-gyp`、非同期work、
 class/wrap/finalizer、および実パッケージ固有APIは引き続きスコープ外である。
