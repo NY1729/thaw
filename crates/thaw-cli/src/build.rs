@@ -54,6 +54,23 @@ fn registry_import_meta_resolutions(
     resolutions
 }
 
+fn external_package_name(specifier: &str) -> Option<String> {
+    let parts = specifier.split('/').collect::<Vec<_>>();
+    let package_parts = usize::from(specifier.starts_with('@')) + 1;
+    Some(parts.get(..package_parts)?.join("/"))
+}
+
+fn installed_node_modules(input: &Path, package: &str) -> Option<PathBuf> {
+    input.parent()?.ancestors().find_map(|directory| {
+        let node_modules = directory.join("node_modules");
+        node_modules
+            .join(package)
+            .join("package.json")
+            .is_file()
+            .then_some(node_modules)
+    })
+}
+
 fn generate_asset_shim(directory: &Path) -> Result<String, String> {
     if !directory.is_dir() {
         return Err(format!(
@@ -235,6 +252,19 @@ fn build_with_assets(
             specifier.clone()
         } else {
             let package = specifier.clone();
+            if thaw_registry::resolve(registry_dir, &package).is_err() {
+                if let Some(name) = external_package_name(&package) {
+                    if let Some(node_modules) = installed_node_modules(input, &name) {
+                        thaw_registry::add_installed(registry_dir, &node_modules, &name).map_err(
+                            |error| {
+                                format!(
+                                    "{location}: failed to register installed `{name}`: {error}"
+                                )
+                            },
+                        )?;
+                    }
+                }
+            }
             thaw_registry::resolve(registry_dir, &package)
                 .map_err(|error| format!("{location}: {error}"))?;
             package

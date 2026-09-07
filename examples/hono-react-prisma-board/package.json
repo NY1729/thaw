@@ -7,7 +7,9 @@
     "db:push": "prisma db push"
   },
   "dependencies": {
+    "@hono/node-server": "2.1.1",
     "@prisma/client": "6.19.0",
+    "hono": "4.13.7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
