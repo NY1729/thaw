@@ -5,7 +5,7 @@
 /// member calls, comments, and strings are not mistaken for edges.
 /// ESM declarations are collected directly from the module AST before they
 /// are lowered to CommonJS.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ModuleAnalysis {
     specs: Vec<String>,
     static_esm_specs: Vec<String>,

@@ -366,6 +366,16 @@ pub extern "C" fn thaw_napi_unload_all() -> u8 {
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
+    if let Some(encoded) = input.strip_prefix("gz:") {
+        let compressed = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| format!("invalid embedded addon base64: {error}"))?;
+        let mut bytes = Vec::new();
+        GzDecoder::new(compressed.as_slice())
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("invalid embedded addon gzip: {error}"))?;
+        return Ok(bytes);
+    }
     if !input.len().is_multiple_of(2) {
         return Err("embedded addon hex has an odd length".into());
     }

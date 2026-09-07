@@ -278,19 +278,12 @@ pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
     for addon in addons {
         out.push_str(&format!("    // {}\n", addon.package_name));
         for dependency in &addon.dependencies {
-            let hex: String = dependency
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
+            let hex = encode_embedded_native(dependency);
             out.push_str(&format!(
                 "    loadNativeSharedLibraryEmbedded(\"{hex}\");\n"
             ));
         }
-        let hex: String = addon
-            .bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let hex = encode_embedded_native(addon.bytes);
         let root_export = escape_ts_string_literal(addon.root_export.unwrap_or(""));
         out.push_str(&format!(
             "    loadNativeAddonEmbedded(\"{hex}\", \"{root_export}\");\n"
@@ -672,4 +665,26 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
     }
     out.push_str("}\n");
     out
+}
+use base64::Engine;
+use flate2::{write::GzEncoder, Compression};
+use std::io::Write;
+
+fn encode_embedded_native(bytes: &[u8]) -> String {
+    // Tiny addons are cheaper as-is and retaining this form keeps old
+    // generated shims readable. Real native addons cross this threshold by
+    // orders of magnitude.
+    if bytes.len() < 1024 {
+        return bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    if encoder.write_all(bytes).is_ok() {
+        if let Ok(compressed) = encoder.finish() {
+            return format!(
+                "gz:{}",
+                base64::engine::general_purpose::STANDARD.encode(compressed)
+            );
+        }
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

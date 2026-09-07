@@ -55,7 +55,7 @@
 //! described by the package manifest; it never runs package install scripts
 //! or `node-gyp`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

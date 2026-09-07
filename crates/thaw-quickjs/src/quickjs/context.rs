@@ -1,7 +1,7 @@
-fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
+fn ensure_context() {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let (_, context) = slot.get_or_insert_with(|| {
+        slot.get_or_insert_with(|| {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
@@ -842,7 +842,17 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
             });
             (runtime, context)
         });
-        context.with(f)
+    });
+}
+
+fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
+    ensure_context();
+    JS.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .expect("QuickJS context was initialized")
+            .1
+            .with(f)
     })
 }
 
