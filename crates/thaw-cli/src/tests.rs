@@ -33,8 +33,118 @@ fn vite_assets_are_embedded_with_routes_and_content_types() {
     assert!(shim.contains("if (path === \"/assets/app.js\") { return \"console.log('hello')\"; }"));
     assert!(shim.contains("if (path === \"/assets/image.png\") { return \"89504e47ff\"; }"));
     assert!(shim.contains("if (path === \"/assets/image.png\") { return \"hex\"; }"));
+    assert!(shim.contains("function thawAssetRoute(path: string): string"));
+    assert!(shim.contains("function thawServeAsset(response:"));
 
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn embedded_frontend_and_api_run_without_the_asset_directory() {
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-fullstack-{}-{port}", std::process::id()));
+    let assets = directory.join("dist");
+    std::fs::create_dir_all(assets.join("assets")).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<main>Thaw SPA</main><script src=/assets/app.js></script>",
+    )
+    .unwrap();
+    std::fs::write(assets.join("assets/app.js"), "console.log('vite')").unwrap();
+    std::fs::write(
+        assets.join("assets/app.css"),
+        "@font-face{src:url('/assets/font.woff2')}",
+    )
+    .unwrap();
+    std::fs::write(assets.join("assets/font.woff2"), [0, 1, 2, 0xff]).unwrap();
+    let entry = directory.join("server.ts");
+    std::fs::write(
+        &entry,
+        format!(
+            r#"import {{ createServer }} from "node:http";
+function main(): void {{
+  const server = createServer((request: {{ method: string; url: string }}, response: {{ statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }}): boolean => {{
+    if (request.url === "/api/message") {{
+      response.setHeader("Content-Type", "application/json; charset=utf-8");
+      return response.end(request.method === "POST" ? "{{\"saved\":true}}" : "{{\"message\":\"hello\"}}");
+    }}
+    if (request.method === "GET" && thawServeAsset(response, request.url)) {{ return true; }}
+    response.statusCode = 404;
+    return response.end("Not Found");
+  }});
+  server.listenMany({}, 6);
+}}
+"#,
+            port
+        ),
+    )
+    .unwrap();
+    let executable = directory.join("app");
+    build_with_assets(
+        &entry,
+        &executable,
+        &[],
+        &[],
+        &[],
+        &directory.join("registry"),
+        &[],
+        false,
+        Some(&assets),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&assets).unwrap();
+
+    let child = Command::new(&executable)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    fn request(port: u16, method: &str, target: &str) -> Vec<u8> {
+        let mut stream = (0..200)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    None
+                }
+            })
+            .expect("compiled full-stack server did not start listening");
+        stream
+            .write_all(
+                format!(
+                    "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        response
+    }
+    let responses = [
+        request(port, "GET", "/"),
+        request(port, "GET", "/assets/app.js?hash=1"),
+        request(port, "GET", "/assets/app.css"),
+        request(port, "GET", "/assets/font.woff2"),
+        request(port, "GET", "/orders/42"),
+        request(port, "POST", "/api/message"),
+    ];
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(responses[0].ends_with(b"<main>Thaw SPA</main><script src=/assets/app.js></script>"));
+    assert!(responses[1].ends_with(b"console.log('vite')"));
+    assert!(responses[2].windows(8).any(|value| value == b"text/css"));
+    assert!(responses[3].ends_with(&[0, 1, 2, 0xff]));
+    assert!(responses[4].ends_with(b"<main>Thaw SPA</main><script src=/assets/app.js></script>"));
+    assert!(responses[5].ends_with(b"{\"saved\":true}"));
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

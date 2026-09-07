@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { lazy, Suspense, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+
+const LazyPanel = lazy(() => import("./LazyPanel"));
 
 function App() {
   const [message, setMessage] = useState("Loading...");
@@ -10,7 +12,7 @@ function App() {
       .then((body) => setMessage(body.message))
       .catch(() => setMessage("Request failed"));
   }, []);
-  return <main><h1>React + Thaw</h1><p>{message}</p></main>;
+  return <main><h1>React + Thaw</h1><p>{message}</p><Suspense fallback={<p>Loading panel...</p>}><LazyPanel /></Suspense></main>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
