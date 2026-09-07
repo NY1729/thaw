@@ -1746,6 +1746,7 @@ dependencies = [
 name = "thaw-cli"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "inkwell",
  "serde_json",
  "swc_ecma_visit",
