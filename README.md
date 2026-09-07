@@ -108,6 +108,34 @@ npx prisma generate
 target/release/thaw registry add @prisma/client --from-node-modules node_modules
 ```
 
+The complete Hono + Prisma + PostgreSQL example can be built and run with:
+
+```sh
+npm install --prefix examples/hono-prisma-postgres
+npm run generate --prefix examples/hono-prisma-postgres
+target/release/thaw registry add hono
+target/release/thaw registry add @hono/node-server
+target/release/thaw registry add @prisma/client \
+  --from-node-modules examples/hono-prisma-postgres/node_modules
+DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/app \
+  target/release/thaw build examples/hono-prisma-postgres/server.ts \
+  --use hono --use @hono/node-server --use @prisma/client -o hono-prisma-server
+DATABASE_URL=postgresql://postgres:password@127.0.0.1:5432/app \
+  ./hono-prisma-server
+```
+
+The Hono + sharp image server follows the same path:
+
+```sh
+target/release/thaw registry add hono
+target/release/thaw registry add @hono/node-server
+target/release/thaw registry add sharp
+target/release/thaw build examples/hono-sharp/server.ts \
+  --use hono --use @hono/node-server --use sharp -o hono-sharp-server
+./hono-sharp-server
+curl --data-binary @image.png http://127.0.0.1:3030/images --output image.webp
+```
+
 ```json
 {
   "version": 2,
