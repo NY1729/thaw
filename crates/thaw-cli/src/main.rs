@@ -22,6 +22,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("prepare") => {
+            if let Err(err) = run_prepare(&args[2..]) {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("add") => {
             if let Err(err) = run_add(&args[2..]) {
                 eprintln!("error: {err}");
@@ -54,7 +60,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts> [build options]\n       thaw build <input.ts> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
+                "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts> [build options]\n       thaw build <input.ts> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
             );
             std::process::exit(1);
         }
