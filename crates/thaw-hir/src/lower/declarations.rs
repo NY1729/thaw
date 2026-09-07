@@ -1220,6 +1220,16 @@ fn lower_param(
         _ => return Err("unsupported function parameter pattern".into()),
     };
     let mut ty = match type_ann {
+        Some(ann)
+            if allow_inference
+                && matches!(
+                    ann.type_ann.as_ref(),
+                    TsType::TsKeywordType(keyword)
+                        if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
+                ) =>
+        {
+            HirType::Dynamic
+        }
         Some(ann) => resolve_ts_type_with_substitution(
             &ann.type_ann,
             type_substitution,
@@ -1239,4 +1249,3 @@ fn lower_param(
     }
     Ok(HirParam { name, ty })
 }
-

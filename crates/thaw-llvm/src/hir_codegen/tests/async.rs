@@ -3175,6 +3175,19 @@ fn frame_split_catches_throw_after_await_in_same_function() {
 }
 
 #[test]
+fn awaits_promise_returned_by_a_synchronous_function() {
+    let source = r#"
+        function value(): Promise<number> {
+            return new Promise<number>((resolve) => resolve(42));
+        }
+        async function main(): Promise<void> {
+            console.log(await value());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "sync_promise_return"), "42\n");
+}
+
+#[test]
 fn frame_split_catches_rejected_child_promise() {
     let source = r#"
         async function fail(): Promise<void> {

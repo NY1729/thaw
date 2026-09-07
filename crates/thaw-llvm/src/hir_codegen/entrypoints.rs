@@ -31,8 +31,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_call(
                         self.module
-                            .get_function("thaw_napi_run_async_work")
-                            .unwrap(),
+                                .get_function("thaw_napi_run_async_work")
+                                .unwrap(),
                         &[],
                         "drain_napi_for_async_main",
                     )
@@ -44,6 +44,44 @@ impl<'ctx> HirCompiler<'ctx> {
                             .unwrap(),
                         &[completion.into()],
                         "resume_async_main_after_napi",
+                    )
+                    .unwrap();
+            }
+            if self.uses_quickjs {
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_js_run_event_loop").unwrap(),
+                        &[],
+                        "drain_quickjs_for_async_main",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_runtime_run_until_resolved")
+                            .unwrap(),
+                        &[completion.into()],
+                        "resume_async_main_after_quickjs",
+                    )
+                    .unwrap();
+            }
+            if self.uses_napi && self.uses_quickjs {
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_napi_run_async_work")
+                            .unwrap(),
+                        &[],
+                        "drain_napi_after_quickjs",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_runtime_run_until_resolved")
+                            .unwrap(),
+                        &[completion.into()],
+                        "resume_async_main_after_napi_quickjs",
                     )
                     .unwrap();
             }

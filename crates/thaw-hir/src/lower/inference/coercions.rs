@@ -54,6 +54,14 @@ impl<'a> FnLowerer<'a> {
                 return Ok(HirExpr::JsonAsNative(Box::new(value), declared.clone()));
             }
         }
+        if *declared == HirType::JsValue
+            && matches!(self.infer_expr_type(&value)?, HirType::Function(_, _))
+        {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("registerNativeCallback".to_string())),
+                vec![value],
+            ));
+        }
         if let (HirType::Object(declared_fields), HirType::Object(actual_fields)) =
             (declared, self.infer_expr_type(&value)?)
         {
@@ -150,21 +158,6 @@ impl<'a> FnLowerer<'a> {
         }
         if let Some(adapted) = self.adapt_named_function_to_callable(declared, &value)? {
             return Ok(adapted);
-        }
-        if let (
-            HirType::Function(declared_params, declared_return),
-            HirType::Function(actual_params, actual_return),
-        ) = (declared, self.infer_expr_type(&value)?)
-        {
-            if declared_return.as_ref() == actual_return.as_ref()
-                && declared_params.len() == actual_params.len()
-                && declared_params.iter().zip(&actual_params).all(|(declared, actual)| {
-                    declared == actual
-                        || (*declared == HirType::Json && *actual == HirType::JsValue)
-                })
-            {
-                return Ok(value);
-            }
         }
         if let HirType::Dictionary(element) = declared {
             if self.infer_expr_type(&value)? == *declared {

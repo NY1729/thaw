@@ -601,7 +601,7 @@ fn child_process_fork_exchanges_ipc_messages_and_disconnects() {
 fn http_server_parses_and_replies_to_a_real_tcp_client() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -617,7 +617,6 @@ fn http_server_parses_and_replies_to_a_real_tcp_client() {
         stream
                 .write_all(b"POST /submit HTTP/1.1\r\nHost: localhost\r\nX-Client: rust\r\nContent-Length: 4\r\nConnection: close\r\n\r\nping")
                 .unwrap();
-        stream.shutdown(Shutdown::Write).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
