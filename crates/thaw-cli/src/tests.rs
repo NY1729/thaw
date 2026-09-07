@@ -170,6 +170,8 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     });
     let executable_bytes = std::fs::metadata(&executable).unwrap().len();
     let sidecar_bytes = directory_size(&package.join("board.native"));
+    let artifact_manifest =
+        artifact_manifest_from_bytes(&std::fs::read(&executable).unwrap()).unwrap();
     assert!(package
         .join("board.native/_prisma_client/native.node")
         .is_file());
@@ -227,6 +229,16 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     if measure_performance {
         let (hello_initial_ms, hello_cached_ms, hello_bytes) = hello_metrics.unwrap();
         let cached_build_ms = cached_build_ms.unwrap();
+        let quickjs_reasons = artifact_manifest["quickjs_reasons"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut quickjs_reason_counts = std::collections::BTreeMap::<&str, usize>::new();
+        for reason in &quickjs_reasons {
+            *quickjs_reason_counts
+                .entry(reason["kind"].as_str().unwrap_or("unknown"))
+                .or_default() += 1;
+        }
         let metrics = serde_json::json!({
             "hello": {
                 "initial_build_ms": hello_initial_ms,
@@ -239,6 +251,8 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
                 "cached_build_ms": cached_build_ms,
                 "executable_bytes": executable_bytes,
                 "sidecar_bytes": sidecar_bytes,
+                "quickjs_reason_counts": quickjs_reason_counts,
+                "quickjs_reasons": quickjs_reasons,
             },
         });
         println!("thaw performance: {metrics}");
@@ -577,6 +591,36 @@ fn quickjs_manifest_detection_tracks_dynamic_host_calls() {
     assert!(source_uses_quickjs(
         "declare function __thaw_typed_js_616464(value: number): number;"
     ));
+}
+
+#[test]
+fn quickjs_fallback_reasons_include_operation_package_and_location() {
+    let source = "import { parse } from 'dynamic-package';\nfunction main(): void { parse('x'); callDynamic('other', []); }\n";
+    let mut exports = ExternalExports::new();
+    exports.insert(
+        "dynamic-package".into(),
+        [("parse".into(), "__thaw_typed_js_7061727365".into())]
+            .into_iter()
+            .collect(),
+    );
+    let reasons = quickjs_fallback_reasons(
+        Path::new("main.ts"),
+        source,
+        "declare function __thaw_typed_js_64796e616d69632d7061636b6167653a3a7061727365(): string;",
+        &["dynamic-package".into()],
+        &exports,
+    );
+    assert!(reasons.iter().any(|reason| {
+        reason["kind"] == "dynamic-operation"
+            && reason["operation"] == "callDynamic"
+            && reason["line"] == 2
+    }));
+    assert!(reasons.iter().any(|reason| {
+        reason["kind"] == "registry-fallback"
+            && reason["package"] == "dynamic-package"
+            && reason["function"] == "parse"
+            && reason["line"] == 2
+    }));
 }
 
 #[test]
