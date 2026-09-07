@@ -16,6 +16,16 @@ include!("tests/ffi_metadata.rs");
 include!("tests/native_addons.rs");
 
 #[test]
+fn prepared_runtime_variants_have_stable_names() {
+    assert_eq!(staticlib_variant(false, &[]), "default");
+    assert_eq!(staticlib_variant(true, &[]), "minimal");
+    assert_eq!(
+        staticlib_variant(true, &["quickjs", "quickjs-tls"]),
+        "quickjs-quickjs-tls"
+    );
+}
+
+#[test]
 fn install_uses_the_project_directory() {
     let command = npm_install_command(Path::new("web"));
     assert_eq!(

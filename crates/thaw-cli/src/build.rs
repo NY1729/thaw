@@ -712,6 +712,9 @@ fn build_staticlib_with_options(
     no_default_features: bool,
     features: &[&str],
 ) -> Result<PathBuf, String> {
+    if let Some(path) = prepared_staticlib(pkg, no_default_features, features) {
+        return Ok(path);
+    }
     let mut command = Command::new("cargo");
     command
         .args(["build", "--release", "-p", pkg, "--message-format=json"])
@@ -755,6 +758,156 @@ fn build_staticlib_with_options(
     Err(format!(
         "could not find a staticlib for `{pkg}` in `cargo build` output"
     ))
+}
+
+fn run_prepare(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: thaw prepare".into());
+    }
+    for package in ["thaw-arena", "thaw-runtime", "thaw-std", "thaw-jit"] {
+        store_prepared_staticlib(package, false, &[])?;
+    }
+    store_prepared_staticlib("thaw-quickjs", true, &[])?;
+    store_prepared_staticlib("thaw-napi", true, &[])?;
+    store_prepared_staticlib("thaw-napi", true, &["quickjs"])?;
+    store_prepared_staticlib(
+        "thaw-napi",
+        true,
+        &["quickjs", "quickjs-tls", "quickjs-wasm"],
+    )?;
+    let root = prepared_staticlib_root()?;
+    std::fs::write(root.join("compiler.fingerprint"), executable_fingerprint()?)
+        .map_err(|error| format!("failed to write prepared runtime fingerprint: {error}"))?;
+    println!("prepared common runtime archives");
+    Ok(())
+}
+
+fn store_prepared_staticlib(
+    package: &str,
+    no_default_features: bool,
+    features: &[&str],
+) -> Result<(), String> {
+    let destination = prepared_staticlib_path(package, no_default_features, features)?;
+    if destination.is_file() {
+        std::fs::remove_file(&destination).map_err(|error| {
+            format!("failed to replace `{}`: {error}", destination.display())
+        })?;
+    }
+    let legacy = destination.with_extension("");
+    if legacy.is_file() {
+        std::fs::remove_file(&legacy)
+            .map_err(|error| format!("failed to remove `{}`: {error}", legacy.display()))?;
+    }
+    let source = build_staticlib_with_options(package, no_default_features, features)?;
+    std::fs::create_dir_all(destination.parent().unwrap())
+        .map_err(|error| format!("failed to create runtime archive directory: {error}"))?;
+    let input = std::fs::File::open(&source)
+        .map_err(|error| format!("failed to read `{}`: {error}", source.display()))?;
+    let output = std::fs::File::create(&destination)
+        .map_err(|error| format!("failed to create `{}`: {error}", destination.display()))?;
+    let mut decoder = std::io::BufReader::new(input);
+    let mut encoder = flate2::write::GzEncoder::new(output, flate2::Compression::default());
+    std::io::copy(&mut decoder, &mut encoder)
+        .and_then(|_| encoder.finish())
+        .map_err(|error| {
+            format!(
+                "failed to compress `{}` to `{}`: {error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    Ok(())
+}
+
+fn prepared_staticlib(
+    package: &str,
+    no_default_features: bool,
+    features: &[&str],
+) -> Option<PathBuf> {
+    let root = prepared_staticlib_root().ok()?;
+    let recorded = std::fs::read_to_string(root.join("compiler.fingerprint")).ok()?;
+    if recorded != executable_fingerprint().ok()? {
+        return None;
+    }
+    let archive = prepared_staticlib_path(package, no_default_features, features).ok()?;
+    if !archive.is_file() {
+        return None;
+    }
+    let path = prepared_staticlib_cache_path(package, no_default_features, features).ok()?;
+    if path.is_file() {
+        return Some(path);
+    }
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let input = std::fs::File::open(archive).ok()?;
+    let temporary = path.with_extension(format!("a.{}.tmp", std::process::id()));
+    let mut decoder = flate2::read::GzDecoder::new(input);
+    let mut output = std::fs::File::create(&temporary).ok()?;
+    if std::io::copy(&mut decoder, &mut output).is_err()
+        || std::fs::rename(&temporary, &path).is_err()
+    {
+        let _ = std::fs::remove_file(temporary);
+        return None;
+    }
+    Some(path)
+}
+
+fn prepared_staticlib_path(
+    package: &str,
+    no_default_features: bool,
+    features: &[&str],
+) -> Result<PathBuf, String> {
+    let directory = prepared_staticlib_root()?
+        .join(staticlib_variant(no_default_features, features));
+    Ok(directory.join(format!("lib{}.a.gz", package.replace('-', "_"))))
+}
+
+fn prepared_staticlib_cache_path(
+    package: &str,
+    no_default_features: bool,
+    features: &[&str],
+) -> Result<PathBuf, String> {
+    Ok(std::env::temp_dir()
+        .join("thaw-runtime-cache")
+        .join(executable_fingerprint()?)
+        .join(staticlib_variant(no_default_features, features))
+        .join(format!("lib{}.a", package.replace('-', "_"))))
+}
+
+fn prepared_staticlib_root() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to locate the thaw executable: {error}"))?;
+    Ok(executable
+        .parent()
+        .ok_or("the thaw executable has no parent directory")?
+        .join("thaw-libs"))
+}
+
+fn executable_fingerprint() -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+
+    static FINGERPRINT: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    FINGERPRINT
+        .get_or_init(|| {
+            let executable = std::env::current_exe()
+                .map_err(|error| format!("failed to locate the thaw executable: {error}"))?;
+            let bytes = std::fs::read(&executable).map_err(|error| {
+                format!("failed to fingerprint `{}`: {error}", executable.display())
+            })?;
+            let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut fingerprint);
+            Ok(format!("{:016x}", fingerprint.finish()))
+        })
+        .clone()
+}
+
+fn staticlib_variant(no_default_features: bool, features: &[&str]) -> String {
+    if !no_default_features {
+        "default".to_string()
+    } else if features.is_empty() {
+        "minimal".to_string()
+    } else {
+        features.join("-")
+    }
 }
 
 fn feature_target_dir(pkg: &str, features: &[&str]) -> PathBuf {

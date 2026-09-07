@@ -88,6 +88,18 @@ Compile the Lambda example:
 target/release/thaw build examples/hello-lambda/handler.ts -o bootstrap
 ```
 
+When building Thaw from source or assembling a distribution, prebuild the
+common runtime archive variants once to avoid their Cargo cost during the first
+application build:
+
+```sh
+target/release/thaw prepare
+```
+
+Prepared archives are stored beside the `thaw` executable and are used only
+when their compiler fingerprint matches; uncommon feature combinations still
+build and cache through Cargo on demand.
+
 Import and use an npm package through the local registry:
 
 ```sh

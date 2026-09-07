@@ -8,6 +8,7 @@ name = "thaw"
 path = "src/main.rs"
 
 [dependencies]
+flate2 = "1"
 inkwell = { version = "0.10.0", features = ["llvm22-1"] }
 thaw-bridge = { version = "0.1.0", path = "../thaw-bridge" }
 thaw-hir = { version = "0.1.0", path = "../thaw-hir" }
