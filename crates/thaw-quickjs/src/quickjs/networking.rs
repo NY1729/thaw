@@ -233,6 +233,10 @@ fn udp_close(handle: u32) {
     });
 }
 
+#[cfg(feature = "tls")]
+mod tls_host {
+use super::*;
+
 fn decode_pem_blocks(bytes: &[u8], label: &str) -> Result<Vec<Vec<u8>>, String> {
     let begin = format!("-----BEGIN {label}-----");
     let end_marker = format!("-----END {label}-----");
@@ -294,19 +298,19 @@ fn decode_alpn_protocols(spec: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
-struct TlsClientOptions<'a> {
-    host: &'a str,
-    port: u16,
-    server_name: &'a str,
-    ca_spec: &'a str,
-    cert_spec: &'a str,
-    key_spec: &'a str,
-    alpn_spec: &'a str,
-    report_alpn: bool,
-    reject_unauthorized: bool,
+pub(super) struct TlsClientOptions<'a> {
+    pub(super) host: &'a str,
+    pub(super) port: u16,
+    pub(super) server_name: &'a str,
+    pub(super) ca_spec: &'a str,
+    pub(super) cert_spec: &'a str,
+    pub(super) key_spec: &'a str,
+    pub(super) alpn_spec: &'a str,
+    pub(super) report_alpn: bool,
+    pub(super) reject_unauthorized: bool,
 }
 
-fn tls_connect(options: TlsClientOptions<'_>) -> String {
+pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
     let TlsClientOptions {
         host,
         port,
@@ -413,18 +417,18 @@ fn tls_connect(options: TlsClientOptions<'_>) -> String {
     })
 }
 
-struct TlsServerOptions<'a> {
-    host: &'a str,
-    port: u16,
-    cert_spec: &'a str,
-    key_spec: &'a str,
-    ca_spec: &'a str,
-    request_cert: bool,
-    reject_unauthorized: bool,
-    alpn_spec: &'a str,
+pub(super) struct TlsServerOptions<'a> {
+    pub(super) host: &'a str,
+    pub(super) port: u16,
+    pub(super) cert_spec: &'a str,
+    pub(super) key_spec: &'a str,
+    pub(super) ca_spec: &'a str,
+    pub(super) request_cert: bool,
+    pub(super) reject_unauthorized: bool,
+    pub(super) alpn_spec: &'a str,
 }
 
-fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
+pub(super) fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
     let TlsServerOptions {
         host,
         port,
@@ -585,15 +589,15 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
     })
 }
 
-fn tls_server_accept(handle: u32) -> String {
+pub(super) fn tls_server_accept(handle: u32) -> String {
     tls_server_accept_impl(handle, false)
 }
 
-fn tls_server_poll_accept(handle: u32) -> String {
+pub(super) fn tls_server_poll_accept(handle: u32) -> String {
     tls_server_accept_impl(handle, true)
 }
 
-fn tls_server_read(handle: u32) -> String {
+pub(super) fn tls_server_read(handle: u32) -> String {
     TLS_SERVER_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let Some(stream) = streams.1.get_mut(&handle) else {
@@ -607,13 +611,13 @@ fn tls_server_read(handle: u32) -> String {
     })
 }
 
-fn tls_server_close_listener(handle: u32) {
+pub(super) fn tls_server_close_listener(handle: u32) {
     TLS_LISTENERS.with(|listeners| {
         listeners.borrow_mut().1.remove(&handle);
     });
 }
 
-fn tls_write(handle: u32, value: &[u8]) -> String {
+pub(super) fn tls_write(handle: u32, value: &[u8]) -> String {
     let client_result = TLS_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let stream = streams.1.get_mut(&handle)?;
@@ -640,7 +644,7 @@ fn tls_write(handle: u32, value: &[u8]) -> String {
     })
 }
 
-fn tls_finish(handle: u32) -> String {
+pub(super) fn tls_finish(handle: u32) -> String {
     let client_result = TLS_STREAMS.with(|streams| {
         let mut stream = streams.borrow_mut().1.remove(&handle)?;
         TLS_CLIENT_CERTIFICATES.with(|certificates| {
@@ -677,7 +681,7 @@ fn tls_finish(handle: u32) -> String {
     })
 }
 
-fn tls_shutdown_write(handle: u32) -> String {
+pub(super) fn tls_shutdown_write(handle: u32) -> String {
     let client = TLS_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let stream = streams.1.get_mut(&handle)?;
@@ -704,7 +708,7 @@ fn tls_shutdown_write(handle: u32) -> String {
     })
 }
 
-fn tls_poll_read(handle: u32) -> String {
+pub(super) fn tls_poll_read(handle: u32) -> String {
     let client = TLS_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let stream = streams.1.get_mut(&handle)?;
@@ -757,7 +761,7 @@ fn tls_poll_read(handle: u32) -> String {
     })
 }
 
-fn tls_destroy(handle: u32) {
+pub(super) fn tls_destroy(handle: u32) {
     TLS_STREAMS.with(|streams| {
         streams.borrow_mut().1.remove(&handle);
     });
@@ -772,7 +776,7 @@ fn tls_destroy(handle: u32) {
     });
 }
 
-fn tls_alpn(handle: u32) -> String {
+pub(super) fn tls_alpn(handle: u32) -> String {
     let client = TLS_STREAMS.with(|streams| {
         streams
             .borrow()
@@ -809,14 +813,14 @@ fn tls_certificate_bytes(handle: u32, peer: bool) -> Option<Vec<u8>> {
     client.or_else(|| TLS_SERVER_CERTIFICATES.with(|certificates| read(&certificates.borrow())))
 }
 
-fn tls_certificate(handle: u32, peer: bool) -> String {
+pub(super) fn tls_certificate(handle: u32, peer: bool) -> String {
     tls_certificate_bytes(handle, peer)
         .as_deref()
         .map(hex_encode)
         .unwrap_or_default()
 }
 
-fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
+pub(super) fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
     let Some(bytes) = tls_certificate_bytes(handle, peer) else {
         return "{}".to_string();
     };
@@ -840,3 +844,66 @@ fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
     })
     .to_string()
 }
+
+}
+
+#[cfg(feature = "tls")]
+use tls_host::*;
+
+#[cfg(not(feature = "tls"))]
+#[allow(dead_code)]
+struct TlsClientOptions<'a> {
+    host: &'a str,
+    port: u16,
+    server_name: &'a str,
+    ca_spec: &'a str,
+    cert_spec: &'a str,
+    key_spec: &'a str,
+    alpn_spec: &'a str,
+    report_alpn: bool,
+    reject_unauthorized: bool,
+}
+
+#[cfg(not(feature = "tls"))]
+#[allow(dead_code)]
+struct TlsServerOptions<'a> {
+    host: &'a str,
+    port: u16,
+    cert_spec: &'a str,
+    key_spec: &'a str,
+    ca_spec: &'a str,
+    request_cert: bool,
+    reject_unauthorized: bool,
+    alpn_spec: &'a str,
+}
+
+#[cfg(not(feature = "tls"))]
+fn tls_unavailable() -> String { "err:TLS support is not linked".to_string() }
+#[cfg(not(feature = "tls"))]
+fn tls_connect(_: TlsClientOptions<'_>) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_server_listen(_: TlsServerOptions<'_>) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_server_accept(_: u32) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_server_poll_accept(_: u32) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_server_read(_: u32) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_server_close_listener(_: u32) {}
+#[cfg(not(feature = "tls"))]
+fn tls_write(_: u32, _: &[u8]) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_finish(_: u32) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_shutdown_write(_: u32) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_poll_read(_: u32) -> String { tls_unavailable() }
+#[cfg(not(feature = "tls"))]
+fn tls_destroy(_: u32) {}
+#[cfg(not(feature = "tls"))]
+fn tls_alpn(_: u32) -> String { String::new() }
+#[cfg(not(feature = "tls"))]
+fn tls_certificate(_: u32, _: bool) -> String { String::new() }
+#[cfg(not(feature = "tls"))]
+fn tls_certificate_metadata(_: u32, _: bool) -> String { "{}".to_string() }
