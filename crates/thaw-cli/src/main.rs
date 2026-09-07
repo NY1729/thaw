@@ -22,6 +22,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("run") => {
+            if let Err(err) = run_script(&args[2..]) {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("registry") => {
             if let Err(err) = run_registry(&args[2..]) {
                 eprintln!("error: {err}");
@@ -36,7 +42,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw install [directory]\n       thaw build <input.ts> [-o <output>] [--static] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
+                "usage: thaw install [directory]\n       thaw run <script> [--prefix <directory>]\n       thaw build <input.ts> [-o <output>] [--static] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
             );
             std::process::exit(1);
         }
@@ -66,6 +72,36 @@ fn run_install(args: &[String]) -> Result<(), String> {
 fn npm_install_command(directory: &Path) -> Command {
     let mut command = Command::new("npm");
     command.args(["install", "--prefix"]).arg(directory);
+    command
+}
+
+fn run_script(args: &[String]) -> Result<(), String> {
+    let script = args
+        .first()
+        .ok_or("usage: thaw run <script> [--prefix <directory>]")?;
+    let directory = match args.get(1).map(String::as_str) {
+        None => Path::new("."),
+        Some("--prefix") if args.len() == 3 => Path::new(&args[2]),
+        _ => return Err("usage: thaw run <script> [--prefix <directory>]".into()),
+    };
+    if !directory.join("package.json").is_file() {
+        return Err(format!(
+            "`{}` does not contain package.json",
+            directory.display()
+        ));
+    }
+    let status = npm_run_command(script, directory)
+        .status()
+        .map_err(|error| format!("failed to run npm script `{script}`: {error}"))?;
+    if !status.success() {
+        return Err(format!("npm script `{script}` failed with {status}"));
+    }
+    Ok(())
+}
+
+fn npm_run_command(script: &str, directory: &Path) -> Command {
+    let mut command = Command::new("npm");
+    command.args(["run", script, "--prefix"]).arg(directory);
     command
 }
 
