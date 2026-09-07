@@ -121,7 +121,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
     }
 
     let mut source = String::from(
-        "function thawHasAsset(path: string): boolean {\n",
+        "function thawAssetPath(path: string): string {\nreturn path.split(\"?\")[0].split(\"#\")[0];\n}\nfunction thawHasAsset(path: string): boolean {\npath = thawAssetPath(path);\n",
     );
     for (path, _, _) in &routes {
         source.push_str(&format!(
@@ -129,7 +129,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(path).unwrap()
         ));
     }
-    source.push_str("return false;\n}\nfunction thawAsset(path: string): string {\n");
+    source.push_str("return false;\n}\nfunction thawAsset(path: string): string {\npath = thawAssetPath(path);\n");
     for (path, content, _) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",
@@ -137,7 +137,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
             serde_json::to_string(content).unwrap()
         ));
     }
-    source.push_str("return \"\";\n}\nfunction thawAssetContentType(path: string): string {\n");
+    source.push_str("return \"\";\n}\nfunction thawAssetContentType(path: string): string {\npath = thawAssetPath(path);\n");
     for (path, _, content_type) in &routes {
         source.push_str(&format!(
             "if (path === {}) {{ return {}; }}\n",

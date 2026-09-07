@@ -77,7 +77,8 @@ The backend can serve generated assets with `thawHasAsset(path)`,
 `thawAsset(path)`, and `thawAssetContentType(path)`. Use `--assets <directory>`
 instead when another frontend tool already produced the files or Vite uses a
 custom `outDir`. Asset paths are rooted at `/`, and `/index.html` is also
-available as `/`.
+available as `/`. Query strings and URL fragments are ignored during asset
+lookup, so cache-busting URLs can be passed directly from an HTTP request.
 
 Compile the Lambda example:
 
