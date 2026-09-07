@@ -68,15 +68,24 @@ fn run_dev(args: &[String]) -> Result<(), String> {
 
 fn dev_project_paths(args: &[String], directory: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
     if let Some(input) = args.first().filter(|argument| !argument.starts_with('-')) {
-        return Ok((PathBuf::from(input), None));
+        let project = Path::new(input);
+        if !project.is_dir() {
+            return Ok((PathBuf::from(input), None));
+        }
+        return dev_project_paths(&[], project).map(|(entry, vite)| {
+            (
+                project.join(entry),
+                vite.map(|directory| project.join(directory)),
+            )
+        });
     }
     let manifest = std::fs::read_to_string(directory.join("package.json")).map_err(|_| {
         "missing input file and package.json has no project configuration".to_string()
     })?;
     let configured = project_build_defaults(&manifest)?;
-    let input = configured
-        .0
-        .or_else(|| directory.join("server.ts").is_file().then(|| PathBuf::from("server.ts")))
+    let input = project_input_path(directory, configured.0)
+        .and_then(|path| path.strip_prefix(directory).ok().map(PathBuf::from))
+        .or_else(|| configured.1.as_ref().map(|_| PathBuf::from("package.json")))
         .ok_or("missing input file; set `thaw.entry` in package.json or add server.ts")?;
     Ok((input, configured.1))
 }

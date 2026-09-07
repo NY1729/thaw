@@ -196,6 +196,38 @@ fn installed_root_defers_subpaths_until_requested() {
 }
 
 #[test]
+fn installed_root_uses_an_installed_definitely_typed_package() {
+    let scratch = temp_registry("installed-types-scratch");
+    let registry = temp_registry("installed-types-registry");
+    let package = scratch.join("node_modules/plain-kit");
+    let types = scratch.join("node_modules/@types/plain-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::create_dir_all(&types).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"plain-kit","main":"index.js"}"#,
+    )
+    .unwrap();
+    fs::write(package.join("index.js"), "exports.double = value => value * 2;").unwrap();
+    fs::write(
+        types.join("package.json"),
+        r#"{"name":"@types/plain-kit","types":"index.d.ts"}"#,
+    )
+    .unwrap();
+    fs::write(
+        types.join("index.d.ts"),
+        "export declare function double(value: number): number;",
+    )
+    .unwrap();
+
+    add_installed_root(&registry, &scratch.join("node_modules"), "plain-kit").unwrap();
+    let resolved = resolve(&registry, "plain-kit").unwrap();
+    assert!(resolved.dts_source.contains("function double(value: number)"));
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_named_function_reexports() {
     let scratch = temp_registry("installed-dts-reexport-scratch");
     let registry = temp_registry("installed-dts-reexport-registry");

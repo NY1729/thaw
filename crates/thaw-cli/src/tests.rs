@@ -417,9 +417,31 @@ fn dev_reads_entry_and_vite_defaults_from_the_project() {
         r#"{"thaw":{"entry":"server.ts","vite":"web"}}"#,
     )
     .unwrap();
+    std::fs::write(directory.join("server.ts"), "function main(): void {}\n").unwrap();
     assert_eq!(
         dev_project_paths(&[], &directory).unwrap(),
         (PathBuf::from("server.ts"), Some(PathBuf::from("web")))
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn dev_accepts_an_npm_project_directory() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-dev-npm-{}", std::process::id()));
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"scripts":{"build":"vite build","dev":"tsx watch src/server.ts"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/server.ts"),
+        "function main(): void {}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        dev_project_paths(&[directory.display().to_string()], Path::new(".")).unwrap(),
+        (directory.join("src/server.ts"), Some(directory.clone()))
     );
     let _ = std::fs::remove_dir_all(directory);
 }
@@ -458,6 +480,12 @@ fn project_build_uses_standard_npm_entry_and_vite_fields() {
             .0,
         Some(PathBuf::from("server.mjs"))
     );
+    assert_eq!(
+        project_build_defaults(r#"{"scripts":{"start":"tsx watch src/api.ts"}}"#)
+            .unwrap()
+            .0,
+        Some(PathBuf::from("src/api.ts"))
+    );
 }
 
 #[test]
@@ -479,6 +507,59 @@ fn build_accepts_an_npm_project_directory() {
     assert!(result.status.success());
     assert_eq!(String::from_utf8_lossy(&result.stdout), "npm project\n");
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[cfg(unix)]
+#[test]
+fn build_accepts_a_hoisted_npm_workspace_package() {
+    let root = std::env::temp_dir().join(format!("thaw-npm-workspace-{}", std::process::id()));
+    let app = root.join("packages/app");
+    let shared = root.join("packages/shared");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::create_dir_all(root.join("node_modules/@example")).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    std::fs::write(app.join("package.json"), r#"{"main":"src/index.ts"}"#).unwrap();
+    std::fs::write(
+        app.join("src/index.ts"),
+        "import { double } from '@example/shared'; function main(): void { console.log(double(21)); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        shared.join("package.json"),
+        r#"{"name":"@example/shared","main":"index.js","types":"index.d.ts"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        shared.join("index.d.ts"),
+        "export declare function double(value: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        shared.join("index.js"),
+        "exports.double = value => value * 2;\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&shared, root.join("node_modules/@example/shared")).unwrap();
+
+    run_build(&[app.display().to_string()]).unwrap();
+    let result = Command::new(app.join("app")).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn frontend_only_vite_projects_get_a_static_server_entry() {
+    let entry = write_static_asset_server_entry().unwrap();
+    let source = std::fs::read_to_string(&entry).unwrap();
+    assert!(source.contains("createServer"));
+    assert!(source.contains("thawServeAsset(response, request.url)"));
+    std::fs::remove_file(entry).unwrap();
 }
 
 #[test]
