@@ -312,10 +312,6 @@ fn wasm_release(kind: String, handle: u32) -> bool {
     true
 }
 
-fn run_quickjs_gc(ctx: Ctx<'_>) {
-    ctx.run_gc();
-}
-
 fn wasm_js_value<'js>(
     value: &WasmVal,
     ctx: Ctx<'js>,

@@ -53,6 +53,13 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_detach_array_buffer", detach_array_buffer)
                     .expect("failed to install ArrayBuffer detacher");
+                let quickjs_gc_function = Function::new(ctx.clone(), run_quickjs_gc)
+                    .expect("failed to create QuickJS garbage collector trigger");
+                ctx.globals()
+                    .set("__thaw_gc", quickjs_gc_function)
+                    .expect("failed to install QuickJS garbage collector trigger");
+                #[cfg(feature = "wasm")]
+                {
                 let wasm_compile_function = Function::new(ctx.clone(), wasm_compile)
                     .expect("failed to create WebAssembly compiler");
                 let wasm_instantiate_function = Function::new(ctx.clone(), wasm_instantiate)
@@ -81,8 +88,6 @@ fn ensure_context() {
                 let wasm_release_pending_function =
                     Function::new(ctx.clone(), wasm_release_pending)
                         .expect("failed to create WebAssembly pending-resource releaser");
-                let quickjs_gc_function = Function::new(ctx.clone(), run_quickjs_gc)
-                    .expect("failed to create QuickJS garbage collector trigger");
                 let wasm_call_function = Function::new(ctx.clone(), wasm_call)
                     .expect("failed to create WebAssembly function caller");
                 let wasm_call_funcref_function = Function::new(ctx.clone(), wasm_call_funcref)
@@ -134,9 +139,6 @@ fn ensure_context() {
                     .set("__thaw_wasm_release_pending", wasm_release_pending_function)
                     .expect("failed to install WebAssembly pending-resource releaser");
                 ctx.globals()
-                    .set("__thaw_gc", quickjs_gc_function)
-                    .expect("failed to install QuickJS garbage collector trigger");
-                ctx.globals()
                     .set("__thaw_wasm_call", wasm_call_function)
                     .expect("failed to install WebAssembly function caller");
                 ctx.globals()
@@ -157,6 +159,7 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_wasm_table", wasm_table_function)
                     .expect("failed to install WebAssembly table accessor");
+                }
                 let worker_spawn = Function::new(
                     ctx.clone(),
                     |bundle_source: String,

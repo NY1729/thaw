@@ -324,7 +324,10 @@ thread_local! {
     static TLS_SERVER_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
     static HOST_WORKERS: RefCell<HostWorkerTable> = RefCell::new(HostWorkerTable { next_handle: 1, workers: HashMap::new(), shared_env: Arc::new(Mutex::new(HashMap::new())) });
     static HOST_CHILDREN: RefCell<HostChildTable> = RefCell::new(HostChildTable { next_handle: 1, children: HashMap::new() });
+    #[cfg(feature = "wasm")]
     static WASM: RefCell<WasmTable> = RefCell::new(WasmTable::default());
+    #[cfg(feature = "wasm")]
     static WASM_JS_IMPORTS: RefCell<(u32, HashMap<u32, WasmJsImport>)> = RefCell::new((1, HashMap::new()));
+    #[cfg(feature = "wasm")]
     static WASM_JS_VALUES: RefCell<(u32, HashMap<u32, WasmJsValue>)> = RefCell::new((1, HashMap::new()));
 }

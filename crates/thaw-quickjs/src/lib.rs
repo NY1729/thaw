@@ -42,7 +42,9 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use rquickjs::function::Args;
-use rquickjs::{Array, ArrayBuffer, Context, Ctx, Function, Object, Persistent, Runtime, Value};
+#[cfg(feature = "wasm")]
+use rquickjs::Persistent;
+use rquickjs::{Array, ArrayBuffer, Context, Ctx, Function, Object, Runtime, Value};
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
 };
@@ -52,11 +54,17 @@ use rustls::{
     ServerConfig, ServerConnection, SignatureScheme, StreamOwned,
 };
 use sha2::{Digest, Sha256, Sha512};
+#[cfg(feature = "wasm")]
 use wasmi::Linker as WasmLinker;
+#[cfg(feature = "wasm")]
 use wasmi::{Caller as WasmCaller, Engine as WasmEngine, Extern as WasmExtern};
+#[cfg(feature = "wasm")]
 use wasmi::{Memory as WasmMemory, MemoryType as WasmMemoryType, Module as WasmModule};
+#[cfg(feature = "wasm")]
 use wasmi::{Store as WasmStore, Val as WasmVal, ValType as WasmValType};
+#[cfg(feature = "wasm")]
 use wasmi_wasi::sync::{ambient_authority, Dir as WasiDir, WasiCtxBuilder};
+#[cfg(feature = "wasm")]
 use wasmi_wasi::WasiCtx;
 
 type NapiBridgeCallback = unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char;
@@ -220,7 +228,12 @@ include!("quickjs/compression.rs");
 
 include!("quickjs/filesystem.rs");
 
+#[cfg(feature = "wasm")]
 include!("quickjs/wasm.rs");
+
+fn run_quickjs_gc(ctx: Ctx<'_>) {
+    ctx.run_gc();
+}
 
 enum HostChildCommand {
     Stdin(Vec<u8>),

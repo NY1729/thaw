@@ -2116,6 +2116,8 @@ property/method/constructor access remain on QuickJS. Replacing those operations
 with a home-grown general-purpose JavaScript runtime is not a project goal.
 QuickJS is linked only when the compiled program actually needs that fallback;
 fully specialized artifacts keep their `quickjs` flag false and omit it.
+The WebAssembly/WASI host is a separate Cargo feature and is omitted from
+QuickJS fallback artifacts whose source does not reference either API.
 
 The QuickJS-independent specialization JIT backend is linked as a
 separate static archive. Typed `DynamicBackend::Jit` calls lower directly from
