@@ -37,6 +37,37 @@ fn bare_imports_automatically_register_installed_packages() {
 }
 
 #[test]
+fn missing_bare_import_suggests_installing_the_project() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-missing-bare-import-{}",
+        std::process::id()
+    ));
+    let project = dir.join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("package.json"), r#"{"dependencies":{"missing-kit":"1.0.0"}}"#)
+        .unwrap();
+    let entry = project.join("src/main.ts");
+    std::fs::write(
+        &entry,
+        "import { value } from 'missing-kit';\nfunction main(): void { console.log(value); }\n",
+    )
+    .unwrap();
+
+    let error = build(
+        &entry,
+        &dir.join("app"),
+        &[],
+        &[],
+        &[],
+        &dir.join("registry"),
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.contains(&format!("help: run `thaw install {}`", project.display())));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bare_imports_automatically_resolve_registry_packages() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-bare-imports-{}", std::process::id()));
     let registry = dir.join("modules");

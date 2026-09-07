@@ -71,6 +71,13 @@ fn installed_node_modules(input: &Path, package: &str) -> Option<PathBuf> {
     })
 }
 
+fn nearest_package_directory(input: &Path) -> Option<&Path> {
+    input
+        .parent()?
+        .ancestors()
+        .find(|directory| directory.join("package.json").is_file())
+}
+
 fn generate_asset_shim(directory: &Path) -> Result<String, String> {
     if !directory.is_dir() {
         return Err(format!(
@@ -265,8 +272,12 @@ fn build_with_assets(
                     }
                 }
             }
-            thaw_registry::resolve(registry_dir, &package)
-                .map_err(|error| format!("{location}: {error}"))?;
+            thaw_registry::resolve(registry_dir, &package).map_err(|error| {
+                let help = nearest_package_directory(input)
+                    .map(|directory| format!("\nhelp: run `thaw install {}`", directory.display()))
+                    .unwrap_or_default();
+                format!("{location}: {error}{help}")
+            })?;
             package
         };
         if !resolved_packages.contains(&package) {
