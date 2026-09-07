@@ -40,6 +40,18 @@ fn infers_void_for_a_dynamic_callback_with_a_bare_return() {
 }
 
 #[test]
+fn contextual_callback_abi_overrides_explicit_any_parameters() {
+    lower(
+        r#"
+        declare function subscribe(callback: (value: JsValue) => Promise<any>): void;
+        function main(): void {
+            subscribe(async (value: any) => value.child.read());
+        }
+        "#,
+    );
+}
+
+#[test]
 fn accepts_an_abi_compatible_object_prefix() {
     lower(
         r#"
