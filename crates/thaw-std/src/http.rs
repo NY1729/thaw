@@ -44,7 +44,7 @@ pub extern "C" fn serveOnce(port: f64, body: *const c_char) -> *const c_char {
 struct ResponseSpec {
     status: u16,
     headers: Vec<(String, String)>,
-    body: String,
+    body: Vec<u8>,
 }
 
 impl ResponseSpec {
@@ -52,7 +52,7 @@ impl ResponseSpec {
         Self {
             status: 200,
             headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
-            body,
+            body: body.into_bytes(),
         }
     }
 }
@@ -108,11 +108,12 @@ fn render_response(response_spec: ResponseSpec) -> Vec<u8> {
         response.push_str("\r\n");
     }
     response.push_str(&format!(
-        "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-        response_spec.body.len(),
-        response_spec.body
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        response_spec.body.len()
     ));
-    response.into_bytes()
+    let mut response = response.into_bytes();
+    response.extend(response_spec.body);
+    response
 }
 
 /// Invokes a Thaw closure with the request target and uses its returned string
@@ -142,7 +143,7 @@ struct NativeClosure {
 
 struct ResponseState {
     headers: Vec<(String, String)>,
-    body: String,
+    body: Vec<u8>,
 }
 
 unsafe fn response_state(environment: *const c_void) -> &'static mut ResponseState {
@@ -164,7 +165,31 @@ unsafe extern "C" fn response_set_header(
 unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_char) -> bool {
     response_state(environment)
         .body
-        .push_str(&string_from_ptr(chunk));
+        .extend(string_from_ptr(chunk).as_bytes());
+    true
+}
+
+unsafe extern "C" fn response_end_encoded(
+    environment: *const c_void,
+    content: *const c_char,
+    encoding: *const c_char,
+) -> bool {
+    let content = string_from_ptr(content);
+    if string_from_ptr(encoding) != "hex" {
+        response_state(environment).body.extend(content.as_bytes());
+        return true;
+    }
+    if !content.len().is_multiple_of(2) {
+        return false;
+    }
+    let decoded = (0..content.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&content[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(decoded) = decoded else {
+        return false;
+    };
+    response_state(environment).body.extend(decoded);
     true
 }
 
@@ -184,6 +209,7 @@ struct ServerResponse {
     set_header: *const NativeClosure,
     end: *const NativeClosure,
     write: *const NativeClosure,
+    end_encoded: *const NativeClosure,
 }
 
 /// One-request native slice of Node's `createServer` callback shape.
@@ -213,7 +239,7 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
         ) -> bool;
         let mut state = ResponseState {
             headers: Vec::new(),
-            body: String::new(),
+            body: Vec::new(),
         };
         let state_ptr = &mut state as *mut ResponseState;
         let set_header = NativeClosure {
@@ -228,6 +254,10 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
             code: response_end as *const c_void,
             context: state_ptr.cast(),
         };
+        let end_encoded = NativeClosure {
+            code: response_end_encoded as *const c_void,
+            context: state_ptr.cast(),
+        };
         let method = CString::new(method).unwrap_or_default();
         let target_string = CString::new(target).unwrap_or_default();
         let request = IncomingMessage {
@@ -239,6 +269,7 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
             set_header: &set_header,
             end: &end,
             write: &write,
+            end_encoded: &end_encoded,
         };
         let code = *(callback as *const *const c_void);
         let callback_fn: Callback = std::mem::transmute(code);
@@ -852,6 +883,29 @@ mod tests {
         assert_eq!(thaw_http_take_unhandled_error(), 1);
         assert_eq!(thaw_http_take_unhandled_error(), 0);
     }
+
+    #[test]
+    fn encoded_response_decodes_binary_bytes() {
+        let mut state = ResponseState {
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let closure = NativeClosure {
+            code: response_end_encoded as *const c_void,
+            context: (&mut state as *mut ResponseState).cast(),
+        };
+        let content = CString::new("89504e4700ff").unwrap();
+        let encoding = CString::new("hex").unwrap();
+        assert!(unsafe {
+            response_end_encoded(
+                (&closure as *const NativeClosure).cast(),
+                content.as_ptr(),
+                encoding.as_ptr(),
+            )
+        });
+        assert_eq!(state.body, [0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+    }
+
     use std::net::TcpStream;
     use std::sync::Arc;
     use std::thread;
