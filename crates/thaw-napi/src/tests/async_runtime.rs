@@ -329,11 +329,24 @@ unsafe extern "C" fn probe_execute(_env: NapiEnv, data: *mut c_void) {
     probe.executed.store(true, Ordering::Release);
 }
 
+unsafe extern "C" fn noop_execute(_env: NapiEnv, _data: *mut c_void) {}
+
 unsafe extern "C" fn probe_complete(_env: NapiEnv, status: NapiStatus, data: *mut c_void) {
     assert_eq!(status, NAPI_OK);
     let probe = &*(data as *const AsyncProbe);
     assert!(probe.executed.load(Ordering::Acquire));
     *probe.complete_thread.lock().unwrap() = Some(std::thread::current().id());
+}
+
+unsafe extern "C" fn resolve_promise_complete(
+    env: NapiEnv,
+    status: NapiStatus,
+    data: *mut c_void,
+) {
+    assert_eq!(status, NAPI_OK);
+    let mut value = ptr::null_mut();
+    assert_eq!(napi_get_undefined(env, &mut value), NAPI_OK);
+    assert_eq!(napi_resolve_deferred(env, data.cast(), value), NAPI_OK);
 }
 
 unsafe extern "C" fn blocking_execute(_env: NapiEnv, data: *mut c_void) {
@@ -876,6 +889,37 @@ fn async_work_executes_on_a_worker_and_completes_on_the_draining_thread() {
             assert_eq!(napi_delete_async_work(&mut env, blocker), NAPI_OK);
             drop(Box::from_raw(gate_data));
         }
+    }
+}
+
+#[test]
+fn native_promise_can_settle_on_the_final_async_completion() {
+    let _guard = lock_async_test();
+    let mut env = Env::new();
+    let mut deferred = ptr::null_mut();
+    let mut promise = ptr::null_mut();
+    let mut work = ptr::null_mut();
+    unsafe {
+        assert_eq!(napi_create_promise(&mut env, &mut deferred, &mut promise), NAPI_OK);
+        assert_eq!(
+            napi_create_async_work(
+                &mut env,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                Some(noop_execute),
+                Some(resolve_promise_complete),
+                deferred.cast(),
+                &mut work,
+            ),
+            NAPI_OK
+        );
+        assert_eq!(napi_queue_async_work(&mut env, work), NAPI_OK);
+    }
+    assert!(matches!(wait_for_promise(promise), Ok(value) if unsafe {
+        matches!(value_ref(value), Ok(Value::Undefined))
+    }));
+    unsafe {
+        assert_eq!(napi_delete_async_work(&mut env, work), NAPI_OK);
     }
 }
 
