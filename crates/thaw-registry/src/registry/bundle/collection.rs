@@ -80,11 +80,28 @@ fn add_builtin_module(
     });
 }
 
+#[cfg(test)]
 fn bundle_commonjs_package(
     node_modules_dir: &Path,
     root_package: &str,
     root_package_dir: &Path,
     main_relative: &str,
+) -> Result<(String, String, usize, BTreeMap<String, String>), String> {
+    bundle_commonjs_package_cached(
+        node_modules_dir,
+        root_package,
+        root_package_dir,
+        main_relative,
+        &mut HashMap::new(),
+    )
+}
+
+fn bundle_commonjs_package_cached(
+    node_modules_dir: &Path,
+    root_package: &str,
+    root_package_dir: &Path,
+    main_relative: &str,
+    source_cache: &mut HashMap<PathBuf, (String, ModuleAnalysis)>,
 ) -> Result<(String, String, usize, BTreeMap<String, String>), String> {
     let (main_relative_key, main_abs) = resolve_module_path(root_package_dir, main_relative)?;
     let main_key = format!("{root_package}/{main_relative_key}");
@@ -108,17 +125,23 @@ fn bundle_commonjs_package(
         {
             continue;
         }
-        let source = fs::read_to_string(&abs_path)
-            .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
-        let source = if abs_path.extension().is_some_and(|ext| ext == "json") {
-            let value: serde_json::Value = serde_json::from_str(&source)
-                .map_err(|error| format!("invalid JSON module `{key}`: {error}"))?;
-            format!("module.exports = {};", value)
+        let (source, analysis) = if let Some(cached) = source_cache.get(&abs_path) {
+            cached.clone()
         } else {
-            source
+            let source = fs::read_to_string(&abs_path)
+                .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
+            let source = if abs_path.extension().is_some_and(|ext| ext == "json") {
+                let value: serde_json::Value = serde_json::from_str(&source)
+                    .map_err(|error| format!("invalid JSON module `{key}`: {error}"))?;
+                format!("module.exports = {};", value)
+            } else {
+                source
+            };
+            let source = rewrite_static_worker_urls(&source, &abs_path, &pkg_name, &pkg_dir)?;
+            let analysis = analyze_module(&source);
+            source_cache.insert(abs_path.clone(), (source.clone(), analysis.clone()));
+            (source, analysis)
         };
-        let source = rewrite_static_worker_urls(&source, &abs_path, &pkg_name, &pkg_dir)?;
-        let analysis = analyze_module(&source);
         uses_global_fetch |= analysis.uses_global_fetch;
         if let Some(error) = &analysis.attribute_error {
             return Err(format!("invalid import attributes in `{key}`: {error}"));

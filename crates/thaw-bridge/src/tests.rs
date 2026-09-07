@@ -680,6 +680,19 @@ fn generates_native_addon_wrapper_and_module_initializer() {
 }
 
 #[test]
+fn compresses_large_embedded_native_payloads() {
+    let bytes = vec![0x5a; 4096];
+    let init = generate_native_addon_init(&[NativeAddon {
+        package_name: "large-native",
+        bytes: &bytes,
+        dependencies: vec![],
+        root_export: None,
+    }]);
+    assert!(init.contains(r#"loadNativeAddonEmbedded("gz:"#));
+    assert!(init.len() < bytes.len());
+}
+
+#[test]
 fn classifies_number_array_and_flat_object_as_fast_path() {
     let funcs = parse_dts(
         "export declare function sum(xs: number[]): number;\n\

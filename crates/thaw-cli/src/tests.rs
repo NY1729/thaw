@@ -153,6 +153,17 @@ fn dev_fingerprint_tracks_sources_but_ignores_dependencies() {
 }
 
 #[test]
+fn dev_reuses_built_vite_assets_for_backend_only_changes() {
+    assert_eq!(
+        reuse_vite_assets(
+            &["server.ts".into(), "--vite".into(), "web".into()],
+            Path::new("web"),
+        ),
+        ["server.ts", "--assets", "web/dist"]
+    );
+}
+
+#[test]
 fn project_build_reads_package_defaults() {
     assert_eq!(
         project_build_defaults(r#"{"thaw":{"entry":"server.ts","vite":"web","output":"app"}}"#)

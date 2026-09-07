@@ -1734,6 +1734,8 @@ dependencies = [
 name = "thaw-bridge"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "swc_ecma_ast",
  "thaw-hir",
  "thaw-parser",
@@ -1785,6 +1787,8 @@ dependencies = [
 name = "thaw-napi"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "libc",
  "serde_json",
  "tempfile",
