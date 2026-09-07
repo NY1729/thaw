@@ -2006,6 +2006,7 @@ fn registry_add_processes_a_real_hono_sharp_image_when_enabled() {
     ));
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "hono@4.13.7").unwrap();
+    thaw_registry::add(&registry, "@hono/node-server@1.19.9").unwrap();
     thaw_registry::add(&registry, "sharp@0.35.4").unwrap();
     let source = dir.join("main.ts");
     let output = dir.join("app");
@@ -2013,23 +2014,21 @@ fn registry_add_processes_a_real_hono_sharp_image_when_enabled() {
     std::fs::write(
         &source,
         r#"import { Hono } from "hono";
+import { serve } from "@hono/node-server";
 import sharp from "sharp";
 import { Buffer } from "node:buffer";
-async function main(): Promise<void> {
-    const app = new Hono();
-    app.post("/images", async (c) => {
-        const input = Buffer.from(await c.req.arrayBuffer());
-        const output = await sharp(input).resize(512, 512).webp().toBuffer();
-        return c.body(output, 200, { "Content-Type": "image/webp" });
-    });
-    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>';
-    const response = await app.request("/images", { method: "POST", body: svg });
-    await response.arrayBuffer();
-    console.log(response.status);
-    console.log(response.headers.get("content-type"));
+const app = new Hono();
+app.post("/images", async (c) => {
+    const input = Buffer.from(await c.req.arrayBuffer());
+    const output = await sharp(input).resize(512, 512).webp().toBuffer();
+    return c.body(output, 200, { "Content-Type": "image/webp" });
+});
+function main(): void {
+    serve({ fetch: app.fetch, port: Number(process.env.PORT) });
 }"#,
     )
     .unwrap();
+    let build_started = Instant::now();
     build(
         &source,
         &output,
@@ -2037,20 +2036,160 @@ async function main(): Promise<void> {
         &[],
         &[],
         &registry,
-        &["hono".into(), "sharp".into()],
+        &[
+            "hono".into(),
+            "@hono/node-server".into(),
+            "sharp".into(),
+        ],
     )
     .unwrap();
+    record_acceptance_metrics("hono-sharp", build_started.elapsed(), &output);
     std::fs::remove_dir_all(&registry).unwrap();
-    let result = Command::new(&output).output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
+
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .current_dir(&dir)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stream = (0..500)
+        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("compiled Hono + sharp server did not start");
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#;
+    stream
+        .write_all(
+            format!(
+                "POST /images HTTP/1.1\r\nHost: localhost\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{svg}",
+                svg.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    assert!(String::from_utf8_lossy(&response).contains("Content-Type: image/webp"));
+    assert!(response.windows(4).any(|bytes| bytes == b"RIFF"));
+    assert!(response.windows(4).any(|bytes| bytes == b"WEBP"));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn builds_and_serves_hono_prisma_postgres_when_enabled() {
+    let Ok(database_url) = std::env::var("THAW_POSTGRES_URL") else {
+        return;
+    };
+    let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/hono-prisma-postgres")
+        .canonicalize()
+        .unwrap();
+    assert!(npm_run_command("generate", &project)
+        .env("DATABASE_URL", &database_url)
+        .status()
+        .unwrap()
+        .success());
+    assert!(npm_run_command("db:push", &project)
+        .env("DATABASE_URL", &database_url)
+        .status()
+        .unwrap()
+        .success());
+
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-hono-prisma-postgres-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    std::fs::create_dir_all(&dir).unwrap();
+    thaw_registry::add(&registry, "hono@4.13.7").unwrap();
+    thaw_registry::add(&registry, "@hono/node-server@1.19.9").unwrap();
+    thaw_registry::add_installed_root(
+        &registry,
+        &project.join("node_modules"),
+        "@prisma/client",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let build_started = Instant::now();
+    build_with_native_mode(
+        &project.join("server.ts"),
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &[
+            "hono".into(),
+            "@hono/node-server".into(),
+            "@prisma/client".into(),
+        ],
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+    record_acceptance_metrics("hono-prisma-postgres", build_started.elapsed(), &output);
+    std::fs::remove_dir_all(&registry).unwrap();
+
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .current_dir(&dir)
+        .env("DATABASE_URL", &database_url)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = |method: &str, path: &str, body: &str| {
+        let mut stream = (0..500)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("compiled Hono + Prisma server did not start");
+        stream
+            .write_all(
+                format!(
+                    "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let id = format!("thaw-{}", std::process::id());
+    assert!(request("GET", "/health", "").contains(r#"{"status":"ok"}"#));
+    let created = request(
+        "POST",
+        "/orders",
+        &format!(r#"{{"id":"{id}","customer":"Yuu","total":42}}"#),
     );
-    assert_eq!(
-        String::from_utf8_lossy(&result.stdout),
-        "200\n\"image/webp\"\n"
-    );
+    assert!(created.starts_with("HTTP/1.1 201"), "{created}");
+    assert!(created.contains(&format!(r#""id":"{id}""#)), "{created}");
+    let listed = request("GET", "/orders", "");
+    assert!(listed.contains(&format!(r#""id":"{id}""#)), "{listed}");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
 

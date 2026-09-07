@@ -225,6 +225,18 @@ THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli \
   installs_builds_and_serves_the_react_prisma_board_when_enabled -- --nocapture
 ```
 
+Native full-stack acceptance checks can also emit build-time and executable-size
+JSON files while enforcing their regression ceilings:
+
+```bash
+THAW_ACCEPTANCE_OUTPUT_DIR="$PWD/target/acceptance" \
+THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli \
+  registry_add_processes_a_real_hono_sharp_image_when_enabled -- --nocapture
+THAW_ACCEPTANCE_OUTPUT_DIR="$PWD/target/acceptance" \
+THAW_POSTGRES_URL=postgresql://postgres:password@127.0.0.1:5432/app \
+  cargo test -p thaw-cli builds_and_serves_hono_prisma_postgres_when_enabled -- --nocapture
+```
+
 Run the same end-to-end path as a coarse build-performance regression check:
 
 ```bash
