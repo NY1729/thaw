@@ -542,6 +542,18 @@ fn diagnoses_uninferable_and_unsupported_generic_layouts() {
 }
 
 #[test]
+fn extern_generics_accept_json_collection_layouts() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        declare function map<T>(values: T): T;
+        function main(): void { map(JSON.parse("[]")); }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_ok());
+}
+
+#[test]
 fn propagates_specializations_through_generic_function_calls() {
     let program = lower(
         r#"

@@ -134,6 +134,25 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
     }
 }
 
+fn supports_generic_dynamic_layout(ty: &HirType) -> bool {
+    match ty {
+        HirType::Json => true,
+        HirType::Array(inner)
+        | HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner) => supports_generic_dynamic_layout(inner),
+        HirType::Tuple(elements) => elements.iter().all(supports_generic_dynamic_layout),
+        HirType::Object(fields) => fields
+            .iter()
+            .all(|(_, ty)| supports_generic_dynamic_layout(ty)),
+        HirType::Function(params, ret) => {
+            params.iter().all(supports_generic_dynamic_layout)
+                && supports_generic_dynamic_layout(ret)
+        }
+        _ => supports_generic_native_layout(ty),
+    }
+}
+
 fn promise_settled_result_type(value: HirType) -> HirType {
     HirType::Object(vec![
         ("status".into(), HirType::Str),
