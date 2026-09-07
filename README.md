@@ -149,6 +149,13 @@ target/release/thaw build examples/hono-react-prisma-board/server.ts \
 DATABASE_URL="file:$PWD/examples/hono-react-prisma-board/board.db" ./thaw-board
 ```
 
+`thaw install [directory]` is the npm-compatible shortcut for that first
+step. It installs the dependencies declared by the project's `package.json`:
+
+```bash
+target/release/thaw install examples/hono-react-prisma-board
+```
+
 ```json
 {
   "version": 2,
