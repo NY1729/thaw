@@ -466,13 +466,13 @@ fn build_with_native_mode(
     let std_lib = build_staticlib("thaw-std")?;
     let jit_lib = build_staticlib("thaw-jit")?;
     let uses_wasm = source_uses_wasm(&shim_source) || source_uses_wasm(&user_source);
+    let uses_tls = source_uses_tls(&shim_source) || source_uses_tls(&user_source);
     let quickjs_lib = uses_quickjs
-        .then(|| {
-            if uses_wasm {
-                build_staticlib("thaw-quickjs")
-            } else {
-                build_staticlib_without_default_features("thaw-quickjs")
-            }
+        .then(|| match (uses_tls, uses_wasm) {
+            (true, true) => build_staticlib("thaw-quickjs"),
+            (true, false) => build_staticlib_with_features("thaw-quickjs", &["tls"]),
+            (false, true) => build_staticlib_with_features("thaw-quickjs", &["wasm"]),
+            (false, false) => build_staticlib_without_default_features("thaw-quickjs"),
         })
         .transpose()?;
     let napi_lib = uses_napi.then(|| {
@@ -582,6 +582,10 @@ fn source_uses_wasm(source: &str) -> bool {
         .any(|marker| source.contains(marker))
 }
 
+fn source_uses_tls(source: &str) -> bool {
+    source.contains("__thaw_tls_")
+}
+
 fn ensure_static_system_libraries() -> Result<(), String> {
     let mut missing = Vec::new();
     for library in ["libc.a", "libm.a", "libdl.a"] {
@@ -640,17 +644,25 @@ fn elf_has_program_interpreter(path: &Path) -> Result<bool, String> {
 /// artifact output. That's robust to `CARGO_TARGET_DIR` overrides, unlike
 /// guessing a relative path.
 fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
-    build_staticlib_with_options(pkg, false)
+    build_staticlib_with_options(pkg, false, &[])
 }
 
 /// Builds a package without its default features. This is used for the N-API
 /// host when the generated program has no QuickJS call sites, so the host's
 /// optional QuickJS bridge is not compiled into the final archive.
 fn build_staticlib_without_default_features(pkg: &str) -> Result<PathBuf, String> {
-    build_staticlib_with_options(pkg, true)
+    build_staticlib_with_options(pkg, true, &[])
 }
 
-fn build_staticlib_with_options(pkg: &str, no_default_features: bool) -> Result<PathBuf, String> {
+fn build_staticlib_with_features(pkg: &str, features: &[&str]) -> Result<PathBuf, String> {
+    build_staticlib_with_options(pkg, true, features)
+}
+
+fn build_staticlib_with_options(
+    pkg: &str,
+    no_default_features: bool,
+    features: &[&str],
+) -> Result<PathBuf, String> {
     let mut command = Command::new("cargo");
     command
         .args(["build", "--release", "-p", pkg, "--message-format=json"])
@@ -658,12 +670,15 @@ fn build_staticlib_with_options(pkg: &str, no_default_features: bool) -> Result<
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"));
     if no_default_features {
         command.arg("--no-default-features");
+        if !features.is_empty() {
+            command.args(["--features", &features.join(",")]);
+        }
         // Keep feature variants in separate target directories. CLI tests build
         // several artifacts concurrently; sharing target/release would let a
         // QuickJS-enabled and a QuickJS-free static archive replace each other.
         command
             .arg("--target-dir")
-            .arg(no_quickjs_target_dir());
+            .arg(feature_target_dir(pkg, features));
     }
     let output = command
         .output()
@@ -693,9 +708,16 @@ fn build_staticlib_with_options(pkg: &str, no_default_features: bool) -> Result<
     ))
 }
 
-fn no_quickjs_target_dir() -> PathBuf {
+fn feature_target_dir(pkg: &str, features: &[&str]) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
-        .join("thaw-no-quickjs")
+        .join(format!(
+            "thaw-{pkg}-{}",
+            if features.is_empty() {
+                "minimal".to_string()
+            } else {
+                features.join("-")
+            }
+        ))
 }

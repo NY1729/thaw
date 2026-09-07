@@ -417,6 +417,12 @@ fn wasm_host_detection_only_enables_wasm_users() {
 }
 
 #[test]
+fn tls_host_detection_only_enables_tls_bundles() {
+    assert!(!source_uses_tls("module.exports = value => value + 1"));
+    assert!(source_uses_tls("__thaw_tls_connect(host, port)"));
+}
+
+#[test]
 fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     let function = thaw_bridge::DtsFunction {
         name: "add".into(),
