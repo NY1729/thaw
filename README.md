@@ -3401,6 +3401,14 @@ Current priorities are:
    compatibility gate.
 4. Extend Node and N-API compatibility from observed package requirements.
 
+The current real-package fallback audit covers lodash, zod, nanoid, bcrypt,
+sqlite3, Hono, `@hono/node-server`, Prisma Client, and sharp. Their remaining
+QuickJS paths are higher-order collection APIs, runtime schema/class graphs,
+random-byte generation, server initialization, or JavaScript wrappers around
+N-API objects. None is presently a false fallback of a statically supported JIT
+expression. Add a JIT rule only when `thaw inspect` identifies a shared static
+pattern; do not replace these dynamic object models with package-specific code.
+
 The first N-API host is now implemented, including shared worker-pool execution,
 main-thread completion and cancellation for the core async-work lifecycle.
 Thread-safe functions provide bounded blocking/nonblocking queues, worker-thread
