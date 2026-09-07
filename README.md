@@ -162,6 +162,14 @@ Package scripts use the same names as npm:
 target/release/thaw run build --prefix examples/hono-react-prisma-board
 ```
 
+The complete install, Prisma setup, compile, API, and React serving path can
+be checked with:
+
+```bash
+THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli \
+  installs_builds_and_serves_the_react_prisma_board_when_enabled -- --nocapture
+```
+
 ```json
 {
   "version": 2,
