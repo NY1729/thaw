@@ -603,6 +603,11 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             bundle.fallback_names,
             bundle.nested_namespace_aliases,
         );
+        let wrapped = if bundle.js_source.len() >= 1024 {
+            encode_embedded_script(&wrapped)
+        } else {
+            wrapped
+        };
         out.push_str(&format!(
             "    loadScript(\"{}\");\n",
             escape_ts_string_literal(&wrapped)
@@ -669,6 +674,19 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
 use base64::Engine;
 use flate2::{write::GzEncoder, Compression};
 use std::io::Write;
+
+fn encode_embedded_script(source: &str) -> String {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    if encoder.write_all(source.as_bytes()).is_ok() {
+        if let Ok(compressed) = encoder.finish() {
+            return format!(
+                "gz:{}",
+                base64::engine::general_purpose::STANDARD.encode(compressed)
+            );
+        }
+    }
+    source.to_string()
+}
 
 fn encode_embedded_native(bytes: &[u8]) -> String {
     // Tiny addons are cheaper as-is and retaining this form keeps old

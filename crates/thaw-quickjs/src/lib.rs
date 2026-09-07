@@ -40,7 +40,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-#[cfg(feature = "tls")]
 use base64::Engine as _;
 use rquickjs::function::Args;
 #[cfg(feature = "wasm")]
