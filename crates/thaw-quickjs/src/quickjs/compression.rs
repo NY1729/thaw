@@ -3,11 +3,14 @@ fn compress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
     use flate2::Compression;
     let compression = Compression::default();
     match format {
+        #[cfg(feature = "brotli")]
         "brotli" => {
             let mut encoder = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
             encoder.write_all(value)?;
             Ok(encoder.into_inner())
         }
+        #[cfg(not(feature = "brotli"))]
+        "brotli" => Err(io::Error::new(io::ErrorKind::Unsupported, "Brotli support is not linked")),
         "gzip" => {
             let mut encoder = GzEncoder::new(Vec::new(), compression);
             encoder.write_all(value)?;
@@ -30,7 +33,10 @@ fn decompress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
     use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
     let mut output = Vec::new();
     match format {
+        #[cfg(feature = "brotli")]
         "brotli" => brotli::Decompressor::new(value, 4096).read_to_end(&mut output)?,
+        #[cfg(not(feature = "brotli"))]
+        "brotli" => return Err(io::Error::new(io::ErrorKind::Unsupported, "Brotli support is not linked")),
         "gzip" => GzDecoder::new(value).read_to_end(&mut output)?,
         "deflateRaw" => DeflateDecoder::new(value).read_to_end(&mut output)?,
         _ => ZlibDecoder::new(value).read_to_end(&mut output)?,
@@ -45,7 +51,9 @@ enum WebZlibWriter {
     GzipDecoder(flate2::write::GzDecoder<Vec<u8>>),
     ZlibDecoder(flate2::write::ZlibDecoder<Vec<u8>>),
     DeflateDecoder(flate2::write::DeflateDecoder<Vec<u8>>),
+    #[cfg(feature = "brotli")]
     BrotliEncoder(Box<brotli::CompressorWriter<Vec<u8>>>),
+    #[cfg(feature = "brotli")]
     BrotliDecoder(Box<brotli::DecompressorWriter<Vec<u8>>>),
 }
 
@@ -78,9 +86,11 @@ impl WebZlibStream {
             ("decompress", "deflate") => {
                 WebZlibWriter::ZlibDecoder(flate2::write::ZlibDecoder::new(Vec::new()))
             }
+            #[cfg(feature = "brotli")]
             ("compress", "brotli") => WebZlibWriter::BrotliEncoder(Box::new(
                 brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22),
             )),
+            #[cfg(feature = "brotli")]
             ("decompress", "brotli") => WebZlibWriter::BrotliDecoder(Box::new(
                 brotli::DecompressorWriter::new(Vec::new(), 4096),
             )),
@@ -109,7 +119,9 @@ impl WebZlibStream {
             WebZlibWriter::GzipDecoder(writer) => write!(writer),
             WebZlibWriter::ZlibDecoder(writer) => write!(writer),
             WebZlibWriter::DeflateDecoder(writer) => write!(writer),
+            #[cfg(feature = "brotli")]
             WebZlibWriter::BrotliEncoder(writer) => write!(writer),
+            #[cfg(feature = "brotli")]
             WebZlibWriter::BrotliDecoder(writer) => write!(writer),
         };
         let chunk = output[self.emitted..].to_vec();
@@ -132,11 +144,13 @@ impl WebZlibStream {
             WebZlibWriter::GzipDecoder(writer) => finish!(writer),
             WebZlibWriter::ZlibDecoder(writer) => finish!(writer),
             WebZlibWriter::DeflateDecoder(writer) => finish!(writer),
+            #[cfg(feature = "brotli")]
             WebZlibWriter::BrotliEncoder(mut writer) => {
                 writer.write_all(input)?;
                 writer.flush()?;
                 (*writer).into_inner()
             }
+            #[cfg(feature = "brotli")]
             WebZlibWriter::BrotliDecoder(mut writer) => {
                 writer.write_all(input)?;
                 writer.flush()?;

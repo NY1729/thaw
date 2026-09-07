@@ -7,13 +7,14 @@ edition.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [features]
-default = ["tls", "wasm"]
+default = ["brotli", "tls", "wasm"]
+brotli = ["dep:brotli"]
 tls = ["dep:rustls", "dep:webpki-roots", "dep:x509-parser"]
 wasm = ["dep:wasmi", "dep:wasmi_wasi"]
 
 [dependencies]
 base64 = "0.22"
-brotli = "8"
+brotli = { version = "8", optional = true }
 flate2 = "1"
 getrandom = "0.2"
 httlib-huffman = "0.3.4"

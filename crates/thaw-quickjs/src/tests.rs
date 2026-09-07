@@ -14,6 +14,17 @@ fn load(source: &str) -> u8 {
     thaw_js_load(source.as_ptr())
 }
 
+#[cfg(not(feature = "brotli"))]
+#[test]
+fn minimal_host_keeps_gzip_and_rejects_brotli() {
+    let compressed = compress_bytes("gzip", b"hello").unwrap();
+    assert_eq!(decompress_bytes("gzip", &compressed).unwrap(), b"hello");
+    assert_eq!(
+        compress_bytes("brotli", b"hello").unwrap_err().kind(),
+        io::ErrorKind::Unsupported
+    );
+}
+
 #[test]
 fn loads_and_calls_a_simple_function() {
     assert_eq!(load("function add(a, b) { return a + b; }"), 1);
