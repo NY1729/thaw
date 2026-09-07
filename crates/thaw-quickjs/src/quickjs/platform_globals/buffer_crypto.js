@@ -129,6 +129,12 @@
     writeUInt16BE(value, offset = 0) { const index = Number(offset); this[index] = Number(value) >> 8 & 255; this[index + 1] = Number(value) & 255; return index + 2; }
   };
   Buffer.poolSize = 8192;
+  for (const name of Object.getOwnPropertyNames(Buffer)) {
+    if (!['length', 'name', 'prototype'].includes(name)) {
+      const descriptor = Object.getOwnPropertyDescriptor(Buffer, name);
+      if (descriptor.configurable) Object.defineProperty(Buffer, name, { ...descriptor, enumerable: true });
+    }
+  }
   globalThis.SlowBuffer = size => Buffer.alloc(Number(size));
   const normalizeHashAlgorithm = algorithm => {
     const name = String(algorithm).toLowerCase().replace(/[-_]/g, '');

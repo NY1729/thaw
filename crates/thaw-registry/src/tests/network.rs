@@ -615,6 +615,9 @@ fn http_server_parses_and_replies_to_a_real_tcp_client() {
             }
         };
         stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
                 .write_all(b"POST /submit HTTP/1.1\r\nHost: localhost\r\nX-Client: rust\r\nContent-Length: 4\r\nConnection: close\r\n\r\nping")
                 .unwrap();
         let mut response = String::new();
@@ -678,6 +681,89 @@ fn http_server_supports_standard_timeout_configuration() {
     }
     .to_string_lossy();
     assert_eq!(result, "[true,1234,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_server_reuses_http11_keep_alive_connections() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        let read_response = |stream: &mut TcpStream| {
+            let mut response = Vec::new();
+            while !response.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                response.push(byte[0]);
+            }
+            let headers = String::from_utf8(response).unwrap();
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            (headers, body)
+        };
+        stream
+            .write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .unwrap();
+        let first = read_response(&mut stream);
+        stream
+            .write_all(b"GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let second = read_response(&mut stream);
+        (first, second)
+    });
+
+    let dir = temp_registry("builtin_http_server_keep_alive");
+    fs::write(
+        dir.join("index.js"),
+        "var http = require('node:http'); module.exports = async function(port) { var count = 0, server = http.createServer(function(request, response) { count++; response.end(String(count), function() { if (count === 2) server.close(); }); }); setTimeout(function() { if (server.listening) server.close(); }, 1000); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return count; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_server_keep_alive_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpKeepAlive = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpKeepAlive").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result = unsafe {
+        CStr::from_ptr(thaw_quickjs::thaw_js_call(
+            function.as_ptr(),
+            arguments.as_ptr(),
+        ))
+    }
+    .to_string_lossy();
+    assert_eq!(result, "2");
+    let ((first_headers, first_body), (second_headers, second_body)) = client.join().unwrap();
+    assert!(first_headers
+        .to_ascii_lowercase()
+        .contains("connection: keep-alive"));
+    assert_eq!(first_body, b"1");
+    assert!(second_headers
+        .to_ascii_lowercase()
+        .contains("connection: close"));
+    assert_eq!(second_body, b"2");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
