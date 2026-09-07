@@ -2011,7 +2011,21 @@ fn registry_add_runs_a_real_fastify_route_when_enabled() {
         r#"import fastify from "fastify";
 async function main(): Promise<void> {
     const app = fastify();
-    app.get("/users/:id", async (request) => ({ id: request.params.id }));
+    app.setErrorHandler(async (error, request, reply) => {
+        return reply.code(418).send({ message: error.message });
+    });
+    app.register(async (instance) => {
+        instance.get("/users/:id", async (request) => ({ id: request.params.id }));
+        instance.post("/echo", async (request) => ({ body: request.body }));
+        instance.get("/fail", async () => { throw new Error("expected failure"); });
+    }, { prefix: "/api" });
+    await app.ready();
+    const injected = await app.inject({ method: "GET", url: "/api/users/42" });
+    if (Number(injected.statusCode) !== 200) throw "Fastify injection failed";
+    const posted = await app.inject({ method: "POST", url: "/api/echo", payload: { name: "Thaw" } });
+    if (Number(posted.statusCode) !== 200 || !String(posted.body).includes("Thaw")) throw "Fastify POST injection failed";
+    const failed = await app.inject({ method: "GET", url: "/api/fail" });
+    if (Number(failed.statusCode) !== 418 || !String(failed.body).includes("expected failure")) throw "Fastify error handler failed";
     await app.listen({ host: "127.0.0.1", port: Number(process.env.PORT) });
 }"#,
     )
@@ -2046,6 +2060,73 @@ async function main(): Promise<void> {
             }
         })
         .expect("compiled Fastify server did not start");
+    stream
+        .write_all(b"GET /api/users/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    assert!(response
+        .windows(b"{\"id\":\"42\"}".len())
+        .any(|bytes| bytes == b"{\"id\":\"42\"}"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn registry_add_runs_a_real_express_route_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-express-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "express@5.1.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import express from "express";
+function main(): void {
+    const app = express();
+    app.get("/users/:id", (request, response) => {
+        response.json({ id: request.params.id });
+    });
+    app.listen(Number(process.env.PORT), "127.0.0.1");
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["express".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stream = (0..500)
+        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("compiled Express server did not start");
     stream
         .write_all(b"GET /users/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();

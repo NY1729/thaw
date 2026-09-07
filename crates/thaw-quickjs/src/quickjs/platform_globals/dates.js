@@ -96,3 +96,15 @@
     }
     return value;
   };
+  globalThis.__thaw_json_safe_stringify = function (value) {
+    const ancestors = [];
+    return JSON.stringify(value, function (key, nested) {
+      nested = globalThis.__thaw_json_binary_replacer.call(this, key, nested);
+      if (nested && typeof nested === 'object') {
+        while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+        if (ancestors.includes(nested)) return undefined;
+        ancestors.push(nested);
+      }
+      return nested;
+    });
+  };
