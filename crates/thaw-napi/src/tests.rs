@@ -14,6 +14,15 @@ static RELEASED_HANDLE_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_os = "linux")]
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
+#[test]
+fn decodes_legacy_hex_and_compressed_embedded_payloads() {
+    assert_eq!(decode_hex("deadbeef").unwrap(), [0xde, 0xad, 0xbe, 0xef]);
+    assert_eq!(
+        decode_hex("gz:H4sIAAAAAAAA/8tIzcnJBwCGphA2BQAAAA==").unwrap(),
+        b"hello"
+    );
+}
+
 unsafe extern "C" fn double_json_callback(
     _context: *mut c_void,
     args: *const c_char,

@@ -504,13 +504,19 @@ fn build_with_native_mode(
         // but this is a manual `cc` invocation instead.
         .arg("-lm")
         .arg("-ldl")
+        // Every support crate is a static archive. Keep only the runtime
+        // sections reached by this particular program, then remove the
+        // remaining symbol/debug tables from the final executable. This is
+        // especially important for the optional QuickJS/N-API hosts, whose
+        // unrelated feature implementations otherwise survive the link.
+        .arg("-Wl,--gc-sections")
         .args(&registry_native_libs)
         .args(extra_links);
     if !static_link {
         linker.arg("-Wl,--export-dynamic");
     }
     let link_output = linker
-        .arg("-Wl,--strip-debug")
+        .arg("-Wl,--strip-all")
         .arg("-o")
         .arg(output)
         .output()

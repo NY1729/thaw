@@ -17,15 +17,22 @@ fn run_dev(args: &[String]) -> Result<(), String> {
         build_args.extend(["-o".into(), output.display().to_string()]);
     }
     let mut roots = vec![input.parent().unwrap_or(Path::new(".")).to_path_buf()];
-    if let Some(index) = build_args.iter().position(|arg| arg == "--vite") {
-        if let Some(directory) = build_args.get(index + 1) {
-            roots.push(PathBuf::from(directory));
-        }
+    let vite_directory = build_args
+        .iter()
+        .position(|arg| arg == "--vite")
+        .and_then(|index| build_args.get(index + 1))
+        .map(PathBuf::from);
+    if let Some(directory) = &vite_directory {
+        roots.push(directory.clone());
     }
     roots.sort();
     roots.dedup();
 
     let mut fingerprint = source_fingerprint(&roots)?;
+    let mut vite_fingerprint = vite_directory
+        .as_ref()
+        .map(|directory| source_fingerprint(std::slice::from_ref(directory)))
+        .transpose()?;
     let mut child = rebuild_and_start(&build_args, &output, None);
     loop {
         std::thread::sleep(Duration::from_millis(300));
@@ -34,9 +41,32 @@ fn run_dev(args: &[String]) -> Result<(), String> {
             continue;
         }
         fingerprint = next;
+        let next_vite_fingerprint = vite_directory
+            .as_ref()
+            .map(|directory| source_fingerprint(std::slice::from_ref(directory)))
+            .transpose()?;
+        let rebuild_args = if vite_fingerprint == next_vite_fingerprint {
+            vite_directory
+                .as_ref()
+                .filter(|directory| directory.join("dist").is_dir())
+                .map(|directory| reuse_vite_assets(&build_args, directory))
+                .unwrap_or_else(|| build_args.clone())
+        } else {
+            build_args.clone()
+        };
+        vite_fingerprint = next_vite_fingerprint;
         eprintln!("change detected; rebuilding...");
-        child = rebuild_and_start(&build_args, &output, child);
+        child = rebuild_and_start(&rebuild_args, &output, child);
     }
+}
+
+fn reuse_vite_assets(args: &[String], directory: &Path) -> Vec<String> {
+    let mut args = args.to_vec();
+    if let Some(index) = args.iter().position(|arg| arg == "--vite") {
+        args[index] = "--assets".into();
+        args[index + 1] = directory.join("dist").display().to_string();
+    }
+    args
 }
 
 fn build_output(args: &[String]) -> Option<PathBuf> {

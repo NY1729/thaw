@@ -148,4 +148,3 @@ impl WebZlibStream {
         Ok(output[self.emitted..].to_vec())
     }
 }
-

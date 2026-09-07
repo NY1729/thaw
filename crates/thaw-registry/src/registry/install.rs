@@ -552,8 +552,15 @@ fn add_installed_inner(
     let main_field = package_export_target(&manifest, None, &["require", "import", "default"])
         .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
         .unwrap_or("index.js");
+    let mut bundle_source_cache = HashMap::new();
     let (js_source, js_relative_path, bundled_file_count, mut dependency_versions) =
-        bundle_commonjs_package(node_modules_dir, name, &package_dir, main_field)?;
+        bundle_commonjs_package_cached(
+            node_modules_dir,
+            name,
+            &package_dir,
+            main_field,
+            &mut bundle_source_cache,
+        )?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
         Some((rel, abs)) => {
@@ -662,8 +669,13 @@ fn add_installed_inner(
     }
     for export in package_subpath_exports(&manifest, &package_dir)? {
         let subpath = export.subpath;
-        let (subpath_js, _, _, subpath_dependencies) =
-            bundle_commonjs_package(node_modules_dir, name, &package_dir, &export.runtime_entry)?;
+        let (subpath_js, _, _, subpath_dependencies) = bundle_commonjs_package_cached(
+            node_modules_dir,
+            name,
+            &package_dir,
+            &export.runtime_entry,
+            &mut bundle_source_cache,
+        )?;
         dependency_versions.extend(subpath_dependencies);
         let types_path = package_dir.join(&export.types_entry);
         let subpath_dts = fs::read_to_string(&types_path).map_err(|error| {

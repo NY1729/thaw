@@ -4,12 +4,14 @@
 // and shares its pointer-validity contract with the native addon caller.
 #![allow(clippy::missing_safety_doc)]
 
+use base64::Engine;
+use flate2::read::GzDecoder;
 use libc::{c_char, c_void};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString};
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
 use std::ptr;
