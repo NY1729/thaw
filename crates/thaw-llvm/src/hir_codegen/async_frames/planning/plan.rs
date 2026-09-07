@@ -1,9 +1,25 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn async_block_returns_on_all_paths(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::Return(_) | HirStmt::Throw(_) => true,
+            HirStmt::If(_, then_body, else_body) => {
+                Self::async_block_returns_on_all_paths(then_body)
+                    && Self::async_block_returns_on_all_paths(else_body)
+            }
+            HirStmt::Try(try_body, _, catch_body) => {
+                Self::async_block_returns_on_all_paths(try_body)
+                    && Self::async_block_returns_on_all_paths(catch_body)
+            }
+            _ => false,
+        })
+    }
+
     fn frame_await_plan(&self, func: &HirFunction) -> Result<Option<FrameAsyncPlan>, String> {
         if !self.frame_async_functions.contains_key(&func.name) {
             return Ok(None);
         }
         let normalized_body = self.flatten_async_finally_only_tries(&func.body)?;
+        let returns_on_all_paths = Self::async_block_returns_on_all_paths(&normalized_body);
         let mut segments = vec![AsyncSegment {
             stmts: Vec::new(),
             awaited: None,
@@ -22,6 +38,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let frame_names = self
                     .frame_async_functions
                     .keys()
+                    .chain(self.promise_returning_functions.iter())
                     .cloned()
                     .collect::<std::collections::HashSet<_>>();
                 if try_body
@@ -281,6 +298,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let frame_names = self
                     .frame_async_functions
                     .keys()
+                    .chain(self.promise_returning_functions.iter())
                     .cloned()
                     .collect::<std::collections::HashSet<_>>();
                 let condition_awaits = Self::expr_awaits_frame_source(cond, &frame_names);
@@ -472,6 +490,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let frame_names = self
                     .frame_async_functions
                     .keys()
+                    .chain(self.promise_returning_functions.iter())
                     .cloned()
                     .collect::<std::collections::HashSet<_>>();
                 let branches_await = then_body
@@ -631,6 +650,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let frame_names = self
                     .frame_async_functions
                     .keys()
+                    .chain(self.promise_returning_functions.iter())
                     .cloned()
                     .collect::<std::collections::HashSet<_>>();
                 if Self::stmt_awaits_frame_source(stmt, &frame_names) {
@@ -723,6 +743,7 @@ impl<'ctx> HirCompiler<'ctx> {
             locals,
             ret: func.ret.clone(),
             guarded_rethrow_handlers,
+            returns_on_all_paths,
         }))
     }
 

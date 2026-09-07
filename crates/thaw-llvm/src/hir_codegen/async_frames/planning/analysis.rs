@@ -183,9 +183,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 | HirExpr::PromiseAnyArray(_, _)
                 | HirExpr::PromiseAllSettled(_, _)
                 | HirExpr::PromiseAllSettledArray(_, _)
-        ) || matches!(expr, HirExpr::Call(callee, _)
+        ) || matches!(self.expr_hir_type(expr), Some(HirType::Promise(_)))
+            || matches!(expr, HirExpr::Call(callee, _)
             if matches!(callee.as_ref(), HirExpr::Var(name)
-                if name == "sleep" || name == "fetch" || name == "Promise.all" || self.frame_async_functions.contains_key(name)))
+                if name == "sleep" || name == "fetch" || name == "Promise.all"
+                    || self.frame_async_functions.contains_key(name)
+                    || self.promise_returning_functions.contains(name)))
     }
 
 }

@@ -951,7 +951,7 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
                         element.as_ref(),
                     ),
-                    HirType::JsValue => {
+                    HirType::JsValue | HirType::Dynamic => {
                         self.lower_dynamic_value_property_read(obj, prop.sym.as_ref())
                     }
                     other => Err(format!(

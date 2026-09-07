@@ -1159,6 +1159,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     if *param == HirType::Dynamic {
                         *param = actual;
                         changed = true;
+                    } else if *param == HirType::Json && actual == HirType::JsValue {
+                        *param = HirType::JsValue;
+                        changed = true;
                     } else if *param != actual {
                         return Err(format!(
                             "conflicting inferred types for parameter {} of `{callee}`: {param:?} and {actual:?} at bytes {}..{}",

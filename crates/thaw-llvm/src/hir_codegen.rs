@@ -31,7 +31,7 @@
 //! async/await is designed but not implemented yet -- see
 //! `docs/design/async-await.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 
@@ -172,6 +172,7 @@ struct FrameAsyncPlan {
     locals: Vec<(String, HirType)>,
     ret: HirType,
     guarded_rethrow_handlers: HashMap<String, AsyncRejectionHandler>,
+    returns_on_all_paths: bool,
 }
 
 enum AsyncBlockExit {
@@ -198,6 +199,7 @@ pub struct HirCompiler<'ctx> {
     /// legacy synchronous V1 ABI. Seeded to a fixed point before declarations
     /// so callers and callees agree on the LLVM signature.
     frame_async_functions: HashMap<String, HirType>,
+    promise_returning_functions: HashSet<String>,
     active_async_completion: Option<PointerValue<'ctx>>,
     next_lambda: usize,
     uses_napi: bool,
@@ -228,6 +230,7 @@ impl<'ctx> HirCompiler<'ctx> {
             catch_stack: Vec::new(),
             loop_stack: Vec::new(),
             frame_async_functions: HashMap::new(),
+            promise_returning_functions: HashSet::new(),
             active_async_completion: None,
             next_lambda: 0,
             uses_napi: false,
@@ -409,6 +412,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .iter()
             .filter(|func| func.is_async)
             .map(|func| (func.name.clone(), func.ret.clone()))
+            .collect();
+        self.promise_returning_functions = program
+            .functions
+            .iter()
+            .filter(|func| !func.is_async && matches!(func.ret, HirType::Promise(_)))
+            .map(|func| func.name.clone())
             .collect();
     }
 

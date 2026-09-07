@@ -96,7 +96,13 @@ impl<'a> FnLowerer<'a> {
                 let name = self.resolve_binding(receiver.sym.as_ref());
                 self.scope
                     .get(&name)
-                    .cloned()
+                    .map(|ty| {
+                        if *ty == HirType::Dynamic {
+                            HirType::JsValue
+                        } else {
+                            ty.clone()
+                        }
+                    })
                     .or_else(|| (receiver.sym == *"crypto").then_some(HirType::JsValue))
             }
             Expr::New(construction) => construction
@@ -1080,14 +1086,6 @@ impl<'a> FnLowerer<'a> {
                         expected_return_hint.as_ref(),
                     );
                 }
-                if matches!(member.obj.as_ref(), Expr::Member(_)) && receiver_type.is_none() {
-                    return self.lower_dynamic_value_method_call(
-                        &member.obj,
-                        &property,
-                        &call.args,
-                        expected_return_hint.as_ref(),
-                    );
-                }
             }
         }
 
@@ -1722,14 +1720,7 @@ impl<'a> FnLowerer<'a> {
             } else {
                 None
             };
-            let value = if let Some((mut params, ret)) = contextual_function {
-                if signature.as_ref().is_some_and(|signature| signature.is_extern) {
-                    for parameter in &mut params {
-                        if *parameter == HirType::Json {
-                            *parameter = HirType::JsValue;
-                        }
-                    }
-                }
+            let value = if let Some((params, ret)) = contextual_function {
                 if matches!(
                     argument.expr.as_ref(),
                     Expr::Arrow(_) | Expr::Fn(_) | Expr::Ident(_)
@@ -1962,9 +1953,22 @@ impl<'a> FnLowerer<'a> {
                     {
                         Ok(value)
                     }
-                    Some(declared) => self.coerce_to_declared(declared, value).map_err(|error| {
-                        format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
-                    }),
+                    Some(declared) => {
+                        let value = if local_function.is_some()
+                            && *declared == HirType::Json
+                            && self.infer_expr_type(&value)? == HirType::JsValue
+                        {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                                vec![value],
+                            )
+                        } else {
+                            value
+                        };
+                        self.coerce_to_declared(declared, value).map_err(|error| {
+                            format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
+                        })
+                    }
                     None => Ok(value),
                 }
             })
@@ -2039,8 +2043,10 @@ impl<'a> FnLowerer<'a> {
                     .push(CallConstraint::Generic(callee_name.clone(), types.clone()));
             } else {
                 for (index, (declared, value)) in signature.params.iter().zip(&args).enumerate() {
-                    if *declared == HirType::Dynamic {
-                        let actual = self.infer_expr_type(value)?;
+                    let actual = self.infer_expr_type(value)?;
+                    if *declared == HirType::Dynamic
+                        || (*declared == HirType::Json && actual == HirType::JsValue)
+                    {
                         constraints.borrow_mut().push(CallConstraint::Parameter(
                             callee_name.clone(),
                             index,
