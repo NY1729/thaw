@@ -16901,6 +16901,50 @@ fn jit_numeric_export(
     Some(format!("expr:{}", tokens(export)?.join(",")))
 }
 
+fn jit_rejection_reason(
+    source: &str,
+    function: &thaw_bridge::DtsFunction,
+) -> String {
+    if function.generic.is_some() {
+        return "generic function specialization is not available for this declaration".into();
+    }
+    if function.rest_param.is_some() {
+        return "rest parameters are outside the specialization JIT ABI".into();
+    }
+    if let Some((name, ty)) = function.params.iter().find(|(_, ty)| {
+        !matches!(ty, thaw_bridge::DtsType::Native(ty) if jit_diagnostic_type_supported(ty))
+    }) {
+        return format!("parameter `{name}` has unsupported JIT type {ty:?}");
+    }
+    if !matches!(&function.ret, thaw_bridge::DtsType::Native(ty) if jit_diagnostic_type_supported(ty))
+    {
+        return format!("return value has unsupported JIT type {:?}", function.ret);
+    }
+    if thaw_parser::parse_javascript(source).is_err() {
+        return "package JavaScript could not be parsed for specialization".into();
+    }
+    "function body uses an expression, closure, external state, or control flow outside the specialization JIT IR".into()
+}
+
+fn jit_diagnostic_type_supported(ty: &thaw_hir::HirType) -> bool {
+    match ty {
+        thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str => true,
+        thaw_hir::HirType::Array(element) | thaw_hir::HirType::Dictionary(element) => {
+            matches!(element.as_ref(), thaw_hir::HirType::F64 | thaw_hir::HirType::Bool | thaw_hir::HirType::Str)
+        }
+        thaw_hir::HirType::Object(fields) => fields
+            .iter()
+            .all(|(_, field)| jit_diagnostic_type_supported(field)),
+        thaw_hir::HirType::Tuple(elements) | thaw_hir::HirType::Union(elements) => {
+            elements.iter().all(jit_diagnostic_type_supported)
+        }
+        thaw_hir::HirType::Optional(payload)
+        | thaw_hir::HirType::Nullable(payload)
+        | thaw_hir::HirType::Nullish(payload) => jit_diagnostic_type_supported(payload),
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum JitKind {
     Number,
@@ -21809,7 +21853,9 @@ type RegistryShims = (
     ExternalExports,
     ExternalNamespaceAliases,
     ExternalNestedNamespaces,
+    JitFallbackReasons,
 );
+type JitFallbackReasons = std::collections::HashMap<(String, String), String>;
 
 /// `(factory function name, class name)` -- a Fallback factory function
 /// call (real example: dayjs's `dayjs(...)`) that should be tracked as
@@ -22169,6 +22215,7 @@ fn generate_registry_shims(
     let mut value_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     let mut jit_targets = std::collections::HashSet::new();
+    let mut jit_fallback_reasons = JitFallbackReasons::new();
     // Names `union_overload_dispatch_declaration` already claims with a
     // runtime `typeof`-based dispatcher -- correctly handled already, so
     // the argument-shape-scoring loop below must skip them rather than
@@ -22556,6 +22603,21 @@ fn generate_registry_shims(
                             function,
                         )
                     });
+                if jit_operation.is_none() {
+                    jit_fallback_reasons
+                        .entry((pkg.name.clone(), function.name.clone()))
+                        .or_insert_with(|| {
+                            if pkg.native_addon.is_some() {
+                                "native addon call requires its N-API/JavaScript wrapper boundary"
+                                    .into()
+                            } else {
+                                jit_rejection_reason(
+                                    pkg.bundle_js.as_deref().unwrap_or_default(),
+                                    function,
+                                )
+                            }
+                        });
+                }
                 let declaration = jit_operation
                     .as_ref()
                     .map(|operation| jit_numeric_declaration(&pkg.name, function, operation))
@@ -23152,5 +23214,6 @@ fn generate_registry_shims(
         external_exports,
         external_namespace_aliases,
         external_nested_namespaces,
+        jit_fallback_reasons,
     ))
 }

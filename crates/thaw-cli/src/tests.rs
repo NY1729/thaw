@@ -643,12 +643,19 @@ fn quickjs_fallback_reasons_include_operation_package_and_location() {
             .into_iter()
             .collect(),
     );
+    let jit_fallback_reasons = [(
+        ("dynamic-package".into(), "parse".into()),
+        "function body uses unsupported control flow".into(),
+    )]
+    .into_iter()
+    .collect();
     let reasons = quickjs_fallback_reasons(
         Path::new("main.ts"),
         source,
         "declare function __thaw_typed_js_64796e616d69632d7061636b6167653a3a7061727365(): string;",
         &["dynamic-package".into()],
         &exports,
+        &jit_fallback_reasons,
     );
     assert!(reasons.iter().any(|reason| {
         reason["kind"] == "dynamic-operation"
@@ -659,8 +666,33 @@ fn quickjs_fallback_reasons_include_operation_package_and_location() {
         reason["kind"] == "registry-fallback"
             && reason["package"] == "dynamic-package"
             && reason["function"] == "parse"
+            && reason["detail"] == "function body uses unsupported control flow"
             && reason["line"] == 2
     }));
+}
+
+#[test]
+fn jit_rejection_reasons_distinguish_signature_from_body() {
+    let mut function = thaw_bridge::DtsFunction {
+        name: "parse".into(),
+        generic: None,
+        params: vec![(
+            "value".into(),
+            thaw_bridge::DtsType::Native(thaw_hir::HirType::Json),
+        )],
+        required_params: 1,
+        rest_param: None,
+        ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+    };
+    let reason = jit_rejection_reason("exports.parse = value => value", &function);
+    assert!(reason.contains("parameter `value` has unsupported JIT type"));
+    assert!(reason.contains("Json"));
+
+    function.params[0].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::F64);
+    assert!(
+        jit_rejection_reason("exports.parse = value => Date.now()", &function)
+            .contains("function body uses an expression")
+    );
 }
 
 #[test]
