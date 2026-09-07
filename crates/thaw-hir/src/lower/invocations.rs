@@ -1080,6 +1080,14 @@ impl<'a> FnLowerer<'a> {
                         expected_return_hint.as_ref(),
                     );
                 }
+                if matches!(member.obj.as_ref(), Expr::Member(_)) && receiver_type.is_none() {
+                    return self.lower_dynamic_value_method_call(
+                        &member.obj,
+                        &property,
+                        &call.args,
+                        expected_return_hint.as_ref(),
+                    );
+                }
             }
         }
 
@@ -1316,7 +1324,10 @@ impl<'a> FnLowerer<'a> {
             // synthetic names such as "console.log" and codegen special-cases them.
             Expr::Member(member) => {
                 let Expr::Ident(obj) = member.obj.as_ref() else {
-                    return Err("unsupported member call target".into());
+                    return Err(format!(
+                        "unsupported member call target at source bytes {}..{}",
+                        member.span.lo.0, member.span.hi.0
+                    ));
                 };
                 let MemberProp::Ident(prop) = &member.prop else {
                     return Err("unsupported member call property".into());
@@ -1711,7 +1722,14 @@ impl<'a> FnLowerer<'a> {
             } else {
                 None
             };
-            let value = if let Some((params, ret)) = contextual_function {
+            let value = if let Some((mut params, ret)) = contextual_function {
+                if signature.as_ref().is_some_and(|signature| signature.is_extern) {
+                    for parameter in &mut params {
+                        if *parameter == HirType::Json {
+                            *parameter = HirType::JsValue;
+                        }
+                    }
+                }
                 if matches!(
                     argument.expr.as_ref(),
                     Expr::Arrow(_) | Expr::Fn(_) | Expr::Ident(_)
@@ -1722,7 +1740,22 @@ impl<'a> FnLowerer<'a> {
                 }
             } else {
                 let expected = param_types.as_ref().and_then(|params| params.get(index));
-                self.lower_expr_with_expected_type(&argument.expr, expected)?
+                match argument.expr.as_ref() {
+                    Expr::Arrow(arrow)
+                        if signature.as_ref().is_some_and(|signature| signature.is_extern)
+                            && matches!(
+                                expected,
+                                Some(HirType::Dynamic | HirType::Json | HirType::JsValue)
+                            ) =>
+                    {
+                        self.lower_contextual_arrow(
+                            arrow,
+                            &vec![HirType::JsValue; arrow.params.len()],
+                            None,
+                        )?
+                    }
+                    _ => self.lower_expr_with_expected_type(&argument.expr, expected)?,
+                }
             };
             lowered.push(value);
         }

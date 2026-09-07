@@ -665,6 +665,38 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let expected_return = generic_return.as_ref().or(expected_return);
+        let declared_parameter_types = if arrow.type_params.is_none() {
+            arrow
+                .params
+                .iter()
+                .zip(parameter_types)
+                .map(|(parameter, contextual)| {
+                    let annotation = match parameter {
+                        Pat::Ident(binding) => binding.type_ann.as_ref(),
+                        Pat::Rest(rest) => rest.type_ann.as_ref(),
+                        Pat::Assign(assignment) => match assignment.left.as_ref() {
+                            Pat::Ident(binding) => binding.type_ann.as_ref(),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    annotation.map_or_else(
+                        || Ok(contextual.clone()),
+                        |annotation| {
+                            lower_ts_type(
+                                &annotation.type_ann,
+                                self.interfaces,
+                                self.generic_interfaces,
+                            )
+                        },
+                    )
+                })
+                .chain(parameter_types.iter().skip(arrow.params.len()).cloned().map(Ok))
+                .collect::<Result<Vec<_>, String>>()?
+        } else {
+            parameter_types.to_vec()
+        };
+        let parameter_types = declared_parameter_types.as_slice();
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_return = self.ret_type.clone();
