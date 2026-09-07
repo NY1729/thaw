@@ -469,6 +469,12 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         } else {
             if plan.ret != HirType::Void {
+                if plan.returns_on_all_paths {
+                    self.builder
+                        .build_unreachable()
+                        .map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
                 return Err("value-returning frame-split async function does not return a value on all paths".to_string());
             }
             self.resolve_async_completion(completion, frame, ramp)?;
