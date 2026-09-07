@@ -354,6 +354,7 @@ fn build_with_native_mode(
         external_exports,
         external_namespace_aliases,
         external_nested_namespaces,
+        jit_fallback_reasons,
     ) = generate_registry_shims(
         registry_dir,
         &resolved_packages,
@@ -387,6 +388,7 @@ fn build_with_native_mode(
         &shim_source,
         &resolved_packages,
         &external_exports,
+        &jit_fallback_reasons,
     );
     let manifest = serde_json::json!({
         "packages": resolved_packages,
@@ -766,6 +768,7 @@ fn quickjs_fallback_reasons(
     shim_source: &str,
     packages: &[String],
     exports: &ExternalExports,
+    jit_fallback_reasons: &JitFallbackReasons,
 ) -> Vec<serde_json::Value> {
     let mut reasons = Vec::new();
     for operation in [
@@ -822,11 +825,17 @@ fn quickjs_fallback_reasons(
                 continue;
             };
             let (line, column) = source_line_column(source, offset);
+            let detail = jit_fallback_reasons
+                .get(&(package.clone(), function.clone()))
+                .map(String::as_str)
+                .unwrap_or(
+                    "dynamic class/object lifecycle is outside the specialization JIT",
+                );
             reasons.push(serde_json::json!({
                 "kind": "registry-fallback",
                 "package": package,
                 "function": function,
-                "detail": "package export was not specialized by the JIT",
+                "detail": detail,
                 "source": input.display().to_string(),
                 "line": line,
                 "column": column,
