@@ -522,7 +522,13 @@ impl<'a> FnLowerer<'a> {
                             .into(),
                     ),
                 };
-                if annotation.is_none() {
+                if annotation.as_ref().is_none_or(|annotation| {
+                    matches!(
+                        annotation.type_ann.as_ref(),
+                        TsType::TsKeywordType(keyword)
+                            if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
+                    )
+                }) {
                     *annotation = Some(Box::new(swc_ecma_ast::TsTypeAnn {
                         span: swc_common::DUMMY_SP,
                         type_ann: Box::new(hir_type_as_ts_type(ty)?),
@@ -683,6 +689,13 @@ impl<'a> FnLowerer<'a> {
                     annotation.map_or_else(
                         || Ok(contextual.clone()),
                         |annotation| {
+                            if matches!(
+                                annotation.type_ann.as_ref(),
+                                TsType::TsKeywordType(keyword)
+                                    if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
+                            ) {
+                                return Ok(contextual.clone());
+                            }
                             lower_ts_type(
                                 &annotation.type_ann,
                                 self.interfaces,
