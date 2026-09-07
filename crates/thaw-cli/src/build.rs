@@ -294,13 +294,32 @@ fn build_with_native_mode(
             if thaw_registry::resolve(registry_dir, &package).is_err() {
                 if let Some(name) = external_package_name(&package) {
                     if let Some(node_modules) = installed_node_modules(input, &name) {
-                        thaw_registry::add_installed(registry_dir, &node_modules, &name).map_err(
-                            |error| {
+                        if thaw_registry::resolve(registry_dir, &name).is_err() {
+                            thaw_registry::add_installed_root(
+                                registry_dir,
+                                &node_modules,
+                                &name,
+                            )
+                            .map_err(|error| {
                                 format!(
                                     "{location}: failed to register installed `{name}`: {error}"
                                 )
-                            },
-                        )?;
+                            })?;
+                        }
+                        if package != name
+                            && thaw_registry::resolve(registry_dir, &package).is_err()
+                        {
+                            thaw_registry::add_installed_subpath(
+                                registry_dir,
+                                &node_modules,
+                                &package,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "{location}: failed to register installed `{package}`: {error}"
+                                )
+                            })?;
+                        }
                     }
                 }
             }
