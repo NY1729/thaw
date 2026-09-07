@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Stdio;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 include!("tests/static_build.rs");
 
@@ -70,7 +70,8 @@ fn external_native_sidecars_replace_stale_contents() {
 
 #[test]
 fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
-    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+    let measure_performance = std::env::var("THAW_RUN_PERFORMANCE").as_deref() == Ok("1");
+    if !measure_performance && std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -82,6 +83,43 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    let hello_metrics = measure_performance.then(|| {
+        let source = dir.join("hello.ts");
+        let output = dir.join("hello");
+        std::fs::write(
+            &source,
+            "function main(): void { console.log(\"hello\"); }\n",
+        )
+        .unwrap();
+        let initial_started = Instant::now();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &dir.join("hello-registry"),
+            &[],
+        )
+        .unwrap();
+        let initial_ms = initial_started.elapsed().as_millis();
+        let cached_started = Instant::now();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &dir.join("hello-registry"),
+            &[],
+        )
+        .unwrap();
+        (
+            initial_ms,
+            cached_started.elapsed().as_millis(),
+            std::fs::metadata(output).unwrap().len(),
+        )
+    });
     let database = dir.join("board.db");
     std::fs::File::create(&database).unwrap();
     let database_url = format!("file:{}", database.display());
@@ -92,10 +130,13 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         .status()
         .unwrap();
     assert!(status.success());
+    let vite_started = Instant::now();
     let assets = build_vite_project(&project).unwrap();
+    let vite_ms = vite_started.elapsed().as_millis();
     let package = dir.join("package");
     std::fs::create_dir_all(&package).unwrap();
     let executable = package.join("board");
+    let build_started = Instant::now();
     build_with_native_mode(
         &project.join("server.ts"),
         &executable,
@@ -109,6 +150,26 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         false,
     )
     .unwrap();
+    let initial_build_ms = build_started.elapsed().as_millis();
+    let cached_build_ms = measure_performance.then(|| {
+        let started = Instant::now();
+        build_with_native_mode(
+            &project.join("server.ts"),
+            &executable,
+            &[],
+            &[],
+            &[],
+            &dir.join("registry"),
+            &[],
+            false,
+            Some(&assets),
+            false,
+        )
+        .unwrap();
+        started.elapsed().as_millis()
+    });
+    let executable_bytes = std::fs::metadata(&executable).unwrap().len();
+    let sidecar_bytes = directory_size(&package.join("board.native"));
     assert!(package
         .join("board.native/_prisma_client/native.node")
         .is_file());
@@ -163,7 +224,69 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     assert!(request("GET", "/", "").contains("<title>Thaw掲示板</title>"));
     child.kill().unwrap();
     child.wait().unwrap();
+    if measure_performance {
+        let (hello_initial_ms, hello_cached_ms, hello_bytes) = hello_metrics.unwrap();
+        let cached_build_ms = cached_build_ms.unwrap();
+        let metrics = serde_json::json!({
+            "hello": {
+                "initial_build_ms": hello_initial_ms,
+                "cached_build_ms": hello_cached_ms,
+                "executable_bytes": hello_bytes,
+            },
+            "board": {
+                "vite_ms": vite_ms,
+                "initial_build_ms": initial_build_ms,
+                "cached_build_ms": cached_build_ms,
+                "executable_bytes": executable_bytes,
+                "sidecar_bytes": sidecar_bytes,
+            },
+        });
+        println!("thaw performance: {metrics}");
+        if let Ok(path) = std::env::var("THAW_PERF_OUTPUT") {
+            let path = Path::new(&path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, format!("{metrics}\n")).unwrap();
+        }
+        assert!(
+            hello_cached_ms < 30_000,
+            "cached Hello build took {hello_cached_ms} ms"
+        );
+        assert!(
+            hello_bytes < 20 * 1024 * 1024,
+            "Hello executable grew to {hello_bytes} bytes"
+        );
+        assert!(
+            cached_build_ms < 60_000,
+            "cached board build took {cached_build_ms} ms"
+        );
+        assert!(
+            executable_bytes < 50 * 1024 * 1024,
+            "board executable grew to {executable_bytes} bytes"
+        );
+        assert!(
+            sidecar_bytes < 50 * 1024 * 1024,
+            "board native sidecar grew to {sidecar_bytes} bytes"
+        );
+    }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+fn directory_size(path: &Path) -> u64 {
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                directory_size(&path)
+            } else {
+                entry.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+            }
+        })
+        .sum()
 }
 
 #[test]
