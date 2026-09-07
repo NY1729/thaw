@@ -6,6 +6,7 @@ fn rewrite_external_class_methods(
 ) -> Result<String, String> {
     rewrite_external_class_methods_with_static(
         source, classes, methods, &[], &[], &[], &[], &[], &[], &[],
+        &[],
     )
 }
 
@@ -15,7 +16,7 @@ fn rewrite_fallback_function_overloads(
     functions: &[FallbackFunctionOverloadRewrite],
 ) -> Result<String, String> {
     rewrite_external_class_methods_with_static(
-        source, &[], &[], &[], &[], &[], &[], &[], &[], functions,
+        source, &[], &[], &[], &[], &[], &[], &[], &[], &[], functions,
     )
 }
 
@@ -24,6 +25,7 @@ fn rewrite_external_class_methods_with_static(
     source: &str,
     classes: &[ClassConstructorRewrite],
     methods: &[ClassMethodRewrite],
+    method_contexts: &[ClassMethodContext],
     static_methods: &[StaticClassMethodRewrite],
     getters: &[ClassGetterRewrite],
     setters: &[ClassSetterRewrite],
@@ -1627,6 +1629,7 @@ fn rewrite_external_class_methods_with_static(
         factories: &'a [FactoryClassRewrite],
         functions: &'a [FallbackFunctionOverloadRewrite],
         methods: &'a [ClassMethodRewrite],
+        method_contexts: &'a [ClassMethodContext],
         static_methods: &'a [StaticClassMethodRewrite],
         getters: &'a [ClassGetterRewrite],
         setters: &'a [ClassSetterRewrite],
@@ -2088,6 +2091,24 @@ fn rewrite_external_class_methods_with_static(
                                     },
                                 )
                                 .filter_map(|candidate| {
+                                    if self.method_contexts.iter().any(|context| {
+                                        let ClassMethodContext::LiteralArgument(
+                                            helper,
+                                            index,
+                                            expected,
+                                        ) = context
+                                        else {
+                                            return false;
+                                        };
+                                        helper == &candidate.2
+                                            && !matches!(
+                                                call.args.get(*index).map(|argument| argument.expr.as_ref()),
+                                                Some(Expr::Lit(Lit::Str(actual)))
+                                                    if actual.value == expected.as_str()
+                                            )
+                                    }) {
+                                        return None;
+                                    }
                                     let mut score = 0u16;
                                     for (argument, declared) in
                                         call.args.iter().zip(candidate.5.iter())
@@ -2121,6 +2142,37 @@ fn rewrite_external_class_methods_with_static(
                                     format!("{receiver_source}, ")
                                 };
                                 self.edits.push((span.hi.0 + 1, span.hi.0 + 1, insertion));
+                                let state = self.flow_state();
+                                for context in self.method_contexts {
+                                    let ClassMethodContext::CallbackInstance(
+                                        candidate,
+                                        argument_index,
+                                        parameter_index,
+                                        class,
+                                    ) = context
+                                    else {
+                                        continue;
+                                    };
+                                    if candidate != helper {
+                                        continue;
+                                    }
+                                    let Some(argument) = call.args.get(*argument_index) else {
+                                        continue;
+                                    };
+                                    let Expr::Arrow(callback) = argument.expr.as_ref() else {
+                                        continue;
+                                    };
+                                    let Some(Pat::Ident(parameter)) =
+                                        callback.params.get(*parameter_index)
+                                    else {
+                                        continue;
+                                    };
+                                    self.variables
+                                        .insert(parameter.id.sym.to_string(), class.clone());
+                                }
+                                call.visit_children_with(self);
+                                self.restore_flow_state(state);
+                                return;
                             }
                         }
                     }
@@ -2458,6 +2510,7 @@ fn rewrite_external_class_methods_with_static(
         factories,
         functions,
         methods,
+        method_contexts,
         static_methods,
         getters,
         setters,

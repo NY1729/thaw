@@ -136,6 +136,34 @@ fn net_builtin_validates_addresses_and_block_lists() {
 }
 
 #[test]
+fn net_socket_supports_write_batching_methods() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_net_write_batching");
+    fs::write(
+        dir.join("index.js"),
+        "var net = require('node:net'); module.exports = function () { var socket = new net.Socket(); return [socket.cork() === socket, socket.uncork() === socket]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_net_write_batching_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetWriteBatching = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseNetWriteBatching").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[true,true]"
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
 fn net_socket_exchanges_bytes_with_a_real_tcp_peer() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
