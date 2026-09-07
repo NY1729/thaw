@@ -132,7 +132,7 @@
   globalThis.SlowBuffer = size => Buffer.alloc(Number(size));
   const normalizeHashAlgorithm = algorithm => {
     const name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
-    if (name !== 'sha256' && name !== 'sha512') throw new TypeError(`Unsupported digest: ${algorithm}`);
+    if (name !== 'sha1' && name !== 'sha256' && name !== 'sha512') throw new TypeError(`Unsupported digest: ${algorithm}`);
     return name;
   };
   const randomBytesSync = size => Buffer.from(__thaw_crypto_random_hex(Number(size)), 'hex');

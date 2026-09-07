@@ -313,6 +313,34 @@ fn bundle_actually_runs_through_quickjs() {
     let _ = fs::remove_dir_all(&node_modules_dir);
 }
 
+#[test]
+fn bare_parent_directory_require_stays_inside_its_package() {
+    let dir = temp_registry("bundle_parent_directory_require");
+    fs::create_dir_all(dir.join("lib/nested")).unwrap();
+    fs::write(dir.join("lib/index.js"), "module.exports = 42;").unwrap();
+    fs::write(
+        dir.join("lib/nested/child.js"),
+        "module.exports = require('..');",
+    )
+    .unwrap();
+
+    let node_modules_dir = temp_registry("bundle_parent_directory_node_modules");
+    let (bundle, _, file_count, _) = bundle_commonjs_package(
+        &node_modules_dir,
+        "pkg",
+        &dir,
+        "lib/nested/child.js",
+    )
+    .unwrap();
+
+    assert_eq!(file_count, 2);
+    assert!(bundle.contains("\"..\": \"pkg/lib/index.js\""));
+    assert!(!bundle.contains("\"../"));
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&node_modules_dir);
+}
+
 /// Real `--use pkg-a --use pkg-b` loads each package's bundle into the
 /// *same* shared thread-local QuickJS-NG context, one `loadScript`
 /// call per package (`wrap_as_commonjs_module`, called once per

@@ -23,7 +23,30 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              Server.prototype.listen = function(port, host, callback) { var options = typeof port === 'object' ? port : { port: port, host: host }; if (typeof host === 'function') callback = host; if (typeof callback === 'function') this.once('listening', callback); var hostname = String(options.host || '127.0.0.1'); var outcome = __thaw_net_listen(hostname, Number(options.port)); if (outcome.indexOf('ok:') !== 0) { var error = new Error(outcome.substring(4)); error.code = 'EADDRINUSE'; queueMicrotask(() => this.emit('error', error)); return this; } var fields = outcome.split(':'); this._handle = Number(fields[1]); this._address = { address: hostname, family: isIPv6(hostname) ? 'IPv6' : 'IPv4', port: Number(fields[2]) }; this.listening = true; var server = this; function pump() { if (!server._handle || !server.listening) return; if (server.maxConnections > 0 && server.connections >= server.maxConnections) { setTimeout(pump, 1); return; } var accepted = __thaw_net_poll_accept(server._handle); if (accepted === 'err:pending') { setTimeout(pump, 1); return; } if (accepted.indexOf('ok:') !== 0) { var error = new Error(accepted.substring(4)); error.code = 'ECONNABORTED'; server.emit('error', error); if (server._handle) setTimeout(pump, 1); return; } var peer = accepted.split(':'); var socket = new Socket(); socket._handle = Number(peer[1]); socket.pending = false; socket.readable = true; socket.writable = true; socket.remoteAddress = peer[2]; socket.remotePort = Number(peer[3]); socket.remoteFamily = isIPv6(peer[2]) ? 'IPv6' : 'IPv4'; server.connections++; socket.once('close', function() { server.connections = Math.max(0, server.connections - 1); }); server.emit('connection', socket); var incoming = __thaw_net_read(socket._handle); if (incoming.indexOf('ok:') === 0) { var data = Buffer.from(incoming.substring(3), 'hex'); if (data.length) { socket.bytesRead += data.length; socket.emit('data', data); } socket.emit('end'); } else { var readError = new Error(incoming.substring(4)); readError.code = 'ECONNRESET'; socket.emit('error', readError); } if (server._handle) setTimeout(pump, 0); } queueMicrotask(function() { server.emit('listening'); pump(); }); return this; };
 "#,
             r#"
-             var listenWithHost = Server.prototype.listen; Server.prototype.listen = function(port, host, callback) { if (typeof port !== 'object' && typeof host === 'function') return listenWithHost.call(this, { port: port }, host); return listenWithHost.apply(this, arguments); };
+             Server.prototype.listen = function(port, host, callback) {
+               var options = port && typeof port === 'object' && 'port' in port ? port : { port: Number(port), host: host };
+               if (typeof host === 'function') { callback = host; options.host = undefined; }
+               if (typeof callback === 'function') this.once('listening', callback);
+               var hostname = String(options.host || '127.0.0.1'), outcome = __thaw_net_listen(hostname, Number(options.port));
+               if (outcome.indexOf('ok:') !== 0) { var error = new Error(outcome.substring(4)); error.code = 'EADDRINUSE'; queueMicrotask(() => this.emit('error', error)); return this; }
+               var fields = outcome.split(':'), server = this;
+               this._handle = Number(fields[1]); this._address = { address: hostname, family: isIPv6(hostname) ? 'IPv6' : 'IPv4', port: Number(fields[2]) }; this.listening = true;
+               function schedulePump(delay) { server._pollTimer = __thaw_set_timeout_ref(pump, delay, server._refed); }
+               function pump() {
+                 server._pollTimer = 0;
+                 if (!server._handle || !server.listening) return;
+                 if (server.maxConnections > 0 && server.connections >= server.maxConnections) { schedulePump(1); return; }
+                 var accepted = __thaw_net_poll_accept(server._handle);
+                 if (accepted === 'err:pending') { schedulePump(1); return; }
+                 if (accepted.indexOf('ok:') !== 0) { var error = new Error(accepted.substring(4)); error.code = 'ECONNABORTED'; server.emit('error', error); if (server._handle) schedulePump(1); return; }
+                 var peer = accepted.split(':'), socket = new Socket(); socket._handle = Number(peer[1]); socket.pending = false; socket.readable = true; socket.writable = true; socket.remoteAddress = peer[2]; socket.remotePort = Number(peer[3]); socket.remoteFamily = isIPv6(peer[2]) ? 'IPv6' : 'IPv4'; server.connections++; socket.once('close', function() { server.connections = Math.max(0, server.connections - 1); }); server.emit('connection', socket);
+                 var incoming = __thaw_net_read(socket._handle); if (incoming.indexOf('ok:') === 0) { var data = Buffer.from(incoming.substring(3), 'hex'); if (data.length) { socket.bytesRead += data.length; socket.emit('data', data); } socket.emit('end'); } else { var readError = new Error(incoming.substring(4)); readError.code = 'ECONNRESET'; socket.emit('error', readError); }
+                 if (server._handle) schedulePump(0);
+               }
+               queueMicrotask(function() { server.emit('listening'); pump(); }); return this;
+             };
+             Server.prototype.ref = function() { this._refed = true; if (this._pollTimer) __thaw_set_timer_ref(this._pollTimer, true); return this; };
+             Server.prototype.unref = function() { this._refed = false; if (this._pollTimer) __thaw_set_timer_ref(this._pollTimer, false); return this; };
 "#,
         )),
         "tls" => Some(concat!(

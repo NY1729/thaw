@@ -5,13 +5,13 @@
     if (!Number.isFinite(number) || number < 0) return 0;
     return Math.min(Math.trunc(number), 2147483647);
   };
-  const schedule = (callback, delay, repeat, args) => {
+  const schedule = (callback, delay, repeat, args, refed = true) => {
     if (typeof callback !== 'function') {
       throw new TypeError('timer callback must be a function');
     }
     const id = nextTimerId++;
     const milliseconds = normalizeDelay(delay);
-    timers.set(id, { callback, args, repeat, milliseconds,
+    timers.set(id, { callback, args, repeat, milliseconds, refed,
                      due: Date.now() + milliseconds });
     return id;
   };
@@ -24,6 +24,12 @@
   globalThis.setImmediate = (callback, ...args) =>
     schedule(callback, 0, false, args);
   globalThis.clearImmediate = globalThis.clearTimeout;
+  globalThis.__thaw_set_timeout_ref = (callback, delay, refed) =>
+    schedule(callback, delay, false, [], Boolean(refed));
+  globalThis.__thaw_set_timer_ref = (id, refed) => {
+    const timer = timers.get(Number(id));
+    if (timer) timer.refed = Boolean(refed);
+  };
   globalThis.queueMicrotask = callback => {
     if (typeof callback !== 'function') {
       throw new TypeError('microtask callback must be a function');

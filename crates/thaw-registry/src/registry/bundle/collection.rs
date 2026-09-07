@@ -234,7 +234,11 @@ fn bundle_commonjs_package_cached(
 
         for spec in module_specs
             .iter()
-            .filter(|spec| spec.starts_with("./") || spec.starts_with("../"))
+            .filter(|spec| {
+                matches!(spec.as_str(), "." | "..")
+                    || spec.starts_with("./")
+                    || spec.starts_with("../")
+            })
             .cloned()
         {
             let (resolution_spec, suffix) = split_module_suffix(&spec);
@@ -268,7 +272,11 @@ fn bundle_commonjs_package_cached(
 
         for spec in module_specs
             .iter()
-            .filter(|spec| !(spec.starts_with("./") || spec.starts_with("../")))
+            .filter(|spec| {
+                !matches!(spec.as_str(), "." | "..")
+                    && !spec.starts_with("./")
+                    && !spec.starts_with("../")
+            })
             .cloned()
         {
             let (resolution_spec, suffix) = split_module_suffix(&spec);
