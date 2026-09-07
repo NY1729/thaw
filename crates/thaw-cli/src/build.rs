@@ -490,13 +490,24 @@ fn build_with_native_mode(
             }
         })
         .transpose()?;
-    let napi_lib = uses_napi.then(|| {
-        if uses_quickjs {
-            build_staticlib("thaw-napi")
-        } else {
-            build_staticlib_without_default_features("thaw-napi")
-        }
-    }).transpose()?;
+    let napi_lib = uses_napi
+        .then(|| {
+            if !uses_quickjs {
+                return build_staticlib_without_default_features("thaw-napi");
+            }
+            let mut features = vec!["quickjs"];
+            if uses_brotli {
+                features.push("quickjs-brotli");
+            }
+            if uses_tls {
+                features.push("quickjs-tls");
+            }
+            if uses_wasm {
+                features.push("quickjs-wasm");
+            }
+            build_staticlib_with_features("thaw-napi", &features)
+        })
+        .transpose()?;
 
     // `--link <path>` lets a program using `declare function` (see
     // docs/design/bridge.md section 6) actually resolve at link time,
