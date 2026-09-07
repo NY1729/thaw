@@ -16,6 +16,24 @@ include!("tests/ffi_metadata.rs");
 include!("tests/native_addons.rs");
 
 #[test]
+fn install_uses_the_project_directory() {
+    let command = npm_install_command(Path::new("web"));
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["install", "--prefix", "web"]
+    );
+}
+
+#[test]
+fn install_requires_a_package_manifest() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-install-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let error = run_install(&[directory.display().to_string()]).unwrap_err();
+    assert!(error.contains("does not contain package.json"));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn vite_assets_are_embedded_with_routes_and_content_types() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-assets-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("assets")).unwrap();
