@@ -1,3 +1,4 @@
 :root { font-family: system-ui, sans-serif; color-scheme: light dark; }
 body { margin: 0; display: grid; min-height: 100vh; place-items: center; }
 main { text-align: center; }
+.vite-logo { padding-top: 72px; background: center top / 64px 64px no-repeat url("./vite.svg"); }

@@ -5449,8 +5449,9 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                                 response: {{
                                     statusCode: number;
                                     setHeader: (name: string, value: string) => boolean;
-                                    write: (chunk: string) => boolean;
                                     end: (chunk: string) => boolean;
+                                    write: (chunk: string) => boolean;
+                                    endEncoded: (content: string, encoding: string) => boolean;
                                 }}
                             ): boolean => {{
                                 requests = requests + 1;
@@ -5551,7 +5552,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
             function main(): void {
                 const server = createServer((
                     request: { method: string; url: string },
-                    response: { statusCode: number; setHeader: (name: string, value: string) => boolean; write: (chunk: string) => boolean; end: (chunk: string) => boolean }
+                    response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
                 ): boolean => true);
                 server.listen(70000);
             }"#,
