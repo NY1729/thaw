@@ -34,6 +34,82 @@ fn install_requires_a_package_manifest() {
 }
 
 #[test]
+fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/hono-react-prisma-board")
+        .canonicalize()
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-react-prisma-board-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let database = dir.join("board.db");
+    std::fs::File::create(&database).unwrap();
+    let database_url = format!("file:{}", database.display());
+
+    run_install(&[project.display().to_string()]).unwrap();
+    let status = npm_run_command("db:push", &project)
+        .env("DATABASE_URL", &database_url)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let assets = build_vite_project(&project).unwrap();
+    let executable = dir.join("board");
+    build_with_assets(
+        &project.join("server.ts"),
+        &executable,
+        &[],
+        &[],
+        &[],
+        &dir.join("registry"),
+        &[],
+        false,
+        Some(&assets),
+    )
+    .unwrap();
+
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(executable)
+        .env("DATABASE_URL", database_url)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = |path: &str| {
+        let mut stream = (0..200)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("compiled bulletin board did not start");
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    assert!(request("/api/posts").contains(r#"{"posts":[]}"#));
+    assert!(request("/").contains("<title>Thaw掲示板</title>"));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn run_uses_the_named_script_and_project_directory() {
     let command = npm_run_command("build", Path::new("web"));
     assert_eq!(
