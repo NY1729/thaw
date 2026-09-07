@@ -5801,6 +5801,43 @@ fn default_callable_import_exposes_export_assignment_namespace_methods() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn default_callable_import_exposes_called_typeof_namespace_properties() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-export-assignment-typeof-property-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("registry");
+    let package = registry.join("callable-tools");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "declare function tools(): unknown;\ndeclare namespace tools { var json: typeof imported.json; }\nexport = tools;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function tools() {} tools.json = (...values) => values.length; module.exports = tools;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import tools from \"callable-tools\"; function main(): void { console.log(tools.json()); console.log(tools.json(1)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n1\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The `export = X;` shape the test above covers, but where `X` is bound
 /// to a whole *interface-typed const* with several methods (real
 /// example: lodash's `declare const _: LoDashStatic;`, ~300 methods) --

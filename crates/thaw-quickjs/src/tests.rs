@@ -208,14 +208,28 @@ fn process_exposes_time_cwd_and_event_helpers() {
                    process.emitWarning('careful', { type: 'ThawWarning', code: 'THAW001' });\n\
                    process.emitWarning('ignored by once listener');\n\
                    const start = process.hrtime(); const elapsed = process.hrtime(start); const memory = process.memoryUsage();\n\
-                   return [changed, process.cwd() === original, warnings.join(','), process.listenerCount('warning'), process.uptime() >= 0, start.length, elapsed[0] >= 0, elapsed[1] >= 0, typeof process.hrtime.bigint() === 'bigint', memory.rss, process.cpuUsage().user, process.title];\n\
+                   return [changed, process.cwd() === original, warnings.join(','), process.listenerCount('warning'), process.uptime() >= 0, start.length, elapsed[0] >= 0, elapsed[1] >= 0, typeof process.hrtime.bigint() === 'bigint', memory.rss, process.cpuUsage().user, process.title, process.stdin.fd, process.stdout.fd, process.stderr.fd, typeof process.stderr.write];\n\
                  }"
             ),
             1
         );
     assert_eq!(
         call("processHelpers", "[]"),
-        r#"["/tmp/app",true,"ThawWarning:THAW001:careful",0,true,2,true,true,true,0,0,"thaw"]"#
+        r#"["/tmp/app",true,"ThawWarning:THAW001:careful",0,true,2,true,true,true,0,0,"thaw",0,1,2,"function"]"#
+    );
+}
+
+#[test]
+fn error_prepare_stack_trace_receives_call_sites() {
+    assert_eq!(
+        load(
+            "function structuredStack() { const original = Error.prepareStackTrace; Error.prepareStackTrace = (_error, frames) => frames; const holder = {}; Error.captureStackTrace(holder); Error.prepareStackTrace = original; const frame = holder.stack[0]; return [typeof frame.getFileName, typeof frame.getLineNumber, typeof frame.getFunctionName, typeof frame.toString]; }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("structuredStack", "[]"),
+        r#"["function","function","function","function"]"#
     );
 }
 
@@ -1069,6 +1083,6 @@ fn hpack_huffman_host_functions_match_the_rfc_vector() {
 fn load_failure_reports_the_real_thrown_message() {
     with_context(|ctx| {
         let err = load_impl(ctx, "throw new Error('boom');").unwrap_err();
-        assert_eq!(err, "boom");
+        assert!(err.starts_with("boom"), "{err}");
     });
 }

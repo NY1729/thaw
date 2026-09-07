@@ -156,6 +156,23 @@
     return [seconds, remainder];
   };
   hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
+  const processStream = (fd, writer) => ({
+    fd,
+    isTTY: false,
+    write(value, encoding, callback) {
+      if (typeof encoding === 'function') callback = encoding;
+      writer(String(value));
+      if (typeof callback === 'function') queueMicrotask(callback);
+      return true;
+    },
+    on() { return this; },
+    once() { return this; },
+    off() { return this; },
+    removeListener() { return this; },
+    setEncoding() { return this; },
+    ref() { return this; },
+    unref() { return this; }
+  });
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || [],
     env: Object.assign({}, JSON.parse(globalThis.__thaw_host_env_json || '{}'),
@@ -167,6 +184,9 @@
     config: globalThis.process.config || { variables: {} },
     versions: Object.assign({ node: '', modules: '', uv: '' },
                             globalThis.process.versions || {}),
+    stdin: globalThis.process.stdin || processStream(0, () => {}),
+    stdout: globalThis.process.stdout || processStream(1, globalThis.__thaw_console_stdout),
+    stderr: globalThis.process.stderr || processStream(2, globalThis.__thaw_console_stderr),
     cwd: () => processCwd,
     chdir: directory => {
       const value = String(directory);
@@ -193,6 +213,44 @@
     exitCode: globalThis.process.exitCode,
     title: globalThis.process.title || 'thaw'
   });
+
+  // V8 exposes structured CallSite objects while QuickJS exposes stack
+  // frames as strings. Packages using Error.prepareStackTrace (notably
+  // deprecation helpers) only need this small common subset.
+  if (typeof Error.captureStackTrace === 'function') {
+    const captureStackTrace = Error.captureStackTrace;
+    Error.captureStackTrace = (target, constructor) => {
+      const prepare = Error.prepareStackTrace;
+      Error.prepareStackTrace = undefined;
+      captureStackTrace(target, constructor);
+      const raw = target.stack;
+      Error.prepareStackTrace = prepare;
+      if (typeof prepare !== 'function') return;
+      const lines = Array.isArray(raw) ? raw.map(String) : String(raw || '').split('\n').slice(1);
+      const frames = lines.map(line => {
+        const text = line.trim().replace(/^at\s+/, '');
+        const match = /^(?:(.*?)\s+\()?(.+?):(\d+):(\d+)\)?$/.exec(text);
+        const name = match && match[1] || null;
+        const file = match && match[2] || '<anonymous>';
+        const row = match ? Number(match[3]) : 0;
+        const column = match ? Number(match[4]) : 0;
+        return {
+          getFileName: () => file,
+          getLineNumber: () => row,
+          getColumnNumber: () => column,
+          getFunctionName: () => name,
+          getMethodName: () => name,
+          getThis: () => undefined,
+          getTypeName: () => null,
+          getEvalOrigin: () => undefined,
+          isEval: () => false,
+          isNative: () => false,
+          toString: () => text
+        };
+      });
+      target.stack = prepare(target, frames);
+    };
+  }
 
   if (typeof globalThis.DOMException !== 'function') {
     const legacyCodes = {

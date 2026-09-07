@@ -531,7 +531,8 @@ pub fn add_installed(
     node_modules_dir: &Path,
     name: &str,
 ) -> Result<AddedPackage, String> {
-    add_installed_inner(registry_dir, node_modules_dir, name, None, true)
+    let fallback_dts = installed_types_package_dts(node_modules_dir, name)?;
+    add_installed_inner(registry_dir, node_modules_dir, name, fallback_dts, true)
 }
 
 /// Registers only the package root. Builds that use a project's existing
@@ -542,7 +543,8 @@ pub fn add_installed_root(
     node_modules_dir: &Path,
     name: &str,
 ) -> Result<AddedPackage, String> {
-    add_installed_inner(registry_dir, node_modules_dir, name, None, false)
+    let fallback_dts = installed_types_package_dts(node_modules_dir, name)?;
+    add_installed_inner(registry_dir, node_modules_dir, name, fallback_dts, false)
 }
 
 fn add_installed_inner(
@@ -2662,6 +2664,27 @@ fn fetch_types_package_dts(scratch: &Path, package: &str) -> Result<(String, Str
     let source = dts_source_with_reexported_functions(&abs, &source)?;
 
     Ok((format!("{types_package}/{rel}"), source))
+}
+
+fn installed_types_package_dts(
+    node_modules: &Path,
+    package: &str,
+) -> Result<Option<(String, String)>, String> {
+    let types_package = types_package_name(package);
+    let types_dir = node_modules.join(&types_package);
+    if !types_dir.join("package.json").is_file() {
+        return Ok(None);
+    }
+    let manifest = read_manifest(&types_dir)?;
+    let Some((rel, abs)) = find_own_dts(&manifest, &types_dir) else {
+        return Err(format!("`{types_package}` doesn't provide a usable type declaration"));
+    };
+    let source = fs::read_to_string(&abs)
+        .map_err(|error| format!("failed to read `{rel}` from `{types_package}`: {error}"))?;
+    Ok(Some((
+        format!("{types_package}/{rel}"),
+        dts_source_with_reexported_functions(&abs, &source)?,
+    )))
 }
 
 /// The DefinitelyTyped naming convention: `foo` -> `@types/foo`,

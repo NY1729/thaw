@@ -219,7 +219,19 @@ thaw build ./my-app
 ./my-app/app
 ```
 
-`thaw dev` uses the same entry and Vite directory, rebuilds the frontend only
+For a frontend-only Vite project, Thaw generates a minimal `node:http` entry
+which serves the embedded `dist` files and falls back to `index.html` for SPA
+routes. No generated source is written into the project.
+
+npm workspaces use the same command at the package directory. Hoisted and
+symlinked dependencies are resolved from ancestor `node_modules` directories:
+
+```bash
+thaw build ./packages/api
+```
+
+`thaw dev ./my-app` uses the same entry and Vite directory, including source
+paths found in conventional `start` or `dev` scripts. It rebuilds the frontend only
 when its sources change, and otherwise reuses the existing `dist/` assets.
 
 Add dependencies with npm-compatible package specifiers:

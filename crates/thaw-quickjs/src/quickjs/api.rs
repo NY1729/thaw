@@ -40,7 +40,7 @@ pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
 /// undiagnosable.
 fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
     ctx.eval::<(), _>(source).map_err(|e| match e {
-        rquickjs::Error::Exception => describe_exception(&ctx),
+        rquickjs::Error::Exception => describe_exception_with_stack(&ctx),
         e => e.to_string(),
     })?;
     if let Ok(ready) = ctx
@@ -1173,6 +1173,26 @@ fn describe_exception(ctx: &Ctx<'_>) -> String {
     if let Some(s) = exc.as_string() {
         if let Ok(s) = s.to_string() {
             return s;
+        }
+    }
+    format!("{exc:?}")
+}
+
+fn describe_exception_with_stack(ctx: &Ctx<'_>) -> String {
+    let exc = ctx.catch();
+    if let Some(obj) = exc.as_object() {
+        if let Ok(msg) = obj.get::<_, String>("message") {
+            if let Ok(stack) = obj.get::<_, String>("stack") {
+                if !stack.is_empty() && !stack.ends_with(&msg) {
+                    return format!("{msg}\n{stack}");
+                }
+            }
+            return msg;
+        }
+    }
+    if let Some(value) = exc.as_string() {
+        if let Ok(value) = value.to_string() {
+            return value;
         }
     }
     format!("{exc:?}")
