@@ -9820,6 +9820,7 @@ fn a_native_closure_can_be_passed_as_an_argument_to_a_dynamic_method_call() {
         "module.exports = { makeHolder: function() { \
          return { \
          check: function(pred) { return pred(5) > 0; }, \
+         arity: function(pred) { return pred.length; }, \
          map: function(pred) { return pred(1) + \",\" + pred(2) + \",\" + pred(3); } \
          }; \
          } };\n",
@@ -9833,6 +9834,7 @@ function main(): void {
     const holder: JsValue = makeHolder();
     console.log(holder.check((n: number) => n > 0));
     console.log(holder.check((n: number) => n < 0));
+    console.log(holder.arity((a: number, b: number, c: number, d: number) => a + b + c + d));
     console.log(holder.map((n: number) => n * 10));
 }
 "#,
@@ -9848,7 +9850,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\nfalse\n\"10,20,30\"\n"
+        "true\nfalse\n4\n\"10,20,30\"\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

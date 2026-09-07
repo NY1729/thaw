@@ -831,7 +831,7 @@ pub extern "C" fn thaw_js_register_native_callback(
              var raw = globalThis['{raw_name}']; \
              delete globalThis['{raw_name}']; \
              var mask = {jsvalue_param_mask}; \
-             return function() {{ \
+             var callback = function() {{ \
              var args = Array.prototype.slice.call(arguments, 0, {param_count}); \
              for (var i = 0; i < args.length; i++) {{ \
              if ((mask & (1 << i)) !== 0) {{ \
@@ -852,6 +852,8 @@ pub extern "C" fn thaw_js_register_native_callback(
              check(); \
              }}); \
              }}; \
+             Object.defineProperty(callback, 'length', {{ value: {param_count} }}); \
+             return callback; \
              }})()"
         );
         let wrapper: Value = ctx
