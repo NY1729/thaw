@@ -54,6 +54,21 @@ fn add_installs_named_packages_into_the_project() {
 }
 
 #[test]
+fn external_native_sidecars_replace_stale_contents() {
+    let root = std::env::temp_dir().join(format!("thaw-sidecar-{}", std::process::id()));
+    let staging = root.join("staging");
+    let destination = root.join("app.native");
+    std::fs::create_dir_all(staging.join("pkg")).unwrap();
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(staging.join("pkg/native.node"), "new").unwrap();
+    std::fs::write(destination.join("obsolete.node"), "old").unwrap();
+    promote_external_native_directory(&staging, &destination).unwrap();
+    assert!(destination.join("pkg/native.node").is_file());
+    assert!(!destination.join("obsolete.node").exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
@@ -78,8 +93,10 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         .unwrap();
     assert!(status.success());
     let assets = build_vite_project(&project).unwrap();
-    let executable = dir.join("board");
-    build_with_assets(
+    let package = dir.join("package");
+    std::fs::create_dir_all(&package).unwrap();
+    let executable = package.join("board");
+    build_with_native_mode(
         &project.join("server.ts"),
         &executable,
         &[],
@@ -89,8 +106,15 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         &[],
         false,
         Some(&assets),
+        false,
     )
     .unwrap();
+    assert!(package
+        .join("board.native/_prisma_client/native.node")
+        .is_file());
+    let moved = dir.join("moved");
+    std::fs::rename(package, &moved).unwrap();
+    let executable = moved.join("board");
 
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = probe.local_addr().unwrap().port();
