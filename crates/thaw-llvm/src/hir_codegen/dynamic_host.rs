@@ -702,6 +702,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .context
             .i64_type()
             .const_int(jsvalue_param_mask, false);
+        let param_count = self
+            .context
+            .i64_type()
+            .const_int(params.len() as u64, false);
         let void_result = matches!(ret, HirType::Void)
             || matches!(ret, HirType::Promise(value) if **value == HirType::Void);
         let void_result = self.context.i8_type().const_int(void_result as u64, false);
@@ -715,6 +719,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     adapter.into(),
                     closure.into(),
                     jsvalue_param_mask.into(),
+                    param_count.into(),
                     void_result.into(),
                     finish.unwrap_or_else(|| self.context.ptr_type(AddressSpace::default()).const_null()).into(),
                 ],

@@ -112,6 +112,17 @@ fn round_trips_objects_and_arrays() {
 }
 
 #[test]
+fn dynamic_json_boundary_omits_cycles_without_dropping_repeated_values() {
+    assert_eq!(
+        load(
+            "function cyclicResult() { const shared = { n: 1 }; const root = { a: shared, b: shared }; root.self = root; return root; }"
+        ),
+        1
+    );
+    assert_eq!(call("cyclicResult", "[]"), r#"{"a":{"n":1},"b":{"n":1}}"#);
+}
+
+#[test]
 fn dynamic_json_boundary_round_trips_binary_values_as_buffers() {
     assert_eq!(
         load(

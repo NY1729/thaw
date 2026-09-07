@@ -62,7 +62,30 @@ impl<'a> FnLowerer<'a> {
                 };
                 Ok(vec![HirStmt::Return(value)])
             }
-            Stmt::Expr(expr_stmt) => Ok(vec![HirStmt::Expr(self.lower_expr(&expr_stmt.expr)?)]),
+            Stmt::Expr(expr_stmt) => {
+                let discarded_dynamic_await = match expr_stmt.expr.as_ref() {
+                    Expr::Await(awaited) => match awaited.arg.as_ref() {
+                        Expr::Call(call) => match &call.callee {
+                            Callee::Expr(callee) => match callee.as_ref() {
+                                Expr::Member(member) => {
+                                    self.infer_member_receiver_type(&member.obj)
+                                        == Some(HirType::JsValue)
+                                }
+                                _ => false,
+                            },
+                            _ => false,
+                        },
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                let value = if discarded_dynamic_await {
+                    self.lower_expr_with_expected_type(&expr_stmt.expr, Some(&HirType::JsValue))?
+                } else {
+                    self.lower_expr(&expr_stmt.expr)?
+                };
+                Ok(vec![HirStmt::Expr(value)])
+            }
             Stmt::Block(block) => self.lower_scoped_stmts(&block.stmts),
             Stmt::Decl(Decl::Var(var_decl)) => self.lower_var_decl(var_decl),
 

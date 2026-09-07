@@ -283,19 +283,12 @@ fn resolve_value_impl<'js>(
     // `null` is the universal placeholder every typed decoder on the
     // other side already tolerates (a `Void`-declared return, notably,
     // never even inspects the JSON it's handed).
-    let json: Object = ctx
+    let stringify: Function = ctx
         .globals()
-        .get("JSON")
-        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?;
-    let stringify: Function = json
-        .get("stringify")
-        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?;
-    let replacer: Function = ctx
-        .globals()
-        .get("__thaw_json_binary_replacer")
+        .get("__thaw_json_safe_stringify")
         .map_err(|e| format!("failed to JSON-encode the result: {e}"))?;
     stringify
-        .call::<_, Option<String>>((result, replacer))
+        .call::<_, Option<String>>((result,))
         .map_err(|e| format!("failed to JSON-encode the result: {e}"))
         .map(|value| value.unwrap_or_else(|| "null".to_string()))
 }
@@ -703,6 +696,7 @@ pub extern "C" fn thaw_js_register_native_callback(
     adapter: *const c_void,
     closure: *const c_void,
     jsvalue_param_mask: u64,
+    param_count: u64,
     void_result: u8,
     finish: *const c_void,
 ) -> ThawHandleResult {
@@ -836,7 +830,7 @@ pub extern "C" fn thaw_js_register_native_callback(
              delete globalThis['{raw_name}']; \
              var mask = {jsvalue_param_mask}; \
              return function() {{ \
-             var args = Array.prototype.slice.call(arguments); \
+             var args = Array.prototype.slice.call(arguments, 0, {param_count}); \
              for (var i = 0; i < args.length; i++) {{ \
              if ((mask & (1 << i)) !== 0) {{ \
              args[i] = {{ __thaw_js_handle_id__: globalThis.__thaw_retain_dynamic_value(args[i]) }}; \
