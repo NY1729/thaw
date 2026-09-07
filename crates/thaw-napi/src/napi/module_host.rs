@@ -16,9 +16,23 @@ unsafe fn dl_error() -> String {
     }
 }
 
+fn executable_relative_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let Some(relative) = path.strip_prefix("@executable/") else {
+        return Ok(path.into());
+    };
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to locate the current executable: {error}"))?;
+    Ok(executable
+        .parent()
+        .ok_or("the current executable has no parent directory")?
+        .join(relative))
+}
+
 unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
-    let path_text = path;
-    let path = CString::new(path).map_err(|_| "addon path contains NUL".to_string())?;
+    let path = executable_relative_path(path)?;
+    let path_text = path.to_string_lossy();
+    let path = CString::new(path_text.as_bytes())
+        .map_err(|_| "addon path contains NUL".to_string())?;
     PENDING_MODULE.with(|slot| slot.borrow_mut().take());
     // Node exports libuv from its executable. Some otherwise portable N-API
     // addons (notably serialport) call that API directly, so expose the system
@@ -51,8 +65,8 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     };
 
     let mut env = Box::new(Env::new());
-    let absolute_path =
-        std::fs::canonicalize(path_text).unwrap_or_else(|_| std::path::PathBuf::from(path_text));
+    let absolute_path = std::fs::canonicalize(path_text.as_ref())
+        .unwrap_or_else(|_| std::path::PathBuf::from(path_text.as_ref()));
     env.module_file_name = CString::new(format!("file://{}", absolute_path.to_string_lossy()))
         .unwrap_or_else(|_| CString::new("").unwrap());
     let env_ptr = &mut *env as NapiEnv;
@@ -445,7 +459,9 @@ pub unsafe extern "C" fn thaw_napi_load_embedded_shared_hex(hex: *const c_char) 
 #[no_mangle]
 pub unsafe extern "C" fn thaw_napi_load_shared(path: *const c_char) -> u8 {
     let result = text(path).and_then(|path| {
-        let path = CString::new(path).map_err(|_| "shared library path contains NUL".to_string())?;
+        let path = executable_relative_path(&path)?;
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| "shared library path contains NUL".to_string())?;
         let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
         if handle.is_null() {
             return Err(dl_error());
