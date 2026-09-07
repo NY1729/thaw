@@ -60,7 +60,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts> [build options]\n       thaw build <input.ts> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
+                "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
             );
             std::process::exit(1);
         }
@@ -358,6 +358,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut vite: Option<PathBuf> = None;
     let mut static_link = false;
     let mut embed_native_addons = true;
+    let mut registry_was_explicit = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -388,6 +389,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
                 i += 1;
                 let value = args.get(i).ok_or("--registry requires a path argument")?;
                 registry_dir = PathBuf::from(value);
+                registry_was_explicit = true;
             }
             "--use" => {
                 i += 1;
@@ -420,22 +422,36 @@ fn run_build(args: &[String]) -> Result<(), String> {
         i += 1;
     }
 
-    if input.is_none() {
-        let manifest = std::fs::read_to_string("package.json").map_err(|_| {
-            "missing input file and package.json has no project configuration".to_string()
-        })?;
+    let project_directory = input
+        .as_ref()
+        .filter(|path| path.is_dir())
+        .cloned()
+        .or_else(|| input.is_none().then(|| PathBuf::from(".")));
+    if let Some(directory) = &project_directory {
+        let manifest_path = directory.join("package.json");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .map_err(|_| format!("`{}` does not contain package.json", directory.display()))?;
         let (configured_input, configured_vite, configured_output) =
             project_build_defaults(&manifest)?;
-        input = configured_input.or_else(|| {
-            Path::new("server.ts")
-                .is_file()
-                .then(|| PathBuf::from("server.ts"))
-        });
+        input = configured_input
+            .filter(|path| directory.join(path).is_file())
+            .map(|path| directory.join(path))
+            .or_else(|| {
+                ["server.ts", "src/server.ts", "index.ts", "src/index.ts"]
+                    .into_iter()
+                    .map(|path| directory.join(path))
+                    .find(|path| path.is_file())
+            });
         if output.is_none() {
-            output = configured_output;
+            output = configured_output
+                .map(|path| directory.join(path))
+                .or_else(|| Some(directory.join("app")));
         }
         if assets.is_none() && vite.is_none() {
-            vite = configured_vite;
+            vite = configured_vite.map(|path| directory.join(path));
+        }
+        if !registry_was_explicit {
+            registry_dir = directory.join("thaw_modules");
         }
     }
     let input =
@@ -492,7 +508,18 @@ fn project_build_defaults(
             .and_then(serde_json::Value::as_str)
             .map(PathBuf::from)
     };
-    Ok((path("entry"), path("vite"), path("output")))
+    let entry = path("entry").or_else(|| {
+        ["source", "module", "main"]
+            .into_iter()
+            .find_map(|name| manifest.get(name)?.as_str().map(PathBuf::from))
+    });
+    let vite = path("vite").or_else(|| {
+        manifest["scripts"]["build"]
+            .as_str()
+            .is_some_and(|script| script.split_whitespace().any(|word| word == "vite"))
+            .then(|| PathBuf::from("."))
+    });
+    Ok((entry, vite, path("output")))
 }
 
 fn build_vite_project(directory: &Path) -> Result<PathBuf, String> {
