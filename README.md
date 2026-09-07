@@ -15,7 +15,7 @@ table and the relevant design document.
 Requirements:
 
 - Rust and Cargo
-- LLVM 22 and a C linker available as `cc`
+- LLVM 22 and a C linker available as `cc` (`ld.lld` is used automatically when available)
 - npm, only when importing packages with `thaw registry add`
 
 Build the compiler and compile a program:
