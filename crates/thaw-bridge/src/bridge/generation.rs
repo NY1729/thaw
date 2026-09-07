@@ -300,6 +300,36 @@ pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
     out
 }
 
+pub struct NativeAddonPath<'a> {
+    pub package_name: &'a str,
+    pub path: &'a str,
+    pub dependencies: Vec<&'a str>,
+    pub root_export: Option<&'a str>,
+}
+
+pub fn generate_native_addon_path_init(addons: &[NativeAddonPath<'_>]) -> String {
+    if addons.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("function __thaw_native_module_init(): void {\n");
+    for addon in addons {
+        out.push_str(&format!("    // {}\n", addon.package_name));
+        for dependency in &addon.dependencies {
+            out.push_str(&format!(
+                "    loadNativeSharedLibrary(\"{}\");\n",
+                escape_ts_string_literal(dependency)
+            ));
+        }
+        out.push_str(&format!(
+            "    loadNativeAddon(\"{}\", \"{}\");\n",
+            escape_ts_string_literal(addon.path),
+            escape_ts_string_literal(addon.root_export.unwrap_or(""))
+        ));
+    }
+    out.push_str("}\n");
+    out
+}
+
 /// Escapes JS source for embedding as a double-quoted TS string literal
 /// (backslash, `"`, and newlines/carriage-returns -- the characters that
 /// would otherwise terminate or corrupt the literal). `generate_module_init`

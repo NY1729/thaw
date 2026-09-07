@@ -432,6 +432,27 @@ pub unsafe extern "C" fn thaw_napi_load_embedded_shared_hex(hex: *const c_char) 
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_load_shared(path: *const c_char) -> u8 {
+    let result = text(path).and_then(|path| {
+        let path = CString::new(path).map_err(|_| "shared library path contains NUL".to_string())?;
+        let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        if handle.is_null() {
+            return Err(dl_error());
+        }
+        HOST.with(|host| host.borrow_mut().libraries.push(handle));
+        Ok(())
+    });
+    match result {
+        Ok(()) => 1,
+        Err(error) => {
+            HOST.with(|host| host.borrow_mut().last_error = error.clone());
+            eprintln!("thaw-napi: {error}");
+            0
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), String> {
     let name = CString::new("thaw-native-addon").unwrap();

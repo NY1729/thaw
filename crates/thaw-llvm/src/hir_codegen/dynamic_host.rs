@@ -1150,6 +1150,38 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_load_native_dependency(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_napi = true;
+        let [path] = args else {
+            return Err("loadNativeSharedLibrary expects a path".into());
+        };
+        let path = self.compile_expr(path)?;
+        let loaded = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_napi_load_shared").unwrap(),
+                &[path.into()],
+                "load_native_dependency_u8",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_napi_load_shared did not return a value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                loaded,
+                self.context.i8_type().const_zero(),
+                "load_native_dependency_ok",
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
     /// `callDynamic(name, args): Json` -- the QuickJS-NG fallback path
     /// (docs/design/bridge.md section 7). Composes thaw-std's
     /// `thaw_json_stringify`/`thaw_json_parse` with thaw-quickjs's

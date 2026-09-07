@@ -22004,6 +22004,7 @@ fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
     user_source: &str,
+    embed_native_addons: bool,
 ) -> Result<RegistryShims, String> {
     let observed_arities = observed_member_call_arities(user_source)?;
     let observed_identifier_arities = observed_identifier_call_arities(user_source)?;
@@ -22158,6 +22159,7 @@ fn generate_registry_shims(
         Vec<(String, String, String, String)>,
     );
     type PendingNativeAddon = (String, Vec<u8>, Vec<Vec<u8>>, Option<String>);
+    type PendingNativeAddonPath = (String, String, Vec<String>, Option<String>);
 
     let mut shim = String::new();
     let mut typed_targets: std::collections::HashMap<(String, String), String> =
@@ -22194,6 +22196,7 @@ fn generate_registry_shims(
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
     let mut native_addons: Vec<PendingNativeAddon> = Vec::new();
+    let mut native_addon_paths: Vec<PendingNativeAddonPath> = Vec::new();
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
@@ -22821,28 +22824,47 @@ fn generate_registry_shims(
             native_libs.push(native_lib.clone());
         }
         if let Some(native_addon) = &pkg.native_addon {
-            let bytes = std::fs::read(native_addon).map_err(|error| {
-                format!(
-                    "failed to embed native addon `{}`: {error}",
-                    native_addon.display()
-                )
-            })?;
-            native_addons.push((
-                pkg.name.clone(),
-                bytes,
-                pkg.native_dependencies
-                    .iter()
-                    .map(std::fs::read)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| format!("failed to embed native dependency: {error}"))?,
-                if pkg.bundle_js.is_some() {
-                    None
-                } else {
-                    pkg.commonjs_export_name.clone().or_else(|| {
-                        (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone())
-                    })
-                },
-            ));
+            let root_export = if pkg.bundle_js.is_some() {
+                None
+            } else {
+                pkg.commonjs_export_name
+                    .clone()
+                    .or_else(|| (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone()))
+            };
+            if embed_native_addons {
+                let bytes = std::fs::read(native_addon).map_err(|error| {
+                    format!(
+                        "failed to embed native addon `{}`: {error}",
+                        native_addon.display()
+                    )
+                })?;
+                native_addons.push((
+                    pkg.name.clone(),
+                    bytes,
+                    pkg.native_dependencies
+                        .iter()
+                        .map(std::fs::read)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| format!("failed to embed native dependency: {error}"))?,
+                    root_export,
+                ));
+            } else {
+                let canonical = |path: &Path| {
+                    path.canonicalize()
+                        .unwrap_or_else(|_| path.to_path_buf())
+                        .display()
+                        .to_string()
+                };
+                native_addon_paths.push((
+                    pkg.name.clone(),
+                    canonical(native_addon),
+                    pkg.native_dependencies
+                        .iter()
+                        .map(|path| canonical(path))
+                        .collect(),
+                    root_export,
+                ));
+            }
         }
         if let Some(bundle_js) = &pkg.bundle_js {
             let value_exports = pkg
@@ -22984,6 +23006,18 @@ fn generate_registry_shims(
         })
         .collect();
     shim.push_str(&thaw_bridge::generate_native_addon_init(&native_addons));
+    let native_addon_paths: Vec<thaw_bridge::NativeAddonPath<'_>> = native_addon_paths
+        .iter()
+        .map(|(name, path, dependencies, root_export)| thaw_bridge::NativeAddonPath {
+            package_name: name,
+            path,
+            dependencies: dependencies.iter().map(String::as_str).collect(),
+            root_export: root_export.as_deref(),
+        })
+        .collect();
+    shim.push_str(&thaw_bridge::generate_native_addon_path_init(
+        &native_addon_paths,
+    ));
 
     let mut external_exports = ExternalExports::new();
     let mut external_namespace_aliases: ExternalNamespaceAliases = std::collections::HashMap::new();

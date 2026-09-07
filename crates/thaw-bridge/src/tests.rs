@@ -669,6 +669,14 @@ fn generates_native_addon_wrapper_and_module_initializer() {
     assert!(init.contains("function __thaw_native_module_init(): void"));
     assert!(init.contains(r#"loadNativeAddonEmbedded("deadbeef", "");"#));
     assert!(init.contains(r#"loadNativeSharedLibraryEmbedded("cafe");"#));
+    let init = generate_native_addon_path_init(&[NativeAddonPath {
+        package_name: "native-add",
+        path: "/registry/native-add/native.node",
+        dependencies: vec!["/registry/native-add/libvalue.so"],
+        root_export: Some("NativeAdd"),
+    }]);
+    assert!(init.contains(r#"loadNativeSharedLibrary("/registry/native-add/libvalue.so");"#));
+    assert!(init.contains(r#"loadNativeAddon("/registry/native-add/native.node", "NativeAdd");"#));
 }
 
 #[test]

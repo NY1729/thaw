@@ -2037,6 +2037,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "loadNativeSharedLibraryEmbedded" => {
                 return self.compile_load_embedded_native_dependency(args)
             }
+            "loadNativeSharedLibrary" => return self.compile_load_native_dependency(args),
             "callNativeAddon" => return self.compile_call_native_addon(args),
             "callNativeAddonWithCallback" => {
                 return self.compile_call_native_addon_with_callback(args)

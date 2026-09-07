@@ -199,6 +199,7 @@ fn generate_asset_shim(directory: &Path) -> Result<String, String> {
 // Keep the build inputs explicit: the slices come from separate CLI/registry
 // sources and are independently varied by integration tests.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn build_with_link_mode(
     input: &Path,
     output: &Path,
@@ -223,6 +224,7 @@ fn build_with_link_mode(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn build_with_assets(
     input: &Path,
     output: &Path,
@@ -234,6 +236,36 @@ fn build_with_assets(
     static_link: bool,
     assets: Option<&Path>,
 ) -> Result<(), String> {
+    build_with_native_mode(
+        input,
+        output,
+        extra_links,
+        bridge_dts,
+        ffi_metadata,
+        registry_dir,
+        use_packages,
+        static_link,
+        assets,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_with_native_mode(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
+    static_link: bool,
+    assets: Option<&Path>,
+    embed_native_addons: bool,
+) -> Result<(), String> {
+    if static_link && !embed_native_addons {
+        return Err("--static and --external-native cannot be used together".into());
+    }
     if static_link {
         ensure_static_system_libraries()?;
         for path in extra_links {
@@ -300,7 +332,12 @@ fn build_with_assets(
         external_exports,
         external_namespace_aliases,
         external_nested_namespaces,
-    ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
+    ) = generate_registry_shims(
+        registry_dir,
+        &resolved_packages,
+        &user_source,
+        embed_native_addons,
+    )?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     // `qs.stringify(x)`-style calls, for a name that collided across two
     // `--use`d packages, only exist as source-level syntax sugar over the
@@ -311,7 +348,10 @@ fn build_with_assets(
     if let Some(directory) = assets {
         shim_source.push_str(&generate_asset_shim(directory)?);
     }
-    if static_link && shim_source.contains("loadNativeAddonEmbedded(") {
+    if static_link
+        && (shim_source.contains("loadNativeAddonEmbedded(")
+            || shim_source.contains("loadNativeAddon("))
+    {
         return Err(
             "--static cannot include an N-API addon: `.node` modules require the dynamic loader; use the package's JavaScript fallback or a static `native.a` backend"
                 .into(),
@@ -326,7 +366,8 @@ fn build_with_assets(
         "quickjs": shim_source.contains("loadScript(")
             || source_uses_quickjs(&user_source)
             || shim_source.contains("__thaw_typed_js_"),
-        "napi": shim_source.contains("loadNativeAddonEmbedded("),
+        "napi": shim_source.contains("loadNativeAddonEmbedded(")
+            || shim_source.contains("loadNativeAddon("),
     });
     let marker = format!("{ARTIFACT_MARKER}{manifest}");
     let marker_literal = serde_json::to_string(&marker)
@@ -469,6 +510,7 @@ fn build_with_assets(
         linker.arg("-Wl,--export-dynamic");
     }
     let link_output = linker
+        .arg("-Wl,--strip-debug")
         .arg("-o")
         .arg(output)
         .output()
