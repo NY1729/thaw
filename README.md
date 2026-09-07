@@ -3616,6 +3616,23 @@ The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
 the host with real synchronous hashing and callback-based asynchronous salt
 generation (`THAW_BCRYPT_NODE=/path/to/bcrypt.glibc.node cargo test -p
 thaw-napi runs_bcrypt_prebuild_when_supplied`).
+The upstream `node-addon-api` aggregate test binding can be used as a broader
+compatibility gate with
+`THAW_NODE_ADDON_API_BINDING=/path/to/binding.node cargo test -p thaw-napi
+runs_node_addon_api_official_binding_when_supplied`. Its top-level object
+exports exercise the same persistent handle and method bridge used by package
+wrappers.
+Every N-API build also compares the selected addon's undefined Node-API symbols
+with the symbols defined by the exact `thaw-napi` archive being linked. Missing
+Node-API entry points and direct Node/V8 C++ imports fail before final linking
+with the offending names; direct libuv imports remain supported by the existing
+system-libuv host path.
+Typed native calls preserve every function-valued argument in its original
+position. Optional callbacks may be omitted, and callback signatures with
+optional parameters or a typed rest parameter are adapted to Thaw's native
+closure ABI. Async-work completions and thread-safe-function callbacks share
+one FIFO readiness queue, so polling preserves their cross-source ready order;
+libuv is polled before that queue on each event-loop turn.
 An opt-in CLI integration test performs `registry add bcrypt@6.0.0`, embeds the
 selected prebuild, deletes the registry, and runs synchronous plus callback-
 based asynchronous salt generation, hashing, comparison, and error delivery

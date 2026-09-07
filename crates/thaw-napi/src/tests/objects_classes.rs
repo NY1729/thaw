@@ -1311,7 +1311,7 @@ fn instanceof_walks_constructor_prototype_chains() {
 }
 
 #[test]
-fn global_date_and_regexp_are_constructors() {
+fn global_date_regexp_and_symbol_are_available() {
     unsafe {
         let mut env = Env::new();
         let env_ptr: NapiEnv = &mut env;
@@ -1325,6 +1325,18 @@ fn global_date_and_regexp_are_constructors() {
             );
             assert!(matches!(value_ref(constructor), Ok(Value::Function(_))));
         }
+        let mut symbol = ptr::null_mut();
+        let mut iterator = ptr::null_mut();
+        assert_eq!(
+            napi_get_named_property(env_ptr, global, c"Symbol".as_ptr(), &mut symbol),
+            NAPI_OK
+        );
+        assert!(matches!(value_ref(symbol), Ok(Value::Function(_))));
+        assert_eq!(
+            napi_get_named_property(env_ptr, symbol, c"iterator".as_ptr(), &mut iterator),
+            NAPI_OK
+        );
+        assert!(matches!(value_ref(iterator), Ok(Value::Symbol { .. })));
         let mut date = ptr::null_mut();
         let mut date_constructor = ptr::null_mut();
         let mut matches = false;

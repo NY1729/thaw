@@ -470,6 +470,31 @@ fn runs_utf8_validate_prebuild_when_supplied() {
 }
 
 #[test]
+fn runs_node_addon_api_official_binding_when_supplied() {
+    let Ok(path) = std::env::var("THAW_NODE_ADDON_API_BINDING") else {
+        return;
+    };
+    let path = CString::new(path).unwrap();
+    unsafe {
+        assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+
+        let numbers = thaw_napi_get_export(c"basic_types_number".as_ptr());
+        assert_ne!(numbers, 0);
+        let result =
+            thaw_napi_call_method_result(numbers, c"toInt32".as_ptr(), c"[42.75]".as_ptr());
+        assert!(result.error.is_null());
+        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "42.0");
+
+        let booleans = thaw_napi_get_export(c"basic_types_boolean".as_ptr());
+        assert_ne!(booleans, 0);
+        let result =
+            thaw_napi_call_method_result(booleans, c"createBoolean".as_ptr(), c"[true]".as_ptr());
+        assert!(result.error.is_null());
+        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "true");
+    }
+}
+
+#[test]
 fn runs_bcrypt_prebuild_when_supplied() {
     let _guard = lock_async_test();
     let Ok(path) = std::env::var("THAW_BCRYPT_NODE") else {

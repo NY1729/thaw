@@ -6,7 +6,11 @@ fn registry_native_addon_builds_and_runs_end_to_end() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function add(a: number, b: number): number;\n",
+        "export declare function add(a: number, b: number): number;\n\
+         export declare function combine(first: (value: number) => number, value: number, second: (value: number) => number): number;\n\
+         export declare function maybe(value: number, callback?: (value: number) => number): number;\n\
+         export declare function variadic(callback: (...values: number[]) => number): number;\n\
+         export declare function optionalParameter(callback: (value: number, extra?: number) => number): number;\n",
     )
     .unwrap();
     let addon_c = dir.join("addon.c");
@@ -17,17 +21,59 @@ fn registry_native_addon_builds_and_runs_end_to_end() {
             extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
             extern napi_status napi_create_double(napi_env, double, napi_value*);
+            extern napi_status napi_get_undefined(napi_env, napi_value*);
+            extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
             extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
             static napi_value add(napi_env env, napi_callback_info info) {
                 size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
                 napi_get_cb_info(env, info, &argc, argv, 0, 0);
                 napi_get_value_double(env, argv[0], &a); napi_get_value_double(env, argv[1], &b);
                 napi_create_double(env, a + b, &result); return result;
             }
+            static napi_value combine(napi_env env, napi_callback_info info) {
+                size_t argc = 3; napi_value argv[3], receiver, left, right, result; double a, b;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_get_undefined(env, &receiver);
+                napi_call_function(env, receiver, argv[0], 1, &argv[1], &left);
+                napi_call_function(env, receiver, argv[2], 1, &argv[1], &right);
+                napi_get_value_double(env, left, &a); napi_get_value_double(env, right, &b);
+                napi_create_double(env, a + b, &result); return result;
+            }
+            static napi_value maybe(napi_env env, napi_callback_info info) {
+                size_t argc = 2; napi_value argv[2], receiver, result;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                if (argc == 1) return argv[0];
+                napi_get_undefined(env, &receiver);
+                napi_call_function(env, receiver, argv[1], 1, argv, &result);
+                return result;
+            }
+            static napi_value variadic(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value callback, receiver, values[3], result;
+                napi_get_cb_info(env, info, &argc, &callback, 0, 0);
+                napi_get_undefined(env, &receiver);
+                napi_create_double(env, 1, &values[0]); napi_create_double(env, 2, &values[1]); napi_create_double(env, 3, &values[2]);
+                napi_call_function(env, receiver, callback, 3, values, &result); return result;
+            }
+            static napi_value optional_parameter(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value callback, receiver, value, result;
+                napi_get_cb_info(env, info, &argc, &callback, 0, 0);
+                napi_get_undefined(env, &receiver); napi_create_double(env, 9, &value);
+                napi_call_function(env, receiver, callback, 1, &value, &result); return result;
+            }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
-                (void)exports;
-                napi_value fn; napi_create_function(env, "add", 3, add, 0, &fn);
-                return fn;
+                napi_value fn;
+                napi_create_function(env, "add", 3, add, 0, &fn);
+                napi_set_named_property(env, exports, "add", fn);
+                napi_create_function(env, "combine", 7, combine, 0, &fn);
+                napi_set_named_property(env, exports, "combine", fn);
+                napi_create_function(env, "maybe", 5, maybe, 0, &fn);
+                napi_set_named_property(env, exports, "maybe", fn);
+                napi_create_function(env, "variadic", 8, variadic, 0, &fn);
+                napi_set_named_property(env, exports, "variadic", fn);
+                napi_create_function(env, "optionalParameter", 17, optional_parameter, 0, &fn);
+                napi_set_named_property(env, exports, "optionalParameter", fn);
+                return exports;
             }
         "#).unwrap();
     assert!(Command::new("cc")
@@ -42,7 +88,7 @@ fn registry_native_addon_builds_and_runs_end_to_end() {
     let output = dir.join("app");
     std::fs::write(
         &source,
-        "import { add } from \"native-add\"; function main(): void { console.log(add(20, 22)); }\n",
+        "import { add, combine, maybe, optionalParameter, variadic } from \"native-add\"; function main(): void { console.log(add(20, 22)); console.log(combine((value: number): number => value + 1, 10, (value: number): number => value * 2)); console.log(maybe(7)); console.log(maybe(7, (value: number): number => value * 3)); console.log(variadic((...values: number[]): number => values[0] + values[1] + values[2])); console.log(optionalParameter((value: number): number => value + 1)); }\n",
     )
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -53,7 +99,7 @@ fn registry_native_addon_builds_and_runs_end_to_end() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n31\n7\n21\n6\n10\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

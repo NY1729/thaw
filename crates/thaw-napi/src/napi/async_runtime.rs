@@ -512,10 +512,10 @@ pub unsafe extern "C" fn napi_cancel_async_work(env: NapiEnv, work: *mut AsyncWo
         .state
         .store(ASYNC_COMPLETE_PENDING, Ordering::Release);
     drop(queue);
-    async_completions()
+    ready_events()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push_back(work as usize);
+        .push_back(ReadyEvent::AsyncCompletion(work as usize));
     NAPI_OK
 }
 
@@ -538,11 +538,7 @@ pub unsafe extern "C" fn napi_delete_async_work(env: NapiEnv, work: *mut AsyncWo
     NAPI_OK
 }
 
-fn run_one_threadsafe_callback() -> Option<bool> {
-    let address = threadsafe_ready()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .pop_front()?;
+fn run_one_threadsafe_callback(address: usize) -> bool {
     let function_ptr = address as *mut ThreadsafeFunction;
     let function = unsafe { &*function_ptr };
     let (data, aborting, finalize) = {
@@ -612,14 +608,10 @@ fn run_one_threadsafe_callback() -> Option<bool> {
             }
         }
     }
-    Some(data.is_some() && !aborting)
+    data.is_some() && !aborting
 }
 
-fn run_one_async_completion() -> Option<()> {
-    let work_address = async_completions()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .pop_front()?;
+fn run_one_async_completion(work_address: usize) {
     let work = unsafe { &*(work_address as *const AsyncWork) };
     let env = work.env as NapiEnv;
     let data = work.data as *mut c_void;
@@ -633,7 +625,6 @@ fn run_one_async_completion() -> Option<()> {
     if let Err(error) = unsafe { take_env_exception(env) } {
         HOST.with(|host| host.borrow_mut().last_error = error);
     }
-    Some(())
 }
 
 fn drain_posted_finalizers() -> usize {
@@ -717,12 +708,21 @@ pub extern "C" fn thaw_napi_poll_async_work() -> usize {
     }
     loop {
         let mut progressed = false;
-        while let Some(called) = run_one_threadsafe_callback() {
-            completed += usize::from(called);
-            progressed = true;
-        }
-        while run_one_async_completion().is_some() {
-            completed += 1;
+        loop {
+            let event = ready_events()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pop_front();
+            let Some(event) = event else { break };
+            completed += match event {
+                ReadyEvent::ThreadsafeFunction(address) => {
+                    usize::from(run_one_threadsafe_callback(address))
+                }
+                ReadyEvent::AsyncCompletion(address) => {
+                    run_one_async_completion(address);
+                    1
+                }
+            };
             progressed = true;
         }
         let finalized = drain_posted_finalizers();
@@ -757,14 +757,14 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
     let mut completed = 0;
     loop {
         completed += thaw_napi_poll_async_work();
-        let threadsafe_pending = !threadsafe_ready()
+        let ready = !ready_events()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_empty();
         let uv_alive = unsafe { poll_uv_loop() };
         if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
             && ACTIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
-            && !threadsafe_pending
+            && !ready
             && !uv_alive
         {
             break;
