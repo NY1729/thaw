@@ -2116,8 +2116,9 @@ property/method/constructor access remain on QuickJS. Replacing those operations
 with a home-grown general-purpose JavaScript runtime is not a project goal.
 QuickJS is linked only when the compiled program actually needs that fallback;
 fully specialized artifacts keep their `quickjs` flag false and omit it.
-The TLS and WebAssembly/WASI hosts are separate Cargo features and are omitted
-from QuickJS fallback artifacts whose bundles do not reference those APIs.
+The Brotli, TLS, and WebAssembly/WASI hosts are separate Cargo features and are
+omitted from QuickJS fallback artifacts whose bundles do not reference them;
+gzip and deflate remain available in the minimal host.
 
 The QuickJS-independent specialization JIT backend is linked as a
 separate static archive. Typed `DynamicBackend::Jit` calls lower directly from

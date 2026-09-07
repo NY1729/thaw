@@ -423,6 +423,13 @@ fn tls_host_detection_only_enables_tls_bundles() {
 }
 
 #[test]
+fn brotli_host_detection_only_enables_brotli_users() {
+    assert!(!source_uses_brotli("new CompressionStream('gzip')"));
+    assert!(source_uses_brotli("brotliCompressSync(input)"));
+    assert!(source_uses_brotli("new BrotliCompress()"));
+}
+
+#[test]
 fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     let function = thaw_bridge::DtsFunction {
         name: "add".into(),
