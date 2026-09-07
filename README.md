@@ -226,18 +226,20 @@ THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli \
 Run the same end-to-end path as a coarse build-performance regression check:
 
 ```bash
+cargo build --release -p thaw-cli
 THAW_RUN_PERFORMANCE=1 \
 THAW_PERF_OUTPUT="$PWD/target/thaw-performance.json" \
   cargo test -p thaw-cli \
   installs_builds_and_serves_the_react_prisma_board_when_enabled -- --nocapture
 ```
 
-It builds a minimal Hello program and the React/Vite/Hono/Prisma board twice,
-records initial and cached build times plus executable/sidecar sizes, starts the
-board, and checks its GET/POST API and frontend. The deliberately loose limits
-only catch large regressions; compare the saved JSON between machines or commits
-for smaller changes. The board metrics also include its QuickJS reasons grouped
-by category, so moving a package path to JIT is visible alongside time and size.
+It copies the release CLI into an isolated distribution directory, measures a
+cold Hello build, `thaw prepare`, prepared and cached builds, then builds the
+React/Vite/Hono/Prisma board twice. It records times and executable/sidecar sizes,
+starts the board, and checks its GET/POST API and frontend. Set `THAW_PERF_THAW`
+to benchmark another release binary. The deliberately loose limits only catch
+large regressions; compare the saved JSON between machines or commits for smaller
+changes. Board metrics also include QuickJS reasons grouped by category.
 
 ```json
 {

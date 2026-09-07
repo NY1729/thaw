@@ -83,7 +83,22 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    let performance_thaw = measure_performance.then(|| {
+        let source = std::env::var_os("THAW_PERF_THAW")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/thaw")
+            });
+        assert!(
+            source.is_file(),
+            "build target/release/thaw first or set THAW_PERF_THAW"
+        );
+        let copied = dir.join("thaw-release");
+        std::fs::copy(source, &copied).unwrap();
+        copied
+    });
     let hello_metrics = measure_performance.then(|| {
+        let thaw = performance_thaw.as_ref().unwrap();
         let source = dir.join("hello.ts");
         let output = dir.join("hello");
         std::fs::write(
@@ -91,31 +106,22 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
             "function main(): void { console.log(\"hello\"); }\n",
         )
         .unwrap();
-        let initial_started = Instant::now();
-        build(
-            &source,
-            &output,
-            &[],
-            &[],
-            &[],
-            &dir.join("hello-registry"),
-            &[],
-        )
-        .unwrap();
-        let initial_ms = initial_started.elapsed().as_millis();
+        let cold_started = Instant::now();
+        run_thaw_build(thaw, &source, &output, &dir.join("hello-registry"), None);
+        let cold_ms = cold_started.elapsed().as_millis();
+        let prepare_started = Instant::now();
+        let status = Command::new(thaw).arg("prepare").status().unwrap();
+        assert!(status.success(), "thaw prepare failed");
+        let prepare_ms = prepare_started.elapsed().as_millis();
+        let prepared_started = Instant::now();
+        run_thaw_build(thaw, &source, &output, &dir.join("hello-registry"), None);
+        let prepared_ms = prepared_started.elapsed().as_millis();
         let cached_started = Instant::now();
-        build(
-            &source,
-            &output,
-            &[],
-            &[],
-            &[],
-            &dir.join("hello-registry"),
-            &[],
-        )
-        .unwrap();
+        run_thaw_build(thaw, &source, &output, &dir.join("hello-registry"), None);
         (
-            initial_ms,
+            cold_ms,
+            prepare_ms,
+            prepared_ms,
             cached_started.elapsed().as_millis(),
             std::fs::metadata(output).unwrap().len(),
         )
@@ -137,22 +143,15 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     std::fs::create_dir_all(&package).unwrap();
     let executable = package.join("board");
     let build_started = Instant::now();
-    build_with_native_mode(
-        &project.join("server.ts"),
-        &executable,
-        &[],
-        &[],
-        &[],
-        &dir.join("registry"),
-        &[],
-        false,
-        Some(&assets),
-        false,
-    )
-    .unwrap();
-    let initial_build_ms = build_started.elapsed().as_millis();
-    let cached_build_ms = measure_performance.then(|| {
-        let started = Instant::now();
+    if let Some(thaw) = &performance_thaw {
+        run_thaw_build(
+            thaw,
+            &project.join("server.ts"),
+            &executable,
+            &dir.join("registry"),
+            Some(&assets),
+        );
+    } else {
         build_with_native_mode(
             &project.join("server.ts"),
             &executable,
@@ -166,6 +165,17 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
             false,
         )
         .unwrap();
+    }
+    let initial_build_ms = build_started.elapsed().as_millis();
+    let cached_build_ms = measure_performance.then(|| {
+        let started = Instant::now();
+        run_thaw_build(
+            performance_thaw.as_ref().unwrap(),
+            &project.join("server.ts"),
+            &executable,
+            &dir.join("registry"),
+            Some(&assets),
+        );
         started.elapsed().as_millis()
     });
     let executable_bytes = std::fs::metadata(&executable).unwrap().len();
@@ -227,7 +237,8 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     child.kill().unwrap();
     child.wait().unwrap();
     if measure_performance {
-        let (hello_initial_ms, hello_cached_ms, hello_bytes) = hello_metrics.unwrap();
+        let (hello_cold_ms, prepare_ms, hello_prepared_ms, hello_cached_ms, hello_bytes) =
+            hello_metrics.unwrap();
         let cached_build_ms = cached_build_ms.unwrap();
         let quickjs_reasons = artifact_manifest["quickjs_reasons"]
             .as_array()
@@ -241,13 +252,15 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         }
         let metrics = serde_json::json!({
             "hello": {
-                "initial_build_ms": hello_initial_ms,
+                "cold_build_ms": hello_cold_ms,
+                "prepare_ms": prepare_ms,
+                "prepared_build_ms": hello_prepared_ms,
                 "cached_build_ms": hello_cached_ms,
                 "executable_bytes": hello_bytes,
             },
             "board": {
                 "vite_ms": vite_ms,
-                "initial_build_ms": initial_build_ms,
+                "prepared_build_ms": initial_build_ms,
                 "cached_build_ms": cached_build_ms,
                 "executable_bytes": executable_bytes,
                 "sidecar_bytes": sidecar_bytes,
@@ -301,6 +314,33 @@ fn directory_size(path: &Path) -> u64 {
             }
         })
         .sum()
+}
+
+fn run_thaw_build(
+    thaw: &Path,
+    input: &Path,
+    output: &Path,
+    registry: &Path,
+    assets: Option<&Path>,
+) {
+    let mut command = Command::new(thaw);
+    command
+        .arg("build")
+        .arg(input)
+        .arg("--registry")
+        .arg(registry)
+        .arg("--external-native")
+        .arg("-o")
+        .arg(output);
+    if let Some(assets) = assets {
+        command.arg("--assets").arg(assets);
+    }
+    let result = command.output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]
