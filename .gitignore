@@ -5,3 +5,5 @@
 /examples/hono-react-prisma-board/node_modules
 /examples/hono-react-prisma-board/dist
 /examples/hono-react-prisma-board/board.db
+/examples/hono-react-prisma-board/app
+/examples/hono-react-prisma-board/thaw_modules

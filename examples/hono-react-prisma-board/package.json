@@ -1,6 +1,11 @@
 {
   "private": true,
   "type": "module",
+  "thaw": {
+    "entry": "server.ts",
+    "vite": ".",
+    "output": "app"
+  },
   "scripts": {
     "build": "vite build",
     "generate": "prisma generate",

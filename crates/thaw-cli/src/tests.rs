@@ -34,6 +34,16 @@ fn install_requires_a_package_manifest() {
 }
 
 #[test]
+fn add_installs_named_packages_into_the_project() {
+    let packages = ["zod".into(), "nanoid@5".into()];
+    let command = npm_add_command(&packages, Path::new("api"));
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["install", "--prefix", "api", "zod", "nanoid@5"]
+    );
+}
+
+#[test]
 fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
@@ -140,6 +150,19 @@ fn dev_fingerprint_tracks_sources_but_ignores_dependencies() {
     std::fs::write(directory.join("node_modules/package/index.js"), "changed").unwrap();
     assert_eq!(source_fingerprint(&roots).unwrap(), changed);
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn project_build_reads_package_defaults() {
+    assert_eq!(
+        project_build_defaults(r#"{"thaw":{"entry":"server.ts","vite":"web","output":"app"}}"#)
+            .unwrap(),
+        (
+            Some(PathBuf::from("server.ts")),
+            Some(PathBuf::from("web")),
+            Some(PathBuf::from("app"))
+        )
+    );
 }
 
 #[test]
