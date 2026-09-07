@@ -221,6 +221,21 @@ THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli \
   installs_builds_and_serves_the_react_prisma_board_when_enabled -- --nocapture
 ```
 
+Run the same end-to-end path as a coarse build-performance regression check:
+
+```bash
+THAW_RUN_PERFORMANCE=1 \
+THAW_PERF_OUTPUT="$PWD/target/thaw-performance.json" \
+  cargo test -p thaw-cli \
+  installs_builds_and_serves_the_react_prisma_board_when_enabled -- --nocapture
+```
+
+It builds a minimal Hello program and the React/Vite/Hono/Prisma board twice,
+records initial and cached build times plus executable/sidecar sizes, starts the
+board, and checks its GET/POST API and frontend. The deliberately loose limits
+only catch large regressions; compare the saved JSON between machines or commits
+for smaller changes.
+
 ```json
 {
   "version": 2,
