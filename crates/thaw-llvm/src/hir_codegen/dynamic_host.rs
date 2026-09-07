@@ -541,6 +541,45 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_return(Some(&ptr_type.const_null()))
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(settled_block);
+        let rejected = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                state,
+                self.context.i8_type().const_int(2, false),
+                "native_promise_rejected",
+            )
+            .map_err(|error| error.to_string())?;
+        let rejected_block = self.context.append_basic_block(function, "rejected");
+        let fulfilled_block = self.context.append_basic_block(function, "fulfilled");
+        self.builder
+            .build_conditional_branch(rejected, rejected_block, fulfilled_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(rejected_block);
+        let error = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_runtime_run_until_resolved")
+                    .unwrap(),
+                &[promise.into()],
+                "native_promise_error",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("rejected native Promise has no error")?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_destroy").unwrap(),
+                &[promise.into()],
+                "destroy_rejected_native_promise",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_return(Some(&error))
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(fulfilled_block);
         let result_json = if *resolved == HirType::Void {
             self.drive_promise_to_completion(promise)?;
             self.compile_json_null()?

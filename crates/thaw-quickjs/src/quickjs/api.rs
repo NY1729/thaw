@@ -782,7 +782,12 @@ pub extern "C" fn thaw_js_register_native_callback(
                     return if result.is_null() {
                         "error:native Promise rejected".to_string()
                     } else {
-                        format!("error:{}", to_str(result))
+                        let error = to_str(result);
+                        let message = error
+                            .strip_prefix('\u{1}')
+                            .and_then(|tagged| tagged.split_once('\u{1}'))
+                            .map_or(error.as_str(), |(_, message)| message);
+                        format!("error:{message}")
                     };
                 }
                 if result.is_null() {
