@@ -35,6 +35,8 @@ use std::os::raw::{c_char, c_void};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -473,6 +475,62 @@ fn os_info_json() -> String {
 }
 
 include!("quickjs/processes.rs");
+
+#[cfg(unix)]
+static PENDING_PROCESS_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn record_process_signal(signal: libc::c_int) {
+    PENDING_PROCESS_SIGNAL.store(signal, Ordering::Relaxed);
+}
+
+fn configure_process_signal(name: String, enabled: bool) -> bool {
+    #[cfg(unix)]
+    {
+        let signal = match name.as_str() {
+            "SIGINT" => libc::SIGINT,
+            "SIGTERM" => libc::SIGTERM,
+            _ => return false,
+        };
+        // SAFETY: the installed handler only performs an atomic store, which
+        // is async-signal-safe. Disabling restores the platform default.
+        unsafe {
+            libc::signal(
+                signal,
+                if enabled {
+                    record_process_signal as *const () as libc::sighandler_t
+                } else {
+                    libc::SIG_DFL
+                },
+            );
+        }
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (name, enabled);
+        false
+    }
+}
+
+fn dispatch_pending_process_signal(ctx: &Ctx<'_>) {
+    #[cfg(unix)]
+    {
+        let signal = PENDING_PROCESS_SIGNAL.swap(0, Ordering::Relaxed);
+        let name = match signal {
+            libc::SIGINT => "SIGINT",
+            libc::SIGTERM => "SIGTERM",
+            _ => return,
+        };
+        if let Ok(process) = ctx.globals().get::<_, Object>("process") {
+            if let Ok(emit) = process.get::<_, Function>("emit") {
+                let _ = emit.call::<_, bool>((name,));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = ctx;
+}
 
 include!("quickjs/context.rs");
 

@@ -2088,12 +2088,13 @@ fn registry_add_runs_a_real_express_route_when_enabled() {
     std::fs::write(
         &source,
         r#"import express from "express";
-function main(): void {
+async function main(): Promise<void> {
     const app = express();
     app.get("/users/:id", (request, response) => {
         response.json({ id: request.params.id });
     });
-    app.listen(Number(process.env.PORT), "127.0.0.1");
+    const server: JsValue = app.listen(Number(process.env.PORT), "127.0.0.1");
+    process.on("SIGTERM", (): void => { server.close(); });
 }"#,
     )
     .unwrap();
@@ -2118,26 +2119,60 @@ function main(): void {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut stream = (0..500)
-        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => Some(stream),
-            Err(_) => {
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "async Express server exited before accepting a request"
+    );
+    let exchange = |request: &[u8]| {
+        let mut stream = (0..500)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("compiled Express server did not accept a request");
+        stream.write_all(request).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        response
+    };
+    let request = |id: usize| {
+        let request = format!(
+            "GET /users/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        );
+        let response = exchange(request.as_bytes());
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        assert!(String::from_utf8_lossy(&response).contains(&format!("{{\"id\":\"{id}\"}}")));
+    };
+    for id in 0..3 {
+        request(id);
+    }
+    std::thread::scope(|scope| {
+        for id in 3..7 {
+            scope.spawn(move || request(id));
+        }
+    });
+    assert!(Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let status = (0..500)
+        .find_map(|_| {
+            let status = child.try_wait().unwrap();
+            if status.is_none() {
                 std::thread::sleep(Duration::from_millis(10));
-                None
             }
+            status
         })
-        .expect("compiled Express server did not start");
-    stream
-        .write_all(b"GET /users/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
-    child.kill().unwrap();
-    child.wait().unwrap();
-    assert!(response.starts_with(b"HTTP/1.1 200"));
-    assert!(response
-        .windows(b"{\"id\":\"42\"}".len())
-        .any(|bytes| bytes == b"{\"id\":\"42\"}"));
+        .unwrap_or_else(|| {
+            child.kill().unwrap();
+            child.wait().unwrap()
+        });
+    assert!(status.success(), "Express server did not shut down cleanly");
     let _ = std::fs::remove_dir_all(dir);
 }
 

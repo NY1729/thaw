@@ -45,6 +45,11 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_console_stderr", stderr)
                     .expect("failed to install JavaScript stderr writer");
+                let configure_signal = Function::new(ctx.clone(), configure_process_signal)
+                    .expect("failed to create process signal bridge");
+                ctx.globals()
+                    .set("__thaw_process_configure_signal", configure_signal)
+                    .expect("failed to install process signal bridge");
                 let detach_array_buffer =
                     Function::new(ctx.clone(), |mut value: ArrayBuffer<'_>| {
                         value.detach();

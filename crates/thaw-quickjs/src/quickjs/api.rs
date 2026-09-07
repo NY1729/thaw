@@ -298,6 +298,7 @@ fn finish_with_platform_events<'js>(
     promise: &rquickjs::Promise<'js>,
 ) -> rquickjs::Result<Value<'js>> {
     loop {
+        dispatch_pending_process_signal(ctx);
         if let Ok(poll_platform_events) = ctx
             .globals()
             .get::<_, Function>("__thaw_poll_platform_events")
@@ -345,6 +346,7 @@ fn finish_with_platform_events<'js>(
 #[no_mangle]
 pub extern "C" fn thaw_js_run_event_loop() {
     with_context(|ctx| loop {
+        dispatch_pending_process_signal(&ctx);
         if let Ok(poll) = ctx
             .globals()
             .get::<_, Function>("__thaw_poll_platform_events")
