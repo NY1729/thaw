@@ -74,7 +74,10 @@ PORT=3000 ./react-vite-server
 ```
 
 The backend can serve generated assets with `thawHasAsset(path)`,
-`thawAsset(path)`, and `thawAssetContentType(path)`. Use `--assets <directory>`
+`thawAsset(path)`, `thawAssetEncoding(path)`, and
+`thawAssetContentType(path)`. Pass the asset and encoding to
+`Buffer.from(thawAsset(path), thawAssetEncoding(path))`; text and binary assets
+are then both reproduced byte-for-byte. Use `--assets <directory>`
 instead when another frontend tool already produced the files or Vite uses a
 custom `outDir`. Asset paths are rooted at `/`, and `/index.html` is also
 available as `/`. Query strings and URL fragments are ignored during asset

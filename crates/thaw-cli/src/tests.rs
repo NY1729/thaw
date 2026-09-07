@@ -21,11 +21,18 @@ fn vite_assets_are_embedded_with_routes_and_content_types() {
     std::fs::create_dir_all(directory.join("assets")).unwrap();
     std::fs::write(directory.join("index.html"), "<main>hello</main>").unwrap();
     std::fs::write(directory.join("assets/app.js"), "console.log('hello')").unwrap();
+    std::fs::write(
+        directory.join("assets/image.png"),
+        [0x89, 0x50, 0x4e, 0x47, 0xff],
+    )
+    .unwrap();
 
     let shim = generate_asset_shim(&directory).unwrap();
     assert!(shim.contains("path = thawAssetPath(path);"));
     assert!(shim.contains("if (path === \"/\") { return \"text/html; charset=utf-8\"; }"));
     assert!(shim.contains("if (path === \"/assets/app.js\") { return \"console.log('hello')\"; }"));
+    assert!(shim.contains("if (path === \"/assets/image.png\") { return \"89504e47ff\"; }"));
+    assert!(shim.contains("if (path === \"/assets/image.png\") { return \"hex\"; }"));
 
     let _ = std::fs::remove_dir_all(directory);
 }

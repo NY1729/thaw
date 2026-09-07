@@ -8,6 +8,8 @@ function main(): void {
       statusCode: number;
       setHeader: (name: string, value: string) => boolean;
       end: (body: string) => boolean;
+      write: (body: string) => boolean;
+      endEncoded: (content: string, encoding: string) => boolean;
     },
   ): boolean => {
     if (request.method === "GET" && request.url === "/api/message") {
@@ -16,7 +18,10 @@ function main(): void {
     }
     if (request.method === "GET" && thawHasAsset(request.url)) {
       response.setHeader("Content-Type", thawAssetContentType(request.url));
-      return response.end(thawAsset(request.url));
+      return response.endEncoded(
+        thawAsset(request.url),
+        thawAssetEncoding(request.url),
+      );
     }
     response.statusCode = 404;
     return response.end("Not Found");
