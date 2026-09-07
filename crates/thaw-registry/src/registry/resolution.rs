@@ -57,6 +57,7 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
     native_dependencies.sort();
 
     let bundle_js_path = dir.join("bundle.js");
+    let compressed_bundle_path = dir.join("bundle.js.gz");
     let bundle_js = if bundle_js_path.is_file() {
         Some(fs::read_to_string(&bundle_js_path).map_err(|e| {
             format!(
@@ -64,6 +65,23 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
                 bundle_js_path.display()
             )
         })?)
+    } else if compressed_bundle_path.is_file() {
+        let file = fs::File::open(&compressed_bundle_path).map_err(|error| {
+            format!(
+                "registry package `{name}`: failed to read `{}`: {error}",
+                compressed_bundle_path.display()
+            )
+        })?;
+        let mut source = String::new();
+        flate2::read::GzDecoder::new(file)
+            .read_to_string(&mut source)
+            .map_err(|error| {
+                format!(
+                    "registry package `{name}`: failed to decompress `{}`: {error}",
+                    compressed_bundle_path.display()
+                )
+            })?;
+        Some(source)
     } else {
         None
     };

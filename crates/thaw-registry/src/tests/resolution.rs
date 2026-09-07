@@ -176,6 +176,8 @@ fn installed_root_defers_subpaths_until_requested() {
 
     add_installed_root(&registry, &scratch.join("node_modules"), "feature-kit").unwrap();
     assert!(resolve(&registry, "feature-kit").is_ok());
+    assert!(registry.join("feature-kit/bundle.js.gz").is_file());
+    assert!(!registry.join("feature-kit/bundle.js").exists());
     assert!(resolve(&registry, "feature-kit/double").is_err());
 
     add_installed_subpath(
@@ -186,6 +188,9 @@ fn installed_root_defers_subpaths_until_requested() {
     .unwrap();
     let subpath = resolve(&registry, "feature-kit/double").unwrap();
     assert!(subpath.bundle_js.unwrap().contains("value * 2"));
+    assert!(registry
+        .join("feature-kit/subpaths/double/bundle.js.gz")
+        .is_file());
     let _ = fs::remove_dir_all(scratch);
     let _ = fs::remove_dir_all(registry);
 }
