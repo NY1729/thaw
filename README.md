@@ -156,6 +156,12 @@ step. It installs the dependencies declared by the project's `package.json`:
 target/release/thaw install examples/hono-react-prisma-board
 ```
 
+Package scripts use the same names as npm:
+
+```bash
+target/release/thaw run build --prefix examples/hono-react-prisma-board
+```
+
 ```json
 {
   "version": 2,
