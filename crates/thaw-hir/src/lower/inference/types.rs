@@ -60,7 +60,11 @@ impl<'a> FnLowerer<'a> {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::OptionalSome(value, payload) => {
-                self.expect_type(payload, value, "optional payload")?;
+                if !(*payload == HirType::Json
+                    && self.infer_expr_type(value)? == HirType::JsValue)
+                {
+                    self.expect_type(payload, value, "optional payload")?;
+                }
                 Ok(HirType::Optional(Box::new(payload.clone())))
             }
             HirExpr::OptionalNone(payload) => Ok(HirType::Optional(Box::new(payload.clone()))),
