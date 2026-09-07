@@ -2306,6 +2306,22 @@ fn escapes_quotes_and_newlines_in_bundled_source() {
 }
 
 #[test]
+fn large_module_init_compresses_embedded_javascript() {
+    let source = "module.exports.value = 1;\n".repeat(200);
+    let init = generate_module_init(&[ModuleBundle {
+        package_name: "large-package",
+        js_source: &source,
+        fallback_names: &[],
+        qualified_aliases: &[],
+        nested_namespace_aliases: &[],
+        value_exports: &[],
+    }]);
+
+    assert!(init.contains("loadScript(\"gz:"));
+    assert!(!init.contains(&source));
+}
+
+#[test]
 fn wraps_real_commonjs_source_and_binds_default_export() {
     // The exact shape of left-pad's actual published `index.js`:
     // `module.exports = leftPad;`, no named exports object.
