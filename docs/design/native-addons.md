@@ -841,7 +841,8 @@ module EnvからURLを継承し、Env所有のNUL終端pointerを安定して返
 公式`node-addon-api`の集約test bindingも任意入力の互換性gateとして利用する。
 初期化時に必要なwell-known Symbolをglobalへ公開し、top-levelのObject exportもFunctionと同様に
 persistent handleとして保持する。`THAW_NODE_ADDON_API_BINDING`を指定したhost testは、無改変の
-公式bindingをloadし、ネストしたnumber／boolean APIをmethod bridge経由で実行する。
+公式bindingをloadし、primitive／collection／Promise APIに加えてAsyncWorkerとuntyped／typed
+thread-safe functionをNodeと同じ入力でmethod bridge経由実行し、JSON結果を比較する。
 生成物のbuild時には、選択された`.node`のundefined symbolを`nm`で読み、同じbuildがlinkする
 `thaw-napi` archiveの実exportと比較する。未実装の`napi_*`／`node_api_*`、またはNode／V8の
 内部C++ symbolへの直接依存は、実行時の`dlopen`失敗ではなく最終link前の診断にする。

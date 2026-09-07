@@ -804,6 +804,9 @@ fn wait_for_promise(value: NapiValue) -> Result<NapiValue, String> {
             return Err(message);
         }
         thaw_napi_poll_async_work();
+        if !matches!(*state.borrow(), PromiseState::Pending) {
+            continue;
+        }
         if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
             && LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
             && !unsafe { poll_uv_loop() }

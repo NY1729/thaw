@@ -471,6 +471,8 @@ fn runs_utf8_validate_prebuild_when_supplied() {
 
 #[test]
 fn runs_node_addon_api_official_binding_when_supplied() {
+    let _guard = lock_async_test();
+
     fn same_json(left: &JsonValue, right: &JsonValue) -> bool {
         match (left, right) {
             (JsonValue::Number(left), JsonValue::Number(right)) => left.as_f64() == right.as_f64(),
@@ -516,6 +518,12 @@ fn runs_node_addon_api_official_binding_when_supplied() {
         ["globalObject", "getPropertyWithInt32", [15]],
         ["promise", "isPromise", [{}]],
         ["promise", "resolvePromise", ["resolved"]],
+        ["asyncworker", "doWorkNoCallback", [true]],
+        ["asyncworker", "doWorkAsyncResNoCallback", [true, {}]],
+        ["threadsafe_function_existing_tsfn", "testCall", [{"blocking": false, "data": false}]],
+        ["threadsafe_function_existing_tsfn", "testCall", [{"blocking": true, "data": false}]],
+        ["typed_threadsafe_function_existing_tsfn", "testCall", [{"blocking": false, "data": false}]],
+        ["typed_threadsafe_function_existing_tsfn", "testCall", [{"blocking": true, "data": false}]],
         ["handlescope", "createScope", []],
         ["handlescope", "createScopeFromExisting", []],
         ["handlescope", "escapeFromScope", []],
@@ -561,10 +569,11 @@ const cases = JSON.parse(process.argv[2]);
                 thaw_napi_call_method_typed_result(receiver, method.as_ptr(), args.as_ptr());
             assert!(
                 result.error.is_null(),
-                "{}.{}: {}",
+                "{}.{}: {}; host error: {}",
                 case[0],
                 case[1],
-                CStr::from_ptr(result.error).to_string_lossy()
+                CStr::from_ptr(result.error).to_string_lossy(),
+                HOST.with(|host| host.borrow().last_error.clone())
             );
             let actual: JsonValue =
                 serde_json::from_str(CStr::from_ptr(result.value).to_str().unwrap()).unwrap();
