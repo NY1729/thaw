@@ -201,6 +201,35 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
         "quickjs: {}",
         manifest["quickjs"].as_bool().unwrap_or(false)
     );
+    if let Some(reasons) = manifest["quickjs_reasons"].as_array() {
+        for reason in reasons {
+            let kind = reason["kind"].as_str().unwrap_or("unknown");
+            let package = reason["package"]
+                .as_str()
+                .map(|value| format!(" package={value}"))
+                .unwrap_or_default();
+            let operation = reason["function"]
+                .as_str()
+                .or_else(|| reason["operation"].as_str())
+                .map(|value| format!(" operation={value}"))
+                .unwrap_or_default();
+            let detail = reason["detail"]
+                .as_str()
+                .map(|value| format!(" reason={value}"))
+                .unwrap_or_default();
+            let location = match (
+                reason["source"].as_str(),
+                reason["line"].as_u64(),
+                reason["column"].as_u64(),
+            ) {
+                (Some(source), Some(line), Some(column)) if line > 0 => {
+                    format!(" at {source}:{line}:{column}")
+                }
+                _ => String::new(),
+            };
+            println!("quickjs-reason: {kind}{package}{operation}{location}{detail}");
+        }
+    }
     println!("napi: {}", manifest["napi"].as_bool().unwrap_or(false));
     Ok(())
 }

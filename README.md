@@ -50,7 +50,9 @@ target/release/thaw inspect app
 ```
 
 This reports its ELF architecture, static/dynamic system linkage, embedded npm
-packages, and whether QuickJS or N-API support is present.
+packages, and whether QuickJS or N-API support is present. When QuickJS is
+needed, `quickjs-reason` lines identify explicit dynamic operations or registry
+fallback functions, including their package and source location when available.
 
 Compile the self-contained frontend + backend example:
 
@@ -234,7 +236,8 @@ It builds a minimal Hello program and the React/Vite/Hono/Prisma board twice,
 records initial and cached build times plus executable/sidecar sizes, starts the
 board, and checks its GET/POST API and frontend. The deliberately loose limits
 only catch large regressions; compare the saved JSON between machines or commits
-for smaller changes.
+for smaller changes. The board metrics also include its QuickJS reasons grouped
+by category, so moving a package path to JIT is visible alongside time and size.
 
 ```json
 {
