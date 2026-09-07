@@ -564,8 +564,11 @@ fn build_with_native_mode(
         .arg("-Wl,--gc-sections")
         .args(&registry_native_libs)
         .args(extra_links);
-    if !static_link {
-        linker.arg("-Wl,--export-dynamic");
+    if !static_link && uses_napi {
+        // Native addons resolve only the public Node-API surface from the
+        // executable. Exporting every Rust symbol keeps otherwise unreachable
+        // TLS/WASM/runtime sections alive and bloats dynamic symbol tables.
+        linker.args(napi_export_args());
     }
     let link_output = linker
         .arg("-Wl,--strip-all")
@@ -594,6 +597,24 @@ fn build_with_native_mode(
 
     println!("built `{}`", output.display());
     Ok(())
+}
+
+fn napi_export_args() -> [&'static str; 2] {
+    [
+        "-Wl,--export-dynamic-symbol=napi_*",
+        "-Wl,--export-dynamic-symbol=node_api_*",
+    ]
+}
+
+#[test]
+fn native_addons_export_only_node_api_symbols() {
+    assert_eq!(
+        napi_export_args(),
+        [
+            "-Wl,--export-dynamic-symbol=napi_*",
+            "-Wl,--export-dynamic-symbol=node_api_*",
+        ]
+    );
 }
 
 /// Returns whether generated or user source explicitly requires the dynamic
