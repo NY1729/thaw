@@ -131,6 +131,9 @@
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     const name = String(event);
     const listeners = processListeners.get(name) || [];
+    if (listeners.length === 0 && (name === 'SIGINT' || name === 'SIGTERM')) {
+      globalThis.__thaw_process_configure_signal(name, true);
+    }
     listeners.push({ listener, once });
     processListeners.set(name, listeners);
     return globalThis.process;
@@ -138,7 +141,11 @@
   const processOff = (event, listener) => {
     const name = String(event);
     const listeners = processListeners.get(name) || [];
-    processListeners.set(name, listeners.filter(entry => entry.listener !== listener));
+    const remaining = listeners.filter(entry => entry.listener !== listener);
+    processListeners.set(name, remaining);
+    if (remaining.length === 0 && (name === 'SIGINT' || name === 'SIGTERM')) {
+      globalThis.__thaw_process_configure_signal(name, false);
+    }
     return globalThis.process;
   };
   const processEmit = (event, ...args) => {

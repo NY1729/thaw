@@ -103,7 +103,10 @@ impl<'a> FnLowerer<'a> {
                             ty.clone()
                         }
                     })
-                    .or_else(|| (receiver.sym == *"crypto").then_some(HirType::JsValue))
+                    .or_else(|| {
+                        matches!(receiver.sym.as_ref(), "crypto" | "process")
+                            .then_some(HirType::JsValue)
+                    })
             }
             Expr::New(construction) => construction
                 .callee
