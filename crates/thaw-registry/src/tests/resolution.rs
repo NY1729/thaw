@@ -151,6 +151,46 @@ fn installed_npm_layout_registers_wildcard_subpath_artifacts() {
 }
 
 #[test]
+fn installed_root_defers_subpaths_until_requested() {
+    let scratch = temp_registry("lazy-subpath-scratch");
+    let registry = temp_registry("lazy-subpath-registry");
+    let package = scratch.join("node_modules/feature-kit");
+    fs::create_dir_all(package.join("features")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"feature-kit","types":"./index.d.ts","main":"./index.js","exports":{".":{"types":"./index.d.ts","require":"./index.js"},"./double":{"types":"./features/double.d.ts","require":"./features/double.js"}}}"#,
+    )
+    .unwrap();
+    fs::write(package.join("index.d.ts"), "export declare const root: number;").unwrap();
+    fs::write(package.join("index.js"), "exports.root = 1;").unwrap();
+    fs::write(
+        package.join("features/double.d.ts"),
+        "export declare function double(value: number): number;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("features/double.js"),
+        "exports.double = function(value) { return value * 2; };",
+    )
+    .unwrap();
+
+    add_installed_root(&registry, &scratch.join("node_modules"), "feature-kit").unwrap();
+    assert!(resolve(&registry, "feature-kit").is_ok());
+    assert!(resolve(&registry, "feature-kit/double").is_err());
+
+    add_installed_subpath(
+        &registry,
+        &scratch.join("node_modules"),
+        "feature-kit/double",
+    )
+    .unwrap();
+    let subpath = resolve(&registry, "feature-kit/double").unwrap();
+    assert!(subpath.bundle_js.unwrap().contains("value * 2"));
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_named_function_reexports() {
     let scratch = temp_registry("installed-dts-reexport-scratch");
     let registry = temp_registry("installed-dts-reexport-registry");

@@ -5989,7 +5989,6 @@ fn registers_builds_and_runs_an_installed_npm_wildcard_subpath() {
     )
     .unwrap();
     let registry = dir.join("registry");
-    thaw_registry::add_installed(&registry, &node_modules, "feature-kit").unwrap();
 
     let entry = dir.join("main.ts");
     std::fs::write(
@@ -6009,6 +6008,10 @@ fn registers_builds_and_runs_an_installed_npm_wildcard_subpath() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    assert!(registry.join("feature-kit/package.d.ts").is_file());
+    assert!(registry
+        .join("feature-kit/subpaths/features/triple/package.d.ts")
+        .is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
 
