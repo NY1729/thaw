@@ -5,6 +5,26 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+fn record_acceptance_metrics(name: &str, build_time: Duration, output: &Path) {
+    let executable_bytes = std::fs::metadata(output).unwrap().len();
+    let metrics = serde_json::json!({
+        "scenario": name,
+        "build_ms": build_time.as_millis(),
+        "executable_bytes": executable_bytes,
+    });
+    println!("thaw acceptance: {metrics}");
+    if let Ok(directory) = std::env::var("THAW_ACCEPTANCE_OUTPUT_DIR") {
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            Path::new(&directory).join(format!("{name}.json")),
+            format!("{metrics}\n"),
+        )
+        .unwrap();
+    }
+    assert!(build_time < Duration::from_secs(120), "{metrics}");
+    assert!(executable_bytes < 100 * 1024 * 1024, "{metrics}");
+}
+
 include!("tests/static_build.rs");
 
 include!("tests/module_graph.rs");
