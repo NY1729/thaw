@@ -507,6 +507,12 @@ CLIは選択済み`native.node`をビルド時に読み、16進データとし�
 `memfd`へ書き込んで`/proc/self/fd/<fd>`から`dlopen`する。このため配布先に
 registry、`native-addon.json`、元の`.node`をコピーする必要はない。
 
+サイズと反復ビルド時間を優先するローカル運用では
+`thaw build --external-native`を選べる。この場合は依存共有ライブラリを
+`RTLD_GLOBAL`、`native.node`を絶対pathから`dlopen`し、バイナリ本体には
+埋め込まない。生成物はそのregistry pathに依存するため、単一ファイル配布の
+既定値は引き続き埋め込みとする。
+
 統合テストはリンク完了後にregistryディレクトリを削除してから生成物を起動し、
 埋め込まれたaddonだけで呼び出せることを確認する。非Linuxでは互換経路として
 一時ファイルへ展開するが、配布成果物そのものは同じく実行ファイル1個である。

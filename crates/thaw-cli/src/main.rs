@@ -28,6 +28,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("dev") => {
+            if let Err(err) = run_dev(&args[2..]) {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("registry") => {
             if let Err(err) = run_registry(&args[2..]) {
                 eprintln!("error: {err}");
@@ -42,7 +48,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw install [directory]\n       thaw run <script> [--prefix <directory>]\n       thaw build <input.ts> [-o <output>] [--static] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
+                "usage: thaw install [directory]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts> [build options]\n       thaw build <input.ts> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
             );
             std::process::exit(1);
         }
@@ -104,6 +110,8 @@ fn npm_run_command(script: &str, directory: &Path) -> Command {
     command.args(["run", script, "--prefix"]).arg(directory);
     command
 }
+
+include!("dev.rs");
 
 const ARTIFACT_MARKER: &str = "THAW_ARTIFACT_V1:";
 
@@ -274,6 +282,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut assets: Option<PathBuf> = None;
     let mut vite: Option<PathBuf> = None;
     let mut static_link = false;
+    let mut embed_native_addons = true;
 
     let mut i = 0;
     while i < args.len() {
@@ -325,6 +334,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
                 vite = Some(PathBuf::from(value));
             }
             "--static" => static_link = true,
+            "--external-native" => embed_native_addons = false,
             other => {
                 if input.is_some() {
                     return Err(format!("unexpected extra argument `{other}`"));
@@ -348,7 +358,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     }
 
     if let Some(assets) = assets {
-        build_with_assets(
+        build_with_native_mode(
             &input,
             &output,
             &extra_links,
@@ -358,9 +368,10 @@ fn run_build(args: &[String]) -> Result<(), String> {
             &use_packages,
             static_link,
             Some(&assets),
+            embed_native_addons,
         )
     } else {
-        build_with_link_mode(
+        build_with_native_mode(
             &input,
             &output,
             &extra_links,
@@ -369,6 +380,8 @@ fn run_build(args: &[String]) -> Result<(), String> {
             &registry_dir,
             &use_packages,
             static_link,
+            None,
+            embed_native_addons,
         )
     }
 }

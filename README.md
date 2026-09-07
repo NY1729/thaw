@@ -162,6 +162,25 @@ Package scripts use the same names as npm:
 target/release/thaw run build --prefix examples/hono-react-prisma-board
 ```
 
+During development, Thaw watches TypeScript, JavaScript, CSS, HTML, and JSON
+sources, then rebuilds and restarts the executable. Native addons stay external
+in this mode to avoid embedding them again on every edit:
+
+```bash
+target/release/thaw dev examples/hono-react-prisma-board/server.ts \
+  --vite examples/hono-react-prisma-board
+```
+
+Native registry addons are embedded by default for a single-file executable.
+For smaller local builds, keep them in `thaw_modules` and load them dynamically:
+
+```bash
+target/release/thaw build server.ts --external-native -o app
+```
+
+The external mode records absolute library paths, so the registry must remain
+available on the target machine.
+
 The complete install, Prisma setup, compile, API, and React serving path can
 be checked with:
 
