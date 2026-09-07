@@ -22,6 +22,20 @@ fn native_promise_state(_promise: *const c_void) -> u8 {
 #[no_mangle]
 pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
     let source = to_str(source);
+    let source = match source.strip_prefix("gz:") {
+        Some(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()
+            .and_then(|compressed| {
+                let mut decoded = String::new();
+                flate2::read::GzDecoder::new(compressed.as_slice())
+                    .read_to_string(&mut decoded)
+                    .ok()
+                    .map(|_| decoded)
+            })
+            .unwrap_or(source),
+        None => source,
+    };
     with_context(|ctx| match load_impl(ctx, &source) {
         Ok(()) => 1,
         Err(reason) => {

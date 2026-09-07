@@ -14,6 +14,27 @@ fn load(source: &str) -> u8 {
     thaw_js_load(source.as_ptr())
 }
 
+#[test]
+fn load_script_accepts_gzip_base64_source() {
+    use base64::Engine as _;
+    use std::io::Write;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(b"globalThis.__thaw_compressed_script = 42;")
+        .unwrap();
+    let source = format!(
+        "gz:{}",
+        base64::engine::general_purpose::STANDARD.encode(encoder.finish().unwrap())
+    );
+
+    assert_eq!(load(&source), 1);
+    assert_eq!(
+        eval_json("globalThis.__thaw_compressed_script"),
+        Ok(Some("42".into()))
+    );
+}
+
 #[cfg(not(feature = "brotli"))]
 #[test]
 fn minimal_host_keeps_gzip_and_rejects_brotli() {
