@@ -1183,6 +1183,29 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             break;
         }
     }
+    // An explicit `any` parameter participates in ordinary call-site
+    // inference so a live JS object keeps its handle. If it has no callers,
+    // retain the old JSON fallback instead of reporting it as unannotated.
+    for declaration in &fn_decls {
+        let Some(signature) = signatures.get_mut(declaration.ident.sym.as_ref()) else {
+            continue;
+        };
+        for (parameter, ty) in declaration.function.params.iter().zip(&mut signature.params) {
+            if *ty == HirType::Dynamic
+                && matches!(
+                    &parameter.pat,
+                    Pat::Ident(binding)
+                        if binding.type_ann.as_ref().is_some_and(|annotation| matches!(
+                            annotation.type_ann.as_ref(),
+                            TsType::TsKeywordType(keyword)
+                                if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
+                        ))
+                )
+            {
+                *ty = HirType::Json;
+            }
+        }
+    }
     if let Some((name, signature)) = signatures.iter().find(|(_, signature)| {
         !signature.is_extern
             && signature.generic_type_params.is_empty()

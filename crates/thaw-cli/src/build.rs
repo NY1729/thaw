@@ -468,7 +468,10 @@ fn build_with_native_mode(
     let uses_wasm = source_uses_wasm(&shim_source) || source_uses_wasm(&user_source);
     let uses_tls = source_uses_tls(&shim_source) || source_uses_tls(&user_source);
     let uses_brotli = source_uses_brotli(&shim_source) || source_uses_brotli(&user_source);
-    let quickjs_lib = uses_quickjs
+    // A QuickJS-enabled `thaw-napi` staticlib already contains its Rust
+    // dependency objects. Linking a second standalone QuickJS archive would
+    // define every host symbol twice.
+    let quickjs_lib = (uses_quickjs && !uses_napi)
         .then(|| {
             let mut features = Vec::new();
             if uses_brotli {
