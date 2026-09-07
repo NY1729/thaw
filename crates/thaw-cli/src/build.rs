@@ -381,6 +381,13 @@ fn build_with_native_mode(
                 .into(),
         );
     }
+    let quickjs_reasons = quickjs_fallback_reasons(
+        input,
+        &user_source,
+        &shim_source,
+        &resolved_packages,
+        &external_exports,
+    );
     let manifest = serde_json::json!({
         "packages": resolved_packages,
         // Registry fallback wrappers contain `callDynamic(...)` even when a
@@ -390,6 +397,7 @@ fn build_with_native_mode(
         "quickjs": shim_source.contains("loadScript(")
             || source_uses_quickjs(&user_source)
             || shim_source.contains("__thaw_typed_js_"),
+        "quickjs_reasons": quickjs_reasons,
         "napi": shim_source.contains("loadNativeAddonEmbedded(")
             || shim_source.contains("loadNativeAddon("),
     });
@@ -750,6 +758,99 @@ fn source_uses_quickjs(source: &str) -> bool {
     ]
     .iter()
     .any(|marker| source.contains(marker))
+}
+
+fn quickjs_fallback_reasons(
+    input: &Path,
+    source: &str,
+    shim_source: &str,
+    packages: &[String],
+    exports: &ExternalExports,
+) -> Vec<serde_json::Value> {
+    let mut reasons = Vec::new();
+    for operation in [
+        "loadScript",
+        "callDynamic",
+        "getDynamicValue",
+        "callDynamicValue",
+        "callDynamicValueHandle",
+        "callDynamicValueWithValue",
+        "releaseDynamicValue",
+        "getDynamicProperty",
+        "setDynamicProperty",
+        "callDynamicMethod",
+        "readDynamicValue",
+        "callDynamicValueMixed",
+        "constructDynamicValue",
+    ] {
+        if let Some(offset) = source.find(&format!("{operation}(")) {
+            let (line, column) = source_line_column(source, offset);
+            reasons.push(serde_json::json!({
+                "kind": "dynamic-operation",
+                "operation": operation,
+                "detail": "explicit dynamic host call",
+                "source": input.display().to_string(),
+                "line": line,
+                "column": column,
+            }));
+        }
+    }
+    let mut seen_targets = std::collections::HashSet::new();
+    for package in packages {
+        let Some(package_exports) = exports.get(package) else {
+            continue;
+        };
+        let mut package_uses_quickjs = false;
+        for (function, target) in package_exports {
+            let key = format!("{package}::{function}");
+            let encoded = key
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            if !shim_source.contains(&format!("__thaw_typed_js_{encoded}"))
+                || !seen_targets.insert(target)
+            {
+                continue;
+            }
+            package_uses_quickjs = true;
+            let Some(offset) = source
+                .find(&format!("{function}("))
+                .or_else(|| source.find(&format!(".{function}(")))
+            else {
+                continue;
+            };
+            let (line, column) = source_line_column(source, offset);
+            reasons.push(serde_json::json!({
+                "kind": "registry-fallback",
+                "package": package,
+                "function": function,
+                "detail": "package export was not specialized by the JIT",
+                "source": input.display().to_string(),
+                "line": line,
+                "column": column,
+            }));
+        }
+        if package_uses_quickjs
+            && !reasons
+                .iter()
+                .any(|reason| reason["package"].as_str() == Some(package))
+        {
+            reasons.push(serde_json::json!({
+                "kind": "package-runtime",
+                "package": package,
+                "detail": "package initialization requires its JavaScript bundle",
+            }));
+        }
+    }
+    reasons
+}
+
+fn source_line_column(source: &str, offset: usize) -> (usize, usize) {
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix.rsplit_once('\n').map_or(prefix.len(), |(_, tail)| tail.len()) + 1;
+    (line, column)
 }
 
 fn source_uses_wasm(source: &str) -> bool {
