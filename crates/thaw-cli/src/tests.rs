@@ -164,6 +164,23 @@ fn dev_reuses_built_vite_assets_for_backend_only_changes() {
 }
 
 #[test]
+fn dev_reads_entry_and_vite_defaults_from_the_project() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-dev-project-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"thaw":{"entry":"server.ts","vite":"web"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        dev_project_paths(&[], &directory).unwrap(),
+        (PathBuf::from("server.ts"), Some(PathBuf::from("web")))
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn project_build_reads_package_defaults() {
     assert_eq!(
         project_build_defaults(r#"{"thaw":{"entry":"server.ts","vite":"web","output":"app"}}"#)

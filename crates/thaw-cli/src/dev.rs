@@ -4,9 +4,15 @@ use std::process::Child;
 use std::time::Duration;
 
 fn run_dev(args: &[String]) -> Result<(), String> {
-    let input = args.first().ok_or("usage: thaw dev <input.ts> [build options]")?;
-    let input = PathBuf::from(input);
+    let (input, configured_vite) = dev_project_paths(args, Path::new("."))?;
     let mut build_args = args.to_vec();
+    if let Some(directory) = configured_vite.filter(|_| {
+        !build_args
+            .iter()
+            .any(|argument| argument == "--vite" || argument == "--assets")
+    }) {
+        build_args.extend(["--vite".into(), directory.display().to_string()]);
+    }
     if !build_args.iter().any(|arg| arg == "--static" || arg == "--external-native") {
         build_args.push("--external-native".into());
     }
@@ -58,6 +64,21 @@ fn run_dev(args: &[String]) -> Result<(), String> {
         eprintln!("change detected; rebuilding...");
         child = rebuild_and_start(&rebuild_args, &output, child);
     }
+}
+
+fn dev_project_paths(args: &[String], directory: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
+    if let Some(input) = args.first().filter(|argument| !argument.starts_with('-')) {
+        return Ok((PathBuf::from(input), None));
+    }
+    let manifest = std::fs::read_to_string(directory.join("package.json")).map_err(|_| {
+        "missing input file and package.json has no project configuration".to_string()
+    })?;
+    let configured = project_build_defaults(&manifest)?;
+    let input = configured
+        .0
+        .or_else(|| directory.join("server.ts").is_file().then(|| PathBuf::from("server.ts")))
+        .ok_or("missing input file; set `thaw.entry` in package.json or add server.ts")?;
+    Ok((input, configured.1))
 }
 
 fn reuse_vite_assets(args: &[String], directory: &Path) -> Vec<String> {
