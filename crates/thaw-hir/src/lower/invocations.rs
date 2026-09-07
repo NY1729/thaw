@@ -1980,7 +1980,9 @@ impl<'a> FnLowerer<'a> {
             .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
             if !types.contains(&HirType::Dynamic) {
                 for ty in &types {
-                    if !supports_generic_native_layout(ty) {
+                    if !(supports_generic_native_layout(ty)
+                        || signature.is_extern && supports_generic_dynamic_layout(ty))
+                    {
                         return Err(format!(
                             "generic function `{callee_name}` cannot specialize for native layout {ty:?}"
                         ));
