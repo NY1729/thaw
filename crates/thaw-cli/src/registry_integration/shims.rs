@@ -6,6 +6,7 @@
 struct ResolvedPackage {
     name: String,
     commonjs_export_name: Option<String>,
+    called_commonjs_namespace_properties: std::collections::HashSet<String>,
     functions: Vec<thaw_bridge::DtsFunction>,
     values: Vec<thaw_bridge::DtsValue>,
     classes: Vec<thaw_bridge::DtsClass>,
@@ -22035,6 +22036,73 @@ fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
     }))
 }
 
+/// Function-valued properties merged onto a callable CommonJS export.
+/// DefinitelyTyped commonly spells these as `namespace e { var json:
+/// typeof bodyParser.json; }` (rather than a namespace `function`), so
+/// `parse_dts` cannot recover their imported signature from this file.
+/// Only return properties the program actually calls; the dynamic host
+/// already handles their values and argument packing.
+fn called_commonjs_namespace_properties(
+    source: &str,
+    namespace: Option<&str>,
+    observed: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat, Stmt, TsModuleName, TsNamespaceBody, TsType};
+
+    let Some(namespace) = namespace else {
+        return Ok(Vec::new());
+    };
+    let module = thaw_parser::parse_typescript(source)?;
+    let mut names = Vec::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
+            continue;
+        };
+        let TsModuleName::Ident(module_name) = &module_decl.id else {
+            continue;
+        };
+        if module_name.sym.as_str() != namespace {
+            continue;
+        }
+        let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+            continue;
+        };
+        for member in &block.body {
+            let declaration = match member {
+                ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) => Some(declaration),
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                    if let Decl::Var(declaration) = &export.decl {
+                        Some(declaration)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let Some(declaration) = declaration else {
+                continue;
+            };
+            for declarator in &declaration.decls {
+                let Pat::Ident(binding) = &declarator.name else {
+                    continue;
+                };
+                let name = binding.id.sym.to_string();
+                if observed.contains_key(&name)
+                    && matches!(
+                        binding.type_ann.as_ref().map(|annotation| annotation.type_ann.as_ref()),
+                        Some(TsType::TsTypeQuery(_))
+                    )
+                {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -22056,6 +22124,13 @@ fn generate_registry_shims(
 ) -> Result<RegistryShims, String> {
     let observed_arities = observed_member_call_arities(user_source)?;
     let observed_identifier_arities = observed_identifier_call_arities(user_source)?;
+    let mut observed_function_arities = observed_identifier_arities.clone();
+    for (name, arities) in &observed_arities {
+        observed_function_arities
+            .entry(name.clone())
+            .or_default()
+            .extend(arities);
+    }
     let mut resolved = Vec::new();
     for name in use_packages {
         let package = if name.starts_with("node:") {
@@ -22063,7 +22138,7 @@ fn generate_registry_shims(
         } else {
             thaw_registry::resolve(registry_dir, name)?
         };
-        let functions = thaw_bridge::parse_dts(&package.dts_source)
+        let mut functions = thaw_bridge::parse_dts(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
         let classes = thaw_bridge::parse_dts_classes(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
@@ -22071,6 +22146,35 @@ fn generate_registry_shims(
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
         let commonjs_export_name = commonjs_export_name(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s CommonJS export: {e}"))?;
+        let called_commonjs_namespace_properties = called_commonjs_namespace_properties(
+            &package.dts_source,
+            commonjs_export_name.as_deref(),
+            &observed_arities,
+        )
+        .map_err(|e| format!("failed to parse `{name}`'s CommonJS properties: {e}"))?;
+        for property in &called_commonjs_namespace_properties {
+            if functions.iter().any(|function| &function.name == property) {
+                continue;
+            }
+            let arities = &observed_arities[property];
+            let minimum = *arities.first().expect("called properties have an arity");
+            let maximum = *arities.last().expect("called properties have an arity");
+            functions.push(thaw_bridge::DtsFunction {
+                name: property.clone(),
+                generic: None,
+                params: (0..maximum)
+                    .map(|index| {
+                        (
+                            format!("arg{index}"),
+                            thaw_bridge::DtsType::Native(thaw_hir::HirType::Json),
+                        )
+                    })
+                    .collect(),
+                required_params: minimum,
+                rest_param: None,
+                ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
+            });
+        }
         // Whether there's actually a `native.a` to link a FastPath
         // signature against -- without one, a fully-primitive real npm
         // function (e.g. date-fns's `daysToWeeks(days: number): number`)
@@ -22093,6 +22197,9 @@ fn generate_registry_shims(
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             commonjs_export_name,
+            called_commonjs_namespace_properties: called_commonjs_namespace_properties
+                .into_iter()
+                .collect(),
             functions,
             values,
             classes,
@@ -22623,7 +22730,7 @@ fn generate_registry_shims(
                     .map(|operation| jit_numeric_declaration(&pkg.name, function, operation))
                     .or_else(|| {
                         let empty_arities = std::collections::BTreeSet::new();
-                        let call_arities = observed_identifier_arities
+                        let call_arities = observed_function_arities
                             .get(&function.name)
                             .unwrap_or(&empty_arities);
                         typed_dynamic_declaration(&pkg.name, function, napi, call_arities, None)
@@ -22706,6 +22813,25 @@ fn generate_registry_shims(
                         (pkg.name.clone(), function.name.clone()),
                         symbol.clone(),
                     );
+                    if pkg
+                        .called_commonjs_namespace_properties
+                        .contains(&function.name)
+                    {
+                        if let Some(alias) = qualified
+                            .iter()
+                            .find(|qualified| qualified.name == function.name)
+                            .map(|qualified| qualified.alias.clone())
+                        {
+                            fallback_function_overload_rewrites.push((
+                                alias,
+                                symbol.clone(),
+                                function.required_params,
+                                function.params.len(),
+                                dts_function_param_hir_types(function),
+                                None,
+                            ));
+                        }
+                    }
                     if observed_identifier_arities.contains_key(&function.name)
                         && !overloaded_names_for_argument_shape_dispatch
                             .contains(&function.name.as_str())
@@ -22796,7 +22922,7 @@ fn generate_registry_shims(
             }
             let napi = pkg.native_addon.is_some() && pkg.bundle_js.is_none();
             let empty_arities = std::collections::BTreeSet::new();
-            let call_arities = observed_identifier_arities
+            let call_arities = observed_function_arities
                 .get(name)
                 .unwrap_or(&empty_arities);
             for (index, function) in pkg.functions.iter().enumerate() {

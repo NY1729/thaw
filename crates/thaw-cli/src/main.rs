@@ -60,7 +60,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
+                "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
             );
             std::process::exit(1);
         }
@@ -433,15 +433,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
             .map_err(|_| format!("`{}` does not contain package.json", directory.display()))?;
         let (configured_input, configured_vite, configured_output) =
             project_build_defaults(&manifest)?;
-        input = configured_input
-            .filter(|path| directory.join(path).is_file())
-            .map(|path| directory.join(path))
-            .or_else(|| {
-                ["server.ts", "src/server.ts", "index.ts", "src/index.ts"]
-                    .into_iter()
-                    .map(|path| directory.join(path))
-                    .find(|path| path.is_file())
-            });
+        input = project_input_path(directory, configured_input);
         if output.is_none() {
             output = configured_output
                 .map(|path| directory.join(path))
@@ -454,8 +446,14 @@ fn run_build(args: &[String]) -> Result<(), String> {
             registry_dir = directory.join("thaw_modules");
         }
     }
-    let input =
-        input.ok_or("missing input file; set `thaw.entry` in package.json or add server.ts")?;
+    let generated_input = if input.is_none() && vite.is_some() {
+        Some(write_static_asset_server_entry()?)
+    } else {
+        None
+    };
+    let input = input
+        .or_else(|| generated_input.clone())
+        .ok_or("missing input file; set `thaw.entry` in package.json or add server.ts")?;
     let output = output.unwrap_or_else(|| {
         let stem = input.file_stem().unwrap_or_default();
         PathBuf::from(stem)
@@ -467,33 +465,22 @@ fn run_build(args: &[String]) -> Result<(), String> {
         assets = Some(build_vite_project(&directory)?);
     }
 
-    if let Some(assets) = assets {
-        build_with_native_mode(
-            &input,
-            &output,
-            &extra_links,
-            &bridge_dts,
-            &ffi_metadata,
-            &registry_dir,
-            &use_packages,
-            static_link,
-            Some(&assets),
-            embed_native_addons,
-        )
-    } else {
-        build_with_native_mode(
-            &input,
-            &output,
-            &extra_links,
-            &bridge_dts,
-            &ffi_metadata,
-            &registry_dir,
-            &use_packages,
-            static_link,
-            None,
-            embed_native_addons,
-        )
+    let result = build_with_native_mode(
+        &input,
+        &output,
+        &extra_links,
+        &bridge_dts,
+        &ffi_metadata,
+        &registry_dir,
+        &use_packages,
+        static_link,
+        assets.as_deref(),
+        embed_native_addons,
+    );
+    if let Some(path) = generated_input {
+        let _ = std::fs::remove_file(path);
     }
+    result
 }
 
 #[allow(clippy::type_complexity)]
@@ -508,11 +495,28 @@ fn project_build_defaults(
             .and_then(serde_json::Value::as_str)
             .map(PathBuf::from)
     };
-    let entry = path("entry").or_else(|| {
-        ["source", "module", "main"]
-            .into_iter()
-            .find_map(|name| manifest.get(name)?.as_str().map(PathBuf::from))
-    });
+    let entry = path("entry")
+        .or_else(|| {
+            ["source", "module", "main"]
+                .into_iter()
+                .find_map(|name| manifest.get(name)?.as_str().map(PathBuf::from))
+        })
+        .or_else(|| {
+            ["start", "dev"].into_iter().find_map(|name| {
+                manifest["scripts"][name]
+                    .as_str()?
+                    .split_whitespace()
+                    .find(|word| {
+                        matches!(
+                            Path::new(word)
+                                .extension()
+                                .and_then(|extension| extension.to_str()),
+                            Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
+                        )
+                    })
+                    .map(PathBuf::from)
+            })
+        });
     let vite = path("vite").or_else(|| {
         manifest["scripts"]["build"]
             .as_str()
@@ -520,6 +524,38 @@ fn project_build_defaults(
             .then(|| PathBuf::from("."))
     });
     Ok((entry, vite, path("output")))
+}
+
+fn project_input_path(directory: &Path, configured: Option<PathBuf>) -> Option<PathBuf> {
+    configured
+        .filter(|path| directory.join(path).is_file())
+        .map(|path| directory.join(path))
+        .or_else(|| {
+            ["server.ts", "src/server.ts", "index.ts", "src/index.ts"]
+                .into_iter()
+                .map(|path| directory.join(path))
+                .find(|path| path.is_file())
+        })
+}
+
+fn write_static_asset_server_entry() -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(format!("thaw-vite-entry-{}.ts", std::process::id()));
+    std::fs::write(
+        &path,
+        r#"import { createServer } from "node:http";
+function main(): void {
+  const port: number = Number(process.env.PORT) || 3000;
+  const server = createServer((request: { method: string; url: string }, response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }): boolean => {
+    if (request.method === "GET" && thawServeAsset(response, request.url)) { return true; }
+    response.statusCode = 404;
+    return response.end("Not Found");
+  });
+  server.listen(port, (): void => { console.log(`http://127.0.0.1:${port}`); });
+}
+"#,
+    )
+    .map_err(|error| format!("failed to create Vite server entry: {error}"))?;
+    Ok(path)
 }
 
 fn build_vite_project(directory: &Path) -> Result<PathBuf, String> {
