@@ -151,6 +151,21 @@ impl<'a> FnLowerer<'a> {
         if let Some(adapted) = self.adapt_named_function_to_callable(declared, &value)? {
             return Ok(adapted);
         }
+        if let (
+            HirType::Function(declared_params, declared_return),
+            HirType::Function(actual_params, actual_return),
+        ) = (declared, self.infer_expr_type(&value)?)
+        {
+            if declared_return.as_ref() == actual_return.as_ref()
+                && declared_params.len() == actual_params.len()
+                && declared_params.iter().zip(&actual_params).all(|(declared, actual)| {
+                    declared == actual
+                        || (*declared == HirType::Json && *actual == HirType::JsValue)
+                })
+            {
+                return Ok(value);
+            }
+        }
         if let HirType::Dictionary(element) = declared {
             if self.infer_expr_type(&value)? == *declared {
                 return Ok(value);

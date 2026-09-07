@@ -3282,8 +3282,36 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"slice" {
-                    let receiver = self.lower_expr(&member.obj)?;
-                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let mut receiver = self.lower_expr(&member.obj)?;
+                    let mut receiver_type = self.infer_expr_type(&receiver)?;
+                    if matches!(receiver_type, HirType::Json | HirType::JsValue) {
+                        receiver = self.coerce_primitive_to_string(receiver)?;
+                        receiver_type = HirType::Str;
+                    }
+                    if receiver_type == HirType::Str {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "String.slice")?;
+                        if arguments.len() > 2 {
+                            return Err("native string `.slice()` expects zero to two arguments".into());
+                        }
+                        let start = arguments
+                            .first()
+                            .cloned()
+                            .map(|value| self.coerce_primitive_to_number(value))
+                            .transpose()?
+                            .unwrap_or(HirExpr::Lit(HirLit::F64(0.0)));
+                        let end = arguments
+                            .get(1)
+                            .cloned()
+                            .map(|value| self.coerce_primitive_to_number(value))
+                            .transpose()?
+                            .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_slice".into())),
+                            vec![receiver, start, end],
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     if !matches!(receiver_type, HirType::Array(_)) {
                         return Err(format!(
                             "`.slice()` requires a homogeneous array, got {receiver_type:?}"
@@ -3638,8 +3666,14 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     }
-                    let receiver = self.lower_expr(&member.obj)?;
-                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let mut receiver = self.lower_expr(&member.obj)?;
+                    let mut receiver_type = self.infer_expr_type(&receiver)?;
+                    if matches!(property.sym.as_ref(), "startsWith" | "endsWith")
+                        && matches!(receiver_type, HirType::Json | HirType::JsValue)
+                    {
+                        receiver = self.coerce_primitive_to_string(receiver)?;
+                        receiver_type = HirType::Str;
+                    }
                     if receiver_type == HirType::Str {
                         let needle = self.coerce_primitive_to_string(arguments[0].clone())?;
                         let position = if let Some(argument) = arguments.get(1) {

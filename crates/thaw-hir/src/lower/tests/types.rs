@@ -554,6 +554,23 @@ fn extern_generics_accept_json_collection_layouts() {
 }
 
 #[test]
+fn extern_dynamic_parameters_contextually_type_callback_arguments() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        declare function subscribe(callback: any): void;
+        function main(): void {
+            subscribe((error, value) => {
+                if (error) console.log(error);
+                console.log(value);
+            });
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_ok());
+}
+
+#[test]
 fn propagates_specializations_through_generic_function_calls() {
     let program = lower(
         r#"
