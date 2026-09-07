@@ -1,4 +1,42 @@
 #[test]
+fn bare_imports_automatically_register_installed_packages() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-installed-bare-imports-{}",
+        std::process::id()
+    ));
+    let project = dir.join("project");
+    let package = project.join("node_modules/installed-kit");
+    let registry = dir.join("registry");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"installed-kit","version":"1.0.0","types":"index.d.ts","main":"index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("index.d.ts"),
+        "export declare function twice(value: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(package.join("index.js"), "exports.twice = value => value * 2;\n").unwrap();
+    let entry = project.join("src/main.ts");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(
+        &entry,
+        "import { twice } from 'installed-kit';\nfunction main(): void { console.log(twice(21)); }\n",
+    )
+    .unwrap();
+
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    assert!(registry.join("installed-kit/package.d.ts").is_file());
+    let result = Command::new(output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bare_imports_automatically_resolve_registry_packages() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-bare-imports-{}", std::process::id()));
     let registry = dir.join("modules");
