@@ -53,6 +53,8 @@ This reports its ELF architecture, static/dynamic system linkage, embedded npm
 packages, and whether QuickJS or N-API support is present. When QuickJS is
 needed, `quickjs-reason` lines identify explicit dynamic operations or registry
 fallback functions, including their package and source location when available.
+Registry reasons distinguish unsupported generic/rest signatures and native
+types from function bodies that exceed the specialization JIT IR.
 
 Compile the self-contained frontend + backend example:
 
