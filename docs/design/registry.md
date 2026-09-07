@@ -894,6 +894,9 @@ namespace import はpackage固有のshim symbolへ変換されるため、同名
 `types`/`typings` と `main` にフォールバックする。`./feature` のような正確な
 package subpath exportは、登録時に専用の型定義とruntime bundleを
 `subpaths/feature/`へ保存し、`pkg/feature` importからrootとは独立して解決する。
+プロジェクトの既存`node_modules`からbuild時に自動登録する場合はrootだけを先に
+登録し、静的importで実際に参照されたsubpathだけを追加生成する。明示的な
+`registry add`は一時取得元を処理後に削除するため、従来通り全subpathを登録する。
 `./features/*` のような単一wildcard exportも、型定義targetに一致する実在
 ファイルを登録時に列挙し、同じ置換値をruntime targetへ適用する。すでに
 依存を取得済みのvendor/offline workflowでは `add_installed` が同じ登録処理を

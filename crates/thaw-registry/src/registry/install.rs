@@ -520,7 +520,7 @@ fn fetch_and_copy(
     } else {
         None
     };
-    add_installed_inner(registry_dir, &node_modules_dir, name, fallback_dts)
+    add_installed_inner(registry_dir, &node_modules_dir, name, fallback_dts, true)
 }
 
 /// Registers a package that already exists under `node_modules_dir`.
@@ -531,7 +531,18 @@ pub fn add_installed(
     node_modules_dir: &Path,
     name: &str,
 ) -> Result<AddedPackage, String> {
-    add_installed_inner(registry_dir, node_modules_dir, name, None)
+    add_installed_inner(registry_dir, node_modules_dir, name, None, true)
+}
+
+/// Registers only the package root. Builds that use a project's existing
+/// `node_modules` can then materialize imported subpaths individually with
+/// [`add_installed_subpath`] instead of eagerly bundling every export.
+pub fn add_installed_root(
+    registry_dir: &Path,
+    node_modules_dir: &Path,
+    name: &str,
+) -> Result<AddedPackage, String> {
+    add_installed_inner(registry_dir, node_modules_dir, name, None, false)
 }
 
 fn add_installed_inner(
@@ -539,6 +550,7 @@ fn add_installed_inner(
     node_modules_dir: &Path,
     name: &str,
     fallback_dts: Option<(String, String)>,
+    eager_subpaths: bool,
 ) -> Result<AddedPackage, String> {
     let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
@@ -667,39 +679,17 @@ fn add_installed_inner(
             )
         })?;
     }
-    for export in package_subpath_exports(&manifest, &package_dir)? {
-        let subpath = export.subpath;
-        let (subpath_js, _, _, subpath_dependencies) = bundle_commonjs_package_cached(
-            node_modules_dir,
-            name,
-            &package_dir,
-            &export.runtime_entry,
-            &mut bundle_source_cache,
-        )?;
-        dependency_versions.extend(subpath_dependencies);
-        let types_path = package_dir.join(&export.types_entry);
-        let subpath_dts = fs::read_to_string(&types_path).map_err(|error| {
-            format!(
-                "failed to read package export `./{subpath}` types `{}`: {error}",
-                types_path.display()
-            )
-        })?;
-        let subpath_dts = dts_source_with_reexported_functions(&types_path, &subpath_dts)?;
-        let subpath_dest = subpaths_dir.join(&subpath);
-        fs::create_dir_all(&subpath_dest)
-            .map_err(|error| format!("failed to create `{}`: {error}", subpath_dest.display()))?;
-        fs::write(subpath_dest.join("package.d.ts"), subpath_dts).map_err(|error| {
-            format!(
-                "failed to write `{}`: {error}",
-                subpath_dest.join("package.d.ts").display()
-            )
-        })?;
-        fs::write(subpath_dest.join("bundle.js"), subpath_js).map_err(|error| {
-            format!(
-                "failed to write `{}`: {error}",
-                subpath_dest.join("bundle.js").display()
-            )
-        })?;
+    if eager_subpaths {
+        for export in package_subpath_exports(&manifest, &package_dir)? {
+            dependency_versions.extend(write_installed_subpath(
+                registry_dir,
+                node_modules_dir,
+                name,
+                &package_dir,
+                &export,
+                &mut bundle_source_cache,
+            )?);
+        }
     }
     fs::write(dest_dir.join("version.txt"), &resolved_version).map_err(|e| {
         format!(
@@ -732,6 +722,65 @@ fn add_installed_inner(
         native_addon,
         native_diagnostic,
     })
+}
+
+/// Materializes one exact package export from an existing `node_modules`.
+pub fn add_installed_subpath(
+    registry_dir: &Path,
+    node_modules_dir: &Path,
+    specifier: &str,
+) -> Result<(), String> {
+    let (name, subpath) = split_bare_spec(specifier);
+    let subpath = subpath.ok_or_else(|| format!("`{specifier}` has no package subpath"))?;
+    let package_dir = node_modules_dir.join(name);
+    let manifest = read_manifest(&package_dir)?;
+    let export = package_subpath_exports(&manifest, &package_dir)?
+        .into_iter()
+        .find(|export| export.subpath == subpath)
+        .ok_or_else(|| format!("package `{name}` has no export named `./{subpath}`"))?;
+    write_installed_subpath(
+        registry_dir,
+        node_modules_dir,
+        name,
+        &package_dir,
+        &export,
+        &mut HashMap::new(),
+    )?;
+    Ok(())
+}
+
+fn write_installed_subpath(
+    registry_dir: &Path,
+    node_modules_dir: &Path,
+    name: &str,
+    package_dir: &Path,
+    export: &PackageSubpathExport,
+    bundle_source_cache: &mut HashMap<PathBuf, (String, ModuleAnalysis)>,
+) -> Result<BTreeMap<String, String>, String> {
+    let (subpath_js, _, _, dependencies) = bundle_commonjs_package_cached(
+        node_modules_dir,
+        name,
+        package_dir,
+        &export.runtime_entry,
+        bundle_source_cache,
+    )?;
+    let types_path = package_dir.join(&export.types_entry);
+    let subpath_dts = fs::read_to_string(&types_path).map_err(|error| {
+        format!(
+            "failed to read package export `./{}` types `{}`: {error}",
+            export.subpath,
+            types_path.display()
+        )
+    })?;
+    let subpath_dts = dts_source_with_reexported_functions(&types_path, &subpath_dts)?;
+    let destination = registry_dir.join(name).join("subpaths").join(&export.subpath);
+    fs::create_dir_all(&destination)
+        .map_err(|error| format!("failed to create `{}`: {error}", destination.display()))?;
+    fs::write(destination.join("package.d.ts"), subpath_dts)
+        .map_err(|error| format!("failed to write `{}`: {error}", destination.join("package.d.ts").display()))?;
+    fs::write(destination.join("bundle.js"), subpath_js)
+        .map_err(|error| format!("failed to write `{}`: {error}", destination.join("bundle.js").display()))?;
+    Ok(dependencies)
 }
 
 /// Follows `/// <reference path="..." />` directives (the classic
