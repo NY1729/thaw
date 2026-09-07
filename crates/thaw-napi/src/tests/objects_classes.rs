@@ -125,6 +125,11 @@ fn symbols_have_unique_identity_and_property_namespace() {
             napi_set_property(env_ptr, object, second, second_value),
             NAPI_OK
         );
+        let numeric_key = env.alloc(Value::Number(2.0));
+        assert_eq!(
+            napi_set_property(env_ptr, object, numeric_key, second_value),
+            NAPI_OK
+        );
         for (key, expected) in [(first, first_value), (second, second_value)] {
             let mut actual = ptr::null_mut();
             assert_eq!(
@@ -140,7 +145,7 @@ fn symbols_have_unique_identity_and_property_namespace() {
             assert!(present);
         }
         let json = json_from_value(object).unwrap();
-        assert_eq!(json, serde_json::json!({"same": 1.0}));
+        assert_eq!(json, serde_json::json!({"2": 3.0, "same": 1.0}));
     }
 }
 
