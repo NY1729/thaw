@@ -887,6 +887,16 @@ pub extern "C" fn thaw_json_array_length(value: *mut Value) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_json_array_slice(value: *mut Value, start: i64) -> *mut Value {
+    leak(Value::Array(
+        unsafe { value.as_ref() }
+            .and_then(Value::as_array)
+            .map(|values| values.iter().skip(start.max(0) as usize).cloned().collect())
+            .unwrap_or_default(),
+    ))
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_object_new() -> *mut Value {
     leak(Value::Object(serde_json::Map::new()))
 }

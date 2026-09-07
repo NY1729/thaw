@@ -1092,6 +1092,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_array_slice",
+            i8_ptr.fn_type(&[i8_ptr.into(), self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_object_new",
             i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
@@ -1370,6 +1375,27 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        for (name, result) in [
+            (
+                "thaw_napi_call_export_handle_with_functions_typed_result",
+                handle_result_type,
+            ),
+            ("thaw_napi_call_with_functions_typed_result", result_type),
+        ] {
+            self.module.add_function(
+                name,
+                result.fn_type(
+                    &[
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_napi_get_export",
             self.context.i64_type().fn_type(&[i8_ptr.into()], false),

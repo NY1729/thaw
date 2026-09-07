@@ -41,6 +41,8 @@ fn quickjs_callback_type(ty: &HirType) -> bool {
     }
 }
 
+type NapiFunctionArgument = (usize, Vec<HirType>, HirType, bool, Option<usize>);
+
 fn jit_parameter_slots(ty: &HirType) -> Option<usize> {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str => Some(1),
@@ -284,25 +286,111 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
-    fn compile_napi_value_callback(
-        &mut self,
-        callback: &HirExpr,
-        params: &[HirType],
-        ret: &HirType,
-    ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>), String> {
-        let closure = self.compile_expr(callback)?.into_pointer_value();
-        self.compile_napi_value_callback_from_closure(closure, params, ret)
-    }
-
     fn compile_napi_value_callback_from_closure(
         &mut self,
         closure: PointerValue<'ctx>,
         params: &[HirType],
         ret: &HirType,
+        rest_start: Option<usize>,
     ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>), String> {
         let (adapter, closure, _) =
-            self.compile_value_callback_from_closure(closure, params, ret, false)?;
+            self.compile_value_callback_from_closure(closure, params, ret, false, rest_start)?;
         Ok((adapter, closure))
+    }
+
+    fn compile_napi_function_arguments(
+        &mut self,
+        args: &[HirExpr],
+        functions: &[NapiFunctionArgument],
+    ) -> Result<PointerValue<'ctx>, String> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        if functions.is_empty() {
+            return Ok(ptr_type.const_null());
+        }
+        let descriptor_type = self.context.struct_type(
+            &[
+                self.context.i64_type().into(),
+                ptr_type.into(),
+                ptr_type.into(),
+            ],
+            false,
+        );
+        let descriptors = self
+            .builder
+            .build_alloca(
+                descriptor_type.array_type(functions.len() as u32),
+                "napi_function_arguments",
+            )
+            .map_err(|error| error.to_string())?;
+        for (slot, (index, params, ret, optional, rest_start)) in functions.iter().enumerate() {
+            let callback = self.compile_expr(&args[*index])?;
+            let (adapter, context) = if *optional {
+                let callback = callback.into_struct_value();
+                let present = self
+                    .builder
+                    .build_extract_value(callback, 0, "optional_napi_callback_present")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let closure = self
+                    .builder
+                    .build_extract_value(callback, 1, "optional_napi_callback")
+                    .map_err(|error| error.to_string())?
+                    .into_pointer_value();
+                let (adapter, context) =
+                    self.compile_napi_value_callback_from_closure(
+                        closure,
+                        params,
+                        ret,
+                        *rest_start,
+                    )?;
+                let adapter = self
+                    .builder
+                    .build_select(present, adapter, ptr_type.const_null(), "napi_callback")
+                    .map_err(|error| error.to_string())?
+                    .into_pointer_value();
+                (adapter, context)
+            } else {
+                self.compile_napi_value_callback_from_closure(
+                    callback.into_pointer_value(),
+                    params,
+                    ret,
+                    *rest_start,
+                )?
+            };
+            let descriptor = self
+                .builder
+                .build_insert_value(
+                    descriptor_type.get_undef(),
+                    self.context.i64_type().const_int(*index as u64, false),
+                    0,
+                    "napi_function_argument_index",
+                )
+                .map_err(|error| error.to_string())?
+                .into_struct_value();
+            let descriptor = self
+                .builder
+                .build_insert_value(descriptor, adapter, 1, "napi_function_argument_callback")
+                .map_err(|error| error.to_string())?
+                .into_struct_value();
+            let descriptor = self
+                .builder
+                .build_insert_value(descriptor, context, 2, "napi_function_argument_context")
+                .map_err(|error| error.to_string())?;
+            let target = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        descriptor_type,
+                        descriptors,
+                        &[self.context.i64_type().const_int(slot as u64, false)],
+                        "napi_function_argument",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(target, descriptor)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(descriptors)
     }
 
     fn compile_value_callback_from_closure(
@@ -311,6 +399,7 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirType],
         ret: &HirType,
         defer_promise: bool,
+        rest_start: Option<usize>,
     ) -> Result<
         (
             PointerValue<'ctx>,
@@ -361,9 +450,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let null_key = ptr_type.const_null();
         let mut callback_args = vec![context.into()];
         for (index, param) in params.iter().enumerate() {
-            let argument = self
-                .builder
-                .build_call(
+            let argument = if rest_start == Some(index) {
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_array_slice").unwrap(),
+                    &[
+                        args_json.into(),
+                        self.context.i64_type().const_int(index as u64, false).into(),
+                    ],
+                    "napi_value_callback_rest",
+                )
+            } else {
+                self.builder.build_call(
                     self.module.get_function("thaw_json_index").unwrap(),
                     &[
                         args_json.into(),
@@ -372,6 +469,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     ],
                     "napi_value_callback_argument",
                 )
+            }
                 .map_err(|error| error.to_string())?
                 .try_as_basic_value()
                 .basic()
@@ -722,7 +820,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(|(index, _)| 1u64 << index)
             .sum();
         let (adapter, closure, finish) =
-            self.compile_value_callback_from_closure(closure, params, ret, true)?;
+            self.compile_value_callback_from_closure(closure, params, ret, true, None)?;
         let jsvalue_param_mask = self
             .context
             .i64_type()
@@ -2494,13 +2592,34 @@ impl<'ctx> HirCompiler<'ctx> {
             .take(args.len())
             .enumerate()
             .filter_map(|(index, ty)| match ty {
-                HirType::Function(params, ret) => Some((index, params.as_slice(), ret.as_ref())),
+                HirType::Function(params, ret) => {
+                    Some((index, params.clone(), ret.as_ref().clone(), false, None))
+                }
+                HirType::CallableFunction(params, _, rest, ret) => {
+                    let mut abi_params = params.clone();
+                    let rest_start = rest.as_ref().map(|_| abi_params.len());
+                    if let Some(rest) = rest {
+                        abi_params.push(HirType::Array(rest.clone()));
+                    }
+                    Some((index, abi_params, ret.as_ref().clone(), false, rest_start))
+                }
+                HirType::Optional(inner) => match inner.as_ref() {
+                    HirType::Function(params, ret) => {
+                        Some((index, params.clone(), ret.as_ref().clone(), true, None))
+                    }
+                    HirType::CallableFunction(params, _, rest, ret) => {
+                        let mut abi_params = params.clone();
+                        let rest_start = rest.as_ref().map(|_| abi_params.len());
+                        if let Some(rest) = rest {
+                            abi_params.push(HirType::Array(rest.clone()));
+                        }
+                        Some((index, abi_params, ret.as_ref().clone(), true, rest_start))
+                    }
+                    _ => None,
+                },
                 _ => None,
             })
             .collect::<Vec<_>>();
-        if function_argument.len() > 1 {
-            return Err("typed N-API calls support at most one function argument".into());
-        }
         let array = self
             .builder
             .build_call(
@@ -2526,8 +2645,8 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
             if signature.backend == DynamicBackend::Napi
                 && function_argument
-                    .first()
-                    .is_some_and(|(function_index, _, _)| *function_index == index)
+                    .iter()
+                    .any(|(function_index, ..)| *function_index == index)
             {
                 continue;
             }
@@ -2564,19 +2683,23 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
-                let result = if let Some((index, params, ret)) = function_argument.first() {
-                    let (callback, context) =
-                        self.compile_napi_value_callback(&args[*index], params, ret)?;
+                let result = if !function_argument.is_empty() {
+                    let functions =
+                        self.compile_napi_function_arguments(args, &function_argument)?;
                     self.builder.build_call(
                         self.module
-                            .get_function("thaw_napi_call_export_handle_with_function_typed_result")
+                            .get_function(
+                                "thaw_napi_call_export_handle_with_functions_typed_result",
+                            )
                             .unwrap(),
                         &[
                             name.as_pointer_value().into(),
                             args_json.into(),
-                            self.context.i64_type().const_int(*index as u64, false).into(),
-                            callback.into(),
-                            context.into(),
+                            functions.into(),
+                            self.context
+                                .i64_type()
+                                .const_int(function_argument.len() as u64, false)
+                                .into(),
                         ],
                         "napi_export_function_handle_result",
                     )
@@ -2774,6 +2897,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.branch_on_pending_exception()?;
             return Ok(value);
+        }
+        if signature.backend == DynamicBackend::Napi && !function_argument.is_empty() {
+            let functions = self.compile_napi_function_arguments(args, &function_argument)?;
+            let count = self
+                .context
+                .i64_type()
+                .const_int(function_argument.len() as u64, false);
+            let json = self.compile_json_backend_values_with_extra(
+                name.as_pointer_value().into(),
+                array,
+                "thaw_napi_call_with_functions_typed_result",
+                &[functions.into(), count.into()],
+            )?;
+            return self.compile_typed_dynamic_result(json, &signature.ret);
         }
         let backend = match signature.backend {
             DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),

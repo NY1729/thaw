@@ -365,6 +365,12 @@ fn build_with_native_mode(
         external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
     )?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
+    let mut native_addons = resolved_packages
+        .iter()
+        .filter_map(|package| thaw_registry::resolve(registry_dir, package).ok()?.native_addon)
+        .collect::<Vec<_>>();
+    native_addons.sort();
+    native_addons.dedup();
     // `qs.stringify(x)`-style calls, for a name that collided across two
     // `--use`d packages, only exist as source-level syntax sugar over the
     // package-qualified alias `generate_registry_shims` actually
@@ -544,6 +550,9 @@ fn build_with_native_mode(
             build_staticlib_with_features("thaw-napi", &features)
         })
         .transpose()?;
+    if let Some(napi_lib) = &napi_lib {
+        validate_native_addon_imports(&native_addons, napi_lib)?;
+    }
 
     // `--link <path>` lets a program using `declare function` (see
     // docs/design/bridge.md section 6) actually resolve at link time,
@@ -683,6 +692,84 @@ fn promote_external_native_directory(staging: &Path, destination: &Path) -> Resu
     Ok(())
 }
 
+fn nm_symbols(path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let output = Command::new("nm")
+        .args(args)
+        .arg(path)
+        .output()
+        .map_err(|error| format!("failed to inspect `{}` with nm: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to inspect `{}` with nm: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().last().map(str::to_string))
+        .collect())
+}
+
+fn validate_native_addon_imports(addons: &[PathBuf], napi_lib: &Path) -> Result<(), String> {
+    let supported = nm_symbols(napi_lib, &["-g", "--defined-only"])?
+        .into_iter()
+        .filter(|name| name.starts_with("napi_") || name.starts_with("node_api_"))
+        .collect::<std::collections::HashSet<_>>();
+    for addon in addons {
+        let imports = nm_symbols(addon, &["-D", "--undefined-only"])?;
+        if let Some(error) = native_addon_compatibility_error(addon, &imports, &supported) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn native_addon_compatibility_error(
+    addon: &Path,
+    imports: &[String],
+    supported: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let missing = imports
+            .iter()
+            .filter(|name| name.starts_with("napi_") || name.starts_with("node_api_"))
+            .filter(|name| !supported.contains(name.split('@').next().unwrap_or_default()))
+            .cloned()
+            .collect::<Vec<_>>();
+    let internals = imports
+            .iter()
+            .filter(|name| {
+                name.as_str() == "node_module_register"
+                    || name.starts_with("_ZN2v8")
+                    || name.starts_with("_ZN4node")
+                    || name.starts_with("_ZNK2v8")
+                    || name.starts_with("_ZNK4node")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+    if missing.is_empty() && internals.is_empty() {
+        return None;
+    }
+    let mut details = Vec::new();
+    if !missing.is_empty() {
+        details.push(format!(
+            "unsupported Node-API symbols: {}",
+            missing.join(", ")
+        ));
+    }
+    if !internals.is_empty() {
+        details.push(format!(
+            "Node/V8 internal symbols are not part of Node-API: {}",
+            internals.join(", ")
+        ));
+    }
+    Some(format!(
+        "native addon `{}` is not compatible with the Thaw N-API host: {}",
+        addon.display(),
+        details.join("; ")
+    ))
+}
+
 fn napi_export_args() -> [&'static str; 2] {
     [
         "-Wl,--export-dynamic-symbol=napi_*",
@@ -719,6 +806,28 @@ fn native_addons_export_only_node_api_symbols() {
             "-Wl,--export-dynamic-symbol=node_api_*",
         ]
     );
+}
+
+#[test]
+fn native_addon_import_audit_rejects_missing_and_internal_symbols() {
+    let supported = ["napi_get_undefined".to_string()]
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    assert!(native_addon_compatibility_error(
+        Path::new("compatible.node"),
+        &["napi_get_undefined@NAPI_1.0".into(), "uv_run".into()],
+        &supported,
+    )
+    .is_none());
+
+    let error = native_addon_compatibility_error(
+        Path::new("incompatible.node"),
+        &["napi_future_api".into(), "_ZN4node10EnvironmentE".into()],
+        &supported,
+    )
+    .unwrap();
+    assert!(error.contains("napi_future_api"));
+    assert!(error.contains("Node/V8 internal symbols"));
 }
 
 #[test]
