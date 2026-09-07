@@ -677,6 +677,9 @@ impl<'a> FnLowerer<'a> {
                 .iter()
                 .zip(parameter_types)
                 .map(|(parameter, contextual)| {
+                    if matches!(parameter, Pat::Assign(_)) {
+                        return Ok(contextual.clone());
+                    }
                     let annotation = match parameter {
                         Pat::Ident(binding) => binding.type_ann.as_ref(),
                         Pat::Rest(rest) => rest.type_ann.as_ref(),
