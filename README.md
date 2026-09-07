@@ -3621,7 +3621,10 @@ compatibility gate with
 `THAW_NODE_ADDON_API_BINDING=/path/to/binding.node cargo test -p thaw-napi
 runs_node_addon_api_official_binding_when_supplied`. Its top-level object
 exports exercise the same persistent handle and method bridge used by package
-wrappers.
+wrappers. The gate runs identical JSON inputs through Node.js and Thaw for
+primitive, array, Buffer, Object, global, Promise, handle-scope and reference
+operations, then directly checks the official Function, Class, TypedArray,
+ArrayBuffer and finalizer exports.
 Every N-API build also compares the selected addon's undefined Node-API symbols
 with the symbols defined by the exact `thaw-napi` archive being linked. Missing
 Node-API entry points and direct Node/V8 C++ imports fail before final linking

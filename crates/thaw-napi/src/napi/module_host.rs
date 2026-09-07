@@ -850,7 +850,7 @@ unsafe fn call_impl(
         new_target: ptr::null_mut(),
         data: function.data,
     };
-    let result = (function.callback)(env, &mut info);
+    let result = callback_result(env, (function.callback)(env, &mut info));
     if let Some(exception) = env.exception {
         return Err(describe_env_exception(env, exception)?);
     }
@@ -869,6 +869,14 @@ fn text_result(result: Result<String, String>) -> ThawResult {
             value: ptr::null_mut(),
             error: CString::new(error).unwrap_or_default().into_raw(),
         },
+    }
+}
+
+unsafe fn callback_result(env: NapiEnv, value: NapiValue) -> NapiValue {
+    if value.is_null() {
+        env_mut(env).unwrap().alloc(Value::Undefined)
+    } else {
+        value
     }
 }
 
@@ -961,7 +969,7 @@ unsafe fn call_function_handle(
         new_target: ptr::null_mut(),
         data: function.data,
     };
-    let value = (function.callback)(env, &mut info);
+    let value = callback_result(env, (function.callback)(env, &mut info));
     take_env_exception(env)?;
     wait_for_promise(value)
 }
@@ -1078,7 +1086,7 @@ unsafe fn call_export_with_functions(
         new_target: ptr::null_mut(),
         data: exported.data,
     };
-    let value = (exported.callback)(env, &mut info);
+    let value = callback_result(env, (exported.callback)(env, &mut info));
     take_env_exception(env)?;
     wait_for_promise(value)
 }
@@ -1241,7 +1249,7 @@ unsafe fn call_method_impl(
             new_target: ptr::null_mut(),
             data: function.data,
         };
-        let value = (function.callback)(env, &mut info);
+        let value = callback_result(env, (function.callback)(env, &mut info));
         take_env_exception(env)?;
         let value = wait_for_promise(value)?;
         serde_json::to_string(&json_from_value_with_undefined(value, preserve_undefined)?)
@@ -1504,7 +1512,8 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
             new_target: ptr::null_mut(),
             data: function.data,
         };
-        let value = (function.callback)(&mut *env, &mut info);
+        let env_ptr = &mut *env as NapiEnv;
+        let value = callback_result(env_ptr, (function.callback)(env_ptr, &mut info));
         if let Some(exception) = env.exception {
             return Err(describe_env_exception(&mut *env as *mut Env, exception)?);
         }
@@ -1622,7 +1631,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
             new_target: ptr::null_mut(),
             data: function.data,
         };
-        let value = (function.callback)(env, &mut info);
+        let value = callback_result(env, (function.callback)(env, &mut info));
         take_env_exception(env)?;
         let value = wait_for_promise(value)?;
         if discard_result != 0 || value.is_null() {
