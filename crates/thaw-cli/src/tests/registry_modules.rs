@@ -9938,7 +9938,7 @@ function main(): void {
 /// branch (real-world example: zod's own `.superRefine((val, ctx) => {
 /// ctx.addIssue(...); })`-shaped callbacks, if ever declared `async`).
 #[test]
-fn a_promise_void_returning_native_closure_argument_still_produces_a_null_result() {
+fn a_promise_void_returning_native_closure_argument_produces_undefined() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-async-void-native-callback-{}",
         std::process::id()
@@ -9984,7 +9984,7 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\ngot:null\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\ngot:undefined\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -10805,6 +10805,52 @@ fn generic_fallback_callback_alias_is_contextually_typed() {
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn synchronous_void_native_callback_returns_undefined_to_javascript() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-sync-void-native-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("callback-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function run(callback: () => void): boolean;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { run: function(callback) { return callback() === undefined; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { run } from 'callback-kit'; function main(): void { console.log(run((): void => {})); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["callback-kit".into()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

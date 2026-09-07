@@ -689,6 +689,7 @@ pub extern "C" fn thaw_js_register_native_callback(
     adapter: *const c_void,
     closure: *const c_void,
     jsvalue_param_mask: u64,
+    void_result: u8,
     finish: *const c_void,
 ) -> ThawHandleResult {
     let adapter = adapter as usize;
@@ -823,12 +824,14 @@ pub extern "C" fn thaw_js_register_native_callback(
              }} \
              }} \
              var result = raw(JSON.stringify(args)); \
+             if ({void_result} && result.slice(0, 8) !== 'promise:') return undefined; \
              if (result.slice(0, 8) !== 'promise:') return JSON.parse(result, globalThis.__thaw_json_date_reviver); \
              return new Promise(function(resolve, reject) {{ \
              function check() {{ \
              var settled = globalThis['{poll_name}'](result); \
              if (!settled) return setTimeout(check, 0); \
              if (settled.slice(0, 6) === 'error:') return reject(new Error(settled.slice(6))); \
+             if ({void_result}) return resolve(undefined); \
              try {{ resolve(JSON.parse(settled, globalThis.__thaw_json_date_reviver)); }} catch (error) {{ reject(error); }} \
              }} \
              check(); \
