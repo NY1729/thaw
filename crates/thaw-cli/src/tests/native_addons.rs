@@ -2090,8 +2090,19 @@ fn registry_add_runs_a_real_express_route_when_enabled() {
         r#"import express from "express";
 async function main(): Promise<void> {
     const app = express();
+    app.use(express.json({ limit: "32b" }));
+    app.use(express.urlencoded({ extended: false }));
     app.get("/users/:id", (request, response) => {
         response.json({ id: request.params.id });
+    });
+    app.post("/json", (request, response) => {
+        response.json({ message: request.body.message });
+    });
+    app.post("/form", (request, response) => {
+        response.json({ message: request.body.message });
+    });
+    app.use((error, _request, response, _next) => {
+        response.status(error.status || 500).json({ type: error.type || "internal" });
     });
     const server: JsValue = app.listen(Number(process.env.PORT), "127.0.0.1");
     process.on("SIGTERM", (): void => { server.close(); });
@@ -2134,6 +2145,9 @@ async function main(): Promise<void> {
                 }
             })
             .expect("compiled Express server did not accept a request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         stream.write_all(request).unwrap();
         let mut response = Vec::new();
         stream.read_to_end(&mut response).unwrap();
@@ -2150,6 +2164,30 @@ async function main(): Promise<void> {
     for id in 0..3 {
         request(id);
     }
+    let post = |path: &str, content_type: &str, body: &[u8]| {
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        exchange(&[head.as_bytes(), body].concat())
+    };
+    let response = post("/json", "application/json", br#"{"message":"json"}"#);
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    assert!(String::from_utf8_lossy(&response).contains("{\"message\":\"json\"}"));
+    let response = post("/form", "application/x-www-form-urlencoded", b"message=form+value");
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    assert!(String::from_utf8_lossy(&response).contains("{\"message\":\"form value\"}"));
+    let response = post("/json", "application/json", br#"{"message":}"#);
+    assert!(response.starts_with(b"HTTP/1.1 400"));
+    let malformed = String::from_utf8_lossy(&response);
+    assert!(malformed.contains("entity.parse.failed"), "{malformed}");
+    let response = post(
+        "/json",
+        "application/json",
+        br#"{"message":"this body is deliberately larger than thirty-two bytes"}"#,
+    );
+    assert!(response.starts_with(b"HTTP/1.1 413"));
+    assert!(String::from_utf8_lossy(&response).contains("entity.too.large"));
     std::thread::scope(|scope| {
         for id in 3..7 {
             scope.spawn(move || request(id));
