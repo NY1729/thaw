@@ -42,7 +42,7 @@ fn registry_import_meta_resolutions(
                 .join("subpaths")
                 .join(parts[package_parts..].join("/"));
         }
-        let artifact = ["native.node", "bundle.js", "native.a"]
+        let artifact = ["native.node", "bundle.js", "bundle.js.gz", "native.a"]
             .into_iter()
             .map(|name| directory.join(name))
             .find(|path| path.is_file());

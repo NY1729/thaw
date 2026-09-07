@@ -12,7 +12,7 @@
 //!                                  by `add`; loaded by thaw-napi
 //!   native-addon.json (optional) -- source path, target tuple, and SHA-256
 //!                                  for `native.node`
-//!   bundle.js      (optional)  -- real JS implementation backing the
+//!   bundle.js[.gz] (optional)  -- real JS implementation backing the
 //!                                  package's Fallback functions; its
 //!                                  source is fed to thaw-bridge's
 //!                                  `generate_module_init` so it's loaded
@@ -20,7 +20,7 @@
 //!                                  (replaces a manual `loadScript` call)
 //!   subpaths/<path>/package.d.ts -- declarations for an exact `exports`
 //!                                  subpath such as `./feature`
-//!   subpaths/<path>/bundle.js    -- independently bundled runtime entry
+//!   subpaths/<path>/bundle.js[.gz] -- independently bundled runtime entry
 //!                                  for that subpath
 //!   version.txt    (optional)  -- the exact version `add` resolved and
 //!                                  fetched for the package itself (see
@@ -57,6 +57,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
