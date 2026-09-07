@@ -282,6 +282,9 @@ fn build_with_native_mode(
     }
     let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
+    let external_native_dirs = (!embed_native_addons)
+        .then(|| external_native_directories(output))
+        .transpose()?;
     let external_specifiers = module_graph::external_specifiers(input, &user_source)?;
     let mut resolved_packages = use_packages.to_vec();
     for (specifier, location) in &external_specifiers {
@@ -357,6 +360,7 @@ fn build_with_native_mode(
         &user_source,
         embed_native_addons,
         output,
+        external_native_dirs.as_ref().map(|dirs| dirs.0.as_path()),
     )?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     // `qs.stringify(x)`-style calls, for a name that collided across two
@@ -591,6 +595,9 @@ fn build_with_native_mode(
     let _ = std::fs::remove_file(&obj_path);
 
     if !link_output.status.success() {
+        if let Some((staging, _)) = &external_native_dirs {
+            let _ = std::fs::remove_dir_all(staging);
+        }
         let stderr = String::from_utf8_lossy(&link_output.stderr);
         let hint = if static_link {
             "\nstatic linking requires the target's static libc/libm/libdl archives (on Fedora, install glibc-static; alternatively use a musl toolchain)"
@@ -598,6 +605,10 @@ fn build_with_native_mode(
             ""
         };
         return Err(format!("linking failed:\n{stderr}{hint}"));
+    }
+
+    if let Some((staging, destination)) = external_native_dirs {
+        promote_external_native_directory(&staging, &destination)?;
     }
     if static_link && elf_has_program_interpreter(output)? {
         return Err(format!(
@@ -607,6 +618,56 @@ fn build_with_native_mode(
     }
 
     println!("built `{}`", output.display());
+    Ok(())
+}
+
+fn external_native_directories(output: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("output path has no valid file name")?;
+    let destination = output.with_file_name(format!("{name}.native"));
+    let staging = output.with_file_name(format!(".{name}.native.{}.tmp", std::process::id()));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .map_err(|error| format!("failed to clear `{}`: {error}", staging.display()))?;
+    }
+    std::fs::create_dir_all(&staging)
+        .map_err(|error| format!("failed to create `{}`: {error}", staging.display()))?;
+    Ok((staging, destination))
+}
+
+fn promote_external_native_directory(staging: &Path, destination: &Path) -> Result<(), String> {
+    if std::fs::read_dir(staging)
+        .map_err(|error| format!("failed to read `{}`: {error}", staging.display()))?
+        .next()
+        .is_none()
+    {
+        std::fs::remove_dir(staging)
+            .map_err(|error| format!("failed to remove `{}`: {error}", staging.display()))?;
+        if destination.exists() {
+            std::fs::remove_dir_all(destination)
+                .map_err(|error| format!("failed to remove `{}`: {error}", destination.display()))?;
+        }
+        return Ok(());
+    }
+    let backup = destination.with_extension(format!("native.{}.old", std::process::id()));
+    if destination.exists() {
+        std::fs::rename(destination, &backup).map_err(|error| {
+            format!("failed to replace `{}`: {error}", destination.display())
+        })?;
+    }
+    if let Err(error) = std::fs::rename(staging, destination) {
+        let _ = std::fs::rename(&backup, destination);
+        return Err(format!(
+            "failed to install `{}`: {error}",
+            destination.display()
+        ));
+    }
+    if backup.exists() {
+        std::fs::remove_dir_all(&backup)
+            .map_err(|error| format!("failed to remove `{}`: {error}", backup.display()))?;
+    }
     Ok(())
 }
 
@@ -834,6 +895,10 @@ fn run_prepare(args: &[String]) -> Result<(), String> {
     if !args.is_empty() {
         return Err("usage: thaw prepare".into());
     }
+    if prepared_runtime_is_current() {
+        println!("prepared runtime archives are current (cache hit)");
+        return Ok(());
+    }
     for package in ["thaw-arena", "thaw-runtime", "thaw-std", "thaw-jit"] {
         store_prepared_staticlib(package, false, &[])?;
     }
@@ -846,7 +911,7 @@ fn run_prepare(args: &[String]) -> Result<(), String> {
         &["quickjs", "quickjs-tls", "quickjs-wasm"],
     )?;
     let root = prepared_staticlib_root()?;
-    std::fs::write(root.join("compiler.fingerprint"), executable_fingerprint()?)
+    std::fs::write(root.join("compiler.fingerprint"), runtime_fingerprint())
         .map_err(|error| format!("failed to write prepared runtime fingerprint: {error}"))?;
     println!("prepared common runtime archives");
     Ok(())
@@ -857,6 +922,10 @@ fn store_prepared_staticlib(
     no_default_features: bool,
     features: &[&str],
 ) -> Result<(), String> {
+    println!(
+        "preparing {package} ({})...",
+        staticlib_variant(no_default_features, features)
+    );
     let destination = prepared_staticlib_path(package, no_default_features, features)?;
     if destination.is_file() {
         std::fs::remove_file(&destination).map_err(|error| {
@@ -889,6 +958,34 @@ fn store_prepared_staticlib(
     Ok(())
 }
 
+fn prepared_runtime_is_current() -> bool {
+    let Ok(root) = prepared_staticlib_root() else {
+        return false;
+    };
+    if !matches!(
+        std::fs::read_to_string(root.join("compiler.fingerprint")).as_deref(),
+        Ok(recorded) if recorded == runtime_fingerprint()
+    ) {
+        return false;
+    }
+    [
+        prepared_staticlib_path("thaw-arena", false, &[]),
+        prepared_staticlib_path("thaw-runtime", false, &[]),
+        prepared_staticlib_path("thaw-std", false, &[]),
+        prepared_staticlib_path("thaw-jit", false, &[]),
+        prepared_staticlib_path("thaw-quickjs", true, &[]),
+        prepared_staticlib_path("thaw-napi", true, &[]),
+        prepared_staticlib_path("thaw-napi", true, &["quickjs"]),
+        prepared_staticlib_path(
+            "thaw-napi",
+            true,
+            &["quickjs", "quickjs-tls", "quickjs-wasm"],
+        ),
+    ]
+    .into_iter()
+    .all(|path| path.is_ok_and(|path| path.is_file()))
+}
+
 fn prepared_staticlib(
     package: &str,
     no_default_features: bool,
@@ -896,7 +993,7 @@ fn prepared_staticlib(
 ) -> Option<PathBuf> {
     let root = prepared_staticlib_root().ok()?;
     let recorded = std::fs::read_to_string(root.join("compiler.fingerprint")).ok()?;
-    if recorded != executable_fingerprint().ok()? {
+    if recorded != runtime_fingerprint() {
         return None;
     }
     let archive = prepared_staticlib_path(package, no_default_features, features).ok()?;
@@ -938,7 +1035,7 @@ fn prepared_staticlib_cache_path(
 ) -> Result<PathBuf, String> {
     Ok(std::env::temp_dir()
         .join("thaw-runtime-cache")
-        .join(executable_fingerprint()?)
+        .join(runtime_fingerprint())
         .join(staticlib_variant(no_default_features, features))
         .join(format!("lib{}.a", package.replace('-', "_"))))
 }
@@ -952,22 +1049,8 @@ fn prepared_staticlib_root() -> Result<PathBuf, String> {
         .join("thaw-libs"))
 }
 
-fn executable_fingerprint() -> Result<String, String> {
-    use std::hash::{Hash, Hasher};
-
-    static FINGERPRINT: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
-    FINGERPRINT
-        .get_or_init(|| {
-            let executable = std::env::current_exe()
-                .map_err(|error| format!("failed to locate the thaw executable: {error}"))?;
-            let bytes = std::fs::read(&executable).map_err(|error| {
-                format!("failed to fingerprint `{}`: {error}", executable.display())
-            })?;
-            let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
-            bytes.hash(&mut fingerprint);
-            Ok(format!("{:016x}", fingerprint.finish()))
-        })
-        .clone()
+fn runtime_fingerprint() -> &'static str {
+    env!("THAW_RUNTIME_FINGERPRINT")
 }
 
 fn staticlib_variant(no_default_features: bool, features: &[&str]) -> String {

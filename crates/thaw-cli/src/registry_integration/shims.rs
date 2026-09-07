@@ -22006,6 +22006,7 @@ fn generate_registry_shims(
     user_source: &str,
     embed_native_addons: bool,
     output: &Path,
+    external_native_staging: Option<&Path>,
 ) -> Result<RegistryShims, String> {
     let observed_arities = observed_member_call_arities(user_source)?;
     let observed_identifier_arities = observed_identifier_call_arities(user_source)?;
@@ -22859,7 +22860,9 @@ fn generate_registry_shims(
                     executable_name,
                     sanitize_identifier(&pkg.name)
                 );
-                let destination = output.with_file_name(&package_dir);
+                let destination = external_native_staging
+                    .ok_or("external native staging directory is missing")?
+                    .join(sanitize_identifier(&pkg.name));
                 std::fs::create_dir_all(&destination).map_err(|error| {
                     format!("failed to create `{}`: {error}", destination.display())
                 })?;
