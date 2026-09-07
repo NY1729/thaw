@@ -15,6 +15,23 @@ static RELEASED_HANDLE_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
 #[test]
+fn resolves_packaged_native_paths_next_to_the_executable() {
+    let resolved = executable_relative_path("@executable/app.native/pkg/native.node").unwrap();
+    assert_eq!(
+        resolved,
+        std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("app.native/pkg/native.node")
+    );
+    assert_eq!(
+        executable_relative_path("/tmp/native.node").unwrap(),
+        std::path::Path::new("/tmp/native.node")
+    );
+}
+
+#[test]
 fn decodes_legacy_hex_and_compressed_embedded_payloads() {
     assert_eq!(decode_hex("deadbeef").unwrap(), [0xde, 0xad, 0xbe, 0xef]);
     assert_eq!(

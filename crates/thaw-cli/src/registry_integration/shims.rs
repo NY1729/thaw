@@ -22005,6 +22005,7 @@ fn generate_registry_shims(
     use_packages: &[String],
     user_source: &str,
     embed_native_addons: bool,
+    output: &Path,
 ) -> Result<RegistryShims, String> {
     let observed_arities = observed_member_call_arities(user_source)?;
     let observed_identifier_arities = observed_identifier_call_arities(user_source)?;
@@ -22849,19 +22850,42 @@ fn generate_registry_shims(
                     root_export,
                 ));
             } else {
-                let canonical = |path: &Path| {
-                    path.canonicalize()
-                        .unwrap_or_else(|_| path.to_path_buf())
-                        .display()
-                        .to_string()
-                };
+                let executable_name = output
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or("output path has no valid file name")?;
+                let package_dir = format!(
+                    "{}.native/{}",
+                    executable_name,
+                    sanitize_identifier(&pkg.name)
+                );
+                let destination = output.with_file_name(&package_dir);
+                std::fs::create_dir_all(&destination).map_err(|error| {
+                    format!("failed to create `{}`: {error}", destination.display())
+                })?;
+                std::fs::copy(native_addon, destination.join("native.node")).map_err(|error| {
+                    format!("failed to copy native addon `{}`: {error}", native_addon.display())
+                })?;
+                let mut dependencies = Vec::new();
+                for dependency in &pkg.native_dependencies {
+                    let name = dependency
+                        .file_name()
+                        .ok_or("native dependency path has no file name")?;
+                    std::fs::copy(dependency, destination.join(name)).map_err(|error| {
+                        format!(
+                            "failed to copy native dependency `{}`: {error}",
+                            dependency.display()
+                        )
+                    })?;
+                    dependencies.push(format!(
+                        "@executable/{package_dir}/{}",
+                        name.to_string_lossy()
+                    ));
+                }
                 native_addon_paths.push((
                     pkg.name.clone(),
-                    canonical(native_addon),
-                    pkg.native_dependencies
-                        .iter()
-                        .map(|path| canonical(path))
-                        .collect(),
+                    format!("@executable/{package_dir}/native.node"),
+                    dependencies,
                     root_export,
                 ));
             }

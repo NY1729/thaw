@@ -513,9 +513,9 @@ registry、`native-addon.json`、元の`.node`をコピーする必要はない�
 
 サイズと反復ビルド時間を優先するローカル運用では
 `thaw build --external-native`を選べる。この場合は依存共有ライブラリを
-`RTLD_GLOBAL`、`native.node`を絶対pathから`dlopen`し、バイナリ本体には
-埋め込まない。生成物はそのregistry pathに依存するため、単一ファイル配布の
-既定値は引き続き埋め込みとする。
+`RTLD_GLOBAL`、`native.node`を実行ファイル隣の`<output>.native/`から`dlopen`し、
+バイナリ本体には埋め込まない。実行ファイルを移動・配布するときはこのdirectoryも
+一緒にコピーする。単一ファイル配布の既定値は引き続き埋め込みとする。
 
 統合テストはリンク完了後にregistryディレクトリを削除してから生成物を起動し、
 埋め込まれたaddonだけで呼び出せることを確認する。非Linuxでは互換経路として
