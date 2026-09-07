@@ -96,9 +96,10 @@ application build:
 target/release/thaw prepare
 ```
 
-Prepared archives are stored beside the `thaw` executable and are used only
-when their compiler fingerprint matches; uncommon feature combinations still
-build and cache through Cargo on demand.
+Prepared archives are stored beside the `thaw` executable and are reused while
+the runtime ABI inputs remain unchanged. CLI-only rebuilds therefore keep the
+cache; repeated `prepare` calls report a cache hit. Uncommon feature combinations
+still build and cache through Cargo on demand.
 
 Import and use an npm package through the local registry:
 
