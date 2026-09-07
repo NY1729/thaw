@@ -1252,6 +1252,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     i8_ptr.into(),
                     i8_ptr.into(),
                     self.context.i64_type().into(),
+                    self.context.i64_type().into(),
                     self.context.i8_type().into(),
                     i8_ptr.into(),
                 ],

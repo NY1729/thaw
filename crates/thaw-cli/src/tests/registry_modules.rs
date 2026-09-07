@@ -10356,7 +10356,7 @@ fn an_async_native_callback_can_reenter_quickjs_while_being_polled() {
     std::fs::write(
         package.join("bundle.js"),
         "module.exports.makeHolder = function() { return { check: function(callback) { return callback('held'); } }; };\n\
-         module.exports.run = function(callback) { return new Promise(function(resolve, reject) { setTimeout(function() { Promise.resolve(callback()).then(resolve, reject); }, 0); }); };\n\
+         module.exports.run = function(callback) { return new Promise(function(resolve, reject) { setTimeout(function() { var extra = {}; extra.self = extra; Promise.resolve(callback(extra)).then(resolve, reject); }, 0); }); };\n\
          module.exports.runRejected = function(callback) { return Promise.resolve(callback()).then(function() { return 'unexpected'; }, function(error) { return error.message; }); };\n",
     )
     .unwrap();
