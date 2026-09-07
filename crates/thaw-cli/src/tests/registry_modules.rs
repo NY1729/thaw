@@ -10357,7 +10357,7 @@ fn an_async_native_callback_can_reenter_quickjs_while_being_polled() {
         package.join("bundle.js"),
         "module.exports.makeHolder = function() { return { check: function(callback) { return callback('held'); } }; };\n\
          module.exports.run = function(callback) { return new Promise(function(resolve, reject) { setTimeout(function() { Promise.resolve(callback()).then(resolve, reject); }, 0); }); };\n\
-         module.exports.runRejected = function(callback) { return Promise.resolve(callback()).then(function() { return 'unexpected'; }, function() { return 'rejected'; }); };\n",
+         module.exports.runRejected = function(callback) { return Promise.resolve(callback()).then(function() { return 'unexpected'; }, function(error) { return error.message; }); };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -10383,7 +10383,7 @@ async function main(): Promise<void> {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"held\"\nrejected\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"held\"\nboom\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
