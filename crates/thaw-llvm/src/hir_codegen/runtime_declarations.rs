@@ -103,6 +103,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let getenv_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module
             .add_function("getenv", getenv_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_runtime_report_uncaught",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
 
         // Lambda captures stdout via a pipe, not a TTY, so libc's stdio
         // fully-buffers it by default -- output could sit in the buffer

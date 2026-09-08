@@ -403,6 +403,15 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(pending, "process_exception_failed")
             .unwrap();
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_runtime_report_uncaught")
+                    .unwrap(),
+                &[pending.into()],
+                "report_uncaught_exception",
+            )
+            .unwrap();
         let http_failure = if self.module.get_function("createServer").is_some() {
             let status = self
                 .builder

@@ -59,7 +59,9 @@ jobs:
       - name: Test Hono, Prisma, and PostgreSQL
         env:
           THAW_POSTGRES_URL: postgresql://postgres:password@127.0.0.1:5432/app
-        run: cargo test -p thaw-cli builds_and_serves_hono_prisma_postgres_when_enabled -- --nocapture
+        run: |
+          cargo test -p thaw-cli builds_and_serves_hono_prisma_postgres_when_enabled -- --nocapture
+          cargo test -p thaw-cli registry_add_queries_postgres_with_real_pg_when_enabled -- --nocapture
       - name: Upload acceptance metrics
         if: always()
         uses: actions/upload-artifact@v4
