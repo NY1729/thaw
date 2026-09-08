@@ -131,6 +131,16 @@ fn rewrites_named_import_to_a_require_call() {
 }
 
 #[test]
+fn rewrites_import_meta_url_without_touching_text() {
+    let rewritten = rewrite_esm_to_commonjs(
+        "export const url = import.meta.url; const text = 'import.meta.url';",
+    )
+    .unwrap();
+    assert!(rewritten.contains("const url = ('file://' + __filename)"));
+    assert!(rewritten.contains("const text = 'import.meta.url'"));
+}
+
+#[test]
 fn live_import_rewrite_respects_shadowing_and_shorthand_properties() {
     let rewritten = rewrite_esm_to_commonjs(
         "import { value } from './state.js';\n\
