@@ -127,6 +127,14 @@
     readUInt16BE(offset = 0) { const index = Number(offset); return this[index] << 8 | this[index + 1]; }
     writeUInt16LE(value, offset = 0) { const index = Number(offset); this[index] = Number(value) & 255; this[index + 1] = Number(value) >> 8 & 255; return index + 2; }
     writeUInt16BE(value, offset = 0) { const index = Number(offset); this[index] = Number(value) >> 8 & 255; this[index + 1] = Number(value) & 255; return index + 2; }
+    readUInt32LE(offset = 0) { const index = Number(offset); return (this[index] | this[index + 1] << 8 | this[index + 2] << 16 | this[index + 3] << 24) >>> 0; }
+    readUInt32BE(offset = 0) { const index = Number(offset); return (this[index] * 0x1000000 + (this[index + 1] << 16 | this[index + 2] << 8 | this[index + 3])) >>> 0; }
+    readInt32LE(offset = 0) { const value = this.readUInt32LE(offset); return value > 0x7fffffff ? value - 0x100000000 : value; }
+    readInt32BE(offset = 0) { const value = this.readUInt32BE(offset); return value > 0x7fffffff ? value - 0x100000000 : value; }
+    writeUInt32LE(value, offset = 0) { const index = Number(offset), number = Number(value) >>> 0; this[index] = number; this[index + 1] = number >>> 8; this[index + 2] = number >>> 16; this[index + 3] = number >>> 24; return index + 4; }
+    writeUInt32BE(value, offset = 0) { const index = Number(offset), number = Number(value) >>> 0; this[index] = number >>> 24; this[index + 1] = number >>> 16; this[index + 2] = number >>> 8; this[index + 3] = number; return index + 4; }
+    writeInt32LE(value, offset = 0) { return this.writeUInt32LE(value, offset); }
+    writeInt32BE(value, offset = 0) { return this.writeUInt32BE(value, offset); }
   };
   Buffer.poolSize = 8192;
   for (const name of Object.getOwnPropertyNames(Buffer)) {

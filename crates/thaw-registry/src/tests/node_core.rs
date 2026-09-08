@@ -171,6 +171,33 @@ fn events_builtin_runs_event_emitter_through_commonjs_require() {
 }
 
 #[test]
+fn events_builtin_emits_listener_metadata_and_error_monitor() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_events_metadata");
+    fs::write(
+        dir.join("index.js"),
+        "var events = require('node:events'); module.exports = function () { var emitter = new events.EventEmitter(), seen = []; emitter.on('newListener', function(name, listener) { if (name !== 'newListener') seen.push('new:' + String(name) + ':' + listener.name); }); emitter.on('removeListener', function(name, listener) { seen.push('remove:' + String(name) + ':' + listener.name); }); emitter.on(events.errorMonitor, function(error) { seen.push('monitor:' + error.message); }); emitter.on('error', function(error) { seen.push('error:' + error.message); }); function first() {} function second() {} emitter.on('work', first); emitter.prependListener('work', second); emitter.removeAllListeners('work'); emitter.emit('error', new Error('broken')); return seen; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_events_metadata_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseEventsMetadata = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseEventsMetadata").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"["new:removeListener:","new:Symbol(events.errorMonitor):","new:error:","new:work:first","new:work:second","remove:work:first","remove:work:second","monitor:broken","error:broken"]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
 fn events_builtin_supports_symbols_async_iteration_and_abort() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_events_async");
