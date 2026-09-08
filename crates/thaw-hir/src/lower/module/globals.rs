@@ -131,7 +131,11 @@ fn lower_top_level_initializers(
                 lowerer.class_context = saved_class_context;
             }
             ModuleItem::Stmt(Stmt::Decl(
-                Decl::Fn(_) | Decl::TsInterface(_) | Decl::TsEnum(_) | Decl::TsTypeAlias(_),
+                Decl::Fn(_)
+                | Decl::TsInterface(_)
+                | Decl::TsEnum(_)
+                | Decl::TsTypeAlias(_)
+                | Decl::TsModule(_),
             )) => {}
             ModuleItem::Stmt(statement) => {
                 steps.extend(

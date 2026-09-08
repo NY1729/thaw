@@ -1133,3 +1133,44 @@ fn load_failure_reports_the_real_thrown_message() {
         assert!(err.starts_with("boom"), "{err}");
     });
 }
+
+#[test]
+fn native_callback_registration_preserves_closure_identity() {
+    unsafe extern "C" fn callback(
+        _context: *const c_void,
+        _arguments: *const c_char,
+    ) -> *const c_char {
+        c"null".as_ptr()
+    }
+
+    let context = &0u8 as *const u8 as *const c_void;
+    let first = thaw_js_register_native_callback(
+        callback as *const c_void,
+        context,
+        0,
+        2,
+        0,
+        std::ptr::null(),
+    );
+    let second = thaw_js_register_native_callback(
+        callback as *const c_void,
+        context,
+        0,
+        2,
+        0,
+        std::ptr::null(),
+    );
+    assert!(first.error.is_null());
+    assert_eq!(first.value, second.value);
+}
+
+#[test]
+fn shared_json_reviver_reconstructs_node_buffers() {
+    assert_eq!(
+        load(
+            "function reviveBuffer() { const value = JSON.parse('{\"type\":\"Buffer\",\"data\":[1,2,255]}', __thaw_json_date_reviver); return Buffer.isBuffer(value) && value.toString('hex'); }"
+        ),
+        1
+    );
+    assert_eq!(call("reviveBuffer", "[]"), r#""0102ff""#);
+}

@@ -3463,7 +3463,9 @@ filesystem event subscription and by embedding its platform-specific optional
 dependency into a standalone executable that writes a snapshot after the
 registry directory has been removed. A second standalone executable performs
 subscribe, filesystem mutation, event polling, callback delivery, unsubscribe,
-and cleanup; the test stops the long-lived watcher process after delivery.
+and natural process cleanup. Native closures registered at different call sites
+retain one QuickJS callback identity, so unsubscribe releases the watcher's
+thread-safe function instead of leaving the executable alive.
 Class-style addons can use `napi_define_class`, wrapped native instance data,
 prototype methods/accessors, construction, `instanceof`, and wrap finalizers.
 Element APIs work on arrays, objects, and functions, including inherited numeric
@@ -3632,6 +3634,10 @@ with the symbols defined by the exact `thaw-napi` archive being linked. Missing
 Node-API entry points and direct Node/V8 C++ imports fail before final linking
 with the offending names; direct libuv imports remain supported by the existing
 system-libuv host path.
+The official `argon2@0.44.0` prebuild is verified end to end through its
+unmodified JavaScript wrapper (`hash` and `verify`), including Buffer results
+returned from native Promises. Addons such as `better-sqlite3` that import the
+Node/V8 C++ ABI directly remain outside this N-API host.
 Typed native calls preserve every function-valued argument in its original
 position. Optional callbacks may be omitted, and callback signatures with
 optional parameters or a typed rest parameter are adapted to Thaw's native

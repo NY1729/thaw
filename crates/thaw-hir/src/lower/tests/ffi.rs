@@ -94,6 +94,45 @@ fn accepts_json_callbacks_for_jsvalue_callback_parameters() {
 }
 
 #[test]
+fn resolves_namespace_scoped_types_used_by_flattened_ambient_functions() {
+    let program = lower(
+        r#"declare namespace Native {
+               export type Backend = "inotify" | "windows";
+               export interface Options { backend?: Backend; }
+           }
+           declare function subscribe(options: Options): void;
+           function main(): void { subscribe({ backend: "inotify" }); }"#,
+    );
+    let body = format!("{:?}", program.functions[0].body);
+    assert!(body.contains("Optional(Str)"), "{body}");
+}
+
+#[test]
+fn generated_dynamic_wrappers_preserve_json_callback_boundaries() {
+    let program = lower(
+        r#"
+        declare function __thaw_typed_js_66(value: Json): JsValue;
+        function __thaw_typed_wrapper_js_66(value: Json): JsValue {
+            return __thaw_typed_js_66(value);
+        }
+        function forward(value: Json): JsValue {
+            return __thaw_typed_wrapper_js_66(value);
+        }
+        function main(): void {
+            const callback = (value: Json): Json => value;
+            forward(callback);
+        }
+        "#,
+    );
+    let wrapper = program
+        .functions
+        .iter()
+        .find(|function| function.name == "__thaw_typed_wrapper_js_66")
+        .unwrap();
+    assert_eq!(wrapper.params[0].ty, HirType::Json);
+}
+
+#[test]
 fn rejects_unsupported_ambient_variadic_element_types() {
     let module = thaw_parser::parse_typescript(
         r#"declare function native_merge(...values: (boolean | undefined)[][]): number;
