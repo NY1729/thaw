@@ -22,18 +22,18 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20if (!(this instanceof EventEmitter)) return new EventEmitter();\n\
              \x20\x20this._events = Object.create(null); this._maxListeners = undefined;\n\
              }\n\
-             EventEmitter.prototype._add = function(event, listener, prepend, once) {\n\
+             function addEventListener(emitter, event, listener, prepend, once) {\n\
              \x20\x20if (typeof listener !== 'function') throw new TypeError('listener must be a function');\n\
-             \x20\x20if (!this._events) this._events = Object.create(null);\n\
-             \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = this._events[name] || (this._events[name] = []);\n\
+             \x20\x20if (!emitter._events) emitter._events = Object.create(null);\n\
+             \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = emitter._events[name] || (emitter._events[name] = []);\n\
              \x20\x20var entry = { listener: listener, once: Boolean(once) };\n\
              \x20\x20if (prepend) list.unshift(entry); else list.push(entry);\n\
-             \x20\x20return this;\n\
+             \x20\x20return emitter;\n\
              };\n\
-             EventEmitter.prototype.addListener = EventEmitter.prototype.on = function(event, listener) { return this._add(event, listener, false, false); };\n\
-             EventEmitter.prototype.once = function(event, listener) { return this._add(event, listener, false, true); };\n\
-             EventEmitter.prototype.prependListener = function(event, listener) { return this._add(event, listener, true, false); };\n\
-             EventEmitter.prototype.prependOnceListener = function(event, listener) { return this._add(event, listener, true, true); };\n\
+             EventEmitter.prototype.addListener = EventEmitter.prototype.on = function(event, listener) { return addEventListener(this, event, listener, false, false); };\n\
+             EventEmitter.prototype.once = function(event, listener) { return addEventListener(this, event, listener, false, true); };\n\
+             EventEmitter.prototype.prependListener = function(event, listener) { return addEventListener(this, event, listener, true, false); };\n\
+             EventEmitter.prototype.prependOnceListener = function(event, listener) { return addEventListener(this, event, listener, true, true); };\n\
              EventEmitter.prototype.emit = function(event) {\n\
              \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = this._events[name];\n\
              \x20\x20if (!list || list.length === 0) {\n\
