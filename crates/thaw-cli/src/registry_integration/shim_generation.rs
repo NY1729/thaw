@@ -505,9 +505,8 @@ fn generate_registry_shims(
             // native-addon branch above (`napi: false` picks the
             // QuickJS-NG symbol/backend instead) -- only instance
             // methods and (see `generate_napi_class_constructors`'s own
-            // `napi` parameter) constructors, not static methods/
-            // getters/setters, which the QuickJS-NG side of
-            // `compile_typed_napi_method` and friends don't support yet.
+            // `napi` parameter) constructors and static methods. Property
+            // getters/setters still remain on the dynamic-value path.
             // Real targets: dayjs/mime never needed constructor support
             // (dayjs's `Dayjs` instances come from calling its factory
             // function, mime's `Mime` instance is a ready-made package
@@ -537,6 +536,26 @@ fn generate_registry_shims(
                     )
                 {
                     class_method_rewrites.push((
+                        class.name.clone(),
+                        method,
+                        symbol,
+                        argument_count,
+                        has_callback,
+                        parameter_types,
+                    ));
+                }
+                for (method, symbol, argument_count, has_callback, parameter_types) in
+                    generate_napi_class_method_overloads_with_callback_instances(
+                        class,
+                        true,
+                        &observed_arities,
+                        &mut shim,
+                        false,
+                        &mut callback_instance_rewrites,
+                    )
+                {
+                    static_class_method_rewrites.push((
+                        qualifier_by_package[&pkg.name].clone(),
                         class.name.clone(),
                         method,
                         symbol,
