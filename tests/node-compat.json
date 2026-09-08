@@ -42,7 +42,7 @@
     },
     {
       "name": "buffer hex round trip",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.from('雪').toString('hex'), Buffer.from('e99baa', 'hex').toString()); }"
     },
     {

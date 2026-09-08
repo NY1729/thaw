@@ -219,9 +219,10 @@ impl<'a> FnLowerer<'a> {
                 "dynamic value method `{property}` does not support spread arguments"
             ));
         }
-        let intrinsic = match expected {
-            Some(HirType::Dynamic) => "callDynamicMethodHandleRaw",
-            Some(HirType::JsValue) => "callDynamicMethodHandle",
+        let intrinsic = match (property, expected) {
+            ("toString", _) => "callDynamicMethod",
+            (_, Some(HirType::Dynamic)) => "callDynamicMethodHandleRaw",
+            (_, Some(HirType::JsValue)) => "callDynamicMethodHandle",
             _ => "callDynamicMethod",
         };
         // The receiver must always come back as a genuine handle here,
@@ -275,10 +276,15 @@ impl<'a> FnLowerer<'a> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let array = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?;
-        Ok(HirExpr::Call(
+        let call = HirExpr::Call(
             Box::new(HirExpr::Var(intrinsic.to_string())),
             vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string())), array],
-        ))
+        );
+        if property == "toString" {
+            Ok(HirExpr::JsonAsString(Box::new(call)))
+        } else {
+            Ok(call)
+        }
     }
 
     /// Lowers `receiver.property` (a plain property *read*, no call at
