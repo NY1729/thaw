@@ -514,6 +514,39 @@ fn installed_package_inlines_a_local_bare_declaration_reexported_under_a_reserve
 }
 
 #[test]
+fn installed_package_inlines_same_file_function_aliases() {
+    let scratch = temp_registry("installed-dts-local-function-alias-scratch");
+    let registry = temp_registry("installed-dts-local-function-alias-registry");
+    let package = scratch.join("node_modules/client-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"client-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "declare function lookup(url: string): string;\n\
+         export { lookup as io, lookup as connect, lookup as default };\n",
+    )
+    .unwrap();
+    fs::write(package.join("index.js"), "module.exports = function() {};\n").unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "client-kit").unwrap();
+    let declarations = resolve(&registry, "client-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("declare function io(url: string): string"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("declare function connect(url: string): string"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_a_callable_const_reexported_from_another_file() {
     let scratch = temp_registry("installed-dts-reexported-callable-const-scratch");
     let registry = temp_registry("installed-dts-reexported-callable-const-registry");

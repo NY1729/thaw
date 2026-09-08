@@ -985,6 +985,11 @@ fn dts_source_with_reexported_functions(
         &import_equals_targets,
     )?);
     let named_import_targets = named_import_targets(entry_path, &module);
+    let mut local_export_visited = std::collections::BTreeSet::new();
+    let local_exports = all_reexported_function_declarations(
+        entry_path,
+        &mut local_export_visited,
+    )?;
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
             continue;
@@ -1051,7 +1056,11 @@ fn dts_source_with_reexported_functions(
                                 )?
                             }
                         }
-                        None => continue,
+                        None => local_exports
+                            .iter()
+                            .filter(|(name, _)| name == &exported)
+                            .map(|(_, snippet)| snippet.clone())
+                            .collect(),
                     },
                 },
             };
