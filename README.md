@@ -260,6 +260,14 @@ THAW_POSTGRES_URL=postgresql://postgres:password@127.0.0.1:5432/app \
   cargo test -p thaw-cli builds_and_serves_hono_prisma_postgres_when_enabled -- --nocapture
 ```
 
+The npm network regression corpus also builds separate Socket.IO server and
+client executables and verifies echo, acknowledgement, and disconnect events:
+
+```bash
+THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli \
+  registry_add_runs_real_socket_io_client_ack_and_disconnect_when_enabled -- --nocapture
+```
+
 Run the same end-to-end path as a coarse build-performance regression check:
 
 ```bash

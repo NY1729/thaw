@@ -239,6 +239,38 @@ fn net_socket_reads_while_its_write_side_remains_open() {
 }
 
 #[test]
+fn net_socket_timeout_fires_without_closing_the_connection() {
+    use std::ffi::{CStr, CString};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    });
+
+    let dir = temp_registry("builtin_net_socket_timeout");
+    fs::write(dir.join("index.js"), "var net = require('node:net'); module.exports = async function (port) { var socket = net.connect(port, '127.0.0.1'); return new Promise(function(resolve, reject) { socket.on('error', reject); socket.setTimeout(10, function() { var open = !socket.destroyed && socket.readable && socket.writable; socket.destroy(); resolve([open, socket.timeout]); }); }); };").unwrap();
+    let empty_node_modules = temp_registry("builtin_net_socket_timeout_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetTimeout = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseNetTimeout").unwrap().as_ptr(),
+        CString::new(format!("[{port}]")).unwrap().as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[true,10]"
+    );
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
 fn http_client_requests_and_parses_a_real_chunked_response() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};

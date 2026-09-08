@@ -18,14 +18,15 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
 "#,
         ),
         "events" => Some(
-            "function EventEmitter() {\n\
+            "var errorMonitor = Symbol.for('events.errorMonitor');\n\
+             function EventEmitter() {\n\
              \x20\x20if (!(this instanceof EventEmitter)) return new EventEmitter();\n\
              \x20\x20this._events = Object.create(null); this._maxListeners = undefined;\n\
              }\n\
              function addEventListener(emitter, event, listener, prepend, once) {\n\
              \x20\x20if (typeof listener !== 'function') throw new TypeError('listener must be a function');\n\
              \x20\x20if (!emitter._events) emitter._events = Object.create(null);\n\
-             \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = emitter._events[name] || (emitter._events[name] = []);\n\
+             \x20\x20var name = typeof event === 'symbol' ? event : String(event); if (emitter._events.newListener && emitter._events.newListener.length) emitter.emit('newListener', name, listener); var list = emitter._events[name] || (emitter._events[name] = []);\n\
              \x20\x20var entry = { listener: listener, once: Boolean(once) };\n\
              \x20\x20if (prepend) list.unshift(entry); else list.push(entry);\n\
              \x20\x20return emitter;\n\
@@ -36,6 +37,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              EventEmitter.prototype.prependOnceListener = function(event, listener) { return addEventListener(this, event, listener, true, true); };\n\
              EventEmitter.prototype.emit = function(event) {\n\
              \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = this._events[name];\n\
+             \x20\x20if (name === 'error' && this._events[errorMonitor] && this._events[errorMonitor].length) this.emit.apply(this, [errorMonitor].concat(Array.prototype.slice.call(arguments, 1)));\n\
              \x20\x20if (!list || list.length === 0) {\n\
              \x20\x20\x20\x20if (name === 'error') { var error = arguments[1]; throw error instanceof Error ? error : new Error('Unhandled error event'); }\n\
              \x20\x20\x20\x20return false;\n\
@@ -49,10 +51,9 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              };\n\
              EventEmitter.prototype.removeListener = EventEmitter.prototype.off = function(event, listener) {\n\
              \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = this._events[name]; if (!list) return this;\n\
-             \x20\x20for (var index = list.length - 1; index >= 0; index--) if (list[index].listener === listener || list[index].listener.listener === listener) { list.splice(index, 1); break; }\n\
-             \x20\x20if (list.length === 0) delete this._events[name]; return this;\n\
+             \x20\x20for (var index = list.length - 1; index >= 0; index--) if (list[index].listener === listener || list[index].listener.listener === listener) { var removed = list[index].listener.listener || list[index].listener; list.splice(index, 1); if (list.length === 0) delete this._events[name]; if (this._events.removeListener && this._events.removeListener.length) this.emit('removeListener', name, removed); break; } return this;\n\
              };\n\
-             EventEmitter.prototype.removeAllListeners = function(event) { if (event === undefined) this._events = Object.create(null); else delete this._events[typeof event === 'symbol' ? event : String(event)]; return this; };\n\
+             EventEmitter.prototype.removeAllListeners = function(event) { var emitter = this; if (!this._events.removeListener || !this._events.removeListener.length) { if (event === undefined) this._events = Object.create(null); else delete this._events[typeof event === 'symbol' ? event : String(event)]; return this; } if (event !== undefined) { var name = typeof event === 'symbol' ? event : String(event), list = (this._events[name] || []).slice(); for (var index = list.length - 1; index >= 0; index--) this.removeListener(name, list[index].listener); return this; } Reflect.ownKeys(this._events).filter(function(name) { return name !== 'removeListener'; }).forEach(function(name) { emitter.removeAllListeners(name); }); this.removeAllListeners('removeListener'); return this; };\n\
              EventEmitter.prototype.listeners = function(event) { var list = this._events[typeof event === 'symbol' ? event : String(event)] || []; return list.map(function(entry) { return entry.listener.listener || entry.listener; }); };\n\
              EventEmitter.prototype.rawListeners = function(event) { var list = this._events[typeof event === 'symbol' ? event : String(event)] || []; return list.map(function(entry) { return entry.listener; }); };\n\
              EventEmitter.prototype.listenerCount = function(event) { var list = this._events[typeof event === 'symbol' ? event : String(event)]; return list ? list.length : 0; };\n\
@@ -73,7 +74,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              module.exports = EventEmitter;\n\
              module.exports.EventEmitter = EventEmitter;\n\
              module.exports.once = once;\n\
-             module.exports.on = on; module.exports.getEventListeners = getEventListeners; module.exports.getMaxListeners = getMaxListeners; module.exports.setMaxListeners = setMaxListeners; module.exports.errorMonitor = Symbol.for('events.errorMonitor'); module.exports.captureRejectionSymbol = Symbol.for('nodejs.rejection');\n\
+             module.exports.on = on; module.exports.getEventListeners = getEventListeners; module.exports.getMaxListeners = getMaxListeners; module.exports.setMaxListeners = setMaxListeners; module.exports.errorMonitor = errorMonitor; module.exports.captureRejectionSymbol = Symbol.for('nodejs.rejection');\n\
              module.exports.default = EventEmitter;\n\
              module.exports.__esModule = true;\n",
         ),
