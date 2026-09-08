@@ -593,12 +593,17 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 continue;
             };
             let derived_name = derived.ident.sym.as_ref();
-            let base_params = signatures[&class_constructor_symbol(base.sym.as_ref())]
-                .params
-                .clone();
-            let base_native_rest = signatures[&class_constructor_symbol(base.sym.as_ref())]
-                .native_rest
-                .clone();
+            let base_symbol = class_constructor_symbol(base.sym.as_ref());
+            let (base_params, base_native_rest) = match signatures.get(&base_symbol) {
+                Some(signature) => (signature.params.clone(), signature.native_rest.clone()),
+                None if is_error_family_name(base.sym.as_ref()) => (vec![HirType::Str], None),
+                None => {
+                    return Err(format!(
+                        "derived class `{derived_name}` has no constructor signature for `{}`",
+                        base.sym
+                    ))
+                }
+            };
             let constructor = signatures
                 .get_mut(&class_constructor_symbol(derived_name))
                 .expect("derived constructor signature");
