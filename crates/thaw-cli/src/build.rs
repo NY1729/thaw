@@ -561,11 +561,11 @@ fn build_with_native_mode(
     if let Some(arg) = preferred_linker_arg(static_link, lld_available()) {
         linker.arg(arg);
     }
+    if cfg!(target_os = "linux") {
+        linker.arg("-no-pie");
+    }
     if static_link {
-        linker
-            .arg("-static")
-            .arg("-no-pie")
-            .arg("-Wl,--no-dynamic-linker");
+        linker.arg("-static").arg("-Wl,--no-dynamic-linker");
     }
     linker
         .arg(&obj_path)
