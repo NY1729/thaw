@@ -63,23 +63,30 @@ impl<'a> FnLowerer<'a> {
                 Ok(vec![HirStmt::Return(value)])
             }
             Stmt::Expr(expr_stmt) => {
-                let discarded_dynamic_await = match expr_stmt.expr.as_ref() {
-                    Expr::Await(awaited) => match awaited.arg.as_ref() {
-                        Expr::Call(call) => match &call.callee {
-                            Callee::Expr(callee) => match callee.as_ref() {
-                                Expr::Member(member) => {
-                                    self.infer_member_receiver_type(&member.obj)
-                                        == Some(HirType::JsValue)
-                                }
-                                _ => false,
-                            },
-                            _ => false,
-                        },
-                        _ => false,
-                    },
-                    _ => false,
+                let discarded_dynamic_call = |expr: &Expr| {
+                    matches!(
+                        expr,
+                        Expr::Call(call)
+                            if matches!(
+                                &call.callee,
+                                Callee::Expr(callee)
+                                    if matches!(
+                                        callee.as_ref(),
+                                        Expr::Member(member)
+                                            if self.infer_member_receiver_type(&member.obj)
+                                                == Some(HirType::JsValue)
+                                    )
+                            )
+                    )
                 };
-                let value = if discarded_dynamic_await {
+                let discarded_dynamic_result = discarded_dynamic_call(&expr_stmt.expr);
+                let discarded_dynamic_await = matches!(
+                        expr_stmt.expr.as_ref(),
+                        Expr::Await(awaited) if discarded_dynamic_call(&awaited.arg)
+                    );
+                let value = if discarded_dynamic_result {
+                    self.lower_expr_with_expected_type(&expr_stmt.expr, Some(&HirType::Dynamic))?
+                } else if discarded_dynamic_await {
                     self.lower_expr_with_expected_type(&expr_stmt.expr, Some(&HirType::JsValue))?
                 } else {
                     self.lower_expr(&expr_stmt.expr)?

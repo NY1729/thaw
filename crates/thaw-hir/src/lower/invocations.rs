@@ -219,10 +219,10 @@ impl<'a> FnLowerer<'a> {
                 "dynamic value method `{property}` does not support spread arguments"
             ));
         }
-        let intrinsic = if expected == Some(&HirType::JsValue) {
-            "callDynamicMethodHandle"
-        } else {
-            "callDynamicMethod"
+        let intrinsic = match expected {
+            Some(HirType::Dynamic) => "callDynamicMethodHandleRaw",
+            Some(HirType::JsValue) => "callDynamicMethodHandle",
+            _ => "callDynamicMethod",
         };
         // The receiver must always come back as a genuine handle here,
         // never a JSON-decoded snapshot -- it's about to be fed straight

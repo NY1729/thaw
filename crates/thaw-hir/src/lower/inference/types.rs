@@ -1309,7 +1309,9 @@ impl<'a> FnLowerer<'a> {
                     // own result is itself a `JsValue` rather than plain
                     // data -- see `lower_dynamic_value_method_call`'s doc
                     // comment for how a call chooses between the two.
-                    "callDynamicMethodHandle" => return Ok(HirType::JsValue),
+                    "callDynamicMethodHandle" | "callDynamicMethodHandleRaw" => {
+                        return Ok(HirType::JsValue)
+                    }
                     "readDynamicValue" => return Ok(HirType::Json),
                     "callDynamicValueMixed" => return Ok(HirType::Json),
                     "constructDynamicValue" => return Ok(HirType::JsValue),
