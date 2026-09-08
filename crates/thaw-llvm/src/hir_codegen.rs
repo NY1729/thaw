@@ -187,7 +187,7 @@ pub struct HirCompiler<'ctx> {
     builder: Builder<'ctx>,
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
-    arena_variables: HashSet<String>,
+    arena_variables: HashSet<PointerValue<'ctx>>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
     global_variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>, HirType)>,
     function_return_types: HashMap<String, HirType>,
