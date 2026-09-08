@@ -193,7 +193,7 @@
     platform: globalThis.process.platform || hostInfo.platform || 'linux',
     arch: globalThis.process.arch || hostInfo.arch || '',
     version: globalThis.process.version || '',
-    execPath: globalThis.process.execPath || '/usr/bin/node',
+    execPath: globalThis.process.execPath || 'node',
     config: globalThis.process.config || { variables: {} },
     versions: Object.assign({ node: '', modules: '', uv: '' },
                             globalThis.process.versions || {}),
