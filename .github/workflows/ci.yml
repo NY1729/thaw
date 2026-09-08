@@ -63,10 +63,12 @@ jobs:
           cargo test -p thaw-cli -- --test-threads=1
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
-      - name: Test Hono and sharp
+      - name: Test Hono, sharp, and Buffer packages
         env:
           THAW_RUN_NPM_INTEGRATION: "1"
-        run: cargo test -p thaw-cli registry_add_processes_a_real_hono_sharp_image_when_enabled -- --nocapture
+        run: |
+          cargo test -p thaw-cli registry_add_processes_a_real_hono_sharp_image_when_enabled -- --nocapture
+          cargo test -p thaw-cli registry_add_runs_real_safe_buffer_string_conversions_when_enabled -- --nocapture
       - name: Test Socket.IO client and server
         env:
           THAW_RUN_NPM_INTEGRATION: "1"
