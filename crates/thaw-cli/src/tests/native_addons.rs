@@ -3143,7 +3143,8 @@ async function main(): Promise<void> {
         return c.json({ value: Number(readDynamicValue(queried.rows[0].value)) });
     });
     const response: JsValue = await app.request("/value");
-    console.log(await response.text());
+    const body: string = await response.text();
+    console.log(body);
     await pool.end();
 }"#,
     )

@@ -407,6 +407,35 @@ fn hmac_bytes(algorithm: &str, key: &[u8], value: &[u8]) -> Vec<u8> {
     digest_bytes(algorithm, &outer)
 }
 
+fn pbkdf2_bytes(
+    algorithm: &str,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    length: usize,
+) -> Vec<u8> {
+    let digest_length = digest_bytes(algorithm, &[]).len();
+    if digest_length == 0 || iterations == 0 {
+        return Vec::new();
+    }
+    let mut output = Vec::with_capacity(length);
+    for block in 1..=length.div_ceil(digest_length) {
+        let mut input = salt.to_vec();
+        input.extend_from_slice(&(block as u32).to_be_bytes());
+        let mut value = hmac_bytes(algorithm, password, &input);
+        let mut accumulated = value.clone();
+        for _ in 1..iterations {
+            value = hmac_bytes(algorithm, password, &value);
+            for (byte, next) in accumulated.iter_mut().zip(&value) {
+                *byte ^= next;
+            }
+        }
+        output.extend_from_slice(&accumulated);
+    }
+    output.truncate(length);
+    output
+}
+
 fn os_info_json() -> String {
     let platform = match std::env::consts::OS {
         "macos" => "darwin",

@@ -253,14 +253,17 @@ fn resolve_promise_value<'js>(
         rquickjs::Error::Exception => {
             format!(
                 "`{label}` could not resolve its result: {}",
-                describe_exception(ctx)
+                describe_exception_with_stack(ctx)
             )
         }
         e => format!("`{label}` could not resolve its result: {e}"),
     })?;
     finish_with_platform_events(ctx, &promise).map_err(|e| match e {
         rquickjs::Error::Exception => {
-            format!("`{label}`'s promise rejected: {}", describe_exception(ctx))
+            format!(
+                "`{label}`'s promise rejected: {}",
+                describe_exception_with_stack(ctx)
+            )
         }
         e => format!("`{label}`'s promise rejected or stalled: {e}"),
     })
