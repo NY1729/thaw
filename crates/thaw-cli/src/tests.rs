@@ -31,7 +31,10 @@ include!("tests/acceptance.rs");
 
 include!("tests/module_graph.rs");
 
-include!("tests/registry_modules.rs");
+include!("tests/registry_jit_aggregates.rs");
+include!("tests/registry_jit_primitives.rs");
+include!("tests/registry_runtime.rs");
+include!("tests/registry_fallback.rs");
 
 include!("tests/ffi_metadata.rs");
 
