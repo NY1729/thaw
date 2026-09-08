@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "name": "path positional arguments",
+      "expect": "unsupported",
+      "source": "import { basename, join } from 'node:path'; function main(): void { console.log(join('a', 'b'), basename('/tmp/file.txt')); }"
+    },
+    {
+      "name": "filesystem sync round trip",
+      "expect": "matched",
+      "source": "import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'; function main(): void { const path: string = '/tmp/thaw-node-compat.txt'; writeFileSync(path, 'hello'); console.log(readFileSync(path, 'utf8')); unlinkSync(path); }"
+    },
+    {
+      "name": "event emitter",
+      "expect": "unsupported",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); events.on('value', (value: number): void => console.log(value)); events.emit('value', 42); }"
+    },
+    {
+      "name": "buffer byte length",
+      "expect": "matched",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.byteLength('雪')); }"
+    },
+    {
+      "name": "URL file conversion",
+      "expect": "unsupported",
+      "source": "import { fileURLToPath, pathToFileURL } from 'node:url'; function main(): void { console.log(fileURLToPath(pathToFileURL('/tmp/a b'))); }"
+    }
+  ]
+}

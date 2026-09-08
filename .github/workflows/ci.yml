@@ -55,6 +55,7 @@ jobs:
       - name: Run tests
         run: |
           cargo run -p thaw-cli -- compat tests/typescript-compat.json
+          cargo run -p thaw-cli -- node-compat tests/node-compat.json
           cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
           cargo test -p thaw-registry -- --test-threads=1
           cargo test -p thaw-llvm -- --test-threads=1
