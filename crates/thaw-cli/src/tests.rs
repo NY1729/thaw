@@ -5,6 +5,26 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[test]
+fn compatibility_manifest_detects_expectation_changes() {
+    let dir = std::env::temp_dir().join(format!("thaw-compat-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = dir.join("cases.json");
+    std::fs::write(
+        &manifest,
+        r#"{"cases":[{"name":"primitive","expect":"supported","source":"function main(): void {}"}]}"#,
+    )
+    .unwrap();
+    assert!(run_compat(&[manifest.to_string_lossy().into_owned()]).is_ok());
+    std::fs::write(
+        &manifest,
+        r#"{"cases":[{"name":"regression","expect":"unsupported","source":"function main(): void {}"}]}"#,
+    )
+    .unwrap();
+    assert!(run_compat(&[manifest.to_string_lossy().into_owned()]).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn record_acceptance_metrics(name: &str, build_time: Duration, output: &Path) {
     let executable_bytes = std::fs::metadata(output).unwrap().len();
     let metrics = serde_json::json!({

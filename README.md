@@ -49,6 +49,16 @@ Inspect a produced artifact without running it:
 target/release/thaw inspect app
 ```
 
+Run the fast parser/HIR TypeScript compatibility corpus with:
+
+```sh
+target/release/thaw compat tests/typescript-compat.json
+```
+
+The JSON report separates supported, intentionally unsupported, out-of-scope,
+and unexpected (`bug`) cases. This front-end corpus complements, rather than
+replaces, the executable real-package acceptance tests.
+
 This reports its ELF architecture, static/dynamic system linkage, embedded npm
 packages, and whether QuickJS or N-API support is present. When QuickJS is
 needed, `quickjs-reason` lines identify explicit dynamic operations or registry
