@@ -932,7 +932,21 @@ fn async_creation_validates_resources_names_and_callback_environment() {
         let foreign_resource = foreign_env.alloc(Value::Object(HashMap::new()));
         let foreign_name = foreign_env.alloc(Value::String("foreign-work".into()));
         let number_name = env.alloc(Value::Number(1.0));
+        let undefined_name = env.alloc(Value::Undefined);
         let mut work = ptr::null_mut();
+        assert_eq!(
+            napi_create_async_work(
+                env_ptr,
+                ptr::null_mut(),
+                undefined_name,
+                Some(noop_execute),
+                None,
+                ptr::null_mut(),
+                &mut work
+            ),
+            NAPI_OK
+        );
+        assert_eq!(napi_delete_async_work(env_ptr, work), NAPI_OK);
         assert_eq!(
             napi_create_async_work(
                 env_ptr,

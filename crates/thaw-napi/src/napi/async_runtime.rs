@@ -434,7 +434,10 @@ pub unsafe extern "C" fn napi_create_async_work(
         return record_status(env, NAPI_INVALID_ARG);
     }
     if !async_resource_name.is_null()
-        && !matches!(value_ref(async_resource_name), Ok(Value::String(_)))
+        && !matches!(
+            value_ref(async_resource_name),
+            Ok(Value::String(_) | Value::Undefined)
+        )
     {
         return record_status(env, NAPI_STRING_EXPECTED);
     }

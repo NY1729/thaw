@@ -130,6 +130,10 @@ fn bundle_commonjs_package_cached(
         } else {
             let source = fs::read_to_string(&abs_path)
                 .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
+            let source = source
+                .strip_prefix("#!")
+                .and_then(|source| source.split_once('\n').map(|(_, rest)| rest.to_string()))
+                .unwrap_or(source);
             let source = if abs_path.extension().is_some_and(|ext| ext == "json") {
                 let value: serde_json::Value = serde_json::from_str(&source)
                     .map_err(|error| format!("invalid JSON module `{key}`: {error}"))?;
@@ -155,7 +159,7 @@ fn bundle_commonjs_package_cached(
 
         let mut requires = Vec::new();
 
-        if analysis.has_nonliteral_dynamic_import {
+        if analysis.has_nonliteral_module_load {
             let mut candidates = Vec::new();
             collect_relative_files(&pkg_dir, &pkg_dir, &mut candidates)?;
             for relative in candidates.into_iter().filter(|path| {

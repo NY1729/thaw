@@ -555,6 +555,16 @@ const cases = JSON.parse(process.argv[2]);
         String::from_utf8_lossy(&node.stderr)
     );
     let expected: Vec<JsonValue> = serde_json::from_slice(&node.stdout).unwrap();
+    let node_error = Command::new("node")
+        .args([
+            "-e",
+            "const b=require(process.argv[1]);try{b.error.throwErrorThatEscapesScope('official-error')}catch(e){process.stdout.write(JSON.stringify({name:e.name,message:e.message}))}",
+            &path,
+        ])
+        .output()
+        .unwrap();
+    assert!(node_error.status.success());
+    let expected_error: JsonValue = serde_json::from_slice(&node_error.stdout).unwrap();
     let path = CString::new(path).unwrap();
     unsafe {
         assert_eq!(thaw_napi_load(path.as_ptr()), 1);
@@ -688,6 +698,54 @@ const cases = JSON.parse(process.argv[2]);
             NAPI_OK
         );
         assert!(matches!(value_ref(external), Ok(Value::External(_))));
+
+        let error = thaw_napi_get_export(c"error".as_ptr()) as NapiValue;
+        let result = thaw_napi_call_method_typed_result(
+            error as u64,
+            c"throwErrorThatEscapesScope".as_ptr(),
+            c"[\"official-error\"]".as_ptr(),
+        );
+        assert!(!result.error.is_null());
+        let actual_error = CStr::from_ptr(result.error).to_string_lossy();
+        assert!(actual_error.contains(expected_error["name"].as_str().unwrap()));
+        assert!(actual_error.contains(expected_error["message"].as_str().unwrap()));
+
+        let asyncworker = thaw_napi_get_export(c"asyncworker".as_ptr()) as NapiValue;
+        assert_eq!(
+            napi_get_named_property(
+                env,
+                asyncworker,
+                c"tryCancelQueuedWork".as_ptr(),
+                &mut create,
+            ),
+            NAPI_OK
+        );
+        let callback = env_mut(env).unwrap().alloc(Value::Function(Function {
+            callback: bcrypt_async_callback,
+            data: ptr::null_mut(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+        }));
+        let echo = env_mut(env).unwrap().alloc(Value::String("echo".into()));
+        let workers = env_mut(env).unwrap().alloc(Value::Number(0.0));
+        let mut cancelled = ptr::null_mut();
+        assert_eq!(
+            napi_call_function(
+                env,
+                asyncworker,
+                create,
+                3,
+                [callback, echo, workers].as_ptr(),
+                &mut cancelled,
+            ),
+            NAPI_OK
+        );
+        assert_eq!(thaw_napi_run_async_work(), 1);
+        assert!(BCRYPT_ASYNC_RESULT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap()
+            .is_none());
         assert_eq!(thaw_napi_unload_all(), 1);
     }
 }
@@ -862,7 +920,7 @@ fn loads_parcel_watcher_prebuild_when_supplied() {
             serde_json::to_string(&serde_json::json!([
                 snapshot_dir.to_string_lossy(),
                 snapshot.to_string_lossy(),
-                {}
+                {"backend": "inotify"}
             ]))
             .unwrap(),
         )
@@ -910,7 +968,11 @@ fn loads_parcel_watcher_prebuild_when_supplied() {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let directory = env.alloc(Value::String(dir.to_string_lossy().into_owned()));
-        let options = env.alloc(Value::Object(HashMap::new()));
+        let backend = env.alloc(Value::String("inotify".into()));
+        let options = env.alloc(Value::Object(HashMap::from([(
+            PropertyKey::String("backend".into()),
+            backend,
+        )])));
         let probe = Box::into_raw(Box::new(ParcelWatcherProbe {
             events: Mutex::new(Vec::new()),
         }));

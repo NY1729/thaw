@@ -12,7 +12,7 @@ struct ModuleAnalysis {
     has_esm: bool,
     has_top_level_await: bool,
     attribute_error: Option<String>,
-    has_nonliteral_dynamic_import: bool,
+    has_nonliteral_module_load: bool,
     uses_global_fetch: bool,
     _commonjs_exports: Vec<String>,
 }
@@ -65,7 +65,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     struct Calls {
         specs: Vec<String>,
         commonjs_exports: Vec<String>,
-        has_nonliteral_dynamic_import: bool,
+        has_nonliteral_module_load: bool,
         attribute_error: Option<String>,
         require_functions: Vec<String>,
         create_require_functions: Vec<String>,
@@ -228,8 +228,8 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
                 }
                 if let Some(specifiers) = specifiers {
                     self.specs.extend(specifiers);
-                } else if is_import {
-                    self.has_nonliteral_dynamic_import = true;
+                } else {
+                    self.has_nonliteral_module_load = true;
                 }
             }
             call.visit_children_with(self);
@@ -351,7 +351,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     let mut calls = Calls {
         specs: Vec::new(),
         commonjs_exports: Vec::new(),
-        has_nonliteral_dynamic_import: false,
+        has_nonliteral_module_load: false,
         attribute_error: None,
         require_functions: vec!["require".to_string()],
         create_require_functions,
@@ -402,7 +402,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
             .any(|item| matches!(item, ModuleItem::ModuleDecl(_))),
         has_top_level_await: top_level_await.found,
         attribute_error,
-        has_nonliteral_dynamic_import: calls.has_nonliteral_dynamic_import,
+        has_nonliteral_module_load: calls.has_nonliteral_module_load,
         uses_global_fetch: calls.uses_global_fetch,
         _commonjs_exports: calls.commonjs_exports,
     }

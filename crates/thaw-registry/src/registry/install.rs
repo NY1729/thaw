@@ -514,7 +514,11 @@ fn fetch_and_copy(
     let node_modules_dir = scratch.join("node_modules");
     let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
-    download_prebuild_install_addon(&package_dir, &manifest)?;
+    if select_prebuilt_addon(&package_dir)?.is_none()
+        && select_optional_dependency_addon(&node_modules_dir, &manifest)?.is_none()
+    {
+        download_prebuild_install_addon(&package_dir, &manifest)?;
+    }
     let fallback_dts = if find_own_dts(&manifest, &package_dir).is_none() {
         Some(fetch_types_package_dts(scratch, name)?)
     } else {

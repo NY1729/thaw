@@ -1381,8 +1381,18 @@ fn dynamic_import_candidate_expansion_is_bounded() {
     let analysis = analyze_module(
             "import((a ? 'a' : 'b') + (b ? 'a' : 'b') + (c ? 'a' : 'b') + (d ? 'a' : 'b') + (e ? 'a' : 'b') + (f ? 'a' : 'b') + (g ? 'a' : 'b'));",
         );
-    assert!(analysis.has_nonliteral_dynamic_import);
+    assert!(analysis.has_nonliteral_module_load);
     assert!(analysis.specs.is_empty());
+    assert!(analyze_module("require(name)").has_nonliteral_module_load);
+}
+
+#[test]
+fn strips_node_shebangs_inside_bundle_factories() {
+    let package = temp_registry("bundle_shebang");
+    fs::write(package.join("index.js"), "#!/usr/bin/env node\nmodule.exports = 42;\n").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&package, "pkg", &package, "index.js").unwrap();
+    assert!(!bundle.contains("#!/usr/bin/env node"));
+    let _ = fs::remove_dir_all(package);
 }
 
 #[test]

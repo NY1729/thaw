@@ -83,6 +83,17 @@ fn specializes_generic_dynamic_ambient_arguments_per_call() {
 }
 
 #[test]
+fn accepts_json_callbacks_for_jsvalue_callback_parameters() {
+    let program = lower(
+        r#"declare function nativeAll(callback: (error: JsValue, rows: JsValue) => void): void;
+           function main(): void {
+               nativeAll((error: Json, rows: Json): void => { console.log(rows); });
+           }"#,
+    );
+    assert!(format!("{:?}", program.functions[0].body).contains("FfiCall"));
+}
+
+#[test]
 fn rejects_unsupported_ambient_variadic_element_types() {
     let module = thaw_parser::parse_typescript(
         r#"declare function native_merge(...values: (boolean | undefined)[][]): number;
@@ -189,5 +200,3 @@ fn coerces_arguments_of_a_generic_ambient_call_to_the_substituted_type() {
         )]
     );
 }
-
-
