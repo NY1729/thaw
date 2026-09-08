@@ -9,7 +9,9 @@
   "scripts": {
     "build": "vite build",
     "generate": "prisma generate",
-    "db:push": "prisma db push"
+    "db:push": "prisma db push",
+    "generate:postgres": "prisma generate --schema prisma/postgres.prisma",
+    "db:push:postgres": "prisma db push --schema prisma/postgres.prisma"
   },
   "dependencies": {
     "@hono/node-server": "2.1.1",
