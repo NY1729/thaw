@@ -713,6 +713,46 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
     Some(output)
 }
 
+fn rewrite_import_meta_urls(source: &str) -> String {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Expr, MemberExpr, MemberProp, MetaPropKind};
+    use thaw_parser::common::Spanned;
+
+    #[derive(Default)]
+    struct ImportMetaUrls(Vec<(u32, u32)>);
+    impl Visit for ImportMetaUrls {
+        fn visit_member_expr(&mut self, member: &MemberExpr) {
+            if matches!(member.obj.as_ref(), Expr::MetaProp(meta) if meta.kind == MetaPropKind::ImportMeta)
+                && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "url")
+            {
+                let span = member.span();
+                self.0.push((span.lo.0, span.hi.0));
+                return;
+            }
+            member.visit_children_with(self);
+        }
+    }
+
+    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
+        return source.to_string();
+    };
+    let mut urls = ImportMetaUrls::default();
+    module.visit_with(&mut urls);
+    let mut output = source.to_string();
+    for (lo, hi) in urls.0.into_iter().rev() {
+        let lo = source_map
+            .lookup_byte_offset(thaw_parser::common::BytePos(lo))
+            .pos
+            .0 as usize;
+        let hi = source_map
+            .lookup_byte_offset(thaw_parser::common::BytePos(hi))
+            .pos
+            .0 as usize;
+        output.replace_range(lo..hi, "('file://' + __filename)");
+    }
+    output
+}
+
 /// Rewrites ESM (`import`/`export`) syntax to the CommonJS shape the rest
 /// of this bundler's require-graph resolution already understands:
 /// the parser-backed dependency walk recognizes the synthesized
@@ -843,7 +883,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                 let loader = if await_imports {
                     "await requireAsync"
                 } else {
-                    "require"
+                    "__thaw_require"
                 };
                 prologue.push_str(&format!(
                     "var {var_name} = {loader}({});\n",
@@ -898,7 +938,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                     let loader = if await_imports {
                         "await requireAsync"
                     } else {
-                        "require"
+                        "__thaw_require"
                     };
                     prologue.push_str(&format!(
                         "var {var_name} = {loader}({});\n",
@@ -950,7 +990,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
                 let loader = if await_imports {
                     "await requireAsync"
                 } else {
-                    "require"
+                    "__thaw_require"
                 };
                 prologue.push_str(&format!(
                     "var {var_name} = {loader}({});\n",
@@ -968,7 +1008,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
         }
     }
 
-    Some(format!(
+    Some(rewrite_import_meta_urls(&format!(
         "module.exports.__esModule = true;\n{local_export_prologue}{prologue}{rest}"
-    ))
+    )))
 }
