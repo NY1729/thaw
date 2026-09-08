@@ -819,6 +819,19 @@ impl<'a> FnLowerer<'a> {
                             )),
                         }
                     }
+                    HirType::JsValue | HirType::Dynamic => {
+                        let key = self.lower_expr(&computed.expr)?;
+                        let key = match self.infer_expr_type(&key)? {
+                            HirType::Str => key,
+                            HirType::F64 => self.coerce_primitive_to_string(key)?,
+                            other => {
+                                return Err(format!(
+                                    "dynamic value index expression must be string or number, got {other:?}"
+                                ))
+                            }
+                        };
+                        self.lower_dynamic_value_property_read(obj, key)
+                    }
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
             }
@@ -952,7 +965,10 @@ impl<'a> FnLowerer<'a> {
                         element.as_ref(),
                     ),
                     HirType::JsValue | HirType::Dynamic => {
-                        self.lower_dynamic_value_property_read(obj, prop.sym.as_ref())
+                        self.lower_dynamic_value_property_read(
+                            obj,
+                            HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
+                        )
                     }
                     other => Err(format!(
                         "unsupported property access `.{}` on a value of type {other:?}",
