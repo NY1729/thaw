@@ -24,9 +24,13 @@ impl<'ctx> HirCompiler<'ctx> {
         captures: &[HirParam],
     ) -> Result<PointerValue<'ctx>, String> {
         for capture in captures {
+            let frame_backed = self
+                .variables
+                .get(&capture.name)
+                .is_some_and(|(cell, _)| cell.get_name().to_bytes().starts_with(b"frame_"));
             if self.arena_variables.contains(&capture.name)
                 || self.global_variables.contains_key(&capture.name)
-                || self.active_async_completion.is_some()
+                || frame_backed
             {
                 continue;
             }
