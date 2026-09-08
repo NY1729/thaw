@@ -174,6 +174,9 @@ impl<'a> FnLowerer<'a> {
             let value = HirExpr::BinOp(op, Box::new(current), Box::new(one));
             return Ok(build_assign(target, value));
         }
+        if let Target::Var(name) = target {
+            return Ok(HirExpr::PostfixUpdate(name, op));
+        }
 
         let mut bindings = Vec::new();
         let target = match target {

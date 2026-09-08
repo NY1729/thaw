@@ -732,6 +732,22 @@ fn numeric_recursion_keeps_variable_cells_on_the_stack() {
 }
 
 #[test]
+fn numeric_loops_do_not_allocate_from_the_arena() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { let total: number = 0; for (let index: number = 0; index < 10; index++) { total += index % 3; } console.log(total); }",
+    )
+    .unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "stack_numeric_loop");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let start = ir.find("define internal void @thaw_user_main").unwrap();
+    let body = &ir[start..start + ir[start..].find("\n}").unwrap()];
+    assert!(!body.contains("call ptr @thaw_arena_alloc"), "{body}");
+}
+
+#[test]
 fn closures_share_mutable_bindings_with_their_outer_scope() {
     let source = r#"
         function main(): void {
@@ -749,6 +765,30 @@ fn closures_share_mutable_bindings_with_their_outer_scope() {
     assert_eq!(
         compile_and_run(source, "mutable_captured_arrow"),
         "41\n42\n42\n"
+    );
+}
+
+#[test]
+fn returned_closures_share_one_promoted_arena_cell() {
+    let source = r#"
+        type Counter = { increment: () => number; read: () => number };
+        function makeCounter(): Counter {
+            let count: number = 40;
+            return {
+                increment: (): number => ++count,
+                read: (): number => count,
+            };
+        }
+        function main(): void {
+            const counter = makeCounter();
+            console.log(counter.increment());
+            console.log(counter.read());
+            console.log(counter.increment());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "shared_promoted_capture"),
+        "41\n41\n42\n"
     );
 }
 

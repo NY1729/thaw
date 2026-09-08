@@ -231,6 +231,16 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(&expected, value, &format!("assignment to `{name}`"))?;
                 Ok(expected)
             }
+            HirExpr::PostfixUpdate(name, _) => {
+                let ty = self
+                    .scope
+                    .get(name)
+                    .ok_or_else(|| format!("unknown variable `{name}`"))?;
+                if ty != &HirType::F64 {
+                    return Err(format!("cannot apply ++/-- to {ty:?}"));
+                }
+                Ok(HirType::F64)
+            }
             HirExpr::Conditional(_, _, _, ty) => Ok(ty.clone()),
             HirExpr::BinOp(op, left, right) => {
                 let left_ty = self.infer_expr_type(left)?;

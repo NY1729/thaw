@@ -176,7 +176,8 @@ pub fn set_ffi_error_abi(
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
             | HirExpr::FunctionRef(..)
-            | HirExpr::MethodRef(..) => {}
+            | HirExpr::MethodRef(..)
+            | HirExpr::PostfixUpdate(_, _) => {}
         }
     }
 
@@ -386,7 +387,8 @@ pub fn set_ffi_ownership(
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
             | HirExpr::FunctionRef(..)
-            | HirExpr::MethodRef(..) => {}
+            | HirExpr::MethodRef(..)
+            | HirExpr::PostfixUpdate(_, _) => {}
         }
     }
     fn update_stmts(
@@ -898,7 +900,8 @@ pub fn set_ffi_string_abi(
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
             | HirExpr::FunctionRef(..)
-            | HirExpr::MethodRef(..) => {}
+            | HirExpr::MethodRef(..)
+            | HirExpr::PostfixUpdate(_, _) => {}
         }
     }
     fn update_stmts(
