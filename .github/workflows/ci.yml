@@ -52,6 +52,10 @@ jobs:
         env:
           THAW_RUN_NPM_INTEGRATION: "1"
         run: cargo test -p thaw-cli registry_add_processes_a_real_hono_sharp_image_when_enabled -- --nocapture
+      - name: Test Socket.IO client and server
+        env:
+          THAW_RUN_NPM_INTEGRATION: "1"
+        run: cargo test -p thaw-cli registry_add_runs_real_socket_io_client_ack_and_disconnect_when_enabled -- --nocapture
       - name: Test Hono, Prisma, and PostgreSQL
         env:
           THAW_POSTGRES_URL: postgresql://postgres:password@127.0.0.1:5432/app

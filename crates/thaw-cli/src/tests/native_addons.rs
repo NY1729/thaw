@@ -3028,3 +3028,38 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "\"Thaw\"\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn registry_add_builds_real_pg_client_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-real-pg-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "pg@8.16.3").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Client } from "pg";
+function main(): void {
+    const client = new Client({ host: "127.0.0.1", port: 5432, user: "thaw", database: "thaw" });
+    console.log(client !== undefined);
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["pg".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    assert!(output.is_file());
+    let _ = std::fs::remove_dir_all(dir);
+}
