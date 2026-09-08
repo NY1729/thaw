@@ -487,6 +487,44 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
+        if matches!(assign.op, AssignOp::AndAssign | AssignOp::OrAssign) {
+            let current = target_to_read_expr(&target)?;
+            let current_type = self.infer_expr_type(&current)?;
+            let rhs = self.coerce_to_declared(&current_type, rhs)?;
+            let current_name = format!("__thaw_logical_assign_current_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope
+                .insert(current_name.clone(), current_type.clone());
+            let rhs_name = format!("__thaw_logical_assign_rhs_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(rhs_name.clone(), current_type.clone());
+            let assigned = HirExpr::Block(vec![
+                HirStmt::Expr(build_assign(
+                    target,
+                    HirExpr::Var(rhs_name.clone()),
+                )),
+                HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
+            ]);
+            let assigned = self.wrap_call_argument_bindings(
+                assigned,
+                &[(rhs_name, current_type.clone(), rhs)],
+            )?;
+            let present = HirExpr::Var(current_name.clone());
+            let condition = self.truthiness_expr(present.clone(), &current_type)?;
+            let (then_branch, else_branch) = if assign.op == AssignOp::AndAssign {
+                (assigned, present)
+            } else {
+                (present, assigned)
+            };
+            let result = HirExpr::Block(vec![HirStmt::If(
+                condition,
+                vec![HirStmt::Return(Some(then_branch))],
+                vec![HirStmt::Return(Some(else_branch))],
+            )]);
+            bindings.push((current_name, current_type, current));
+            return self.wrap_call_argument_bindings(result, &bindings);
+        }
+
         let value = if assign.op == AssignOp::Assign {
             rhs
         } else if let Some(op) = compound_op(assign.op) {

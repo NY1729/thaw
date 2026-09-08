@@ -25,6 +25,165 @@ fn callback_signature(ty: &HirType, supplied: usize) -> Option<(Vec<HirType>, Hi
 }
 
 impl<'a> FnLowerer<'a> {
+    fn lower_object_method(
+        &mut self,
+        method: &swc_ecma_ast::MethodProp,
+        receiver: HirType,
+    ) -> Result<HirExpr, String> {
+        struct ReplaceThis<'a>(&'a str);
+        impl VisitMut for ReplaceThis<'_> {
+            fn visit_mut_expr(&mut self, expression: &mut Expr) {
+                if matches!(expression, Expr::This(_)) {
+                    *expression = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        self.0.into(),
+                        swc_common::DUMMY_SP,
+                    ));
+                } else {
+                    expression.visit_mut_children_with(self);
+                }
+            }
+        }
+
+        let expression = swc_ecma_ast::FnExpr {
+            ident: None,
+            function: method.function.clone(),
+        };
+        let mut arrow = function_expression_as_arrow(&expression)?;
+        let receiver_name = format!("__thaw_object_this_{}", self.next_binding);
+        self.next_binding += 1;
+        arrow.body.visit_mut_with(&mut ReplaceThis(&receiver_name));
+        arrow.params.insert(
+            0,
+            Pat::Ident(swc_ecma_ast::BindingIdent {
+                id: swc_ecma_ast::Ident::new_no_ctxt(
+                    receiver_name.into(),
+                    swc_common::DUMMY_SP,
+                ),
+                type_ann: None,
+            }),
+        );
+        let mut params = vec![receiver];
+        params.extend(
+            method
+                .function
+                .params
+                .iter()
+                .map(|parameter| {
+                    lower_param(
+                        &parameter.pat,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        false,
+                        &HashMap::new(),
+                    )
+                    .map(|parameter| parameter.ty)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let expected_return = method
+            .function
+            .return_type
+            .as_ref()
+            .map(|annotation| {
+                lower_ts_type(
+                    &annotation.type_ann,
+                    self.interfaces,
+                    self.generic_interfaces,
+                )
+            })
+            .transpose()?;
+        self.lower_contextual_arrow(&arrow, &params, expected_return.as_ref())
+    }
+
+    fn lower_computed_dictionary_lit(
+        &mut self,
+        obj_lit: &SwcObjectLit,
+    ) -> Result<HirExpr, String> {
+        let mut bindings = Vec::new();
+        let mut entries = Vec::new();
+        let mut element_type = None;
+        for (index, property) in obj_lit.props.iter().enumerate() {
+            let PropOrSpread::Prop(property) = property else {
+                return Err("computed object literals cannot contain spreads yet".into());
+            };
+            let (key, value) = match property.as_ref() {
+                Prop::KeyValue(KeyValueProp { key, value }) => {
+                    let key = match key {
+                        PropName::Ident(key) => HirExpr::Lit(HirLit::Str(key.sym.to_string())),
+                        PropName::Str(key) => HirExpr::Lit(HirLit::Str(
+                            key.value.to_string_lossy().into_owned(),
+                        )),
+                        PropName::Computed(key) => {
+                            let key = self.lower_expr(&key.expr)?;
+                            self.coerce_primitive_to_string(key)?
+                        }
+                        _ => return Err("unsupported computed object literal key".into()),
+                    };
+                    (key, self.lower_object_lit_field_value(value, None)?)
+                }
+                Prop::Shorthand(value) => (
+                    HirExpr::Lit(HirLit::Str(value.sym.to_string())),
+                    self.lower_expr(&Expr::Ident(value.clone()))?,
+                ),
+                _ => return Err("computed dictionaries support data properties only".into()),
+            };
+            let value_type = self.infer_expr_type(&value)?;
+            if element_type
+                .as_ref()
+                .is_some_and(|element| element != &value_type)
+            {
+                return Err("computed dictionary values must have one native type".into());
+            }
+            element_type.get_or_insert_with(|| value_type.clone());
+            let key_name = format!("__thaw_computed_key_{index}_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(key_name.clone(), HirType::Str);
+            bindings.push((key_name.clone(), HirType::Str, key));
+            let value_name = format!("__thaw_computed_value_{index}_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(value_name.clone(), value_type.clone());
+            bindings.push((value_name.clone(), value_type, value));
+            entries.push((key_name, value_name));
+        }
+        let element = element_type.ok_or("computed dictionary cannot be empty")?;
+        let dictionary = HirType::Dictionary(Box::new(element.clone()));
+        let object_name = format!("__thaw_computed_object_{}", self.next_binding);
+        self.next_binding += 1;
+        let mut body = entries
+            .into_iter()
+            .map(|(key, value)| {
+                HirStmt::Expr(HirExpr::JsonSet(
+                    Box::new(HirExpr::Var(object_name.clone())),
+                    Box::new(HirExpr::Var(key)),
+                    Box::new(HirExpr::Var(value)),
+                    element.clone(),
+                    false,
+                ))
+            })
+            .collect::<Vec<_>>();
+        body.push(HirStmt::Return(Some(HirExpr::Var(object_name.clone()))));
+        let captures = bindings
+            .iter()
+            .map(|(name, ty, _)| HirParam {
+                name: name.clone(),
+                ty: ty.clone(),
+            })
+            .collect();
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                captures,
+                vec![HirParam {
+                    name: object_name,
+                    ty: dictionary.clone(),
+                }],
+                dictionary,
+                Box::new(HirExpr::Block(body)),
+            )),
+            vec![HirExpr::JsonObjectLit(Vec::new(), element)],
+        );
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     /// Lowers an object literal's own `key: value` field value -- almost
     /// always just `lower_expr`, with one narrow exception: a method
     /// call whose *receiver* is already known to be `JsValue`-typed
@@ -99,6 +258,16 @@ impl<'a> FnLowerer<'a> {
         obj_lit: &SwcObjectLit,
         expected_fields: Option<&[(Symbol, HirType)]>,
     ) -> Result<HirExpr, String> {
+        if expected_fields.is_none()
+            && obj_lit.props.iter().any(|property| {
+                matches!(property, PropOrSpread::Prop(property)
+                    if matches!(property.as_ref(), Prop::KeyValue(KeyValueProp {
+                        key: PropName::Computed(computed), ..
+                    }) if !matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_)))))
+            })
+        {
+            return self.lower_computed_dictionary_lit(obj_lit);
+        }
         struct AwaitFinder(bool);
         impl Visit for AwaitFinder {
             fn visit_await_expr(&mut self, _: &AwaitExpr) {
@@ -110,7 +279,7 @@ impl<'a> FnLowerer<'a> {
         if finder.0 {
             return self.lower_ordered_await_object_lit(obj_lit);
         }
-        let mut fields = Vec::new();
+        let mut fields: Vec<(Symbol, HirExpr)> = Vec::new();
         let mut evaluated_spreads: Vec<(Symbol, HirType, HirExpr)> = Vec::new();
         for property in &obj_lit.props {
             let additions = match property {
@@ -187,6 +356,26 @@ impl<'a> FnLowerer<'a> {
                         ident.sym.to_string(),
                         self.lower_expr(&Expr::Ident(ident.clone()))?,
                     )],
+                    Prop::Method(method) => {
+                        let name = match &method.key {
+                            PropName::Ident(name) => name.sym.to_string(),
+                            PropName::Str(name) => name.value.to_string_lossy().into_owned(),
+                            _ => return Err("object method name must be static".into()),
+                        };
+                        let receiver = HirType::Object(
+                            fields
+                                .iter()
+                                .map(|(name, value)| {
+                                    Ok((name.clone(), self.infer_expr_type(value)?))
+                                })
+                                .chain(std::iter::once(Ok((
+                                    "__thaw_object_method_receiver".into(),
+                                    HirType::Undefined,
+                                ))))
+                                .collect::<Result<Vec<_>, String>>()?,
+                        );
+                        vec![(name, self.lower_object_method(method, receiver)?)]
+                    }
                     _ => {
                         return Err(
                             "only data properties are supported in object literals".to_string()
@@ -724,6 +913,17 @@ impl<'a> FnLowerer<'a> {
                             }
                             return Err(format!("object has no field `{key}`"));
                         }
+                        let key = self.lower_expr(&computed.expr)?;
+                        if let HirType::StrLiteral(key_name) = self.infer_expr_type(&key)? {
+                            if fields.iter().any(|(name, _)| name == &key_name) {
+                                return Ok(HirExpr::PropAccess(
+                                    Box::new(obj),
+                                    HirType::Object(fields),
+                                    key_name,
+                                ));
+                            }
+                            return Err(format!("object has no field `{key_name}`"));
+                        }
                         let Some((_, payload)) = fields.first() else {
                             return Err("cannot dynamically index an empty object".into());
                         };
@@ -775,7 +975,6 @@ impl<'a> FnLowerer<'a> {
                             if !members.contains(&HirType::Undefined) {
                                 members.push(HirType::Undefined);
                             }
-                            let key = self.lower_expr(&computed.expr)?;
                             self.expect_type(&HirType::Str, &key, "computed object key")?;
                             return Ok(HirExpr::DynamicPropAccess(
                                 Box::new(obj),
@@ -791,7 +990,6 @@ impl<'a> FnLowerer<'a> {
                             }
                             other => HirType::Optional(Box::new(other.clone())),
                         };
-                        let key = self.lower_expr(&computed.expr)?;
                         self.expect_type(&HirType::Str, &key, "computed object key")?;
                         Ok(HirExpr::DynamicPropAccess(
                             Box::new(obj),
@@ -822,7 +1020,7 @@ impl<'a> FnLowerer<'a> {
                     HirType::JsValue | HirType::Dynamic => {
                         let key = self.lower_expr(&computed.expr)?;
                         let key = match self.infer_expr_type(&key)? {
-                            HirType::Str => key,
+                            HirType::Str | HirType::Dynamic => key,
                             HirType::F64 => self.coerce_primitive_to_string(key)?,
                             other => {
                                 return Err(format!(

@@ -231,6 +231,7 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(&expected, value, &format!("assignment to `{name}`"))?;
                 Ok(expected)
             }
+            HirExpr::Conditional(_, _, _, ty) => Ok(ty.clone()),
             HirExpr::BinOp(op, left, right) => {
                 let left_ty = self.infer_expr_type(left)?;
                 let right_ty = self.infer_expr_type(right)?;

@@ -6,7 +6,8 @@ impl<'ctx> HirCompiler<'ctx> {
         closure: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let llvm_ty = self.basic_type(ty)?;
-        let cell = self.allocate_variable_cell(llvm_ty, name)?;
+        let cell = self.allocate_arena_cell(llvm_ty, name)?;
+        self.arena_variables.insert(name.to_string());
         self.variables.insert(name.to_string(), (cell, llvm_ty));
         self.variable_hir_types.insert(name.to_string(), ty.clone());
         let value = self.compile_expr(closure)?;
@@ -22,6 +23,26 @@ impl<'ctx> HirCompiler<'ctx> {
         this_adapter: FunctionValue<'ctx>,
         captures: &[HirParam],
     ) -> Result<PointerValue<'ctx>, String> {
+        for capture in captures {
+            if self.arena_variables.contains(&capture.name)
+                || self.global_variables.contains_key(&capture.name)
+            {
+                continue;
+            }
+            let Some((stack, ty)) = self.variables.get(&capture.name).copied() else {
+                continue;
+            };
+            let cell = self.allocate_arena_cell(ty, &capture.name)?;
+            let value = self
+                .builder
+                .build_load(ty, stack, "captured_stack_value")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_store(cell, value)
+                .map_err(|error| error.to_string())?;
+            self.variables.insert(capture.name.clone(), (cell, ty));
+            self.arena_variables.insert(capture.name.clone());
+        }
         let i64_type = self.context.i64_type();
         let closure = self
             .builder

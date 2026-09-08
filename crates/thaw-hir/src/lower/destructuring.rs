@@ -86,9 +86,24 @@ impl<'a> FnLowerer<'a> {
                             let field_type = fields
                                 .iter()
                                 .find(|(name, _)| name == &key)
-                                .map(|(_, ty)| ty.clone())
-                                .ok_or_else(|| format!("object has no field `{key}`"))?;
+                                .map(|(_, ty)| ty.clone());
                             used.insert(key.clone());
+                            if field_type.is_none() {
+                                let default = property
+                                    .value
+                                    .as_ref()
+                                    .ok_or_else(|| format!("object has no field `{key}`"))?;
+                                let default = self.lower_expr(default)?;
+                                let default_type = self.infer_expr_type(&default)?;
+                                self.lower_binding_pattern(
+                                    &Pat::Ident(property.key.clone()),
+                                    default,
+                                    &default_type,
+                                    statements,
+                                )?;
+                                continue;
+                            }
+                            let field_type = field_type.expect("missing field handled above");
                             let mut field_value =
                                 HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key);
                             let mut binding_type = field_type.clone();
@@ -123,9 +138,23 @@ impl<'a> FnLowerer<'a> {
                             let field_type = fields
                                 .iter()
                                 .find(|(name, _)| name == &key)
-                                .map(|(_, ty)| ty.clone())
-                                .ok_or_else(|| format!("object has no field `{key}`"))?;
+                                .map(|(_, ty)| ty.clone());
                             used.insert(key.clone());
+                            if field_type.is_none() {
+                                let Pat::Assign(default) = property.value.as_ref() else {
+                                    return Err(format!("object has no field `{key}`"));
+                                };
+                                let value = self.lower_expr(&default.right)?;
+                                let value_type = self.infer_expr_type(&value)?;
+                                self.lower_binding_pattern(
+                                    &default.left,
+                                    value,
+                                    &value_type,
+                                    statements,
+                                )?;
+                                continue;
+                            }
+                            let field_type = field_type.expect("missing field handled above");
                             self.lower_binding_pattern(
                                 &property.value,
                                 HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key),
@@ -175,6 +204,41 @@ impl<'a> FnLowerer<'a> {
                             pattern, value, elements, statements,
                         );
                     }
+                }
+                if let HirType::Array(element) = ty {
+                    for (index, element_pattern) in pattern.elems.iter().enumerate() {
+                        let Some(element_pattern) = element_pattern else {
+                            continue;
+                        };
+                        if let Pat::Rest(rest) = element_pattern {
+                            let rest_value = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                                vec![
+                                    value.clone(),
+                                    HirExpr::Lit(HirLit::F64(index as f64)),
+                                    HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                                ],
+                            );
+                            self.lower_binding_pattern(
+                                &rest.arg,
+                                rest_value,
+                                ty,
+                                statements,
+                            )?;
+                            break;
+                        }
+                        self.lower_binding_pattern(
+                            element_pattern,
+                            HirExpr::TypedIndex(
+                                Box::new(value.clone()),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                element.as_ref().clone(),
+                            ),
+                            element,
+                            statements,
+                        )?;
+                    }
+                    return Ok(());
                 }
                 let HirType::Tuple(elements) = ty else {
                     return Err(format!(
