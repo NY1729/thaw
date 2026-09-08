@@ -259,6 +259,8 @@ include!("tests/async.rs");
 include!("tests/classes.rs");
 include!("tests/control_flow.rs");
 include!("tests/core.rs");
+include!("tests/collections.rs");
+include!("tests/native_builtins.rs");
 include!("tests/ffi.rs");
 include!("tests/types.rs");
 include!("tests/values.rs");
