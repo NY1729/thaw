@@ -59,6 +59,11 @@ pub fn set_ffi_error_abi(
                 visit_expr(key, symbol, abi, found);
                 visit_expr(value, symbol, abi, found);
             }
+            HirExpr::Conditional(test, consequent, alternate, _) => {
+                visit_expr(test, symbol, abi, found);
+                visit_expr(consequent, symbol, abi, found);
+                visit_expr(alternate, symbol, abi, found);
+            }
             HirExpr::Call(callee, args) => {
                 visit_expr(callee, symbol, abi, found);
                 for arg in args {
@@ -268,6 +273,11 @@ pub fn set_ffi_ownership(
                 for arg in args {
                     update_expr(arg, symbol, returns, errors, found);
                 }
+            }
+            HirExpr::Conditional(test, consequent, alternate, _) => {
+                update_expr(test, symbol, returns, errors, found);
+                update_expr(consequent, symbol, returns, errors, found);
+                update_expr(alternate, symbol, returns, errors, found);
             }
             HirExpr::DynamicCall(_, args) => {
                 for arg in args {
@@ -497,6 +507,19 @@ pub fn set_ffi_string_abi(
                     found,
                 );
                 for value in values {
+                    update_expr(
+                        value,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
+                }
+            }
+            HirExpr::Conditional(test, consequent, alternate, _) => {
+                for value in [test, consequent, alternate] {
                     update_expr(
                         value,
                         symbol,

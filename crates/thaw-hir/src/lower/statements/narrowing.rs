@@ -603,6 +603,124 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    fn union_boolean_discriminant_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        let Expr::Member(member) = expr else {
+            return None;
+        };
+        let Expr::Ident(identifier) = member.obj.as_ref() else {
+            return None;
+        };
+        let property = member_property_name(&member.prop)?;
+        let name = self.resolve_binding(identifier.sym.as_ref());
+        let HirType::Union(elements) = self.scope.get(&name)? else {
+            return None;
+        };
+        let values = self.union_discriminants.get(&name)?.get(&property)?;
+        let allowed = self
+            .union_narrowings
+            .get(&name)
+            .map(|(allowed, _)| allowed.clone())
+            .unwrap_or_else(|| (0..elements.len()).collect());
+        let matching = allowed
+            .iter()
+            .copied()
+            .filter(|index| values[*index] == Some(HirLit::Bool(true)))
+            .collect::<Vec<_>>();
+        (!matching.is_empty()).then(|| {
+            (
+                vec![UnionNarrowingTarget {
+                    name,
+                    matching,
+                    allowed,
+                    elements: elements.clone(),
+                }],
+                true,
+                true,
+            )
+        })
+    }
+
+    fn union_instanceof_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        let Expr::Bin(binary) = expr else {
+            return None;
+        };
+        if binary.op != BinaryOp::InstanceOf {
+            return None;
+        }
+        let (Expr::Ident(value), Expr::Ident(class)) =
+            (binary.left.as_ref(), binary.right.as_ref())
+        else {
+            return None;
+        };
+        let name = self.resolve_binding(value.sym.as_ref());
+        let HirType::Union(elements) = self.scope.get(&name)? else {
+            return None;
+        };
+        let allowed = self
+            .union_narrowings
+            .get(&name)
+            .map(|(allowed, _)| allowed.clone())
+            .unwrap_or_else(|| (0..elements.len()).collect());
+        let matching = allowed
+            .iter()
+            .copied()
+            .filter(|index| class_type_has_identity(&elements[*index], class.sym.as_ref()))
+            .collect::<Vec<_>>();
+        (!matching.is_empty()).then(|| {
+            (
+                vec![UnionNarrowingTarget {
+                    name,
+                    matching,
+                    allowed,
+                    elements: elements.clone(),
+                }],
+                true,
+                true,
+            )
+        })
+    }
+
+    fn union_in_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        let Expr::Bin(binary) = expr else { return None };
+        if binary.op != BinaryOp::In {
+            return None;
+        }
+        let (Expr::Lit(Lit::Str(property)), Expr::Ident(value)) =
+            (binary.left.as_ref(), binary.right.as_ref())
+        else {
+            return None;
+        };
+        let property = property.value.to_string_lossy();
+        let name = self.resolve_binding(value.sym.as_ref());
+        let HirType::Union(elements) = self.scope.get(&name)? else {
+            return None;
+        };
+        let allowed = self
+            .union_narrowings
+            .get(&name)
+            .map(|(allowed, _)| allowed.clone())
+            .unwrap_or_else(|| (0..elements.len()).collect());
+        let matching = allowed
+            .iter()
+            .copied()
+            .filter(|index| {
+                matches!(&elements[*index], HirType::Object(fields) if fields.iter().any(|(name, _)| name == property.as_ref()))
+            })
+            .collect::<Vec<_>>();
+        (!matching.is_empty()).then(|| {
+            (
+                vec![UnionNarrowingTarget {
+                    name,
+                    matching,
+                    allowed,
+                    elements: elements.clone(),
+                }],
+                true,
+                true,
+            )
+        })
+    }
+
     fn union_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
         if let Expr::Paren(parenthesized) = expr {
             return self.union_narrowing(&parenthesized.expr);
@@ -648,6 +766,9 @@ impl<'a> FnLowerer<'a> {
         }
         self.union_typeof_narrowing(expr)
             .or_else(|| self.union_member_equality_narrowing(expr))
+            .or_else(|| self.union_boolean_discriminant_narrowing(expr))
+            .or_else(|| self.union_instanceof_narrowing(expr))
+            .or_else(|| self.union_in_narrowing(expr))
     }
 
     fn lower_body_with_union_narrowing(

@@ -149,6 +149,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonDelete(_, _) => Some(HirType::Bool),
             HirExpr::EnumReverseLookup(_, _) => Some(HirType::Optional(Box::new(HirType::Str))),
             HirExpr::ArrayLen(_) => Some(HirType::F64),
+            HirExpr::Conditional(_, _, _, ty) => Some(ty.clone()),
             HirExpr::BinOp(op, _, _) => Some(match op {
                 BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::EqEqEq => HirType::Bool,
                 _ => HirType::F64,

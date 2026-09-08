@@ -121,6 +121,8 @@ pub enum HirType {
     Null,
     Void,
     Str,
+    /// Compile-time generic specialization marker; erased to `Str` in HIR bodies.
+    StrLiteral(Symbol),
     Json,
     /// A runtime-keyed JSON object whose values share one native type.
     Dictionary(Box<HirType>),

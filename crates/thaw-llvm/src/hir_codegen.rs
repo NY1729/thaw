@@ -187,6 +187,7 @@ pub struct HirCompiler<'ctx> {
     builder: Builder<'ctx>,
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
+    arena_variables: HashSet<String>,
     global_variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>, HirType)>,
     function_return_types: HashMap<String, HirType>,
     ffi_signatures: HashMap<String, FfiSignature>,
@@ -224,6 +225,7 @@ impl<'ctx> HirCompiler<'ctx> {
             builder: context.create_builder(),
             variables: HashMap::new(),
             variable_hir_types: HashMap::new(),
+            arena_variables: HashSet::new(),
             global_variables: HashMap::new(),
             function_return_types: HashMap::new(),
             ffi_signatures: HashMap::new(),
@@ -368,6 +370,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.variables.clear();
         self.variable_hir_types.clear();
+        self.arena_variables.clear();
         self.catch_stack.clear();
         self.seed_global_variables();
         for step in &program.initializers {

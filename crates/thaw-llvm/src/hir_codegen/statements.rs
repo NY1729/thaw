@@ -1,4 +1,46 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_conditional_value(
+        &mut self,
+        test: &HirExpr,
+        consequent: &HirExpr,
+        alternate: &HirExpr,
+        ty: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let function = self.current_function();
+        let consequent_block = self.context.append_basic_block(function, "conditional_then");
+        let alternate_block = self.context.append_basic_block(function, "conditional_else");
+        let merge_block = self.context.append_basic_block(function, "conditional_end");
+        let condition = self.compile_expr(test)?.into_int_value();
+        self.builder
+            .build_conditional_branch(condition, consequent_block, alternate_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(consequent_block);
+        let consequent = self.compile_expr(consequent)?;
+        let consequent_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(alternate_block);
+        let alternate = self.compile_expr(alternate)?;
+        let alternate_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(merge_block);
+        let phi = self
+            .builder
+            .build_phi(self.basic_type(ty)?, "conditional_value")
+            .map_err(|error| error.to_string())?;
+        phi.add_incoming(&[
+            (&consequent, consequent_end),
+            (&alternate, alternate_end),
+        ]);
+        Ok(phi.as_basic_value())
+    }
+
     /// Compiles a statement list, stopping early if one of them
     /// unconditionally leaves the block (`return`/`throw`, or an `if` whose
     /// branches all do). Returns `true` when that happened, so callers know

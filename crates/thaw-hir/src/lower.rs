@@ -31,9 +31,9 @@ use swc_ecma_ast::{
     ClassMember, ClassMethod, ClassProp, ComputedPropName, Decl, Expr, FnDecl, ForHead, IdentName,
     KeyValueProp, Lit, MemberExpr, MemberProp, MethodKind, Module, ModuleDecl, ModuleItem,
     ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop,
-    PropName, PropOrSpread, SimpleAssignTarget, Stmt, SuperProp, TsFnOrConstructorType, TsFnParam,
-    TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsParamPropParam, TsType, TsTypeElement,
-    TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
+    PropName, PropOrSpread, SimpleAssignTarget, Stmt, SuperProp, TsEntityName,
+    TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsParamPropParam,
+    TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
@@ -198,9 +198,15 @@ enum GenericTypePattern {
     Record(Vec<Symbol>, Box<GenericTypePattern>),
     Pick(Box<GenericTypePattern>, Vec<Symbol>),
     Omit(Box<GenericTypePattern>, Vec<Symbol>),
-    IndexedAccess(Box<GenericTypePattern>, Vec<Symbol>),
+    IndexedAccess(Box<GenericTypePattern>, GenericIndexKeys),
     Dictionary(Box<GenericTypePattern>),
     Object(Vec<(Symbol, GenericTypePattern)>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum GenericIndexKeys {
+    Finite(Vec<Symbol>),
+    Variable(Symbol),
 }
 
 #[derive(PartialEq)]

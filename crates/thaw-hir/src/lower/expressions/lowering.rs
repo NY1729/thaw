@@ -314,6 +314,35 @@ impl<'a> FnLowerer<'a> {
                             .is_some_and(object_type_is_error_family);
                     let value = self.lower_expr(&bin.left)?;
                     let value_type = self.infer_expr_type(&value)?;
+                    if let HirType::Union(elements) = &value_type {
+                        let matching = elements
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, element)| {
+                                class_type_has_identity(element, class.sym.as_ref())
+                                    .then_some(index)
+                            })
+                            .collect::<Vec<_>>();
+                        let name = format!("__thaw_instanceof_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), value_type.clone());
+                        let mut result = HirExpr::Lit(HirLit::Bool(false));
+                        for index in matching {
+                            let check = HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(
+                                    Box::new(HirExpr::Var(name.clone())),
+                                    elements.clone(),
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            );
+                            result = self.lower_logical_expr(result, check, false)?;
+                        }
+                        return self.wrap_call_argument_bindings(
+                            result,
+                            &[(name, value_type, value)],
+                        );
+                    }
                     // A caught exception has no real `Error` object or class
                     // hierarchy behind it once thrown -- just a string,
                     // optionally tagged with a class identity chain ahead
@@ -449,6 +478,43 @@ impl<'a> FnLowerer<'a> {
                                     (left_name, HirType::Str, lhs),
                                     (right_name, right_type, rhs),
                                 ],
+                            )?
+                        } else if let HirType::Union(elements) = &right_type {
+                            let HirExpr::Lit(HirLit::Str(property)) = lhs else {
+                                return Err(
+                                    "`in` on a union requires a string literal key".into()
+                                );
+                            };
+                            let matching = elements
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, element)| match element {
+                                    HirType::Object(fields)
+                                        if fields.iter().any(|(name, _)| name == &property) =>
+                                    {
+                                        Some(index)
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>();
+                            let name = format!("__thaw_in_union_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), right_type.clone());
+                            let mut result = HirExpr::Lit(HirLit::Bool(false));
+                            for index in matching {
+                                let check = HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::UnionTag(
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        elements.clone(),
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                );
+                                result = self.lower_logical_expr(result, check, false)?;
+                            }
+                            self.wrap_call_argument_bindings(
+                                result,
+                                &[(name, right_type, rhs)],
                             )?
                         } else {
                             let HirType::Object(fields) = right_type else {
@@ -885,9 +951,56 @@ impl<'a> FnLowerer<'a> {
                     let rhs = self.lower_expr(&conditional.cons)?;
                     return self.lower_undefined_default(lhs, rhs);
                 }
+                let optional_narrowing = self.optional_undefined_narrowing(&conditional.test);
+                let union_narrowing = self.union_narrowing(&conditional.test);
+                let branch_union = |truth: bool| {
+                    union_narrowing.as_ref().map(|(targets, equal, complement)| {
+                        targets
+                            .iter()
+                            .map(|target| UnionNarrowingTarget {
+                                name: target.name.clone(),
+                                matching: if truth == *equal {
+                                    target.matching.clone()
+                                } else if *complement {
+                                    target
+                                        .allowed
+                                        .iter()
+                                        .filter(|index| !target.matching.contains(index))
+                                        .copied()
+                                        .collect()
+                                } else {
+                                    target.allowed.clone()
+                                },
+                                allowed: target.allowed.clone(),
+                                elements: target.elements.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                };
+                let branch_optional = |truth: bool| {
+                    optional_narrowing.as_ref().and_then(
+                        |(name, payload, present_when_true, absence_kind)| {
+                            (truth == *present_when_true).then(|| {
+                                (name.clone(), payload.clone(), *absence_kind)
+                            })
+                        },
+                    )
+                };
+                let consequent_union = branch_union(true);
+                let alternate_union = branch_union(false);
+                let consequent_optional = branch_optional(true);
+                let alternate_optional = branch_optional(false);
                 let test = self.lower_condition_expr(&conditional.test)?;
-                let mut consequent = self.lower_expr(&conditional.cons)?;
-                let mut alternate = self.lower_expr(&conditional.alt)?;
+                let mut consequent = self.lower_expr_with_union_narrowing(
+                    &conditional.cons,
+                    consequent_union.as_deref(),
+                    consequent_optional.as_ref(),
+                )?;
+                let mut alternate = self.lower_expr_with_union_narrowing(
+                    &conditional.alt,
+                    alternate_union.as_deref(),
+                    alternate_optional.as_ref(),
+                )?;
                 let consequent_type = self.infer_expr_type(&consequent)?;
                 let alternate_type = self.infer_expr_type(&alternate)?;
                 let result_type = if consequent_type == alternate_type {
@@ -912,30 +1025,11 @@ impl<'a> FnLowerer<'a> {
                         "conditional expression branches have incompatible types {consequent_type:?} and {alternate_type:?}"
                     ));
                 };
-                let body = HirExpr::Block(vec![HirStmt::If(
-                    test,
-                    vec![HirStmt::Return(Some(consequent))],
-                    vec![HirStmt::Return(Some(alternate))],
-                )]);
-                let mut referenced = BTreeSet::new();
-                collect_referenced_bindings(&body, &mut referenced);
-                let captures = referenced
-                    .into_iter()
-                    .filter_map(|name| {
-                        self.scope
-                            .get(&name)
-                            .cloned()
-                            .map(|ty| HirParam { name, ty })
-                    })
-                    .collect();
-                Ok(HirExpr::Call(
-                    Box::new(HirExpr::Lambda(
-                        captures,
-                        Vec::new(),
-                        result_type,
-                        Box::new(body),
-                    )),
-                    Vec::new(),
+                Ok(HirExpr::Conditional(
+                    Box::new(test),
+                    Box::new(consequent),
+                    Box::new(alternate),
+                    result_type,
                 ))
             }
 

@@ -84,6 +84,11 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_referenced_bindings(left, names);
             collect_referenced_bindings(right, names);
         }
+        HirExpr::Conditional(test, consequent, alternate, _) => {
+            collect_referenced_bindings(test, names);
+            collect_referenced_bindings(consequent, names);
+            collect_referenced_bindings(alternate, names);
+        }
         HirExpr::JsonSet(object, key, value, _, _)
         | HirExpr::JsonIndexSet(object, key, value) => {
             collect_referenced_bindings(object, names);
@@ -216,6 +221,9 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::JsonIndex(left, right)
         | HirExpr::JsonKey(left, right)
         | HirExpr::JsonDelete(left, right) => contains_await(left) || contains_await(right),
+        HirExpr::Conditional(test, consequent, alternate, _) => {
+            contains_await(test) || contains_await(consequent) || contains_await(alternate)
+        }
         HirExpr::JsonSet(object, key, value, _, _)
         | HirExpr::JsonIndexSet(object, key, value) => {
             contains_await(object) || contains_await(key) || contains_await(value)
@@ -653,7 +661,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         HirType::F64 | HirType::I64 => Some("number"),
         HirType::Undefined => Some("undefined"),
         HirType::Null => Some("object"),
-        HirType::Str => Some("string"),
+        HirType::Str | HirType::StrLiteral(_) => Some("string"),
         HirType::Bool => Some("boolean"),
         HirType::Function(_, _) => Some("function"),
         HirType::CallableFunction(..) => Some("function"),
