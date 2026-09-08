@@ -145,7 +145,7 @@ defaultなしのno-match、top-levelおよび条件付きbreakを別々の出口
 
 registry.md 16章で確認した通り、実際の npm ネイティブアドオン
 （`bcrypt`、`utf-8-validate`、`sqlite3`、`sharp`、...）はほぼ例外なく
-**N-API**（または NAN 経由で N-API）を使って書かれている。これは V8/Node
+**N-API**を使って書かれているものが多い。これは V8/Node
 専用の C ABI で、Thaw の内部表現とも、単純な `(ptr, len)` 形式の C ABI
 （[bridge.md](bridge.md) 5章、registry.md 18章で実装した Marshal アダプタ）
 とも全くの別物:
@@ -446,8 +446,13 @@ N-API ホスト向けには、同じ関数の中に `loadNativeAddon("<path>")` 
 
 2章の一覧の通り。特に強調すべき点: **非同期 API 抜きでも `*Sync` 系関数は
 現実的に多くカバーできる**（`bcrypt.hashSync`/`compareSync`、
-`better-sqlite3` の同期 API 中心の設計など）。まず同期のみで最大公約数を
+`sqlite3` の同期処理など）。まず同期のみで最大公約数を
 取りに行く、という優先順位が妥当と考える。
+
+`argon2@0.44.0`は公式prebuildと無改造のJS wrapperを使い、Promiseで返るBufferを
+QuickJS側の共通reviverで復元して`hash`/`verify`までE2E確認した。一方、
+`better-sqlite3@12.2.0`は同期API中心でもNode/V8 C++ ABIを直接使うため、N-API hostの
+対象ではない。対応にはNode/V8 ABI互換層またはNode埋め込みという別設計が必要になる。
 
 ## 9. 実装結果
 
@@ -639,7 +644,9 @@ JSONへ変換する。`napi_strict_equals`と`napi_fatal_exception`も実prebuil
 
 `THAW_PARCEL_WATCHER_NODE`付きhost E2Eは一時directoryをsubscribeし、実ファイル作成を
 inotify backendが検出してTSFN callbackへ返すこと、同じcallback identityによるunsubscribe、
-両操作のPromise解決まで検証する。snapshot APIもPromise bridge経由で実ファイルを生成する。
+両操作のPromise解決とプロセスの自然終了まで検証する。snapshot APIもPromise bridge経由で
+実ファイルを生成する。namespace内の`Options`/type aliasも通常の型解決へ取り込み、
+`{ backend: "inotify" }`を型付きで渡す実際の宣言形を使用する。
 
 Parcelのbinaryは本体package内の`prebuilds/`ではなく、
 `@parcel/watcher-linux-x64-glibc`のようなplatform optional dependencyへ分離される。

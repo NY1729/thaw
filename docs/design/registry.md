@@ -967,6 +967,7 @@ pathとhashは従来どおり`native-addon.json`へ記録する。
 実npm integration testは`@parcel/watcher@2.5.1`を無改造で取得し、optional dependencyの
 公式prebuildを埋め込んだ単一実行ファイルを生成する。registry directoryを削除した後に
 Promiseベースの`writeSnapshot`を呼び、実snapshotファイルが作られるところまで検証する。
+イベント側も明示的なinotify options、callback配信、unsubscribe、自然終了まで検証する。
 
 ## 24. 実npm Promise workload
 

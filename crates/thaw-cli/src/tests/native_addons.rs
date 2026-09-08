@@ -745,6 +745,49 @@ fn registry_add_fetches_and_runs_bcrypt_when_enabled() {
 }
 
 #[test]
+fn registry_add_fetches_and_runs_argon2_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-argon2-{}", std::process::id()));
+    let registry = dir.join("modules");
+    let added = thaw_registry::add(&registry, "argon2@0.44.0").unwrap();
+    assert!(added.native_addon.is_some());
+
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        r#"import { hash, verify } from "argon2";
+async function main(): Promise<void> {
+    const encoded = await hash("password");
+    console.log(await verify(encoded, "password"));
+    console.log(await verify(encoded, "wrong"));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["argon2".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\nfalse\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
@@ -1104,7 +1147,7 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
                         fs.writeFileSync({callback_literal}, "received");
                         return result;
                     }};
-                    await subscribe({watched_literal}, callback);
+                    await subscribe({watched_literal}, callback, {{ backend: "inotify" }});
                     fs.writeFileSync("{}", "event");
                     let attempts: number = 0;
                     while (received < 1 && attempts < 10000) {{
@@ -1114,7 +1157,7 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
                     if (received < 1) {{
                         throw new Error("watch event timed out");
                     }}
-                    await unsubscribe({watched_literal}, callback);
+                    await unsubscribe({watched_literal}, callback, {{ backend: "inotify" }});
                     console.log("watch-event");
                 }}
                 "#,
@@ -1149,12 +1192,18 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     while !callback_file.is_file() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    if child.try_wait().unwrap().is_none() {
+    let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() && std::time::Instant::now() < exit_deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let exited = child.try_wait().unwrap().is_some();
+    if !exited {
         child.kill().unwrap();
     }
     child.wait().unwrap();
     assert!(event_file.is_file());
     assert!(callback_file.is_file());
+    assert!(exited, "watcher process did not exit after unsubscribe");
     let _ = std::fs::remove_dir_all(dir);
 }
 

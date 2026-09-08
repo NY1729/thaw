@@ -1156,13 +1156,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         continue;
                     }
                     let is_extern = signatures[&callee].is_extern;
+                    let preserves_json_boundary = is_extern
+                        || callee.starts_with("__thaw_typed_wrapper_");
                     let param = &mut signatures.get_mut(&callee).unwrap().params[index];
                     if *param == HirType::Dynamic {
                         *param = actual;
                         changed = true;
                     } else if *param == HirType::Json
                         && actual == HirType::JsValue
-                        && is_extern
+                        && preserves_json_boundary
                     {
                         // `Json` is an explicit host-marshalling boundary, not
                         // an inference placeholder. The call lowering wraps a

@@ -1,13 +1,35 @@
 /// Resolves top-level interfaces into fixed native layouts.
+fn collect_type_declarations<'a>(items: &'a [ModuleItem], output: &mut Vec<&'a Decl>) {
+    for item in items {
+        let declaration = match item {
+            ModuleItem::Stmt(Stmt::Decl(declaration)) => Some(declaration),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => Some(&export.decl),
+            _ => None,
+        };
+        let Some(declaration) = declaration else {
+            continue;
+        };
+        if let Decl::TsModule(namespace) = declaration {
+            if let Some(swc_ecma_ast::TsNamespaceBody::TsModuleBlock(block)) = &namespace.body {
+                collect_type_declarations(&block.body, output);
+            }
+        } else {
+            output.push(declaration);
+        }
+    }
+}
+
 fn resolve_interfaces(
     module: &Module,
 ) -> Result<(HashMap<Symbol, HirType>, GenericInterfaces<'_>), String> {
     let mut raw: HashMap<Symbol, &TsInterfaceDecl> = HashMap::new();
     let mut aliases = HashMap::new();
     let mut generic = GenericInterfaces::new();
-    for item in &module.body {
-        match item {
-            ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(iface))) => {
+    let mut declarations = Vec::new();
+    collect_type_declarations(&module.body, &mut declarations);
+    for declaration in declarations {
+        match declaration {
+            Decl::TsInterface(iface) => {
                 let name = iface.id.sym.to_string();
                 if let Some(parameters) = &iface.type_params {
                     validate_trailing_type_parameter_defaults(
@@ -26,7 +48,7 @@ fn resolve_interfaces(
                     generic.plain_interfaces.insert(name, iface.as_ref());
                 }
             }
-            ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => {
+            Decl::TsTypeAlias(alias) => {
                 let name = alias.id.sym.to_string();
                 if matches!(
                     strip_parenthesized_ts_type(&alias.type_ann),

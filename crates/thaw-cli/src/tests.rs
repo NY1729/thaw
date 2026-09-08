@@ -768,6 +768,37 @@ fn widens_callable_union_parameters_at_the_quickjs_boundary() {
 }
 
 #[test]
+fn renders_namespace_scoped_options_for_quickjs_arity_dispatch() {
+    let functions = thaw_bridge::parse_dts(
+        r#"declare namespace ParcelWatcher {
+            export type BackendType = "fs-events" | "watchman" | "inotify" | "windows";
+            export interface Options { backend?: BackendType; }
+            export type SubscribeCallback = (err: Error | null, events: Event[]) => unknown;
+            export interface Event { type: "create" | "update" | "delete"; path: string; }
+            export function subscribe(dir: string, fn: SubscribeCallback, opts?: Options): Promise<void>;
+        }
+        export = ParcelWatcher;"#,
+    )
+    .unwrap();
+    let function = functions
+        .iter()
+        .find(|function| function.name == "subscribe")
+        .unwrap();
+    let (_, declaration) = typed_dynamic_declaration(
+        "@parcel/watcher",
+        function,
+        false,
+        &std::collections::BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+    assert!(
+        declaration.contains("fn: Json, opts: { backend: string | undefined }"),
+        "{declaration}"
+    );
+}
+
+#[test]
 fn quickjs_manifest_detection_tracks_dynamic_host_calls() {
     assert!(!source_uses_quickjs("function main() { return 42; }"));
     assert!(source_uses_quickjs(

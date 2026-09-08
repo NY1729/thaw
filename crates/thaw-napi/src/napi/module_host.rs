@@ -122,12 +122,31 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     #[cfg(feature = "quickjs")]
     thaw_quickjs::register_napi_bridge(
         thaw_napi_export_names,
-        thaw_napi_call,
+        thaw_napi_call_typed_bridge,
         thaw_napi_handle_bridge,
         thaw_napi_poll_async_work,
         thaw_napi_async_work_pending,
     );
     Ok(())
+}
+
+#[cfg(feature = "quickjs")]
+unsafe extern "C" fn thaw_napi_call_typed_bridge(
+    name: *const c_char,
+    args: *const c_char,
+) -> *const c_char {
+    let result = thaw_napi_call_typed_result(name, args);
+    if result.error.is_null() {
+        result.value
+    } else {
+        let error = CStr::from_ptr(result.error).to_string_lossy();
+        CString::new(format!(
+            "{{\"__thaw_error__\":{}}}",
+            serde_json::to_string(error.as_ref()).unwrap()
+        ))
+        .unwrap()
+        .into_raw()
+    }
 }
 
 #[cfg(feature = "quickjs")]

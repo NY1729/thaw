@@ -1450,6 +1450,34 @@ fn classifies_typed_optional_callback_parameter_as_fast_path() {
     );
 }
 
+#[test]
+fn resolves_namespace_scoped_types_in_ambient_functions() {
+    let funcs = parse_dts(
+        r#"declare namespace ParcelWatcher {
+            export type BackendType = "fs-events" | "watchman" | "inotify" | "windows";
+            export interface Options { backend?: BackendType; }
+            export type SubscribeCallback = (err: Error | null, events: Event[]) => unknown;
+            export interface Event { type: "create" | "update" | "delete"; path: string; }
+            export function subscribe(dir: string, fn: SubscribeCallback, opts?: Options): Promise<void>;
+        }
+        export = ParcelWatcher;"#,
+    )
+    .unwrap();
+    let subscribe = funcs
+        .iter()
+        .find(|function| function.name == "subscribe")
+        .unwrap();
+    assert_eq!(subscribe.params[0].1, DtsType::Native(HirType::Str));
+    assert!(matches!(subscribe.params[1].1, DtsType::Unsupported(_)));
+    assert_eq!(
+        subscribe.params[2].1,
+        DtsType::Native(HirType::Object(vec![(
+            "backend".into(),
+            HirType::Optional(Box::new(HirType::Str)),
+        )]))
+    );
+}
+
 /// A plausible subset of a real package's `.d.ts` (uuid-shaped): mixes
 /// signatures that should and shouldn't classify as fast path.
 #[test]
