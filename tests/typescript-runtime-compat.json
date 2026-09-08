@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "name": "control flow and arithmetic",
+      "expect": "matched",
+      "source": "function main(): void { let total: number = 0; for (const value of [1, 2, 3]) { if (value !== 2) total += value; } console.log(total); }"
+    },
+    {
+      "name": "closure immediate call",
+      "expect": "matched",
+      "source": "function makeAdder(offset: number): (value: number) => number { return (value: number): number => offset + value; } function main(): void { console.log(makeAdder(10)(3)); }"
+    },
+    {
+      "name": "object and destructuring",
+      "expect": "matched",
+      "source": "type User = { name: string; score: number }; function main(): void { const user: User = { name: 'A', score: 4 }; const { name, score } = user; console.log(name + ':' + score); }"
+    },
+    {
+      "name": "generic function",
+      "expect": "matched",
+      "source": "function first<T, U>(left: T, right: U): T { return left; } function main(): void { console.log(first<number, string>(42, 'x')); }"
+    },
+    {
+      "name": "class inheritance",
+      "expect": "matched",
+      "source": "class Base { value: number = 4; } class Child extends Base { double(): number { return this.value * 2; } } function main(): void { console.log(new Child().double()); }"
+    },
+    {
+      "name": "rest parameters",
+      "expect": "matched",
+      "source": "function sum(...values: number[]): number { return values.reduce((left, right) => left + right, 0); } function main(): void { console.log(sum(1, 2, 3)); }"
+    },
+    {
+      "name": "optional chaining",
+      "expect": "matched",
+      "source": "type Box = { value: string } | undefined; function read(box: Box): string { return box?.value ?? 'none'; } function main(): void { console.log(read(undefined)); }"
+    },
+    {
+      "name": "map and set",
+      "expect": "unsupported",
+      "source": "function main(): void { const map = new Map<string, number>(); map.set('a', 2); const set = new Set<number>([1, 2]); console.log(String(map.get('a')) + ':' + set.has(2)); }"
+    },
+    {
+      "name": "async promise all",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const values: number[] = await Promise.all([Promise.resolve(20), Promise.resolve(22)]); console.log(values[0] + values[1]); }"
+    },
+    {
+      "name": "throw and catch",
+      "expect": "unsupported",
+      "source": "function main(): void { try { throw new Error('broken'); } catch (error) { console.log(String(error)); } }"
+    }
+  ]
+}

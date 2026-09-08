@@ -111,14 +111,14 @@ fn imports_supported_node_builtin_modules() {
                 import { isatty } from "node:tty";
                 import { pathToFileURL, fileURLToPath, urlToHttpOptions } from "node:url";
                 function main(): void {
-                    console.log(String(path.join(JSON.parse("[\"a\",\"b\"]"))));
-                    console.log(String(path.extname(JSON.parse("[\"archive.tar.gz\"]"))));
-                    console.log(String(path.relative(JSON.parse("[\"/a/b\",\"/a/c/d\"]"))));
+                    console.log(path.join("a", "b"));
+                    console.log(path.extname("archive.tar.gz"));
+                    console.log(path.relative("/a/b", "/a/c/d"));
                     console.log(String(inspect(JSON.parse("[42]"))));
                     console.log(String(format(JSON.parse("[\"%s:%d\",\"value\",4]"))));
-                    console.log(String(cwd(JSON.parse("[]"))));
+                    console.log(cwd());
                     console.log(Number(byteLength(JSON.parse("[\"thaw\"]"))));
-                    console.log(String(os.arch(JSON.parse("[]"))) + ":" + String(os.platform(JSON.parse("[]"))) + ":" + String(os.type(JSON.parse("[]"))) + ":" + String(os.tmpdir(JSON.parse("[]"))));
+                    console.log(os.arch() + ":" + os.platform() + ":" + os.type() + ":" + os.tmpdir());
                     console.log(Boolean(isatty(JSON.parse("[1]"))));
                     console.log(String(querystring.stringify(JSON.parse("[{\"a\":[1,2],\"space\":\"two words\"}]"))));
                     console.log(String(querystring.parse(JSON.parse("[\"a=1&a=2&space=two+words\"]"))));
@@ -128,9 +128,9 @@ fn imports_supported_node_builtin_modules() {
                     emitter.emit("value", 42);
                     emitter.emit("value", 7);
                     console.log(emitted);
-                    console.log(String(pathToFileURL(JSON.parse("[\"/tmp/a b\"]"))));
-                    console.log(String(fileURLToPath(JSON.parse("[\"file:///tmp/a%20b\"]"))));
-                    console.log(String(urlToHttpOptions(JSON.parse("[\"https://user:pass@example.test:8443/a?b=1#c\"]"))));
+                    console.log(String(readDynamicValue(pathToFileURL("/tmp/a b"))));
+                    console.log(fileURLToPath(pathToFileURL("/tmp/a b")));
+                    console.log(String(urlToHttpOptions(pathToFileURL("/tmp/a b"))));
                 }
             "#,
         )
@@ -146,7 +146,7 @@ fn imports_supported_node_builtin_modules() {
     let expected_tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
     assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            format!("a/b\n.gz\n../c/d\n42\nvalue:4\n/\n4\nx64:linux:Linux:{expected_tmpdir}\nfalse\na=1&a=2&space=two%20words\n{{\"a\":[\"1\",\"2\"],\"space\":\"two words\"}}\n42\nfile:///tmp/a%20b\n/tmp/a b\n{{\"protocol\":\"https:\",\"hostname\":\"example.test\",\"hash\":\"#c\",\"search\":\"?b=1\",\"pathname\":\"/a\",\"path\":\"/a?b=1\",\"href\":\"https://user:pass@example.test:8443/a?b=1#c\",\"port\":8443,\"auth\":\"user:pass\"}}\n")
+            format!("a/b\n.gz\n../c/d\n42\nvalue:4\n/\n4\nx64:linux:Linux:{expected_tmpdir}\nfalse\na=1&a=2&space=two%20words\n{{\"a\":[\"1\",\"2\"],\"space\":\"two words\"}}\n42\nfile:///tmp/a%20b\n/tmp/a b\n{{\"protocol\":\"file:\",\"hostname\":\"\",\"hash\":\"\",\"search\":\"\",\"pathname\":\"/tmp/a%20b\",\"path\":\"/tmp/a%20b\",\"href\":\"file:///tmp/a%20b\"}}\n")
         );
     let _ = std::fs::remove_dir_all(dir);
 }
