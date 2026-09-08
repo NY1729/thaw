@@ -1,7 +1,10 @@
 include!("instance_builtins/support.rs");
 include!("instance_builtins/collections.rs");
-include!("instance_builtins/primitive_methods.rs");
-include!("instance_builtins/array_methods.rs");
+include!("instance_builtins/text_methods.rs");
+include!("instance_builtins/regex_methods.rs");
+include!("instance_builtins/scalar_methods.rs");
+include!("instance_builtins/array_transform_methods.rs");
+include!("instance_builtins/array_mutation_methods.rs");
 include!("instance_builtins/date_methods.rs");
 include!("instance_builtins/map_set_methods.rs");
 include!("instance_builtins/conversion_methods.rs");

@@ -32,19 +32,27 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
         match property.sym.as_ref() {
-            "charAt" | "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart"
-            | "trimEnd" | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision"
-            | "localeCompare" | "normalize" | "split" | "replace" | "replaceAll" | "test"
-            | "match" | "search" | "matchAll" | "exec" | "toLowerCase" | "toUpperCase"
-            | "isWellFormed" | "toWellFormed" => {
-                self.lower_native_primitive_method(member, property, call)
+            "charAt" | "charCodeAt" | "localeCompare" | "normalize" | "split" => {
+                self.lower_native_text_method(member, property, call)
+            }
+            "replace" | "replaceAll" | "test" | "exec" | "match" | "matchAll" | "search" => {
+                self.lower_native_regex_method(member, property, call)
+            }
+            "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd" | "repeat"
+            | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "toLowerCase"
+            | "toUpperCase" | "isWellFormed" | "toWellFormed" => {
+                self.lower_native_scalar_method(member, property, call)
             }
             "toReversed" | "sort" | "toSorted" | "some" | "every" | "find" | "findIndex"
             | "findLast" | "findLastIndex" | "reduce" | "reduceRight" | "toSpliced" | "at"
-            | "with" | "flat" | "flatMap" | "map" | "filter" | "forEach" | "slice"
-            | "copyWithin" | "fill" | "reverse" | "join" | "push" | "pop" | "shift"
-            | "unshift" | "splice" | "indexOf" | "lastIndexOf" | "includes" | "startsWith"
-            | "endsWith" => self.lower_native_array_method(member, property, call),
+            | "with" | "flat" | "flatMap" | "map" | "filter" => {
+                self.lower_native_array_transform_method(member, property, call)
+            }
+            "forEach" | "slice" | "copyWithin" | "fill" | "reverse" | "join" | "push"
+            | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
+            | "includes" | "startsWith" | "endsWith" => {
+                self.lower_native_array_mutation_method(member, property, call)
+            }
             "getTime" | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate"
             | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
             | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours"
