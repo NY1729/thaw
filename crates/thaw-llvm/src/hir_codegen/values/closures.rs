@@ -7,7 +7,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let llvm_ty = self.basic_type(ty)?;
         let cell = self.allocate_arena_cell(llvm_ty, name)?;
-        self.arena_variables.insert(cell);
+        self.arena_variables.insert(name.to_string());
         self.variables.insert(name.to_string(), (cell, llvm_ty));
         self.variable_hir_types.insert(name.to_string(), ty.clone());
         let value = self.compile_expr(closure)?;
@@ -28,7 +28,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 continue;
             };
             let frame_backed = self.async_frame_cells.contains(&variable_cell);
-            if self.arena_variables.contains(&variable_cell)
+            if self.arena_variables.contains(&capture.name)
                 || self.global_variables.contains_key(&capture.name)
                 || frame_backed
             {
@@ -43,7 +43,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(cell, value)
                 .map_err(|error| error.to_string())?;
             self.variables.insert(capture.name.clone(), (cell, ty));
-            self.arena_variables.insert(cell);
+            self.arena_variables.insert(capture.name.clone());
         }
         let i64_type = self.context.i64_type();
         let closure = self
@@ -133,11 +133,13 @@ impl<'ctx> HirCompiler<'ctx> {
 
         let saved_variables = std::mem::take(&mut self.variables);
         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
+        let saved_arena_variables = std::mem::take(&mut self.arena_variables);
         let saved_catch_stack = std::mem::take(&mut self.catch_stack);
         let saved_loop_stack = std::mem::take(&mut self.loop_stack);
         let compiled = self.compile_function_body(&lifted);
         self.variables = saved_variables;
         self.variable_hir_types = saved_variable_hir_types;
+        self.arena_variables = saved_arena_variables;
         self.catch_stack = saved_catch_stack;
         self.loop_stack = saved_loop_stack;
         self.builder.position_at_end(parent_block);
@@ -270,21 +272,18 @@ impl<'ctx> HirCompiler<'ctx> {
             })
             .map(|capture| capture.name.clone())
             .collect::<HashSet<_>>();
-        let arena_captures = captures
-            .iter()
-            .filter(|capture| {
-                self.variables
-                    .get(&capture.name)
-                    .is_some_and(|(cell, _)| self.arena_variables.contains(cell))
-            })
-            .map(|capture| capture.name.clone())
-            .collect::<HashSet<_>>();
         // Closure captures retain their variable cells so mutations remain
         // visible when the function value is invoked later.
         let closure = self.allocate_lambda_environment(function, this_adapter, captures)?;
+        let arena_captures = captures
+            .iter()
+            .filter(|capture| self.arena_variables.contains(&capture.name))
+            .map(|capture| capture.name.clone())
+            .collect::<HashSet<_>>();
 
         let saved_variables = std::mem::take(&mut self.variables);
         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
+        let saved_arena_variables = std::mem::replace(&mut self.arena_variables, arena_captures);
         let saved_catch_stack = std::mem::take(&mut self.catch_stack);
         let saved_loop_stack = std::mem::take(&mut self.loop_stack);
         let result = (|| -> Result<(), String> {
@@ -318,9 +317,6 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_pointer_value();
                 if frame_captures.contains(&capture.name) {
                     self.async_frame_cells.insert(variable_cell);
-                }
-                if arena_captures.contains(&capture.name) {
-                    self.arena_variables.insert(variable_cell);
                 }
                 self.variables.insert(
                     capture.name.clone(),
@@ -373,6 +369,7 @@ impl<'ctx> HirCompiler<'ctx> {
         })();
         self.variables = saved_variables;
         self.variable_hir_types = saved_variable_hir_types;
+        self.arena_variables = saved_arena_variables;
         self.catch_stack = saved_catch_stack;
         self.loop_stack = saved_loop_stack;
         self.builder.position_at_end(parent_block);

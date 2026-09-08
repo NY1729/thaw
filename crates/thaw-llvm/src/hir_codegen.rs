@@ -187,7 +187,7 @@ pub struct HirCompiler<'ctx> {
     builder: Builder<'ctx>,
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
-    arena_variables: HashSet<PointerValue<'ctx>>,
+    arena_variables: HashSet<String>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
     global_variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>, HirType)>,
     function_return_types: HashMap<String, HirType>,
@@ -634,6 +634,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.variables.clear();
         self.variable_hir_types.clear();
+        self.arena_variables.clear();
         self.catch_stack.clear();
         self.seed_global_variables();
         for (param_val, hir_param) in function.get_param_iter().zip(func.params.iter()) {
