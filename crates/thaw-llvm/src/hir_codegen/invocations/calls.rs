@@ -1957,16 +1957,8 @@ impl<'ctx> HirCompiler<'ctx> {
             _ => {}
         }
 
-        if let Some(HirType::Function(params, ret)) = self.variable_hir_types.get(name).cloned() {
-            return self.compile_closure_call(callee, &params, &ret, args, name);
-        }
-        if let Some(HirType::CallableFunction(mut params, _, rest, ret)) =
-            self.variable_hir_types.get(name).cloned()
-        {
-            if let Some(rest) = rest {
-                params.push(HirType::Array(rest));
-            }
-            return self.compile_closure_call(callee, &params, &ret, args, name);
+        if let Some(result) = self.compile_variable_call(name, callee, args) {
+            return result;
         }
 
         let symbol = Self::llvm_symbol_for(name);
