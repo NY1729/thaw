@@ -60,6 +60,29 @@ pub unsafe extern "C" fn thaw_error_message(message: *const c_char) -> *const c_
     arena_c_string(body).map_or(std::ptr::null(), |value| value.cast())
 }
 
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+///
+/// The returned pointer is either `message` itself or an arena allocation.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_to_string(message: *const c_char) -> *const c_char {
+    if message.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    if !text.starts_with(ERROR_TAG_MARKER) {
+        return message;
+    }
+    let (chain, body) = split_error_tag(&text);
+    let name = chain.split('$').next().unwrap_or(chain);
+    let rendered = if body.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}: {body}")
+    };
+    arena_c_string(&rendered).map_or(std::ptr::null(), |value| value.cast())
+}
+
 /// Whether `message`'s tagged (or defaulted) identity chain includes
 /// `class_name`, or `class_name` is `"Error"` -- every tagged/untagged
 /// exception this channel can carry is some kind of `Error`, matching real
@@ -105,6 +128,15 @@ mod error_native_tests {
             .into_owned()
     }
 
+    fn call_to_string(message: &str) -> String {
+        let message = CString::new(message).unwrap();
+        let result = unsafe { thaw_error_to_string(message.as_ptr()) };
+        assert!(!result.is_null());
+        unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn call_is_instance(message: &str, class_name: &str) -> bool {
         let message = CString::new(message).unwrap();
         let class_name = CString::new(class_name).unwrap();
@@ -127,6 +159,8 @@ mod error_native_tests {
         assert!(call_is_instance(tagged, "Error"));
         assert!(call_is_instance(tagged, "TypeError"));
         assert!(!call_is_instance(tagged, "RangeError"));
+        assert_eq!(call_to_string(tagged), "TypeError: not a function");
+        assert_eq!(call_to_string("plain"), "plain");
     }
 
     #[test]

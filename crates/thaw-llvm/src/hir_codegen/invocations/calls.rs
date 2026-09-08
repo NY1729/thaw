@@ -108,7 +108,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date string conversion returned no value".into());
             }
-            "__thaw_error_message" | "__thaw_error_name" => {
+            "__thaw_error_message" | "__thaw_error_name" | "__thaw_error_to_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
                 };

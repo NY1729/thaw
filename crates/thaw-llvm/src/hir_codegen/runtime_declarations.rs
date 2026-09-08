@@ -741,7 +741,11 @@ impl<'ctx> HirCompiler<'ctx> {
         // `thaw_runtime::split_error_tag`); these recover either half, or
         // check the tagged (or defaulted) name against a class, without
         // exposing the marker byte itself to generated code.
-        for name in ["thaw_error_name", "thaw_error_message"] {
+        for name in [
+            "thaw_error_name",
+            "thaw_error_message",
+            "thaw_error_to_string",
+        ] {
             self.module.add_function(
                 name,
                 i8_ptr.fn_type(&[i8_ptr.into()], false),

@@ -322,7 +322,10 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let ty = self.infer_expr_type(&value)?;
         let result = if callee_name == "String" && ty == HirType::Str {
-            value
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_to_string".to_string())),
+                vec![value],
+            )
         } else if callee_name == "String" && ty == HirType::Bool {
             HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
@@ -336,7 +339,10 @@ impl<'a> FnLowerer<'a> {
         } else if callee_name == "String"
             && matches!(
                 ty,
-                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                HirType::Array(_)
+                    | HirType::Tuple(_)
+                    | HirType::Object(_)
+                    | HirType::Optional(_)
             )
         {
             self.coerce_primitive_to_string(value)?
