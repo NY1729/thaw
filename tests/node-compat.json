@@ -2,7 +2,7 @@
   "cases": [
     {
       "name": "path positional arguments",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { basename, join } from 'node:path'; function main(): void { console.log(join('a', 'b'), basename('/tmp/file.txt')); }"
     },
     {
@@ -12,7 +12,7 @@
     },
     {
       "name": "event emitter",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); events.on('value', (value: number): void => console.log(value)); events.emit('value', 42); }"
     },
     {
@@ -22,8 +22,33 @@
     },
     {
       "name": "URL file conversion",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { fileURLToPath, pathToFileURL } from 'node:url'; function main(): void { console.log(fileURLToPath(pathToFileURL('/tmp/a b'))); }"
+    },
+    {
+      "name": "path helpers",
+      "expect": "matched",
+      "source": "import { dirname, extname, isAbsolute, relative } from 'node:path'; function main(): void { console.log(dirname('/a/b.txt'), extname('/a/b.txt'), isAbsolute('/a'), relative('/a/b', '/a/c')); }"
+    },
+    {
+      "name": "URL string conversion",
+      "expect": "matched",
+      "source": "import { fileURLToPath } from 'node:url'; function main(): void { console.log(fileURLToPath('file:///tmp/a%20b')); }"
+    },
+    {
+      "name": "event emitter multiple arguments",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); events.once('value', (left: number, right: string): void => console.log(left, right)); events.emit('value', 42, 'ok'); }"
+    },
+    {
+      "name": "buffer hex round trip",
+      "expect": "unsupported",
+      "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.from('雪').toString('hex'), Buffer.from('e99baa', 'hex').toString()); }"
+    },
+    {
+      "name": "process and os metadata",
+      "expect": "matched",
+      "source": "import { cwd } from 'node:process'; import { platform } from 'node:os'; function main(): void { console.log(cwd().length > 0, platform()); }"
     }
   ]
 }
