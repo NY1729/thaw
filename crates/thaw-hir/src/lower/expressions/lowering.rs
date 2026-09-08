@@ -1163,6 +1163,10 @@ impl<'a> FnLowerer<'a> {
                                         | "callDynamicMethod"
                                         | "callDynamicMethodHandle"
                                         | "callDynamicMethodHandleRaw"))
+                    ) || matches!(
+                        &value,
+                        HirExpr::DynamicCall(signature, _)
+                            if signature.backend == DynamicBackend::QuickJs
                     );
                     if resolves_at_dynamic_boundary {
                         Ok(value)

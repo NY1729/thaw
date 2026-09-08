@@ -3109,12 +3109,14 @@ fn registry_add_queries_postgres_with_real_pg_when_enabled() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-real-pg-query-{}", std::process::id()));
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "pg@8.16.3").unwrap();
+    thaw_registry::add(&registry, "hono@4.13.7").unwrap();
     let source = dir.join("main.ts");
     let output = dir.join("app");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
         r#"import { Client, Pool } from "pg";
+import { Hono } from "hono";
 async function main(): Promise<void> {
     const client = new Client({ connectionString: process.env.DATABASE_URL });
     await client.connect();
@@ -3127,6 +3129,14 @@ async function main(): Promise<void> {
     const parameterized: JsValue = await pooled.query("SELECT $1::int AS value", [43]);
     console.log(parameterized.rows[0].value);
     pooled.release();
+
+    const app = new Hono();
+    app.get("/value", async (c) => {
+        const queried: JsValue = await pool.query("SELECT $1::int AS value", [44]);
+        return c.json({ value: Number(readDynamicValue(queried.rows[0].value)) });
+    });
+    const response: JsValue = await app.request("/value");
+    console.log(await response.text());
     await pool.end();
 }"#,
     )
@@ -3138,7 +3148,7 @@ async function main(): Promise<void> {
         &[],
         &[],
         &registry,
-        &["pg".into()],
+        &["pg".into(), "hono".into()],
     )
     .unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
@@ -3155,6 +3165,9 @@ async function main(): Promise<void> {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n43\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "42\n43\n{\"value\":44}\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
