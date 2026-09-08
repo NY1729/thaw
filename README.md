@@ -3463,7 +3463,7 @@ filesystem event subscription and by embedding its platform-specific optional
 dependency into a standalone executable that writes a snapshot after the
 registry directory has been removed. A second standalone executable performs
 subscribe, filesystem mutation, event polling, callback delivery, unsubscribe,
-cleanup and normal process exit.
+and cleanup; the test stops the long-lived watcher process after delivery.
 Class-style addons can use `napi_define_class`, wrapped native instance data,
 prototype methods/accessors, construction, `instanceof`, and wrap finalizers.
 Element APIs work on arrays, objects, and functions, including inherited numeric
@@ -3625,7 +3625,8 @@ wrappers. The gate runs identical JSON inputs through Node.js and Thaw for
 primitive, array, Buffer, Object, global, Promise, handle-scope and reference
 operations, Promise-returning AsyncWorker completion, and untyped/typed
 thread-safe-function calls, then directly checks the official Function, Class,
-TypedArray, ArrayBuffer and finalizer exports.
+TypedArray, ArrayBuffer, typed errors, AsyncWorker cancellation and finalizer
+exports.
 Every N-API build also compares the selected addon's undefined Node-API symbols
 with the symbols defined by the exact `thaw-napi` archive being linked. Missing
 Node-API entry points and direct Node/V8 C++ imports fail before final linking

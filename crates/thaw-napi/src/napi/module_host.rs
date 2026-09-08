@@ -1057,18 +1057,38 @@ unsafe fn call_export_with_functions(
             ));
         }
         let value = if let Some(callback) = function.callback {
-            let bridge = Arc::new(ThawCallbackBridge {
-                callback: ThawCallback::Value(callback),
-                context: function.context as usize,
-            });
-            env_mut(env)
-                .map_err(|_| "invalid native addon environment")?
-                .alloc(Value::Function(Function {
-                    callback: thaw_compiled_callback,
-                    data: Arc::as_ptr(&bridge) as *mut c_void,
-                    properties: HashMap::new(),
-                    _thaw_bridge: Some(bridge),
-                }))
+            let callback_key = (
+                function.context as usize,
+                if function.context.is_null() {
+                    callback as usize
+                } else {
+                    0
+                },
+            );
+            if let Some(value) =
+                HOST.with(|host| host.borrow().compiled_callbacks.get(&callback_key).copied())
+            {
+                value
+            } else {
+                let bridge = Arc::new(ThawCallbackBridge {
+                    callback: ThawCallback::Value(callback),
+                    context: function.context as usize,
+                });
+                let value = env_mut(env)
+                    .map_err(|_| "invalid native addon environment")?
+                    .alloc(Value::Function(Function {
+                        callback: thaw_compiled_callback,
+                        data: Arc::as_ptr(&bridge) as *mut c_void,
+                        properties: HashMap::new(),
+                        _thaw_bridge: Some(bridge),
+                    }));
+                HOST.with(|host| {
+                    host.borrow_mut()
+                        .compiled_callbacks
+                        .insert(callback_key, value);
+                });
+                value
+            }
         } else {
             env_mut(env)
                 .map_err(|_| "invalid native addon environment")?
