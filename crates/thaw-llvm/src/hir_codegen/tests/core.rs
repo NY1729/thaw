@@ -530,6 +530,208 @@ fn compiles_captured_and_nested_arrow_functions() {
 }
 
 #[test]
+fn immediately_invokes_a_returned_capturing_closure() {
+    let source = r#"
+        function make(offset: number): (value: number) => number {
+            return (value: number): number => value + offset;
+        }
+        function main(): void {
+            console.log(make(2)(40));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "immediate_returned_closure"), "42\n");
+}
+
+#[test]
+fn destructures_nested_homogeneous_arrays() {
+    let source = r#"
+        function main(): void {
+            const { value, nested: [first, ...rest] } = {
+                value: 40,
+                nested: [2, 3, 4],
+            };
+            console.log(value + first, rest.length);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nested_array_destructuring"), "42 2\n");
+}
+
+#[test]
+fn forwards_a_homogeneous_array_to_a_rest_parameter() {
+    let source = r#"
+        function sum(...values: number[]): number {
+            return values.reduce((left, right) => left + right, 0);
+        }
+        function main(): void {
+            const values: number[] = [20, 22];
+            console.log(sum(...values));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_rest_forwarding"), "42\n");
+}
+
+#[test]
+fn narrows_unions_in_conditional_expressions() {
+    let source = r#"
+        type Result = { ok: true; value: number } | { ok: false; error: string };
+        type Named = { name: string } | { count: number };
+        class NumberValue { value: number = 42; }
+        class StringValue { value: string = "text"; }
+        function result(value: Result): string {
+            return value.ok ? String(value.value) : value.error;
+        }
+        function property(value: Named): string {
+            return "name" in value ? value.name : String(value.count);
+        }
+        function instance(value: NumberValue | StringValue): string {
+            return value instanceof NumberValue ? String(value.value) : value.value;
+        }
+        function nullable(value: string | null): string {
+            return value === null ? "none" : value;
+        }
+        function main(): void {
+            console.log(result({ ok: true, value: 42 }));
+            console.log(property({ name: "named" }));
+            console.log(instance(new StringValue()));
+            console.log(nullable(null));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "conditional_union_narrowing"),
+        "42\nnamed\ntext\nnone\n"
+    );
+}
+
+#[test]
+fn builds_a_homogeneous_dictionary_with_computed_keys() {
+    let source = r#"
+        function main(): void {
+            const first: string = "answer";
+            const second: string = "other";
+            const values = { [first]: 42, [second]: 7 };
+            console.log(values[first], values[second]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "computed_dictionary_literal"),
+        "42 7\n"
+    );
+}
+
+#[test]
+fn compiles_finite_mapped_types_and_structural_builtin_constraints() {
+    let source = r#"
+        type Flags<T> = { [K in keyof T]: boolean };
+        type Input = { ready: number; done: string };
+        function length<T extends { length: number }>(value: T): number {
+            return value.length;
+        }
+        function main(): void {
+            const flags: Flags<Input> = { ready: true, done: false };
+            console.log(flags.ready, flags.done);
+            console.log(length<string>("thaw"), length<number[]>([1, 2]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "mapped_types_and_constraints"),
+        "true false\n4 2\n"
+    );
+}
+
+#[test]
+fn compiles_lazy_logical_assignments() {
+    let source = r#"
+        function replacement(): string { console.log("replace"); return "set"; }
+        function main(): void {
+            let empty: string = "";
+            let present: string = "kept";
+            empty ||= replacement();
+            present ||= replacement();
+            present &&= "updated";
+            console.log(empty, present);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "logical_assignments"),
+        "replace\nset updated\n"
+    );
+}
+
+#[test]
+fn applies_defaults_to_missing_destructured_properties() {
+    let source = r#"
+        function source(): {} { console.log("source"); return {}; }
+        function main(): void {
+            const { value = 40, missing: renamed = 2 } = source();
+            console.log(value + renamed);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "missing_destructuring_defaults"),
+        "source\n42\n"
+    );
+}
+
+#[test]
+fn packs_fixed_tuple_rest_parameters() {
+    let source = r#"
+        function pair(...values: [number, string]): string {
+            return `${values[0]}${values[1]}`;
+        }
+        function main(): void { console.log(pair(42, "x")); }
+    "#;
+    assert_eq!(compile_and_run(source, "tuple_rest_parameter"), "42x\n");
+}
+
+#[test]
+fn specializes_indexed_access_for_literal_generic_keys() {
+    let source = r#"
+        type Item = { name: string; count: number };
+        function read<T, K extends keyof T>(value: T, key: K): T[K] {
+            return value[key];
+        }
+        function main(): void {
+            console.log(read<Item, "name">({ name: "thaw", count: 42 }, "name"));
+            console.log(read<Item, "count">({ name: "thaw", count: 42 }, "count"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generic_indexed_access"), "thaw\n42\n");
+}
+
+#[test]
+fn compiles_object_literal_methods_with_native_receivers() {
+    let source = r#"
+        function main(): void {
+            const value = {
+                base: 40,
+                add(delta: number): number { return this.base + delta; },
+            };
+            console.log(value.add(2));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "object_literal_method"), "42\n");
+}
+
+#[test]
+fn numeric_recursion_keeps_variable_cells_on_the_stack() {
+    let module = thaw_parser::parse_typescript(
+        "function fib(n: number): number { return n < 2 ? n : fib(n - 1) + fib(n - 2); } function main(): void { console.log(fib(10)); }",
+    )
+    .unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "stack_numeric_recursion");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let start = ir
+        .find("define internal double @fib")
+        .unwrap_or_else(|| panic!("{ir}"));
+    let body = &ir[start..start + ir[start..].find("\n}").unwrap()];
+    assert!(body.contains("alloca double"), "{body}");
+    assert!(!body.contains("call ptr @thaw_arena_alloc"), "{body}");
+}
+
+#[test]
 fn closures_share_mutable_bindings_with_their_outer_scope() {
     let source = r#"
         function main(): void {

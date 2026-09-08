@@ -507,11 +507,20 @@ impl<'a> FnLowerer<'a> {
             }
         }
         if let Some((element, values)) = native_rest_values {
-            let values = values
-                .into_iter()
-                .map(|value| self.coerce_to_declared(&element, value))
-                .collect::<Result<Vec<_>, _>>()?;
-            arguments.push(native_rest_array(values, &element));
+            let packed = if element == HirType::Dynamic {
+                let expected = signature
+                    .params
+                    .last()
+                    .ok_or("tuple rest parameter is missing its ABI slot")?;
+                self.coerce_to_declared(expected, HirExpr::ArrayLit(values))?
+            } else {
+                let values = values
+                    .into_iter()
+                    .map(|value| self.coerce_to_declared(&element, value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                native_rest_array(values, &element)
+            };
+            arguments.push(packed);
         }
         let expected = &signature.params[receiver_count..];
         if arguments.len() != expected.len() {
@@ -968,6 +977,64 @@ impl<'a> FnLowerer<'a> {
             return Ok(invoked);
         }
 
+        // Expressions that produce typed functions are callable through the
+        // same closure ABI as locals. In particular, support `make(x)(y)`.
+        if !matches!(callee_expr.as_ref(), Expr::Ident(_) | Expr::Member(_)) {
+            if call.type_args.is_some() {
+                return Err("function-value invocation does not accept type arguments".into());
+            }
+            let callee = self.lower_expr(callee_expr)?;
+            let (params, optional, rest) = match self.infer_expr_type(&callee)? {
+                HirType::Function(params, _) => (params, HirOptionalMask::default(), None),
+                HirType::CallableFunction(params, optional, rest, _) => {
+                    (params, optional, rest.map(|element| *element))
+                }
+                _ => return Err("call target is not a function value".into()),
+            };
+            let (mut arguments, bindings) =
+                self.lower_native_spread_values(&call.args, "function-value invocation")?;
+            if rest.is_none() && arguments.len() > params.len() {
+                return Err(format!(
+                    "function value expects {} argument(s), got {}",
+                    params.len(),
+                    arguments.len()
+                ));
+            }
+            if arguments.len() < params.len()
+                && (arguments.len()..params.len())
+                    .any(|index| !is_optional_parameter(&optional, index))
+            {
+                return Err(format!(
+                    "function value expects at least {} argument(s), got {}",
+                    params.len(),
+                    arguments.len()
+                ));
+            }
+            let rest_values = rest.as_ref().map(|element| {
+                let values = arguments.split_off(params.len());
+                (element, values)
+            });
+            for parameter in params.iter().skip(arguments.len()) {
+                arguments.push(omitted_parameter_value(parameter)?);
+            }
+            let mut arguments = arguments
+                .into_iter()
+                .zip(&params)
+                .map(|(argument, expected)| self.coerce_to_declared(expected, argument))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some((element, values)) = rest_values {
+                let values = values
+                    .into_iter()
+                    .map(|value| self.coerce_to_declared(element, value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                arguments.push(native_rest_array(values, element));
+            }
+            return self.wrap_call_argument_bindings(
+                HirExpr::Call(Box::new(callee), arguments),
+                &bindings,
+            );
+        }
+
         if let Some(bound) = self.lower_native_class_bind(call)? {
             return Ok(bound);
         }
@@ -1261,14 +1328,47 @@ impl<'a> FnLowerer<'a> {
                         _ => None,
                     };
                     if let Some((params, _, rest, optional)) = callable {
+                        // Compile-time marker: keep ordinary function-valued
+                        // properties distinct from receiver-aware methods.
+                        let receiver_parameter = params.first().is_some_and(|parameter| {
+                            matches!(parameter, HirType::Object(fields)
+                                if fields.iter().any(|(name, _)| name == "__thaw_object_method_receiver"))
+                        });
                         let callee = HirExpr::PropAccess(
-                            Box::new(object_expr),
-                            object_ty,
+                            Box::new(object_expr.clone()),
+                            object_ty.clone(),
                             resolved_property.to_string(),
                         );
                         let label = format!("method `{object_label}.{property}`");
                         let (mut args, bindings) =
                             self.lower_native_spread_values(&call.args, &label)?;
+                        if receiver_parameter {
+                            let HirType::Object(receiver_fields) = &params[0] else {
+                                unreachable!()
+                            };
+                            args.insert(
+                                0,
+                                HirExpr::ObjectLit(
+                                    receiver_fields
+                                        .iter()
+                                        .map(|(name, _)| {
+                                            if name == "__thaw_object_method_receiver" {
+                                                (name.clone(), HirExpr::Lit(HirLit::Undefined))
+                                            } else {
+                                                (
+                                                    name.clone(),
+                                                    HirExpr::PropAccess(
+                                                        Box::new(object_expr.clone()),
+                                                        object_ty.clone(),
+                                                        name.clone(),
+                                                    ),
+                                                )
+                                            }
+                                        })
+                                        .collect(),
+                                ),
+                            );
+                        }
                         if args.len() < params.len()
                             && (args.len()..params.len())
                                 .any(|index| !is_optional_parameter(&optional, index))
@@ -1680,6 +1780,7 @@ impl<'a> FnLowerer<'a> {
 
         let mut argument_bindings = Vec::new();
         let mut lowered_arguments = Vec::new();
+        let mut forwarded_rest_array = false;
         let mut lowered = Vec::with_capacity(call.args.len());
         for (index, argument) in call.args.iter().enumerate() {
             let contextual_function = if argument.spread.is_none() {
@@ -1783,6 +1884,24 @@ impl<'a> FnLowerer<'a> {
             }
 
             let source_type = self.infer_expr_type(&value)?;
+            let rest_element = signature
+                .as_ref()
+                .and_then(|signature| signature.native_rest.as_ref())
+                .or_else(|| {
+                    local_function
+                        .as_ref()
+                        .and_then(|(_, _, rest, _)| rest.as_ref())
+                });
+            let fixed_count = param_types
+                .as_ref()
+                .map_or(0, |params| params.len() - usize::from(rest_element.is_some()));
+            if let (HirType::Array(element), Some(rest_element)) = (&source_type, rest_element) {
+                if lowered_arguments.len() == fixed_count && element.as_ref() == rest_element {
+                    lowered_arguments.push(value);
+                    forwarded_rest_array = true;
+                    continue;
+                }
+            }
             let HirType::Tuple(elements) = &source_type else {
                 return Err(format!(
                     "call spread source must have statically known tuple length, got {source_type:?}"
@@ -1802,8 +1921,10 @@ impl<'a> FnLowerer<'a> {
             }));
         }
 
-        let native_rest_values = signature.as_ref().and_then(|signature| {
-            signature.native_rest.clone().map(|element| {
+        let native_rest_values = if forwarded_rest_array {
+            None
+        } else {
+            signature.as_ref().and_then(|signature| signature.native_rest.clone().map(|element| {
                 let fixed_count = signature.params.len() - 1;
                 let values = if lowered_arguments.len() > fixed_count {
                     lowered_arguments.split_off(fixed_count)
@@ -1811,12 +1932,12 @@ impl<'a> FnLowerer<'a> {
                     Vec::new()
                 };
                 (element, values)
-            })
-        });
-        let local_rest_values = local_function
-            .as_ref()
-            .and_then(|(_, _, rest, _)| rest.clone())
-            .map(|element| {
+            }))
+        };
+        let local_rest_values = if forwarded_rest_array {
+            None
+        } else {
+            local_function.as_ref().and_then(|(_, _, rest, _)| rest.clone()).map(|element| {
                 let fixed_count = param_types
                     .as_ref()
                     .map_or(0, |params| params.len().saturating_sub(1));
@@ -1826,7 +1947,8 @@ impl<'a> FnLowerer<'a> {
                     Vec::new()
                 };
                 (element, values)
-            });
+            })
+        };
 
         if let Some((fixed, _, _, optional)) = &local_function {
             let fixed_count = fixed.len() - usize::from(local_rest_values.is_some());
@@ -1884,11 +2006,20 @@ impl<'a> FnLowerer<'a> {
         }
 
         if let Some((element, values)) = native_rest_values {
-            let values = values
-                .into_iter()
-                .map(|value| self.coerce_to_declared(&element, value))
-                .collect::<Result<Vec<_>, _>>()?;
-            lowered_arguments.push(native_rest_array(values, &element));
+            let packed = if element == HirType::Dynamic {
+                let expected = signature
+                    .as_ref()
+                    .and_then(|signature| signature.params.last())
+                    .ok_or("tuple rest parameter is missing its ABI slot")?;
+                self.coerce_to_declared(expected, HirExpr::ArrayLit(values))?
+            } else {
+                let values = values
+                    .into_iter()
+                    .map(|value| self.coerce_to_declared(&element, value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                native_rest_array(values, &element)
+            };
+            lowered_arguments.push(packed);
             param_types = signature.as_ref().map(|signature| signature.params.clone());
         }
         if let Some((element, values)) = local_rest_values {

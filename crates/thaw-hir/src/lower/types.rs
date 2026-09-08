@@ -107,7 +107,12 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
         // instead -- a correctly-lowered program should never actually
         // produce this shape for that case anymore, so this check
         // staying strict is a real safety net, not just an unfixed gap.
-        HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
+        HirType::F64
+        | HirType::I64
+        | HirType::Bool
+        | HirType::Str
+        | HirType::StrLiteral(_)
+        | HirType::JsValue => true,
         // Recurses the same way `Tuple`/`Object` already do just below,
         // rather than staying hardcoded to `F64` only -- real example:
         // zod's own `union<T extends readonly core.SomeType[]>(options:
@@ -418,6 +423,13 @@ fn substituted_utility_keys(
     generic_interfaces: &GenericInterfaces,
     in_progress: &mut Vec<Symbol>,
 ) -> Result<Vec<Symbol>, String> {
+    if let TsType::TsTypeRef(reference) = ty {
+        if let TsEntityName::Ident(name) = &reference.type_name {
+            if let Some(HirType::StrLiteral(value)) = substitution.get(name.sym.as_ref()) {
+                return Ok(vec![value.clone()]);
+            }
+        }
+    }
     if let TsType::TsTypeOperator(operator) = ty {
         if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf {
             return hir_object_keys(resolve_ts_type_with_substitution(
@@ -439,6 +451,10 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
             HirType::I64 => "i64".into(),
             HirType::Bool => "bool".into(),
             HirType::Str => "str".into(),
+            HirType::StrLiteral(value) => format!(
+                "strlit_{}",
+                value.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+            ),
             HirType::Json => "json".into(),
             HirType::Array(inner) => format!("array_{}", fingerprint(inner)),
             HirType::Tuple(elements) => format!(
@@ -470,6 +486,13 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
     )
 }
 
+fn runtime_generic_type(ty: &HirType) -> HirType {
+    match ty {
+        HirType::StrLiteral(_) => HirType::Str,
+        _ => ty.clone(),
+    }
+}
+
 fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &str) -> bool {
     match pattern {
         GenericTypePattern::Variable(name) => name == variable,
@@ -487,8 +510,9 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         GenericTypePattern::Pick(inner, _) | GenericTypePattern::Omit(inner, _) => {
             generic_pattern_contains_variable(inner, variable)
         }
-        GenericTypePattern::IndexedAccess(inner, _) => {
+        GenericTypePattern::IndexedAccess(inner, keys) => {
             generic_pattern_contains_variable(inner, variable)
+                || matches!(keys, GenericIndexKeys::Variable(name) if name == variable)
         }
         GenericTypePattern::Object(fields) => fields
             .iter()
@@ -504,7 +528,7 @@ fn instantiate_generic_pattern(
     match pattern {
         GenericTypePattern::Variable(name) => substitution
             .get(name)
-            .cloned()
+            .map(runtime_generic_type)
             .ok_or_else(|| format!("missing concrete type for `{name}`")),
         GenericTypePattern::Concrete(ty) => Ok(ty.clone()),
         GenericTypePattern::Array(inner) => Ok(HirType::Array(Box::new(
@@ -544,7 +568,14 @@ fn instantiate_generic_pattern(
             omit_hir_type(instantiate_generic_pattern(inner, substitution)?, keys)
         }
         GenericTypePattern::IndexedAccess(inner, keys) => {
-            indexed_access_hir_type(instantiate_generic_pattern(inner, substitution)?, keys)
+            let keys = match keys {
+                GenericIndexKeys::Finite(keys) => keys.clone(),
+                GenericIndexKeys::Variable(name) => match substitution.get(name) {
+                    Some(HirType::StrLiteral(key)) => vec![key.clone()],
+                    _ => return Err(format!("indexed access key `{name}` is not a literal")),
+                },
+            };
+            indexed_access_hir_type(instantiate_generic_pattern(inner, substitution)?, &keys)
         }
         GenericTypePattern::Dictionary(inner) => Ok(HirType::Dictionary(Box::new(
             instantiate_generic_pattern(inner, substitution)?,
@@ -572,10 +603,11 @@ fn specialized_generic_function_name(
         .iter()
         .zip(generic_types)
         .filter_map(|(parameter, ty)| {
-            (!signature
-                .generic_param_patterns
-                .iter()
-                .any(|pattern| generic_pattern_contains_variable(pattern, parameter)))
+            (matches!(ty, HirType::StrLiteral(_))
+                || !signature
+                    .generic_param_patterns
+                    .iter()
+                    .any(|pattern| generic_pattern_contains_variable(pattern, parameter)))
             .then_some(ty.clone())
         })
         .collect::<Vec<_>>();
@@ -978,13 +1010,21 @@ fn generic_type_pattern(
                 generic_interfaces,
                 in_progress,
             )?);
-            let keys = generic_utility_keys(
-                &indexed.index_type,
-                substitutions,
-                interfaces,
-                generic_interfaces,
-                in_progress,
-            )?;
+            let keys = match indexed.index_type.as_ref() {
+                TsType::TsTypeRef(reference) => match &reference.type_name {
+                    TsEntityName::Ident(name)
+                        if matches!(substitutions.get(name.sym.as_ref()), Some(GenericTypePattern::Variable(_))) =>
+                    {
+                        GenericIndexKeys::Variable(name.sym.to_string())
+                    }
+                    _ => GenericIndexKeys::Finite(generic_utility_keys(
+                        &indexed.index_type, substitutions, interfaces, generic_interfaces, in_progress,
+                    ).map_err(|error| format!("generic indexed access: {error}"))?),
+                },
+                _ => GenericIndexKeys::Finite(generic_utility_keys(
+                    &indexed.index_type, substitutions, interfaces, generic_interfaces, in_progress,
+                ).map_err(|error| format!("generic indexed access: {error}"))?),
+            };
             Ok(GenericTypePattern::IndexedAccess(object, keys))
         }
         TsType::TsTypeLit(literal) => {
@@ -1285,7 +1325,15 @@ fn resolve_explicit_generic_type_tuple(
     let mut substitution = HashMap::new();
     for (index, name) in signature.generic_type_params.iter().enumerate() {
         let concrete = if let Some(argument) = arguments.get(index) {
-            lower_ts_type(argument, interfaces, generic_interfaces)?
+            match argument.as_ref() {
+                TsType::TsLitType(literal) => match &literal.lit {
+                    swc_ecma_ast::TsLit::Str(value) => {
+                        HirType::StrLiteral(value.value.to_string_lossy().into_owned())
+                    }
+                    _ => lower_ts_type(argument, interfaces, generic_interfaces)?,
+                },
+                _ => lower_ts_type(argument, interfaces, generic_interfaces)?,
+            }
         } else {
             resolve_ts_type_with_substitution(
                 signature.generic_type_defaults[index]
@@ -1330,7 +1378,7 @@ fn resolve_explicit_generic_type_tuple(
     }
     for (name, inferred) in inferred {
         let explicit = &substitution[&name];
-        if &inferred != explicit {
+        if inferred != runtime_generic_type(explicit) {
             return Err(format!(
                 "argument infers {name} as {inferred:?}, but explicit type is {explicit:?}"
             ));
@@ -1360,7 +1408,7 @@ fn lower_generic_instance(
         .cloned()
         .zip(types.iter().cloned())
         .collect::<HashMap<_, _>>();
-    let params = fn_decl
+    let mut params = fn_decl
         .function
         .params
         .iter()
@@ -1489,16 +1537,20 @@ fn lower_generic_instance(
             .ok_or_else(|| format!("function `{base_name}` has no body"))?
             .stmts,
     )?;
+    for param in &mut params {
+        param.ty = runtime_generic_type(&param.ty);
+    }
+    let specialized_name = specialized_generic_function_name(
+        &base_name,
+        &params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect::<Vec<_>>(),
+        signature,
+        types,
+    );
     Ok(HirFunction {
-        name: specialized_generic_function_name(
-            &base_name,
-            &params
-                .iter()
-                .map(|param| param.ty.clone())
-                .collect::<Vec<_>>(),
-            signature,
-            types,
-        ),
+        name: specialized_name,
         params,
         ret,
         is_async: fn_decl.function.is_async,

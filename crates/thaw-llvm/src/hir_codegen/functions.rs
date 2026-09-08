@@ -200,6 +200,26 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: BasicTypeEnum<'ctx>,
         name: &str,
     ) -> Result<PointerValue<'ctx>, String> {
+        let function = self.current_function();
+        let entry = function
+            .get_first_basic_block()
+            .ok_or("variable allocation requires a function entry")?;
+        let builder = self.context.create_builder();
+        if let Some(first) = entry.get_first_instruction() {
+            builder.position_before(&first);
+        } else {
+            builder.position_at_end(entry);
+        }
+        builder
+            .build_alloca(ty, &format!("{name}_cell"))
+            .map_err(|error| error.to_string())
+    }
+
+    fn allocate_arena_cell(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
         let size = ty

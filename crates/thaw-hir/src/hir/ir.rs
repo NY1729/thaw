@@ -5,6 +5,7 @@ pub enum HirExpr {
     Lit(HirLit),
     Var(Symbol),
     BinOp(BinOp, Box<HirExpr>, Box<HirExpr>),
+    Conditional(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>, HirType),
     OptionalSome(Box<HirExpr>, HirType),
     OptionalNone(HirType),
     OptionalIsNone(Box<HirExpr>, HirType),

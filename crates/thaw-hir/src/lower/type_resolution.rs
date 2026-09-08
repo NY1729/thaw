@@ -171,6 +171,31 @@ fn lower_ts_type(
                 .map(|element| lower_ts_type(&element.ty, interfaces, generic_interfaces))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
+        TsType::TsMappedType(mapped) => {
+            if mapped.name_type.is_some() {
+                return Err("mapped type key remapping is not supported".into());
+            }
+            let constraint = mapped
+                .type_param
+                .constraint
+                .as_ref()
+                .ok_or("mapped type parameter needs a key constraint")?;
+            let keys = utility_keys(constraint, interfaces, generic_interfaces)?;
+            let value = mapped
+                .type_ann
+                .as_ref()
+                .ok_or("mapped type needs a value annotation")?;
+            let mut value = lower_ts_type(value, interfaces, generic_interfaces)?;
+            if matches!(
+                mapped.optional,
+                Some(swc_ecma_ast::TruePlusMinus::True | swc_ecma_ast::TruePlusMinus::Plus)
+            ) {
+                value = optional_parameter_type(value);
+            }
+            Ok(HirType::Object(
+                keys.into_iter().map(|key| (key, value.clone())).collect(),
+            ))
+        }
         TsType::TsIndexedAccessType(indexed) => indexed_access_hir_type(
             lower_ts_type(&indexed.obj_type, interfaces, generic_interfaces)?,
             &utility_keys(&indexed.index_type, interfaces, generic_interfaces)?,
@@ -856,6 +881,9 @@ fn resolve_generic_alias(
 }
 
 fn type_satisfies_constraint(actual: &HirType, constraint: &HirType) -> bool {
+    if matches!(actual, HirType::StrLiteral(_)) && constraint == &HirType::Str {
+        return true;
+    }
     if actual == constraint || constraint == &HirType::Dynamic {
         return true;
     }
@@ -863,15 +891,19 @@ fn type_satisfies_constraint(actual: &HirType, constraint: &HirType) -> bool {
         HirType::Union(elements) => elements
             .iter()
             .any(|element| type_satisfies_constraint(actual, element)),
-        HirType::Object(required) => match actual {
-            HirType::Object(fields) => required.iter().all(|(name, ty)| {
-                fields
+        HirType::Object(required) => required.iter().all(|(name, ty)| {
+            let actual_field = match actual {
+                HirType::Object(fields) => fields
                     .iter()
                     .find(|(field, _)| field == name)
-                    .is_some_and(|(_, actual)| type_satisfies_constraint(actual, ty))
-            }),
-            _ => false,
-        },
+                    .map(|(_, ty)| ty),
+                HirType::Str | HirType::Array(_) | HirType::Tuple(_) if name == "length" => {
+                    Some(&HirType::F64)
+                }
+                _ => None,
+            };
+            actual_field.is_some_and(|actual| type_satisfies_constraint(actual, ty))
+        }),
         _ => false,
     }
 }
@@ -1062,22 +1094,65 @@ fn resolve_ts_type_with_substitution(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        TsType::TsIndexedAccessType(indexed) => indexed_access_hir_type(
-            resolve_ts_type_with_substitution(
+        TsType::TsMappedType(mapped) => {
+            if mapped.name_type.is_some() {
+                return Err("mapped type key remapping is not supported".into());
+            }
+            let constraint = mapped
+                .type_param
+                .constraint
+                .as_ref()
+                .ok_or("mapped type parameter needs a key constraint")?;
+            let keys = substituted_utility_keys(
+                constraint,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?;
+            let value = mapped
+                .type_ann
+                .as_ref()
+                .ok_or("mapped type needs a value annotation")?;
+            let mut value = resolve_ts_type_with_substitution(
+                value,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?;
+            if matches!(
+                mapped.optional,
+                Some(swc_ecma_ast::TruePlusMinus::True | swc_ecma_ast::TruePlusMinus::Plus)
+            ) {
+                value = optional_parameter_type(value);
+            }
+            Ok(HirType::Object(
+                keys.into_iter().map(|key| (key, value.clone())).collect(),
+            ))
+        }
+        TsType::TsIndexedAccessType(indexed) => {
+            let object = resolve_ts_type_with_substitution(
                 &indexed.obj_type,
                 substitution,
                 interfaces,
                 generic_interfaces,
                 in_progress,
-            )?,
-            &substituted_utility_keys(
+            )?;
+            if object == HirType::Dynamic {
+                return Ok(HirType::Dynamic);
+            }
+            indexed_access_hir_type(
+                object,
+                &substituted_utility_keys(
                 &indexed.index_type,
                 substitution,
                 interfaces,
                 generic_interfaces,
                 in_progress,
-            )?,
-        ),
+                )?,
+            )
+        }
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
             let mut elements = Vec::new();
             for element in &union.types {

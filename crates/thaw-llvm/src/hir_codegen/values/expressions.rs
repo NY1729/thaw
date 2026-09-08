@@ -155,6 +155,9 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
+            HirExpr::Conditional(test, consequent, alternate, ty) => {
+                self.compile_conditional_value(test, consequent, alternate, ty)
+            }
 
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
             HirExpr::FunctionCallWithThis(callee, this_arg, args, params, ret) => {

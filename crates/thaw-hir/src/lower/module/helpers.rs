@@ -238,6 +238,10 @@ fn native_rest_element(patterns: &[Pat], params: &[HirType]) -> Result<Option<Hi
     }
     match params.last() {
         Some(HirType::Array(element)) => Ok(Some(element.as_ref().clone())),
+        // A fixed tuple rest parameter still occupies one native ABI slot.
+        // `Dynamic` is only the packing marker; the call path validates the
+        // completed tuple against this last signature parameter.
+        Some(HirType::Tuple(_)) => Ok(Some(HirType::Dynamic)),
         Some(other) => Err(format!(
             "native class rest parameter needs an array annotation, got {other:?}"
         )),

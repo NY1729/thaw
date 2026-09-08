@@ -186,7 +186,7 @@ fn render_ts_type(ty: &HirType) -> String {
         HirType::Undefined => "undefined".to_string(),
         HirType::Null => "null".to_string(),
         HirType::Void => "void".to_string(),
-        HirType::Str => "string".to_string(),
+        HirType::Str | HirType::StrLiteral(_) => "string".to_string(),
         HirType::Json => "Json".to_string(),
         HirType::Dictionary(element) => {
             format!("{{ [key: string]: {} }}", render_ts_type(element))

@@ -59,7 +59,7 @@ impl<'ctx> HirCompiler<'ctx> {
             function.get_nth_param(1).unwrap().into_pointer_value()
         } else {
             let value = function.get_nth_param(1).unwrap();
-            let slot = self.allocate_variable_cell(self.basic_type(resolved)?, "promise_result")?;
+            let slot = self.allocate_arena_cell(self.basic_type(resolved)?, "promise_result")?;
             self.builder
                 .build_store(slot, value)
                 .map_err(|error| error.to_string())?;
@@ -300,7 +300,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
         } else {
             let output_type = self.basic_type(output)?;
-            let output_slot = self.allocate_variable_cell(output_type, "chain_output")?;
+            let output_slot = self.allocate_arena_cell(output_type, "chain_output")?;
             self.builder
                 .build_store(output_slot, transformed.unwrap())
                 .map_err(|error| error.to_string())?;
