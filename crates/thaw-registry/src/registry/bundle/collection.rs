@@ -80,6 +80,15 @@ fn add_builtin_module(
     });
 }
 
+fn bundle_builtin_module(name: &str) -> Result<String, String> {
+    let main_key = format!("node:{name}");
+    let mut visited = Vec::new();
+    let mut modules = Vec::new();
+    add_builtin_module(name, main_key.clone(), &mut visited, &mut modules);
+    prepare_async_modules(&mut modules)?;
+    Ok(render_bundle(&main_key, &modules))
+}
+
 #[cfg(test)]
 fn bundle_commonjs_package(
     node_modules_dir: &Path,

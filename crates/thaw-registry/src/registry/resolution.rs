@@ -274,7 +274,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         }
         _ => return Err(format!("unsupported Node built-in module `{specifier}`")),
     };
-    let source = builtin_module_source(name)
+    builtin_module_source(name)
         .ok_or_else(|| format!("unsupported Node built-in module `{specifier}`"))?;
     Ok(ResolvedPackage {
         name: format!("node:{name}"),
@@ -289,7 +289,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         native_lib: None,
         native_addon: None,
         native_dependencies: Vec::new(),
-        bundle_js: Some(source.to_string()),
+        bundle_js: Some(bundle_builtin_module(name)?),
         version: None,
         dependency_versions: None,
     })
