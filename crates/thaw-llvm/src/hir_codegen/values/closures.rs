@@ -27,7 +27,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let frame_backed = self
                 .variables
                 .get(&capture.name)
-                .is_some_and(|(cell, _)| cell.get_name().to_bytes().starts_with(b"frame_"));
+                .is_some_and(|(cell, _)| self.async_frame_cells.contains(cell));
             if self.arena_variables.contains(&capture.name)
                 || self.global_variables.contains_key(&capture.name)
                 || frame_backed
@@ -264,6 +264,15 @@ impl<'ctx> HirCompiler<'ctx> {
         )?;
 
         let i64_type = self.context.i64_type();
+        let frame_captures = captures
+            .iter()
+            .filter(|capture| {
+                self.variables
+                    .get(&capture.name)
+                    .is_some_and(|(cell, _)| self.async_frame_cells.contains(cell))
+            })
+            .map(|capture| capture.name.clone())
+            .collect::<HashSet<_>>();
         // Closure captures retain their variable cells so mutations remain
         // visible when the function value is invoked later.
         let closure = self.allocate_lambda_environment(function, this_adapter, captures)?;
@@ -299,10 +308,14 @@ impl<'ctx> HirCompiler<'ctx> {
                         capture_slot,
                         "capture_cell",
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| error.to_string())?
+                    .into_pointer_value();
+                if frame_captures.contains(&capture.name) {
+                    self.async_frame_cells.insert(variable_cell);
+                }
                 self.variables.insert(
                     capture.name.clone(),
-                    (variable_cell.into_pointer_value(), ty),
+                    (variable_cell, ty),
                 );
                 self.variable_hir_types
                     .insert(capture.name.clone(), capture.ty.clone());
