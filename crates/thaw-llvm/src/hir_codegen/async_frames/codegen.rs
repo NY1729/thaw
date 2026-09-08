@@ -36,6 +36,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(entry);
         self.variables.clear();
         self.variable_hir_types.clear();
+        self.arena_variables.clear();
         self.catch_stack.clear();
         self.seed_global_variables();
 
@@ -94,6 +95,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(resume_entry);
         self.variables.clear();
         self.variable_hir_types.clear();
+        self.arena_variables.clear();
         self.catch_stack.clear();
         self.seed_global_variables();
         let resume_frame = resume.get_nth_param(0).unwrap().into_pointer_value();
@@ -306,6 +308,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.position_at_end(block);
             self.variables.clear();
             self.variable_hir_types.clear();
+            self.arena_variables.clear();
             self.catch_stack.clear();
             self.seed_global_variables();
             self.bind_async_frame_locals(resume_frame, plan)?;

@@ -188,12 +188,19 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_conditional_branch(cond_val, then_bb, else_bb)
             .map_err(|e| e.to_string())?;
 
+        let variables_before_branches = self.variables.clone();
+        let arena_variables_before_branches = self.arena_variables.clone();
         self.builder.position_at_end(then_bb);
         let then_terminated = self.compile_block(then_branch)?;
+        let then_variables = self.variables.clone();
+        let then_arena_variables = self.arena_variables.clone();
         if !then_terminated {
             self.builder
                 .build_unconditional_branch(merge_bb)
                 .map_err(|e| e.to_string())?;
+        } else {
+            self.variables = variables_before_branches.clone();
+            self.arena_variables = arena_variables_before_branches.clone();
         }
 
         self.builder.position_at_end(else_bb);
@@ -202,6 +209,9 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_unconditional_branch(merge_bb)
                 .map_err(|e| e.to_string())?;
+        } else if !then_terminated {
+            self.variables = then_variables;
+            self.arena_variables = then_arena_variables;
         }
 
         self.builder.position_at_end(merge_bb);
