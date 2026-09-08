@@ -6,7 +6,10 @@ include!("tests/bundling.rs");
 
 include!("tests/node_core.rs");
 
-include!("tests/streams.rs");
+include!("tests/stream_web.rs");
+include!("tests/stream_lifecycle.rs");
+include!("tests/stream_pipeline.rs");
+include!("tests/stream_integrations.rs");
 
 include!("tests/platform.rs");
 
