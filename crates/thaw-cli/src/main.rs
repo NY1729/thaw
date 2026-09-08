@@ -627,6 +627,10 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
 }
 
 include!("registry_integration/shims.rs");
+include!("registry_integration/jit_validation.rs");
+include!("registry_integration/dynamic_declarations.rs");
+include!("registry_integration/shim_support.rs");
+include!("registry_integration/shim_generation.rs");
 include!("registry_integration/class_methods.rs");
 include!("registry_integration/calls.rs");
 
