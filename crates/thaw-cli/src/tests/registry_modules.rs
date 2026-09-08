@@ -9442,7 +9442,7 @@ fn a_property_can_be_read_on_a_jsvalue_including_a_non_enumerable_one() {
         "module.exports.makeThing = function() {\n\
              var inner = { visible: 'v', hidden: 'h' };\n\
              Object.defineProperty(inner, 'hidden', { value: 'h', enumerable: false });\n\
-             return { detail: inner };\n\
+             return { detail: inner, rows: [{ value: 42 }] };\n\
          };\n",
     )
     .unwrap();
@@ -9454,6 +9454,8 @@ function main(): void {
     const thing: JsValue = makeThing();
     console.log(readDynamicValue(thing.detail.visible));
     console.log(readDynamicValue(thing.detail.hidden));
+    console.log(readDynamicValue(thing["detail"]["visible"]));
+    console.log(readDynamicValue(thing.rows[0].value));
 }
 "#,
     )
@@ -9468,7 +9470,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"v\"\n\"h\"\n"
+        "\"v\"\n\"h\"\n\"v\"\n42\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
