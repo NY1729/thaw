@@ -646,7 +646,7 @@ Parcelのbinaryは本体package内の`prebuilds/`ではなく、
 registryは現在のOS／architecture／libc suffixに一致するoptional dependencyの`main`が
 `.node`なら自動選択し、従来と同じ`native.node`／`native-addon.json`へ格納する。
 `THAW_RUN_NPM_INTEGRATION=1`のCLI E2Eは実npm packageを取得し、snapshot実行ファイルをbuild、
-registry削除後の単独実行まで確認する。
+registry削除後の単独実行に加え、型付き第2引数callbackへの実ファイルevent配信まで確認する。
 
 ## 20. callback identityと実行中poll
 
@@ -843,6 +843,7 @@ module EnvからURLを継承し、Env所有のNUL終端pointerを安定して返
 persistent handleとして保持する。`THAW_NODE_ADDON_API_BINDING`を指定したhost testは、無改変の
 公式bindingをloadし、primitive／collection／Promise APIに加えてAsyncWorkerとuntyped／typed
 thread-safe functionをNodeと同じ入力でmethod bridge経由実行し、JSON結果を比較する。
+さらにtyped error、AsyncWorker cancellation、finalizer/unloadも直接検証する。
 生成物のbuild時には、選択された`.node`のundefined symbolを`nm`で読み、同じbuildがlinkする
 `thaw-napi` archiveの実exportと比較する。未実装の`napi_*`／`node_api_*`、またはNode／V8の
 内部C++ symbolへの直接依存は、実行時の`dlopen`失敗ではなく最終link前の診断にする。

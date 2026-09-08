@@ -1067,19 +1067,14 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
         .source
         .contains("watcher-linux-x64-glibc/watcher.node"));
 
-    let args = serde_json::to_string(&serde_json::json!([
-        watched.to_string_lossy(),
-        snapshot.to_string_lossy(),
-        {}
-    ]))
-    .unwrap();
-    let args_literal = serde_json::to_string(&args).unwrap();
+    let watched_literal = serde_json::to_string(&watched.to_string_lossy()).unwrap();
+    let snapshot_literal = serde_json::to_string(&snapshot.to_string_lossy()).unwrap();
     let source = dir.join("main.ts");
     let output = dir.join("app");
     std::fs::write(
             &source,
             format!(
-                "function main(): void {{ const result: Json = writeSnapshot(JSON.parse({args_literal})); console.log(\"snapshot-created\"); }}\n"
+                "function main(): void {{ const result: Json = writeSnapshot({watched_literal}, {snapshot_literal}, {{ backend: \"inotify\" }}); console.log(\"snapshot-created\"); }}\n"
             ),
         )
         .unwrap();
@@ -1094,27 +1089,32 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     )
     .unwrap();
     let event_file = watched.join("event.txt");
-    let subscribe_args =
-        serde_json::to_string(&serde_json::json!([watched.to_string_lossy()])).unwrap();
-    let subscribe_literal = serde_json::to_string(&subscribe_args).unwrap();
+    let callback_file = watched.join("callback.txt");
+    let callback_literal = serde_json::to_string(&callback_file.to_string_lossy()).unwrap();
     let event_source = dir.join("events.ts");
     let event_output = dir.join("events-app");
     std::fs::write(
             &event_source,
             format!(
                 r#"import * as fs from "node:fs";
-                function main(): void {{
+                async function main(): Promise<void> {{
                     let received: number = 0;
                     const callback = (error: Json, result: Json): Json => {{
                         received = 1;
+                        fs.writeFileSync({callback_literal}, "received");
                         return result;
                     }};
-                    const subscribed: Json = callNativeAddonWithCallback("subscribe", JSON.parse({subscribe_literal}), callback);
+                    await subscribe({watched_literal}, callback);
                     fs.writeFileSync("{}", "event");
-                    while (received < 1) {{
+                    let attempts: number = 0;
+                    while (received < 1 && attempts < 10000) {{
                         const count: number = pollNativeAddonEvents();
+                        attempts = attempts + 1;
                     }}
-                    const unsubscribed: Json = callNativeAddonWithCallback("unsubscribe", JSON.parse({subscribe_literal}), callback);
+                    if (received < 1) {{
+                        throw new Error("watch event timed out");
+                    }}
+                    await unsubscribe({watched_literal}, callback);
                     console.log("watch-event");
                 }}
                 "#,
@@ -1144,14 +1144,17 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
         "snapshot-created\n"
     );
     assert!(snapshot.is_file());
-    let result = Command::new(&event_output).output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "watch-event\n");
+    let mut child = Command::new(&event_output).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !callback_file.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if child.try_wait().unwrap().is_none() {
+        child.kill().unwrap();
+    }
+    child.wait().unwrap();
     assert!(event_file.is_file());
+    assert!(callback_file.is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
 

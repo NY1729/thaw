@@ -6,19 +6,39 @@ impl<'a> FnLowerer<'a> {
         context: &str,
     ) -> Result<(), String> {
         let actual = self.infer_expr_type(value)?;
+        let callback_param_compatible = |expected: &HirType, actual: &HirType| {
+            expected == actual
+                || matches!(
+                    (expected, actual),
+                    (HirType::Json, HirType::JsValue) | (HirType::JsValue, HirType::Json)
+                )
+        };
         let callable_compatible = match (expected, &actual) {
+            (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {
+                expected_ret == ret
+                    && expected_params.len() == params.len()
+                    && expected_params
+                        .iter()
+                        .zip(params)
+                        .all(|(expected, actual)| callback_param_compatible(expected, actual))
+            }
             (
                 HirType::CallableFunction(fixed, _, rest, expected_ret),
                 HirType::Function(params, ret),
             ) => {
                 expected_ret == ret
                     && params.len() >= fixed.len()
-                    && params[..fixed.len()] == fixed[..]
+                    && fixed
+                        .iter()
+                        .zip(params)
+                        .all(|(expected, actual)| callback_param_compatible(expected, actual))
                     && match rest {
                         Some(rest) => {
                             let tail = &params[fixed.len()..];
                             tail == [HirType::Array(rest.clone())]
-                                || tail.iter().all(|ty| ty == rest.as_ref())
+                                || tail
+                                    .iter()
+                                    .all(|ty| callback_param_compatible(rest, ty))
                         }
                         None => params.len() == fixed.len(),
                     }
