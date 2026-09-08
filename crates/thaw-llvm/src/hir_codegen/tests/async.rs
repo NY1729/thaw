@@ -1292,7 +1292,7 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
             napi_set_named_property(env, exports, "schedule", schedule_fn); return exports;
         }
     "#).unwrap();
-    assert!(Command::new("cc")
+    assert!(cc_command()
         .args(["-shared", "-fPIC"])
         .arg(&addon_c)
         .arg("-o")
@@ -1335,7 +1335,7 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
     let std = build_staticlib("thaw-std");
     let runtime = build_staticlib("thaw-runtime");
     let napi = build_staticlib("thaw-napi");
-    assert!(Command::new("cc")
+    assert!(cc_command()
         .arg(&obj)
         .arg(&arena)
         .arg(&std)
@@ -1395,7 +1395,7 @@ fn runs_module_init_before_lambda_handler() {
     let std_lib = build_staticlib("thaw-std");
     let quickjs_lib = build_staticlib("thaw-quickjs");
 
-    let link_status = Command::new("cc")
+    let link_status = cc_command()
         .arg(&obj_path)
         .arg(&arena_lib)
         .arg(&std_lib)
