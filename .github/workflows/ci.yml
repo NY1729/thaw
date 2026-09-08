@@ -53,7 +53,9 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run tests
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace --exclude thaw-cli
+          cargo test -p thaw-cli -- --test-threads=1
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-prisma-postgres
       - name: Test Hono and sharp
