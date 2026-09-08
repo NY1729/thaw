@@ -201,11 +201,11 @@ fn classic_for_continue_runs_the_update_but_nested_loop_continue_does_not() {
     };
     assert!(matches!(
         then_body.as_slice(),
-        [HirStmt::Expr(HirExpr::Call(_, _)), HirStmt::Continue]
+        [HirStmt::Expr(HirExpr::PostfixUpdate(_, BinOp::Add)), HirStmt::Continue]
     ));
     assert!(matches!(
         body.last(),
-        Some(HirStmt::Expr(HirExpr::Call(_, _)))
+        Some(HirStmt::Expr(HirExpr::PostfixUpdate(_, BinOp::Add)))
     ));
 }
 

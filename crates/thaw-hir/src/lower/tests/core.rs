@@ -385,7 +385,7 @@ fn distinguishes_prefix_and_postfix_update_values() {
     let main = &program.functions[0];
     assert!(matches!(
         &main.body[1],
-        HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
+        HirStmt::Let(_, HirType::F64, HirExpr::PostfixUpdate(_, BinOp::Add))
     ));
     assert!(matches!(
         &main.body[2],
@@ -533,20 +533,18 @@ fn lowers_conditional_expressions_with_matching_native_types() {
             console.log(value);
         }"#,
     );
-    let HirStmt::Let(_, HirType::F64, HirExpr::Call(lambda, arguments)) =
+    let HirStmt::Let(
+        _,
+        HirType::F64,
+        HirExpr::Conditional(condition, consequent, alternate, HirType::F64),
+    ) =
         &program.functions[0].body[1]
     else {
-        panic!("expected conditional expression closure call");
+        panic!("expected direct conditional expression");
     };
-    assert!(arguments.is_empty());
-    assert!(matches!(
-        lambda.as_ref(),
-        HirExpr::Lambda(captures, params, HirType::F64, body)
-            if captures.len() == 1 && captures[0].name == "chooseLeft"
-                && params.is_empty()
-                && matches!(body.as_ref(), HirExpr::Block(stmts)
-                    if matches!(stmts.as_slice(), [HirStmt::If(_, _, _)]))
-    ));
+    assert!(matches!(condition.as_ref(), HirExpr::Var(name) if name == "chooseLeft"));
+    assert!(matches!(consequent.as_ref(), HirExpr::Lit(HirLit::F64(1.0))));
+    assert!(matches!(alternate.as_ref(), HirExpr::Lit(HirLit::F64(2.0))));
 }
 
 #[test]
@@ -759,4 +757,3 @@ fn generates_typed_inherited_member_wrappers_and_prefers_overrides() {
         .collect::<Vec<_>>();
     assert_eq!(answer.len(), 1, "override must suppress inherited wrapper");
 }
-
