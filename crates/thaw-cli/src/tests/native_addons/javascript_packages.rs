@@ -545,3 +545,46 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn registry_add_runs_real_safe_buffer_string_conversions_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-safe-buffer-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "safe-buffer@5.2.1").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Buffer } from "safe-buffer";
+function main(): void {
+    console.log(Buffer.from("雪").toString("hex"));
+    console.log(Buffer.from("e99baa", "hex").toString());
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["safe-buffer".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "e99baa\n雪\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
