@@ -68,6 +68,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .iter()
                 .any(|(name, ty)| name == field && ty == &HirType::Str),
             HirExpr::Assign(_, value) => self.expr_is_string(value),
+            HirExpr::PostfixUpdate(_, _) => false,
             HirExpr::Call(callee, _) => match callee.as_ref() {
                 HirExpr::Var(name) => {
                     self.function_return_types.get(name) == Some(&HirType::Str)
@@ -109,6 +110,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
             HirExpr::Var(name) => self.variable_hir_types.get(name).cloned(),
             HirExpr::Assign(_, value) => self.expr_hir_type(value),
+            HirExpr::PostfixUpdate(_, _) => Some(HirType::F64),
             HirExpr::OptionalSome(_, payload) | HirExpr::OptionalNone(payload) => {
                 Some(HirType::Optional(Box::new(payload.clone())))
             }

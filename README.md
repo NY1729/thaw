@@ -296,6 +296,18 @@ to benchmark another release binary. The deliberately loose limits only catch
 large regressions; compare the saved JSON between machines or commits for smaller
 changes. Board metrics also include QuickJS reasons grouped by category.
 
+For repeatable CPU and peak-memory measurements, build the release CLI and run
+the small native-only corpus (three warmups and ten measured runs by default):
+
+```bash
+cargo build --release -p thaw-cli
+benchmarks/cpu/run.sh target/release/thaw
+```
+
+Set `THAW_BENCH_WARMUPS` or `THAW_BENCH_RUNS` to change the sample count. The
+script verifies each checksum and reports mean elapsed time and mean maximum RSS;
+it requires GNU `/usr/bin/time`.
+
 ```json
 {
   "version": 2,

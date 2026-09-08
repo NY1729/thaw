@@ -43,6 +43,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|e| e.to_string())?;
                 Ok(val)
             }
+            HirExpr::PostfixUpdate(name, op) => {
+                let (pointer, ty) = *self
+                    .variables
+                    .get(name)
+                    .ok_or_else(|| format!("update of undeclared variable `{name}`"))?;
+                let old = self
+                    .builder
+                    .build_load(ty, pointer, "postfix_old")
+                    .map_err(|error| error.to_string())?
+                    .into_float_value();
+                let one = self.context.f64_type().const_float(1.0);
+                let updated = match op {
+                    BinOp::Add => self.builder.build_float_add(old, one, "postfix_increment"),
+                    BinOp::Sub => self.builder.build_float_sub(old, one, "postfix_decrement"),
+                    _ => unreachable!("postfix update only carries add/subtract"),
+                }
+                .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(pointer, updated)
+                    .map_err(|error| error.to_string())?;
+                Ok(old.into())
+            }
 
             HirExpr::OptionalSome(value, payload) => {
                 self.compile_optional(value.as_ref(), payload, true)

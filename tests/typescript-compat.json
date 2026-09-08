@@ -91,7 +91,7 @@
     { "name": "regular expression", "expect": "supported", "source": "function main(): void { const pattern: RegExp = /thaw/i; console.log(pattern.test('Thaw')); }" },
     { "name": "map collection", "expect": "supported", "source": "function main(): void { const values = new Map<string, number>(); values.set('a', 1); console.log(values.get('a')); }" },
     { "name": "set collection", "expect": "supported", "source": "function main(): void { const values = new Set<number>([1, 2]); values.add(3); console.log(values.has(2)); }" },
-    { "name": "json parse stringify", "expect": "unsupported", "source": "function main(): void { const value: JsValue = JSON.parse('{\"a\":1}'); console.log(JSON.stringify(value)); }" },
+    { "name": "json parse stringify", "expect": "supported", "source": "function main(): void { const value: Json = JSON.parse('{\"a\":1}'); console.log(JSON.stringify(value)); }" },
     { "name": "math calls", "expect": "supported", "source": "function main(): void { console.log(Math.max(1, 2), Math.floor(1.5), Math.sqrt(9)); }" },
     { "name": "number conversion", "expect": "supported", "source": "function main(): void { console.log(Number('42'), parseInt('10'), parseFloat('1.5')); }" },
     { "name": "error subclass", "expect": "supported", "source": "class AppError extends Error { code: number = 1; } function main(): void { const error = new AppError('x'); console.log(error.message, error.code); }" },
