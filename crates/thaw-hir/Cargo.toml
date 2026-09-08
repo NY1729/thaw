@@ -2,6 +2,7 @@
 name = "thaw-hir"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 swc_common = "26.0.0"
