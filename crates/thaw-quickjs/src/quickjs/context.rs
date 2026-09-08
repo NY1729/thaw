@@ -330,6 +330,23 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript HMAC function");
+                let pbkdf2_hex = Function::new(
+                    ctx.clone(),
+                    |algorithm: String,
+                     password: String,
+                     salt: String,
+                     iterations: u32,
+                     length: u32| {
+                        hex_encode(&pbkdf2_bytes(
+                            &algorithm,
+                            &hex_decode(&password),
+                            &hex_decode(&salt),
+                            iterations,
+                            length as usize,
+                        ))
+                    },
+                )
+                .expect("failed to create JavaScript PBKDF2 function");
                 let hpack_huffman_encode = Function::new(ctx.clone(), |value: String| {
                     let mut output = Vec::new();
                     httlib_huffman::encode(&hex_decode(&value), &mut output)
@@ -692,6 +709,9 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_crypto_hmac_hex", hmac_hex)
                     .expect("failed to install JavaScript HMAC function");
+                ctx.globals()
+                    .set("__thaw_crypto_pbkdf2_hex", pbkdf2_hex)
+                    .expect("failed to install JavaScript PBKDF2 function");
                 ctx.globals()
                     .set("__thaw_hpack_huffman_encode", hpack_huffman_encode)
                     .expect("failed to install HPACK Huffman encoder");
