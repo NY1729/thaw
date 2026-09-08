@@ -811,11 +811,18 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .ok_or("failed to create a target machine for the host triple")?;
 
-        // Optimize the IR before instruction selection. LLVM's default O2
-        // pipeline includes the coroutine lowering required by async functions.
+        // V2 async functions emit `llvm.coro.*` intrinsics. These passes are
+        // what turn that ramp function into resume/destroy functions before
+        // instruction selection. They are no-ops for today's synchronous
+        // functions, so keeping the pipeline always enabled gives both modes
+        // one deterministic object-generation path.
         self.module
-            .run_passes("default<O2>", &target_machine, PassBuilderOptions::create())
-            .map_err(|e| format!("optimization pass pipeline failed: {e}"))?;
+            .run_passes(
+                "coro-early,coro-split,coro-cleanup",
+                &target_machine,
+                PassBuilderOptions::create(),
+            )
+            .map_err(|e| format!("coroutine pass pipeline failed: {e}"))?;
 
         target_machine
             .write_to_file(&self.module, FileType::Object, path)
