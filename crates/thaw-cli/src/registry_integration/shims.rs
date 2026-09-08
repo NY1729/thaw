@@ -174,7 +174,11 @@ include!("jit/returns.rs");
 include!("jit/expressions.rs");
 include!("jit/conditions.rs");
 include!("jit/control_flow.rs");
-include!("jit/loops.rs");
+include!("jit/loop_control.rs");
+include!("jit/loop_expressions.rs");
+include!("jit/loop_analysis.rs");
+include!("jit/loop_bodies.rs");
+include!("jit/loop_aliases.rs");
 include!("jit/callables.rs");
 
 fn jit_export(
@@ -195,7 +199,11 @@ fn jit_export(
     jit_expressions!();
     jit_conditions!();
     jit_control_flow!();
-    jit_loops!();
+    jit_loop_control!();
+    jit_loop_expressions!();
+    jit_loop_analysis!();
+    jit_loop_bodies!();
+    jit_loop_aliases!();
     jit_callables!();
 
     if function.generic.is_some()
