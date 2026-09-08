@@ -10,7 +10,26 @@ impl<'a> FnLowerer<'a> {
             expected == actual
                 || matches!(
                     (expected, actual),
-                    (HirType::Json, HirType::JsValue) | (HirType::JsValue, HirType::Json)
+                    (
+                        HirType::Json,
+                        HirType::F64
+                            | HirType::I64
+                            | HirType::Bool
+                            | HirType::Undefined
+                            | HirType::Null
+                            | HirType::Str
+                            | HirType::StrLiteral(_)
+                            | HirType::Dictionary(_)
+                            | HirType::Array(_)
+                            | HirType::Tuple(_)
+                            | HirType::Object(_)
+                            | HirType::Union(_)
+                            | HirType::Optional(_)
+                            | HirType::Nullable(_)
+                            | HirType::Nullish(_)
+                            | HirType::JsValue
+                    )
+                        | (HirType::JsValue, HirType::Json)
                 )
         };
         let callable_compatible = match (expected, &actual) {

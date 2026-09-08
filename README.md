@@ -117,6 +117,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 target/release/thaw compat tests/typescript-compat.json
+target/release/thaw node-compat tests/typescript-runtime-compat.json
 target/release/thaw node-compat tests/node-compat.json
 ```
 
