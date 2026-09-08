@@ -26,6 +26,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for capture in captures {
             if self.arena_variables.contains(&capture.name)
                 || self.global_variables.contains_key(&capture.name)
+                || self.active_async_completion.is_some()
             {
                 continue;
             }
