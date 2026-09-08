@@ -267,7 +267,7 @@ THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli \
   registry_add_processes_a_real_hono_sharp_image_when_enabled -- --nocapture
 THAW_ACCEPTANCE_OUTPUT_DIR="$PWD/target/acceptance" \
 THAW_POSTGRES_URL=postgresql://postgres:password@127.0.0.1:5432/app \
-  cargo test -p thaw-cli builds_and_serves_hono_prisma_postgres_when_enabled -- --nocapture
+  cargo test -p thaw-cli builds_and_serves_hono_react_prisma_postgres_when_enabled -- --nocapture
 ```
 
 The npm network regression corpus also builds separate Socket.IO server and

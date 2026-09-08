@@ -2840,27 +2840,27 @@ function main(): void {
 }
 
 #[test]
-fn builds_and_serves_hono_prisma_postgres_when_enabled() {
+fn builds_and_serves_hono_react_prisma_postgres_when_enabled() {
     let Ok(database_url) = std::env::var("THAW_POSTGRES_URL") else {
         return;
     };
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/hono-prisma-postgres")
+        .join("../../examples/hono-react-prisma-board")
         .canonicalize()
         .unwrap();
-    assert!(npm_run_command("generate", &project)
+    assert!(npm_run_command("generate:postgres", &project)
         .env("DATABASE_URL", &database_url)
         .status()
         .unwrap()
         .success());
-    assert!(npm_run_command("db:push", &project)
+    assert!(npm_run_command("db:push:postgres", &project)
         .env("DATABASE_URL", &database_url)
         .status()
         .unwrap()
         .success());
 
     let dir = std::env::temp_dir().join(format!(
-        "thaw-cli-hono-prisma-postgres-{}",
+        "thaw-cli-hono-react-prisma-postgres-{}",
         std::process::id()
     ));
     let registry = dir.join("modules");
@@ -2873,6 +2873,7 @@ fn builds_and_serves_hono_prisma_postgres_when_enabled() {
         "@prisma/client",
     )
     .unwrap();
+    let assets = build_vite_project(&project).unwrap();
     let output = dir.join("app");
     let build_started = Instant::now();
     build_with_native_mode(
@@ -2888,11 +2889,15 @@ fn builds_and_serves_hono_prisma_postgres_when_enabled() {
             "@prisma/client".into(),
         ],
         false,
-        None,
+        Some(&assets),
         true,
     )
     .unwrap();
-    record_acceptance_metrics("hono-prisma-postgres", build_started.elapsed(), &output);
+    record_acceptance_metrics(
+        "hono-react-prisma-postgres",
+        build_started.elapsed(),
+        &output,
+    );
     std::fs::remove_dir_all(&registry).unwrap();
 
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2915,7 +2920,7 @@ fn builds_and_serves_hono_prisma_postgres_when_enabled() {
                     None
                 }
             })
-            .expect("compiled Hono + Prisma server did not start");
+            .expect("compiled Hono + React + Prisma server did not start");
         stream
             .write_all(
                 format!(
@@ -2929,17 +2934,17 @@ fn builds_and_serves_hono_prisma_postgres_when_enabled() {
         stream.read_to_string(&mut response).unwrap();
         response
     };
-    let id = format!("thaw-{}", std::process::id());
-    assert!(request("GET", "/health", "").contains(r#"{"status":"ok"}"#));
+    assert!(request("GET", "/", "").contains("<title>Thaw掲示板</title>"));
+    assert!(request("GET", "/api/posts", "").contains(r#"{"posts":[]}"#));
     let created = request(
         "POST",
-        "/orders",
-        &format!(r#"{{"id":"{id}","customer":"Yuu","total":42}}"#),
+        "/api/posts",
+        r#"{"author":"Yuu","message":"PostgreSQL"}"#,
     );
     assert!(created.starts_with("HTTP/1.1 201"), "{created}");
-    assert!(created.contains(&format!(r#""id":"{id}""#)), "{created}");
-    let listed = request("GET", "/orders", "");
-    assert!(listed.contains(&format!(r#""id":"{id}""#)), "{listed}");
+    assert!(created.contains(r#""author":"Yuu""#), "{created}");
+    let listed = request("GET", "/api/posts", "");
+    assert!(listed.contains(r#""message":"PostgreSQL""#), "{listed}");
 
     child.kill().unwrap();
     child.wait().unwrap();

@@ -60,7 +60,7 @@ jobs:
           cargo test -p thaw-llvm -- --test-threads=1
           cargo test -p thaw-cli -- --test-threads=1
       - name: Install Prisma example
-        run: npm ci --prefix examples/hono-prisma-postgres
+        run: npm ci --prefix examples/hono-react-prisma-board
       - name: Test Hono and sharp
         env:
           THAW_RUN_NPM_INTEGRATION: "1"
@@ -73,7 +73,7 @@ jobs:
         env:
           THAW_POSTGRES_URL: postgresql://postgres:password@127.0.0.1:5432/app
         run: |
-          cargo test -p thaw-cli builds_and_serves_hono_prisma_postgres_when_enabled -- --nocapture
+          cargo test -p thaw-cli builds_and_serves_hono_react_prisma_postgres_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_queries_postgres_with_real_pg_when_enabled -- --nocapture
       - name: Upload acceptance metrics
         if: always()
