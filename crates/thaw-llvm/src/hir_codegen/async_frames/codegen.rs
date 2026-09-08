@@ -516,6 +516,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
                 &format!("frame_{name}"),
             )?;
+            self.async_frame_cells.insert(slot);
             self.variables
                 .insert(name.clone(), (slot, self.basic_type(ty)?));
             self.variable_hir_types.insert(name.clone(), ty.clone());
@@ -775,6 +776,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
                     &format!("frame_{name}"),
                 )?;
+                self.async_frame_cells.insert(slot);
                 self.builder
                     .build_store(slot, value)
                     .map_err(|e| e.to_string())?;
