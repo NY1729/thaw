@@ -1023,7 +1023,7 @@ async function main(): Promise<void> {
 }
 
 #[test]
-fn registry_add_runs_a_real_socket_io_handshake_when_enabled() {
+fn registry_add_runs_a_real_socket_io_echo_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
@@ -1037,10 +1037,13 @@ fn registry_add_runs_a_real_socket_io_handshake_when_enabled() {
     let port = 20_000 + std::process::id() % 20_000;
     std::fs::write(
         &source,
-        r#"import { Server } from "socket.io";
-async function main(): Promise<void> {
-    await new Promise<void>((resolve): void => {
-        new Server(__PORT__, { transports: ["websocket"] });
+r#"import { Server } from "socket.io";
+function main(): void {
+    const server = new Server(__PORT__, { transports: ["websocket"] });
+    server.on("connection", (socket: JsValue): void => {
+        socket.on("echo", (value: string): void => {
+            socket.emit("echo", value);
+        });
     });
 }"#
         .replace("__PORT__", &port.to_string()),
@@ -1048,10 +1051,7 @@ async function main(): Promise<void> {
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let mut child = Command::new(&output)
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = Command::new(&output).spawn().unwrap();
 
     use std::io::{Read, Write};
     let address = format!("127.0.0.1:{port}");
@@ -1108,6 +1108,8 @@ async function main(): Promise<void> {
     assert!(read_frame(&mut stream).starts_with(b"0{"));
     write_frame(&mut stream, b"40");
     assert!(read_frame(&mut stream).starts_with(b"40"));
+    write_frame(&mut stream, br#"42["echo","hello"]"#);
+    assert_eq!(read_frame(&mut stream), br#"42["echo","hello"]"#);
     child.kill().unwrap();
     child.wait().unwrap();
     let _ = std::fs::remove_dir_all(dir);

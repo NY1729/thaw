@@ -10831,13 +10831,13 @@ fn discarded_dynamic_method_results_do_not_require_json_serialization() {
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.make = function() { return { on: function(name, callback) { this.name = name; this.callback = callback; this.self = this; return this; }, fire: function() { var self = this; queueMicrotask(function() { self.callback('ok'); }); return this; } }; };\n",
+        "class Emitter { constructor() { this.events = {}; } on(name, callback) { (this.events[name] || (this.events[name] = [])).push(callback); return this; } emit(name, value) { (this.events[name] || []).forEach(function(callback) { callback(value); }); } } class Listener extends Emitter { constructor() { super(); this.self = this; } fire() { this.emit('value', this); return this; } } class Outer { constructor() { this.target = new Listener(); } fire() { this.target.fire(); return this; } } ['on'].forEach(function(name) { Outer.prototype[name] = function() { return this.target[name].apply(this.target, arguments); }; }); module.exports.make = function() { return new Outer(); };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
     std::fs::write(
         &entry,
-        "import { make } from 'listener-kit'; function main(): void { const listener: JsValue = make(); listener.on('value', (value: string): void => { console.log(value); }); listener.fire(); }\n",
+        "import { make } from 'listener-kit'; function main(): void { const listener: JsValue = make(); listener.on('value', (value: JsValue): void => { console.log('called'); }); listener.fire(); }\n",
     )
     .unwrap();
     let output = dir.join("app");
@@ -10857,7 +10857,7 @@ fn discarded_dynamic_method_results_do_not_require_json_serialization() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "called\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
