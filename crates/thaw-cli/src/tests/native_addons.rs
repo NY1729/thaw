@@ -2764,6 +2764,7 @@ import { serve } from "@hono/node-server";
 import sharp from "sharp";
 import { Buffer } from "node:buffer";
 const app = new Hono();
+app.onError((error, c) => c.text(error.message, 500));
 app.post("/images", async (c) => {
     const input = Buffer.from(await c.req.arrayBuffer());
     const output = await sharp(input).resize(512, 512).webp().toBuffer();
@@ -2823,12 +2824,18 @@ function main(): void {
         .unwrap();
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
-    assert!(response.starts_with(b"HTTP/1.1 200"));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let mut stderr = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    assert!(
+        response.starts_with(b"HTTP/1.1 200"),
+        "{}\n{stderr}",
+        String::from_utf8_lossy(&response),
+    );
     assert!(String::from_utf8_lossy(&response).contains("Content-Type: image/webp"));
     assert!(response.windows(4).any(|bytes| bytes == b"RIFF"));
     assert!(response.windows(4).any(|bytes| bytes == b"WEBP"));
-    child.kill().unwrap();
-    child.wait().unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
 

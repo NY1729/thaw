@@ -27,8 +27,13 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     out.push_str("var __thaw_bundle_factories = {\n");
     for module in modules {
         let asynchronous = if module.async_module { "async " } else { "" };
+        let require = if module.has_esm {
+            "__thaw_require"
+        } else {
+            "require"
+        };
         out.push_str(&format!(
-            "{}: {asynchronous}function(module, exports, require, requireAsync, __filename, __dirname) {{\n{}\n}},\n",
+            "{}: {asynchronous}function(module, exports, {require}, requireAsync, __filename, __dirname) {{\n{}\n}},\n",
             js_string_literal(&module.key),
             module.source
         ));

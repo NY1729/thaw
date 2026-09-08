@@ -725,6 +725,11 @@ unsafe fn json_from_value_with_undefined(
             values
                 .iter()
                 .map(|value| match value {
+                    Some(value)
+                        if matches!(value_ref(*value), Ok(Value::Function(_) | Value::Symbol { .. })) =>
+                    {
+                        Ok(JsonValue::Null)
+                    }
                     Some(value) => json_from_value_with_undefined(*value, preserve_undefined),
                     None => Ok(JsonValue::Null),
                 })
@@ -737,12 +742,15 @@ unsafe fn json_from_value_with_undefined(
             values
                 .iter()
                 .filter_map(|(key, value)| match key {
-                    PropertyKey::String(key) => {
-                        Some(
-                            json_from_value_with_undefined(*value, preserve_undefined)
-                                .map(|value| (key.clone(), value)),
-                        )
+                    PropertyKey::String(_)
+                        if matches!(value_ref(*value), Ok(Value::Function(_) | Value::Symbol { .. })) =>
+                    {
+                        None
                     }
+                    PropertyKey::String(key) => Some(
+                        json_from_value_with_undefined(*value, preserve_undefined)
+                            .map(|value| (key.clone(), value)),
+                    ),
                     PropertyKey::Symbol(_) => None,
                 })
                 .collect::<Result<_, String>>()?,

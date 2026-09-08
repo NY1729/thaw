@@ -391,7 +391,7 @@ fn rewrite_static_worker_urls(
         let worker_relative = normalize_path_string(&worker_relative.to_string_lossy());
         let worker_key = format!("{package_name}/{worker_relative}");
         let worker_bootstrap = format!(
-            "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\n",
+            "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\nvar __thaw_require = require;\n",
             js_string_literal(&worker_key)
         );
         let worker_source =
@@ -430,4 +430,3 @@ fn rewrite_static_worker_urls(
     }
     Ok(output)
 }
-
