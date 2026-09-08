@@ -616,8 +616,9 @@ The workspace crates have narrow responsibilities:
   TextDecoder exports and token-producing CLI argument parsing. The CommonJS
   `EventEmitter` supports ordered, one-shot and prepended listeners, Symbol
   events, removal, maximum-listener controls and introspection. `events.on()`
-  exposes queued async iteration with AbortSignal cancellation; native
-  `new EventEmitter()` class bridging remains outside this import surface. The
+  exposes queued async iteration with AbortSignal cancellation. Named and
+  default imports expose the constructible class with typed listener methods,
+  so ordinary `new EventEmitter()` syntax works. The
   URL module shares the global constructors and
   provides file-URL conversion plus HTTP-option projection
 - `node:path` covers POSIX resolve/join/normalize, relative paths, component
@@ -3586,8 +3587,9 @@ QuickJS function arguments are retained by reference, deduplicated by identity,
 and callable from native code through the same bridge. Plain object arguments
 carry a deduplicated reference ID plus an enumerable-property snapshot, so
 native code observes stable identity within an invocation and persistent class
-environments retain it across method calls. Live bidirectional property updates
-after the snapshot remain unsupported. N-API instance Proxies carry a private
+environments retain it across method calls. Each native call refreshes that
+snapshot from JavaScript and synchronizes native property additions, updates,
+and removals back to the same live JavaScript object. N-API instance Proxies carry a private
 handle marker, allowing one native constructor or method to receive an instance
 created by another without degrading it to a plain-object snapshot. The real
 `weak-napi` addon now constructs both `ObjectInfo` and `WeakTag` through its
@@ -3780,6 +3782,10 @@ An opt-in multi-package project gate combines real Zod, Nano ID, Lodash, and
 `@node-rs/crc32` imports in one build without explicit `--use` flags, removes
 the registry, and verifies the standalone executable
 (`registry_add_builds_a_multi_package_project_when_enabled`).
+The same real-package corpus includes `ws@8.18.3`: a generated standalone
+server completes an HTTP Upgrade, receives a masked WebSocket frame from an
+independent TCP client, echoes its payload, and shuts down cleanly
+(`registry_add_runs_a_real_ws_echo_when_enabled`).
 Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
 to a real `napi_value` Buffer, and addons that return a function as their
 module root are bound to the single declaration name from `package.d.ts`.
