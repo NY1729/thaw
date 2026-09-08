@@ -513,6 +513,43 @@ fn bundled_bindings_require_uses_the_loaded_addon() {
 }
 
 #[test]
+fn bundled_node_gyp_build_uses_the_loaded_addon() {
+    use std::ffi::{CStr, CString};
+
+    let node_modules = temp_registry("bundle_node_gyp_addon_node_modules");
+    let package = node_modules.join("pkg");
+    let locator = node_modules.join("node-gyp-build");
+    fs::create_dir_all(&package).unwrap();
+    fs::create_dir_all(&locator).unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = require('node-gyp-build')(__dirname);",
+    )
+    .unwrap();
+    fs::write(
+        locator.join("package.json"),
+        r#"{"name":"node-gyp-build","main":"index.js"}"#,
+    )
+    .unwrap();
+    fs::write(locator.join("index.js"), "throw new Error('locator ran');").unwrap();
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &package, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.require.addon = function() {{ return {{ answer: 42 }}; }}; {bundle} globalThis.readAddon = function() {{ return module.exports.answer; }};"
+    );
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("readAddon").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn bundled_direct_node_require_uses_the_loaded_addon() {
     use std::ffi::{CStr, CString};
 

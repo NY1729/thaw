@@ -788,6 +788,151 @@ async function main(): Promise<void> {
 }
 
 #[test]
+fn registry_add_fetches_and_lists_serial_ports_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-serialport-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let added = thaw_registry::add(&registry, "@serialport/bindings-cpp@12.0.1").unwrap();
+    assert!(added.native_addon.is_some());
+
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        r#"import { autoDetect } from "@serialport/bindings-cpp";
+async function main(): Promise<void> {
+    const ports = await autoDetect().list();
+    console.log(Array.isArray(ports));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["@serialport/bindings-cpp".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn registry_add_fetches_and_runs_node_rs_crc32_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-node-rs-crc32-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let added = thaw_registry::add(&registry, "@node-rs/crc32@1.10.7").unwrap();
+    assert!(added.native_addon.is_some());
+
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        r#"import { crc32, crc32c } from "@node-rs/crc32";
+function main(): void {
+    console.log(crc32("hello"));
+    console.log(crc32c("hello"));
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["@node-rs/crc32".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "907060870\n2591144780\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn registry_add_builds_a_multi_package_project_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-multi-package-project-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    for package in [
+        "zod@3.23.0",
+        "nanoid@5.1.5",
+        "lodash@4.17.21",
+        "@node-rs/crc32@1.10.7",
+    ] {
+        thaw_registry::add(&registry, package).unwrap();
+    }
+
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        r#"import { z } from "zod";
+import { nanoid } from "nanoid";
+import { map, reduce } from "lodash";
+import { crc32 } from "@node-rs/crc32";
+function main(): void {
+    const input = z.object({ values: z.array(z.number()) }).parse({ values: [1, 2, 3] });
+    const doubled: number[] = map(input.values, (value: number): number => value * 2);
+    console.log(reduce(doubled, (sum: number, value: number): number => sum + value, 0));
+    const id: string = nanoid(8);
+    console.log(id.length);
+    console.log(crc32("hello"));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "12\n8\n907060870\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
