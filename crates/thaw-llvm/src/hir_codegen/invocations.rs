@@ -1,3 +1,4 @@
+include!("invocations/array_calls.rs");
 include!("invocations/calls.rs");
 include!("invocations/closure_calls.rs");
 include!("invocations/dynamic_calls.rs");
