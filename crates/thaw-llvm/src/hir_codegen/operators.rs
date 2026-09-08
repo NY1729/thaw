@@ -215,6 +215,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         "getDynamicValue"
                         | "constructDynamicValue"
                         | "callDynamicMethodHandle"
+                        | "callDynamicMethodHandleRaw"
                         | "registerNativeCallback"
                         | "getDynamicProperty"
                         | "callDynamicValueHandle" => return Some(HirType::JsValue),

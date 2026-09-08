@@ -1023,6 +1023,97 @@ async function main(): Promise<void> {
 }
 
 #[test]
+fn registry_add_runs_a_real_socket_io_handshake_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("thaw-cli-real-socket-io-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "socket.io@4.8.1").unwrap();
+
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    let port = 20_000 + std::process::id() % 20_000;
+    std::fs::write(
+        &source,
+        r#"import { Server } from "socket.io";
+async function main(): Promise<void> {
+    await new Promise<void>((resolve): void => {
+        new Server(__PORT__, { transports: ["websocket"] });
+    });
+}"#
+        .replace("__PORT__", &port.to_string()),
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let mut child = Command::new(&output)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    use std::io::{Read, Write};
+    let address = format!("127.0.0.1:{port}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut stream = loop {
+        match std::net::TcpStream::connect(&address) {
+            Ok(stream) => break stream,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("failed to connect to Socket.IO server: {error}"),
+        }
+    };
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "GET /socket.io/?EIO=4&transport=websocket HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).unwrap();
+        response.push(byte[0]);
+    }
+    assert!(
+        String::from_utf8_lossy(&response).starts_with("HTTP/1.1 101"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+
+    let write_frame = |stream: &mut std::net::TcpStream, payload: &[u8]| {
+        let mut frame = vec![0x81, 0x80 | payload.len() as u8, 1, 2, 3, 4];
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ [1, 2, 3, 4][index % 4]),
+        );
+        stream.write_all(&frame).unwrap();
+    };
+    let read_frame = |stream: &mut std::net::TcpStream| {
+        let mut header = [0_u8; 2];
+        stream.read_exact(&mut header).unwrap();
+        let mut payload = vec![0_u8; usize::from(header[1] & 0x7f)];
+        stream.read_exact(&mut payload).unwrap();
+        payload
+    };
+    assert!(read_frame(&mut stream).starts_with(b"0{"));
+    write_frame(&mut stream, b"40");
+    assert!(read_frame(&mut stream).starts_with(b"40"));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;

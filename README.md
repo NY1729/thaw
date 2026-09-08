@@ -3786,6 +3786,10 @@ The same real-package corpus includes `ws@8.18.3`: a generated standalone
 server completes an HTTP Upgrade, receives a masked WebSocket frame from an
 independent TCP client, echoes its payload, and shuts down cleanly
 (`registry_add_runs_a_real_ws_echo_when_enabled`).
+It also includes `socket.io@4.8.1`: an independent masked WebSocket client
+completes the Engine.IO open and Socket.IO namespace handshake against the
+compiled standalone server
+(`registry_add_runs_a_real_socket_io_handshake_when_enabled`).
 Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
 to a real `napi_value` Buffer, and addons that return a function as their
 module root are bound to the single declaration name from `package.d.ts`.

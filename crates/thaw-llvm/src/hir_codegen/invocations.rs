@@ -2029,6 +2029,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamicMethodHandle" => {
                 return self.compile_call_dynamic_method_handle(args, false);
             }
+            "callDynamicMethodHandleRaw" => {
+                return self.compile_call_dynamic_method_handle(args, true);
+            }
             "readDynamicValue" => return self.compile_read_dynamic_value(args),
             "callDynamicValueMixed" => return self.compile_call_dynamic_value_mixed(args),
             "constructDynamicValue" => return self.compile_construct_dynamic_value(args),
