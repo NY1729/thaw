@@ -35,6 +35,13 @@
   globalThis.__thaw_json_date_reviver = (key, value) => {
     if (
       value &&
+      value.type === 'Buffer' &&
+      Array.isArray(value.data)
+    ) {
+      return Buffer.from(value.data);
+    }
+    if (
+      value &&
       typeof value === 'object' &&
       !Array.isArray(value) &&
       Object.keys(value).length === 1 &&

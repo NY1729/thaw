@@ -663,6 +663,12 @@ pub extern "C" fn thaw_js_construct_handle_result(
 /// caller-frees-nothing convention (mirrors `thaw_js_call`'s own return),
 /// so `to_str` below copies it out immediately and nothing is freed here.
 type NativeCallbackAdapter = unsafe extern "C" fn(*const c_void, *const c_char) -> *const c_char;
+type NativeCallbackKey = (usize, u64, u64, u8, usize);
+
+thread_local! {
+    static NATIVE_CALLBACK_HANDLES: RefCell<HashMap<NativeCallbackKey, u64>> =
+        RefCell::new(HashMap::new());
+}
 
 /// Wraps a real compiled (native) closure -- already bridged into a
 /// generic `(context, args_json) -> result_json` adapter by thaw-llvm's
@@ -706,6 +712,17 @@ pub extern "C" fn thaw_js_register_native_callback(
     let closure = closure as usize;
     let finish = finish as usize;
     let result: Result<u64, String> = with_active_or_context(|ctx| {
+        let identity = if closure == 0 { adapter } else { closure };
+        let cache_key = (identity, jsvalue_param_mask, param_count, void_result, finish);
+        if let Some(handle) = NATIVE_CALLBACK_HANDLES.with(|handles| {
+            handles
+                .borrow()
+                .get(&cache_key)
+                .copied()
+                .filter(|handle| value_for_handle(&ctx, *handle).is_ok())
+        }) {
+            return Ok(handle);
+        }
         // The Rust-backed half stays a plain `String -> String` closure --
         // no `Value<'js>` anywhere in its own signature -- deliberately:
         // an `IntoJsFunc` closure returning a value borrowed from `Ctx<'js>`
@@ -859,7 +876,11 @@ pub extern "C" fn thaw_js_register_native_callback(
         let wrapper: Value = ctx
             .eval(wrapper_source.as_str())
             .map_err(|error| error.to_string())?;
-        retain_value(&ctx, wrapper)
+        let handle = retain_value(&ctx, wrapper)?;
+        NATIVE_CALLBACK_HANDLES.with(|handles| {
+            handles.borrow_mut().insert(cache_key, handle);
+        });
+        Ok(handle)
     });
     match result {
         Ok(value) => ThawHandleResult {
