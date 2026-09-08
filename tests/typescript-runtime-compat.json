@@ -37,7 +37,7 @@
     },
     {
       "name": "map and set",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "function main(): void { const map = new Map<string, number>(); map.set('a', 2); const set = new Set<number>([1, 2]); console.log(String(map.get('a')) + ':' + set.has(2)); }"
     },
     {
@@ -47,7 +47,7 @@
     },
     {
       "name": "throw and catch",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "function main(): void { try { throw new Error('broken'); } catch (error) { console.log(String(error)); } }"
     }
   ]

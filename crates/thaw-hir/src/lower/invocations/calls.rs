@@ -856,7 +856,10 @@ impl<'a> FnLowerer<'a> {
             let value = self.lower_expr(&arg.expr)?;
             let ty = self.infer_expr_type(&value)?;
             if callee_name == "String" && ty == HirType::Str {
-                return Ok(value);
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_error_to_string".to_string())),
+                    vec![value],
+                ));
             }
             if callee_name == "String" && ty == HirType::Bool {
                 return Ok(HirExpr::Call(
@@ -873,7 +876,10 @@ impl<'a> FnLowerer<'a> {
             if callee_name == "String"
                 && matches!(
                     ty,
-                    HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                    HirType::Array(_)
+                        | HirType::Tuple(_)
+                        | HirType::Object(_)
+                        | HirType::Optional(_)
                 )
             {
                 return self.coerce_primitive_to_string(value);

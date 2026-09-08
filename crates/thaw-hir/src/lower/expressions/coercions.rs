@@ -333,6 +333,25 @@ impl<'a> FnLowerer<'a> {
                 vec![value],
             )),
             HirType::Json => Ok(HirExpr::JsonAsString(Box::new(value))),
+            HirType::Optional(payload) => {
+                let optional_type = HirType::Optional(payload.clone());
+                let name = format!("__thaw_string_optional_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), optional_type.clone());
+                let bound = HirExpr::Var(name.clone());
+                let present = self.coerce_primitive_to_string(HirExpr::OptionalValue(
+                    Box::new(bound.clone()),
+                    payload.as_ref().clone(),
+                ))?;
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                    vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
+                        "undefined".to_string(),
+                    ))))],
+                    vec![HirStmt::Return(Some(present))],
+                )]);
+                self.wrap_call_argument_bindings(result, &[(name, optional_type, value)])
+            }
             HirType::Object(fields) => {
                 // A class extending `Error`/`TypeError`/etc. (see
                 // `lower/module/classes.rs`) is a real object with an
