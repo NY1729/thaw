@@ -477,7 +477,7 @@ fn wrap_as_commonjs_module(
     format!(
         "globalThis.module = {{ exports: {{}} }};\n\
          globalThis.exports = globalThis.module.exports;\n\
-         globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported in the Fallback path yet\"); }};\n\
+         globalThis.require = function(name) {{ var error = new Error(\"Cannot find module '\" + name + \"'\"); error.code = 'MODULE_NOT_FOUND'; throw error; }};\n\
          // Real packages commonly *guard* Node-only globals before using\n\
          // them (`Buffer && Buffer.isBuffer(x)`, `Buffer?.from(x)`) for\n\
          // exactly this situation -- a non-Node environment. But an\n\

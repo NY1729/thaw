@@ -3034,6 +3034,9 @@ fn registry_add_builds_real_pg_client_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
     let dir = std::env::temp_dir().join(format!("thaw-cli-real-pg-{}", std::process::id()));
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "pg@8.16.3").unwrap();
@@ -3043,9 +3046,77 @@ fn registry_add_builds_real_pg_client_when_enabled() {
     std::fs::write(
         &source,
         r#"import { Client } from "pg";
-function main(): void {
-    const client = new Client({ host: "127.0.0.1", port: 5432, user: "thaw", database: "thaw" });
-    console.log(client !== undefined);
+async function main(): Promise<void> {
+    const client = new Client({ host: "127.0.0.1", port: __PORT__, user: "thaw", database: "thaw", connectionTimeoutMillis: 500 });
+    try {
+        await client.connect();
+    } catch (error) {
+        console.log("closed");
+    }
+}"#
+        .replace("__PORT__", &port.to_string()),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["pg".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let peer = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    drop(stream);
+                    return true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        }
+    });
+    let result = Command::new(&output).output().unwrap();
+    assert!(peer.join().unwrap(), "pg did not reach the TCP peer");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "closed\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn registry_add_queries_postgres_with_real_pg_when_enabled() {
+    let Ok(database_url) = std::env::var("THAW_POSTGRES_URL") else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("thaw-cli-real-pg-query-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "pg@8.16.3").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Client } from "pg";
+async function main(): Promise<void> {
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    const result: JsValue = await client.query("SELECT 42::int AS value");
+    console.log(result.rows[0].value);
+    await client.end();
 }"#,
     )
     .unwrap();
@@ -3060,6 +3131,15 @@ function main(): void {
     )
     .unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    assert!(output.is_file());
+    let result = Command::new(&output)
+        .env("DATABASE_URL", database_url)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
