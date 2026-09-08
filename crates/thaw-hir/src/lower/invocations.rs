@@ -306,11 +306,11 @@ impl<'a> FnLowerer<'a> {
     fn lower_dynamic_value_property_read(
         &mut self,
         receiver: HirExpr,
-        property: &str,
+        property: HirExpr,
     ) -> Result<HirExpr, String> {
         Ok(HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicProperty".to_string())),
-            vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string()))],
+            vec![receiver, property],
         ))
     }
 

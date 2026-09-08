@@ -3030,7 +3030,7 @@ function main(): void {
 }
 
 #[test]
-fn registry_add_builds_real_pg_client_when_enabled() {
+fn registry_add_builds_real_pg_pool_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
@@ -3045,14 +3045,15 @@ fn registry_add_builds_real_pg_client_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
-        r#"import { Client } from "pg";
+        r#"import { Pool } from "pg";
 async function main(): Promise<void> {
-    const client = new Client({ host: "127.0.0.1", port: __PORT__, user: "thaw", database: "thaw", connectionTimeoutMillis: 500 });
+    const pool = new Pool({ host: "127.0.0.1", port: __PORT__, user: "thaw", database: "thaw", connectionTimeoutMillis: 500 });
     try {
-        await client.connect();
+        await pool.connect();
     } catch (error) {
         console.log("closed");
     }
+    await pool.end();
 }"#
         .replace("__PORT__", &port.to_string()),
     )
@@ -3087,7 +3088,7 @@ async function main(): Promise<void> {
         }
     });
     let result = Command::new(&output).output().unwrap();
-    assert!(peer.join().unwrap(), "pg did not reach the TCP peer");
+    assert!(peer.join().unwrap(), "pg Pool did not reach the TCP peer");
     assert!(
         result.status.success(),
         "{}",
@@ -3099,9 +3100,12 @@ async function main(): Promise<void> {
 
 #[test]
 fn registry_add_queries_postgres_with_real_pg_when_enabled() {
-    let Ok(database_url) = std::env::var("THAW_POSTGRES_URL") else {
+    let database_url = std::env::var("THAW_POSTGRES_URL").ok();
+    if database_url.is_none()
+        && std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1")
+    {
         return;
-    };
+    }
     let dir = std::env::temp_dir().join(format!("thaw-cli-real-pg-query-{}", std::process::id()));
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "pg@8.16.3").unwrap();
@@ -3110,13 +3114,20 @@ fn registry_add_queries_postgres_with_real_pg_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
-        r#"import { Client } from "pg";
+        r#"import { Client, Pool } from "pg";
 async function main(): Promise<void> {
     const client = new Client({ connectionString: process.env.DATABASE_URL });
     await client.connect();
     const result: JsValue = await client.query("SELECT 42::int AS value");
     console.log(result.rows[0].value);
     await client.end();
+
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const pooled = await pool.connect();
+    const parameterized: JsValue = await pooled.query("SELECT $1::int AS value", [43]);
+    console.log(parameterized.rows[0].value);
+    pooled.release();
+    await pool.end();
 }"#,
     )
     .unwrap();
@@ -3131,6 +3142,10 @@ async function main(): Promise<void> {
     )
     .unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
+    let Some(database_url) = database_url else {
+        let _ = std::fs::remove_dir_all(dir);
+        return;
+    };
     let result = Command::new(&output)
         .env("DATABASE_URL", database_url)
         .output()
@@ -3140,6 +3155,6 @@ async function main(): Promise<void> {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n43\n");
     let _ = std::fs::remove_dir_all(dir);
 }
