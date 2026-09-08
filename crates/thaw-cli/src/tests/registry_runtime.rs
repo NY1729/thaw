@@ -369,6 +369,49 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
 }
 
 #[test]
+fn multifile_cli_includes_transitive_node_builtin_dependencies() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-transitive-node-builtins-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = dir.join("message.txt");
+    std::fs::write(&data, "hello").unwrap();
+    let data = serde_json::to_string(&data.to_string_lossy()).unwrap();
+    std::fs::write(
+        dir.join("files.ts"),
+        format!(
+            r#"import {{ readFileSync }} from "node:fs";
+                import "node:path";
+                export function describe(): string {{
+                    return "message.txt:" + readFileSync({data}, "utf8");
+                }}"#
+        ),
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { describe } from "./files";
+            function main(): void { console.log(describe()); }"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("modules"), &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "message.txt:hello\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bare_import_resolution_errors_include_source_location() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-missing-bare-import-{}",
@@ -1516,4 +1559,3 @@ fn object_from_entries_with_a_literal_array_of_pairs_uses_jit_without_quickjs() 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "10,20,2\n");
     let _ = std::fs::remove_dir_all(dir);
 }
-
