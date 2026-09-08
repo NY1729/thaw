@@ -447,6 +447,10 @@ fn top_level_exception_skips_main_and_fails_the_process() {
     let result = Command::new(&output).output().unwrap();
     assert_eq!(result.status.code(), Some(1));
     assert_eq!(String::from_utf8_lossy(&result.stdout), "before failure\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        "Uncaught: module initialization failed\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -669,4 +673,3 @@ fn builds_and_runs_a_multifile_async_json_lambda_handler() {
     assert!(request.ends_with("{\"message\":\"module lambda\"}"));
     let _ = std::fs::remove_dir_all(dir);
 }
-

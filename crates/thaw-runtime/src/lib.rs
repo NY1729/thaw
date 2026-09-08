@@ -30,6 +30,20 @@ use std::time::{Duration, Instant};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
+/// Prints an uncaught compiled exception before the process exits unsuccessfully.
+///
+/// # Safety
+/// `error` must be null or point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
+    if !error.is_null() {
+        eprintln!(
+            "Uncaught: {}",
+            unsafe { CStr::from_ptr(error) }.to_string_lossy()
+        );
+    }
+}
+
 include!("runtime/native_values/numbers.rs");
 include!("runtime/native_values/strings.rs");
 include!("runtime/native_values/arrays.rs");
