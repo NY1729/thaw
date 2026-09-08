@@ -1116,6 +1116,107 @@ function main(): void {
 }
 
 #[test]
+fn registry_add_runs_real_socket_io_client_ack_and_disconnect_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-real-socket-io-client-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "socket.io@4.8.1").unwrap();
+    thaw_registry::add(&registry, "socket.io-client@4.8.1").unwrap();
+    let port = (20_000 + std::process::id() % 20_000) as u16;
+    let server_source = dir.join("server.ts");
+    let client_source = dir.join("client.ts");
+    let server_output = dir.join("server");
+    let client_output = dir.join("client");
+    std::fs::write(
+        &server_source,
+        r#"import { Server } from "socket.io";
+function main(): void {
+    const server = new Server(__PORT__, { transports: ["websocket"] });
+    server.on("connection", (socket: JsValue): void => {
+        socket.on("echo", (value: string, acknowledge: JsValue): void => {
+            acknowledge.call(undefined, "ack:" + value);
+            socket.emit("echo", value);
+        });
+    });
+}"#
+        .replace("__PORT__", &port.to_string()),
+    )
+    .unwrap();
+    std::fs::write(
+        &client_source,
+        r#"import { io } from "socket.io-client";
+function main(): void {
+    const socket = io("http://127.0.0.1:__PORT__", { transports: ["websocket"] });
+    socket.on("connect", (): void => {
+        socket.emit("echo", "hello", (value: string): void => console.error(value));
+    });
+    socket.on("echo", (value: string): void => {
+        console.error(value);
+        socket.disconnect();
+    });
+    socket.on("disconnect", (): void => console.error("disconnected"));
+    socket.on("connect_error", (error: JsValue): void => console.error(error.message));
+}"#
+        .replace("__PORT__", &port.to_string()),
+    )
+    .unwrap();
+    build(
+        &server_source,
+        &server_output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &[],
+    )
+    .unwrap();
+    build(
+        &client_source,
+        &client_output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &[],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let mut server = Command::new(&server_output).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "compiled Socket.IO server did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let mut client = Command::new(&client_output)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    if client.try_wait().unwrap().is_none() {
+        client.kill().unwrap();
+    }
+    let client = client.wait_with_output().unwrap();
+    server.kill().unwrap();
+    server.wait().unwrap();
+    let stderr = String::from_utf8_lossy(&client.stderr);
+    assert!(stderr.lines().any(|line| line == "ack:hello"), "{stderr}");
+    assert!(stderr.lines().any(|line| line == "hello"), "{stderr}");
+    assert!(
+        stderr.lines().any(|line| line == "disconnected"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;

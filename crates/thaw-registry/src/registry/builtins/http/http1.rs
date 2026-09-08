@@ -22,7 +22,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length));
                if (!this.hasHeader('connection')) this.setHeader('Connection', 'close');
                var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n';
-               var pending = Buffer.alloc(0), response = null, remaining = null, chunkSize = null, ended = false;
+               var pending = Buffer.alloc(0), response = null, remaining = null, chunkSize = null, ended = false, upgraded = false;
                function finishResponse() { if (!response || ended) return; ended = true; response.complete = true; response.readable = false; response.emit('end'); }
                function emitBody(value) {
                  if (!value.length || ended) return;
@@ -55,6 +55,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                      request.emit('information', information); if (candidate.statusCode === 100) request.emit('continue');
                      continue;
                    }
+                   if (candidate.statusCode === 101) { upgraded = true; var headBytes = pending; pending = Buffer.alloc(0); request.emit('upgrade', candidate, request.socket, headBytes); return; }
                    response = candidate; response.trailersDistinct = {};
                    var length = response.headers['content-length']; remaining = length === undefined ? null : Math.max(0, Number(length));
                    request.emit('response', response);
@@ -82,9 +83,9 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                var socket = this.socket = this.connection = transport.createConnection ? transport.createConnection(connectOptions) : transport.connect(connectOptions);
                this.emit('socket', socket);
                socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); });
-               socket.on('connect', function() { socket.end(Buffer.concat([Buffer.from(head), body])); request.emit('finish'); if (typeof callback === 'function') callback(); });
-               socket.on('data', function(data) { try { pending = Buffer.concat([pending, Buffer.from(data)]); consume(); } catch (error) { request.emit('error', error); socket.destroy(); } });
-               socket.on('end', function() { try { consume(); if (!response) throw new Error('Parse Error: Invalid HTTP response'); finishResponse(); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } });
+               socket.on('connect', function() { var packet = Buffer.concat([Buffer.from(head), body]); if (String(request.getHeader('upgrade') || '')) socket.write(packet); else socket.end(packet); request.emit('finish'); if (typeof callback === 'function') callback(); });
+               socket.on('data', function(data) { if (upgraded) return; try { pending = Buffer.concat([pending, Buffer.from(data)]); consume(); } catch (error) { request.emit('error', error); socket.destroy(); } });
+               socket.on('end', function() { if (upgraded) return; try { consume(); if (!response) throw new Error('Parse Error: Invalid HTTP response'); finishResponse(); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } });
                return this;
              };
              var endWithoutAgent = ClientRequest.prototype.end; ClientRequest.prototype.end = function() { if (this.agent && typeof this.agent.createConnection === 'function') { var agent = this.agent; this._options._transport = { createConnection: function(options) { return agent.createConnection(options); } }; } return endWithoutAgent.apply(this, arguments); };

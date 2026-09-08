@@ -202,6 +202,43 @@ fn net_socket_exchanges_bytes_with_a_real_tcp_peer() {
 }
 
 #[test]
+fn net_socket_reads_while_its_write_side_remains_open() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"hello").unwrap();
+        let mut reply = [0; 4];
+        stream.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"ping");
+        stream.write_all(b"world").unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+    });
+
+    let dir = temp_registry("builtin_net_full_duplex_socket");
+    fs::write(dir.join("index.js"), "var net = require('node:net'); module.exports = async function (port) { var chunks = [], socket = net.connect(port, '127.0.0.1'); var completed = new Promise(function(resolve, reject) { socket.on('error', reject); socket.on('data', function(chunk) { var value = chunk.toString(); chunks.push(value); if (value === 'hello') socket.write('ping'); }); socket.on('close', resolve); }); await completed; return [chunks, socket.bytesWritten, socket.bytesRead]; };").unwrap();
+    let empty_node_modules = temp_registry("builtin_net_full_duplex_socket_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetFullDuplex = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseNetFullDuplex").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"[["hello","world"],4,10]"#
+    );
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
 fn http_client_requests_and_parses_a_real_chunked_response() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
@@ -247,6 +284,54 @@ fn http_client_requests_and_parses_a_real_chunked_response() {
     server.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http_client_upgrades_and_keeps_the_socket_duplex() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        assert!(String::from_utf8(request)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("upgrade: websocket\r\n"));
+        stream
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nhead")
+            .unwrap();
+        let mut reply = [0; 4];
+        stream.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"ping");
+        stream.write_all(b"pong").unwrap();
+    });
+
+    let dir = temp_registry("builtin_http_client_upgrade");
+    fs::write(dir.join("index.js"), "var http = require('node:http'); module.exports = async function (port) { return new Promise(function(resolve, reject) { var request = http.request({ hostname: '127.0.0.1', port: port, path: '/', headers: { Connection: 'Upgrade', Upgrade: 'websocket' } }); request.on('error', reject); request.on('response', function() { reject(new Error('unexpected response')); }); request.on('upgrade', function(response, socket, head) { var result = [response.statusCode, head.toString()]; socket.on('data', function(data) { result.push(data.toString()); socket.destroy(); resolve(result); }); socket.write('ping'); }); request.end(); }); };").unwrap();
+    let empty_node_modules = temp_registry("builtin_http_client_upgrade_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpUpgrade = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpUpgrade").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"[101,"head","pong"]"#
+    );
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
 }
 
 #[test]
