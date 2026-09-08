@@ -57,6 +57,10 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("call target is not a compiled function value".to_string());
         };
 
+        if let Some(result) = self.compile_dynamic_named_call(name, args) {
+            return result;
+        }
+
         match name.as_str() {
             "console.log" | "console.info" | "console.debug" => {
                 return self.compile_console_log(args, false)
@@ -1999,54 +2003,6 @@ impl<'ctx> HirCompiler<'ctx> {
                     "json_object_is",
                 );
             }
-            "loadScript" => return self.compile_load_script(args),
-            "callDynamic" => return self.compile_call_dynamic(args),
-            "getDynamicValue" => return self.compile_get_dynamic_value(args),
-            "callDynamicValue" => return self.compile_call_dynamic_value(args),
-            "callNativeAddonValue" => return self.compile_call_native_addon_value(args),
-            "callDynamicValueHandle" => return self.compile_call_dynamic_value_handle(args),
-            "callDynamicValueWithValue" => return self.compile_call_dynamic_value_with_value(args),
-            "releaseDynamicValue" => return self.compile_release_dynamic_value(args),
-            "getDynamicProperty" => {
-                return self.compile_dynamic_handle_operation("thaw_js_get_property_result", args)
-            }
-            "setDynamicProperty" => {
-                let value = self
-                    .compile_dynamic_handle_operation("thaw_js_set_property_result", args)?
-                    .into_int_value();
-                return self
-                    .builder
-                    .build_int_compare(
-                        IntPredicate::NE,
-                        value,
-                        self.context.i64_type().const_zero(),
-                        "dynamic_property_set",
-                    )
-                    .map(Into::into)
-                    .map_err(|error| error.to_string());
-            }
-            "callDynamicMethod" => return self.compile_call_dynamic_method(args),
-            "callDynamicMethodHandle" => {
-                return self.compile_call_dynamic_method_handle(args, false);
-            }
-            "callDynamicMethodHandleRaw" => {
-                return self.compile_call_dynamic_method_handle(args, true);
-            }
-            "readDynamicValue" => return self.compile_read_dynamic_value(args),
-            "callDynamicValueMixed" => return self.compile_call_dynamic_value_mixed(args),
-            "constructDynamicValue" => return self.compile_construct_dynamic_value(args),
-            "loadNativeAddon" => return self.compile_load_native_addon(args),
-            "loadNativeAddonEmbedded" => return self.compile_load_embedded_native_addon(args),
-            "loadNativeSharedLibraryEmbedded" => {
-                return self.compile_load_embedded_native_dependency(args)
-            }
-            "loadNativeSharedLibrary" => return self.compile_load_native_dependency(args),
-            "callNativeAddon" => return self.compile_call_native_addon(args),
-            "callNativeAddonWithCallback" => {
-                return self.compile_call_native_addon_with_callback(args)
-            }
-            "pollNativeAddonEvents" => return self.compile_poll_native_addon_events(args),
-            "registerNativeCallback" => return self.compile_register_native_callback(args),
             _ => {}
         }
 
