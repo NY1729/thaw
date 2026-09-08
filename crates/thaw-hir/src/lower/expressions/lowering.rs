@@ -1161,7 +1161,8 @@ impl<'a> FnLowerer<'a> {
                                     "callDynamic"
                                         | "callDynamicHandle"
                                         | "callDynamicMethod"
-                                        | "callDynamicMethodHandle"))
+                                        | "callDynamicMethodHandle"
+                                        | "callDynamicMethodHandleRaw"))
                     );
                     if resolves_at_dynamic_boundary {
                         Ok(value)
