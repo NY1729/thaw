@@ -104,6 +104,7 @@ pub enum HirExpr {
     /// `name = value` (and desugared compound assignments / `++`/`--`).
     /// Evaluates to `value`.
     Assign(Symbol, Box<HirExpr>),
+    PostfixUpdate(Symbol, BinOp),
     /// Phase 1 arrays are number-only at codegen time (see hir_codegen);
     /// the HIR shape itself doesn't enforce that.
     ArrayLit(Vec<HirExpr>),

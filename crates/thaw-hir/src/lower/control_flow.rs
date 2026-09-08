@@ -72,6 +72,9 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             names.insert(name.clone());
             collect_referenced_bindings(value, names);
         }
+        HirExpr::PostfixUpdate(name, _) => {
+            names.insert(name.clone());
+        }
         HirExpr::BinOp(_, left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::UnionIsEqual(left, right, _)
@@ -300,7 +303,8 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::NullishUndefined(_)
         | HirExpr::Var(_)
         | HirExpr::EnvVar(_)
-        | HirExpr::ObjectAlloc(_) => false,
+        | HirExpr::ObjectAlloc(_)
+        | HirExpr::PostfixUpdate(_, _) => false,
     }
 }
 
