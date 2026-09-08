@@ -154,7 +154,11 @@ fn select_optional_dependency_addon(
     let suffixes = if platform == "linux" && libc == "musl" {
         vec![format!("-{platform}-{arch}-{libc}"), format!("-linuxmusl-{arch}")]
     } else if platform == "linux" {
-        vec![format!("-{platform}-{arch}-{libc}"), format!("-{platform}-{arch}")]
+        vec![
+            format!("-{platform}-{arch}-{libc}"),
+            format!("-{platform}-{arch}-gnu"),
+            format!("-{platform}-{arch}"),
+        ]
     } else {
         vec![format!("-{platform}-{arch}")]
     };

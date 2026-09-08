@@ -870,12 +870,13 @@ extended errorを更新する。
 
 ## 24. 値を返すfunction引数
 
-型付きtop-level N-API呼び出しは、宣言上の任意位置にある1個の通常function引数を渡せる。
+型付きtop-level N-API呼び出しは、宣言上の任意位置にある通常function引数をすべて渡せる。
 LLVMはclosureごとにJSON引数をnative型へ戻し、native戻り値をJSONへ変換するadapterを生成する。
 hostはadapterとclosure contextをaddonのEnvに属するFunctionとして保持し、addonが同期中または
 元呼び出し後にFunctionを呼び出しても同じidentityを利用する。実C addon E2Eは
 `(number) => number`を受け取ってそのまま返し、生成実行ファイルが返されたFunctionを呼んで
-`42`を得るところまで検証する。複数function引数とoptional/rest callbackは未対応である。
+`42`を得るところまで検証する。複数function引数、callback自体の省略、optional parameterと
+rest parameterを持つcallbackも同じclosure ABIで検証する。
 
 `.d.ts`のgeneric fallback関数は型parameter、constraint、parameter pattern、optional arityを
 generated ambient declarationへ保持する。HIRは呼び出しごとに具体型tupleを推論し、ambient dynamic
