@@ -19,8 +19,8 @@ impl<'a> FnLowerer<'a> {
                 | "setHours" | "setMinutes" | "setSeconds" | "setMilliseconds" | "setUTCFullYear"
                 | "setUTCMonth" | "setUTCDate" | "setUTCHours" | "setUTCMinutes" | "setUTCSeconds"
                 | "setUTCMilliseconds" | "toDateString" | "toTimeString" | "toUTCString" | "toJSON"
-                | "keys" | "values" | "entries" | "get" | "set" | "add" | "has" | "clear"
-                | "delete" | "union" | "intersection" | "difference" | "symmetricDifference"
+                | "keys" | "values" | "entries" | "union" | "intersection" | "difference"
+                | "symmetricDifference"
                 | "isSubsetOf" | "isSupersetOf" | "isDisjointFrom"
         )
     }

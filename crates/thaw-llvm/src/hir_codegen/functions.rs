@@ -220,13 +220,22 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: BasicTypeEnum<'ctx>,
         name: &str,
     ) -> Result<PointerValue<'ctx>, String> {
+        let entry = self
+            .current_function()
+            .get_first_basic_block()
+            .ok_or("arena allocation requires a function entry")?;
+        let builder = self.context.create_builder();
+        if let Some(first) = entry.get_first_instruction() {
+            builder.position_before(&first);
+        } else {
+            builder.position_at_end(entry);
+        }
         let i64_type = self.context.i64_type();
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
         let size = ty
             .size_of()
             .ok_or_else(|| format!("variable `{name}` has an unsized LLVM type"))?;
-        let cell = self
-            .builder
+        let cell = builder
             .build_call(
                 alloc,
                 &[size.into(), i64_type.const_int(8, false).into()],
