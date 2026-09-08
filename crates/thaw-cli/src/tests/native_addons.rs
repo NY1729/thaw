@@ -114,12 +114,12 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\nexport declare function passesObject(): number;\nexport declare function passesNativeHandle(value: number): number;\nexport declare function prototypeRoundTrip(value: number): number;\nexport declare function watchObject(): number;\nexport declare function collectObjects(): number;\nexport declare function finalizedObjects(): number;\n",
+        "export declare function addOne(value: number): number;\nexport declare function boxed(value: number): number;\nexport declare function nativeCallback(value: number): number;\nexport declare function preservesCallbackIdentity(): boolean;\nexport declare function passesObject(): number;\nexport declare function mutatesObject(): number;\nexport declare function roundTripsObject(): number;\nexport declare function passesNativeHandle(value: number): number;\nexport declare function prototypeRoundTrip(value: number): number;\nexport declare function watchObject(): number;\nexport declare function collectObjects(): number;\nexport declare function finalizedObjects(): number;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "const native = require.addon(); native.Box.prototype.read = function() { return this.get(); }; native.Box.prototype.mark = function(value) { return value + 1; }; module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).read(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); }; module.exports.passesObject = () => { const object = { value: 42 }; return native.same(object, object) ? native.objectValue(object) : 0; }; module.exports.passesNativeHandle = value => new native.Box(new native.Box(value)).get(); module.exports.prototypeRoundTrip = value => new native.Box(value).self().callMark(); const watcher = new native.Box(0); module.exports.watchObject = () => { watcher.watch({ value: 1 }, function() { this.marked = 41; }); return 1; }; module.exports.collectObjects = async () => { for (let index = 0; index < 4; index++) { __thaw_gc(); await Promise.resolve(); } return 1; }; module.exports.finalizedObjects = () => watcher.finalized() + watcher.marked;",
+        "const native = require.addon(); native.Box.prototype.read = function() { return this.get(); }; native.Box.prototype.mark = function(value) { return value + 1; }; module.exports.addOne = value => native.add(value, 1); module.exports.boxed = value => new native.Box(value).read(); module.exports.nativeCallback = value => native.invoke(item => item * 2, value); module.exports.preservesCallbackIdentity = () => { const callback = () => {}; return native.same(callback, callback); }; module.exports.passesObject = () => { const object = { value: 42 }; return native.same(object, object) ? native.objectValue(object) : 0; }; module.exports.mutatesObject = () => { const object = { value: 1 }; native.mutate(object); return object.value; }; module.exports.roundTripsObject = () => { const object = { value: 1 }; native.objectValue(object); object.value = 9; return native.objectValue(object); }; module.exports.passesNativeHandle = value => new native.Box(new native.Box(value)).get(); module.exports.prototypeRoundTrip = value => new native.Box(value).self().callMark(); const watcher = new native.Box(0); module.exports.watchObject = () => { watcher.watch({ value: 1 }, function() { this.marked = 41; }); return 1; }; module.exports.collectObjects = async () => { for (let index = 0; index < 4; index++) { __thaw_gc(); await Promise.resolve(); } return 1; }; module.exports.finalizedObjects = () => watcher.finalized() + watcher.marked;",
     )
     .unwrap();
     let addon_c = dir.join("addon.c");
@@ -173,6 +173,12 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
                 napi_get_cb_info(env, info, &argc, &object, 0, 0);
                 napi_get_named_property(env, object, "value", &result); return result;
             }
+            static napi_value mutate(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value object, value;
+                napi_get_cb_info(env, info, &argc, &object, 0, 0);
+                napi_create_double(env, 42, &value); napi_set_named_property(env, object, "value", value);
+                return object;
+            }
             static napi_value box_new(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value arg, self; double value; box *source = 0, *data = malloc(sizeof(*data));
                 napi_get_cb_info(env, info, &argc, &arg, &self, 0);
@@ -218,6 +224,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
                 napi_create_function(env, "invoke", 6, invoke, 0, &fn); napi_set_named_property(env, exports, "invoke", fn);
                 napi_create_function(env, "same", 4, same, 0, &fn); napi_set_named_property(env, exports, "same", fn);
                 napi_create_function(env, "objectValue", 11, object_value, 0, &fn); napi_set_named_property(env, exports, "objectValue", fn);
+                napi_create_function(env, "mutate", 6, mutate, 0, &fn); napi_set_named_property(env, exports, "mutate", fn);
                 napi_define_class(env, "Box", 3, box_new, 0, 5, properties, &constructor);
                 napi_set_named_property(env, exports, "Box", constructor); return exports;
             }
@@ -236,7 +243,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     let output = dir.join("app");
     std::fs::write(
         &source,
-        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity, passesObject, passesNativeHandle, prototypeRoundTrip, watchObject, collectObjects, finalizedObjects } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); console.log(passesObject()); console.log(passesNativeHandle(42)); console.log(prototypeRoundTrip(42)); watchObject(); collectObjects(); collectObjects(); console.log(finalizedObjects()); }\n",
+        "import { addOne, boxed, nativeCallback, preservesCallbackIdentity, passesObject, mutatesObject, roundTripsObject, passesNativeHandle, prototypeRoundTrip, watchObject, collectObjects, finalizedObjects } from \"native-wrapper\"; function main(): void { console.log(addOne(41)); console.log(boxed(42)); console.log(nativeCallback(21)); console.log(preservesCallbackIdentity()); console.log(passesObject()); console.log(mutatesObject()); console.log(roundTripsObject()); console.log(passesNativeHandle(42)); console.log(prototypeRoundTrip(42)); watchObject(); collectObjects(); collectObjects(); console.log(finalizedObjects()); }\n",
     )
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -249,7 +256,7 @@ fn registry_javascript_wrapper_calls_bundled_native_addon() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "42\n42\n42\ntrue\n42\n42\n43\n42\n"
+        "42\n42\n42\ntrue\n42\n42\n9\n42\n43\n42\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -929,6 +936,89 @@ function main(): void {
         String::from_utf8_lossy(&result.stdout),
         "12\n8\n907060870\n"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn registry_add_runs_a_real_ws_echo_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-real-ws-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "ws@8.18.3").unwrap();
+
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        r#"import { WebSocketServer } from "ws";
+async function main(): Promise<void> {
+    await new Promise<void>((resolve, reject): void => {
+        const server = new WebSocketServer({ port: __PORT__ });
+        server.on("error", reject);
+        server.on("connection", (socket): void => {
+            socket.on("message", (data): void => {
+                socket.send(data);
+                console.log(data.toString());
+                socket.terminate();
+                server.close(() => resolve());
+            });
+        });
+    });
+}"#
+        .replace(
+            "__PORT__",
+            &(20_000 + std::process::id() % 20_000).to_string(),
+        ),
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let child = Command::new(&output)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::{Read, Write};
+    let address = format!("127.0.0.1:{}", 20_000 + std::process::id() % 20_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut stream = loop {
+        match std::net::TcpStream::connect(&address) {
+            Ok(stream) => break stream,
+            Err(error) if std::time::Instant::now() < deadline => {
+                let _ = error;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("failed to connect to ws server: {error}"),
+        }
+    };
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "GET / HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = [0_u8; 1024];
+    let response_len = stream.read(&mut response).unwrap();
+    assert!(
+        String::from_utf8_lossy(&response[..response_len]).starts_with("HTTP/1.1 101"),
+        "{}",
+        String::from_utf8_lossy(&response[..response_len])
+    );
+    stream
+        .write_all(&[0x81, 0x85, 1, 2, 3, 4, b'h' ^ 1, b'e' ^ 2, b'l' ^ 3, b'l' ^ 4, b'o' ^ 1])
+        .unwrap();
+    let mut frame = [0_u8; 7];
+    stream.read_exact(&mut frame).unwrap();
+    assert_eq!(&frame, b"\x82\x05hello");
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"hello\"\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
