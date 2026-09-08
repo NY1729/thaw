@@ -182,6 +182,23 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             release_napi_handle(handle)?;
             return Ok(serde_json::json!({ "kind": "value", "value": true }));
         }
+        if operation == "sync_reference" {
+            let reference = target
+                .parse::<u64>()
+                .map_err(|_| "invalid QuickJS reference")?;
+            return HOST.with(|host| {
+                let host = host.borrow();
+                let value = host
+                    .module_envs
+                    .iter()
+                    .find_map(|env| env.quickjs_references.get(&reference).copied())
+                    .ok_or_else(|| "unknown QuickJS reference".to_string())?;
+                Ok(serde_json::json!({
+                    "kind": "value",
+                    "value": json_from_value_with_undefined(value, true)?
+                }))
+            });
+        }
         let handle = if operation == "construct" {
             let target = CString::new(target).map_err(|_| "export contains NUL")?;
             thaw_napi_get_export(target.as_ptr())
@@ -636,11 +653,6 @@ fn value_from_json_with_undefined(
                 .get("__thaw_napi_object__")
                 .and_then(JsonValue::as_u64)
             {
-                if let Some(value) = env.quickjs_references.get(&reference) {
-                    return *value;
-                }
-                let object = env.alloc(Value::Object(HashMap::new()));
-                env.quickjs_references.insert(reference, object);
                 let properties = values
                     .get("value")
                     .and_then(JsonValue::as_object)
@@ -660,6 +672,14 @@ fn value_from_json_with_undefined(
                             .collect::<HashMap<_, _>>()
                     })
                     .unwrap_or_default();
+                if let Some(object) = env.quickjs_references.get(&reference).copied() {
+                    if let Some(Value::Object(target)) = unsafe { object.as_mut() } {
+                        *target = properties;
+                    }
+                    return object;
+                }
+                let object = env.alloc(Value::Object(HashMap::new()));
+                env.quickjs_references.insert(reference, object);
                 if let Some(Value::Object(target)) = unsafe { object.as_mut() } {
                     *target = properties;
                 }

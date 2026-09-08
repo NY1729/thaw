@@ -898,7 +898,9 @@ class exportは`new.target`をhandle bridgeへ転送し、返されたN-API inst
 callbackは現在のQuickJS contextで実行し、E2Eで戻り値と同一性を検証する。非function objectの
 引数もWeakMapの参照tokenと列挙可能propertyのsnapshotへ変換する。同じ呼び出し内では同じ
 `napi_value`へ重複排除し、classの永続N-API環境ではmethod呼び出しをまたいで保持する。循環参照は
-空Objectを先にcacheしてからpropertyを埋めて復元する。snapshot後の双方向property同期は未対応。
+空Objectを先にcacheしてからpropertyを埋めて復元する。後続のnative呼び出し前には同じ参照IDの
+propertyをJavaScriptから再取得し、呼び出し後にはnative側の追加・更新・削除を元のJavaScript
+objectへ同期する。
 N-API instance Proxyは別のWeakMapでhandleを保持し、同じaddon環境のconstructor/method引数では
 元の`napi_value`を直接復元する。合成E2Eは`new Box(new Box(42))`を検証し、実`weak-napi` wrapperも
 `ObjectInfo` instanceを`WeakTag` constructorへ渡して両方を生成できる。
