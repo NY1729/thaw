@@ -1,4 +1,12 @@
 use super::*;
+
+fn cc_command() -> Command {
+    let mut command = Command::new("cc");
+    if cfg!(target_os = "linux") {
+        command.arg("-no-pie");
+    }
+    command
+}
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
@@ -113,7 +121,7 @@ fn compile_and_run_output_with_env(
     let std_lib = build_staticlib("thaw-std");
     let quickjs_lib = build_staticlib("thaw-quickjs");
 
-    let link_status = Command::new("cc")
+    let link_status = cc_command()
         .arg(&obj_path)
         .arg(&arena_lib)
         .arg(&std_lib)
@@ -193,7 +201,7 @@ fn compile_and_invoke_lambda(source: &str, test_name: &str, event_body: &str) ->
     let exe_path = dir.join("out");
     compiler.write_object_file(&obj_path).unwrap();
 
-    let link_status = Command::new("cc")
+    let link_status = cc_command()
         .arg(&obj_path)
         .arg(build_staticlib("thaw-arena"))
         .arg(build_staticlib("thaw-std"))
