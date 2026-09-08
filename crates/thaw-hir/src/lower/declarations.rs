@@ -447,10 +447,22 @@ fn lower_class_constructor(
                 ));
             }
         } else {
-            let (base_initializer, _, _) = lowerer
+            let (base_initializer, _, base_name) = lowerer
                 .super_initializer
                 .clone()
                 .expect("derived class has a base initializer");
+            if is_error_family_name(&base_name) {
+                let message = params
+                    .first()
+                    .ok_or("implicit Error constructor is missing its message parameter")?;
+                initializer_body.push(HirStmt::Expr(HirExpr::PropAssign(
+                    Box::new(HirExpr::Var(this_name.clone())),
+                    instance_type.clone(),
+                    "message".to_string(),
+                    Box::new(HirExpr::Var(message.name.clone())),
+                )));
+                initializer_body.append(&mut own_initializers);
+            } else {
             let signature = &signatures[&base_initializer];
             if signature.params.len() != params.len() + 1 {
                 return Err(format!(
@@ -468,6 +480,7 @@ fn lower_class_constructor(
                 args,
             )));
             initializer_body.append(&mut own_initializers);
+            }
         }
     } else {
         initializer_body.append(&mut own_initializers);

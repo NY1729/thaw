@@ -921,6 +921,24 @@ fn user_class_extends_error_exposes_message_name_instanceof() {
 }
 
 #[test]
+fn error_subclass_inherits_an_implicit_message_constructor() {
+    let source = r#"
+        class AppError extends Error {
+            code: number = 1;
+        }
+        function main(): void {
+            const error = new AppError("failed");
+            console.log(error.message);
+            console.log(error.code);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "implicit_error_constructor"),
+        "failed\n1\n"
+    );
+}
+
+#[test]
 fn multi_level_error_subclass_instanceof_matches_every_ancestor() {
     let source = r#"
         class MyError extends Error {
@@ -1010,5 +1028,4 @@ fn instanceof_guard_skips_the_as_cast_for_an_unrelated_thrown_value() {
         "not a MyError\nplain string\n"
     );
 }
-
 

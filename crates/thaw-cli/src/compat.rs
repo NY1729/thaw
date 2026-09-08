@@ -32,13 +32,23 @@ fn run_compat(args: &[String]) -> Result<(), String> {
         let source = case["source"]
             .as_str()
             .ok_or_else(|| format!("case `{name}` is missing `source`"))?;
-        let outcome = thaw_parser::parse_typescript_with_source_map(source).and_then(
-            |(module, source_map)| {
-                thaw_hir::lower_module_with_source_map(&module, &source_map, name)
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            },
-        );
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            thaw_parser::parse_typescript_with_source_map(source).and_then(
+                |(module, source_map)| {
+                    thaw_hir::lower_module_with_source_map(&module, &source_map, name)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+            )
+        }))
+        .unwrap_or_else(|panic| {
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            Err(format!("compiler panic: {message}"))
+        });
         let actual = if outcome.is_ok() {
             "supported"
         } else {
