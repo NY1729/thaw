@@ -122,11 +122,16 @@
       this.set(bytes.slice(0, count), Number(offset)); return count;
     }
     readUInt8(offset = 0) { return this[Number(offset)]; }
+    readInt8(offset = 0) { const value = this.readUInt8(offset); return value > 0x7f ? value - 0x100 : value; }
     writeUInt8(value, offset = 0) { this[Number(offset)] = Number(value) & 255; return Number(offset) + 1; }
     readUInt16LE(offset = 0) { const index = Number(offset); return this[index] | this[index + 1] << 8; }
     readUInt16BE(offset = 0) { const index = Number(offset); return this[index] << 8 | this[index + 1]; }
+    readInt16LE(offset = 0) { const value = this.readUInt16LE(offset); return value > 0x7fff ? value - 0x10000 : value; }
+    readInt16BE(offset = 0) { const value = this.readUInt16BE(offset); return value > 0x7fff ? value - 0x10000 : value; }
     writeUInt16LE(value, offset = 0) { const index = Number(offset); this[index] = Number(value) & 255; this[index + 1] = Number(value) >> 8 & 255; return index + 2; }
     writeUInt16BE(value, offset = 0) { const index = Number(offset); this[index] = Number(value) >> 8 & 255; this[index + 1] = Number(value) & 255; return index + 2; }
+    writeInt16LE(value, offset = 0) { return this.writeUInt16LE(value, offset); }
+    writeInt16BE(value, offset = 0) { return this.writeUInt16BE(value, offset); }
     readUInt32LE(offset = 0) { const index = Number(offset); return (this[index] | this[index + 1] << 8 | this[index + 2] << 16 | this[index + 3] << 24) >>> 0; }
     readUInt32BE(offset = 0) { const index = Number(offset); return (this[index] * 0x1000000 + (this[index + 1] << 16 | this[index + 2] << 8 | this[index + 3])) >>> 0; }
     readInt32LE(offset = 0) { const value = this.readUInt32LE(offset); return value > 0x7fffffff ? value - 0x100000000 : value; }
@@ -221,6 +226,32 @@
       const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
       const value = cryptoModule.createHash(name).update(Buffer.from(data.buffer || data,
         data.byteOffset || 0, data.byteLength)).digest();
+      return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    },
+    importKey(format, keyData, algorithm, extractable, usages) {
+      if (format !== 'raw') return Promise.reject(new TypeError(`Unsupported key format: ${format}`));
+      return Promise.resolve({
+        __thawRaw: Buffer.from(keyData.buffer || keyData, keyData.byteOffset || 0, keyData.byteLength),
+        algorithm: typeof algorithm === 'string' ? { name: algorithm } : algorithm,
+        extractable: Boolean(extractable),
+        usages: Array.from(usages || [])
+      });
+    },
+    sign(algorithm, key, data) {
+      const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
+      const hash = key.algorithm && key.algorithm.hash;
+      const digest = typeof hash === 'string' ? hash : hash && hash.name;
+      if (String(name).toUpperCase() !== 'HMAC' || !key.__thawRaw) return Promise.reject(new TypeError('Unsupported signing key'));
+      const value = Buffer.from(__thaw_crypto_hmac_hex(normalizeHashAlgorithm(digest), key.__thawRaw.toString('hex'), Buffer.from(data.buffer || data, data.byteOffset || 0, data.byteLength).toString('hex')), 'hex');
+      return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    },
+    deriveBits(algorithm, key, length) {
+      const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
+      const hash = algorithm && algorithm.hash;
+      const digest = typeof hash === 'string' ? hash : hash && hash.name;
+      if (String(name).toUpperCase() !== 'PBKDF2' || !key.__thawRaw || Number(length) % 8 !== 0) return Promise.reject(new TypeError('Unsupported key derivation'));
+      const salt = Buffer.from(algorithm.salt.buffer || algorithm.salt, algorithm.salt.byteOffset || 0, algorithm.salt.byteLength);
+      const value = Buffer.from(__thaw_crypto_pbkdf2_hex(normalizeHashAlgorithm(digest), key.__thawRaw.toString('hex'), salt.toString('hex'), Number(algorithm.iterations), Number(length) / 8), 'hex');
       return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
     }
   };
