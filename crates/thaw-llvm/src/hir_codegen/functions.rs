@@ -260,9 +260,12 @@ impl<'ctx> HirCompiler<'ctx> {
         };
 
         let symbol = Self::llvm_symbol_for(&func.name);
-        Ok(self
-            .module
-            .add_function(&symbol, fn_type, Some(Linkage::Internal)))
+        let linkage = if func.name == "__thaw_artifact_metadata" {
+            Linkage::External
+        } else {
+            Linkage::Internal
+        };
+        Ok(self.module.add_function(&symbol, fn_type, Some(linkage)))
     }
 
     /// Declares an ambient (`declare function`) signature as an `extern

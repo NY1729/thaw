@@ -523,6 +523,7 @@ fn build_accepts_an_npm_project_directory() {
     )
     .unwrap();
     run_build(&[directory.display().to_string()]).unwrap();
+    run_inspect(&[directory.join("app").display().to_string()]).unwrap();
     let result = Command::new(directory.join("app")).output().unwrap();
     assert!(result.status.success());
     assert_eq!(String::from_utf8_lossy(&result.stdout), "npm project\n");
