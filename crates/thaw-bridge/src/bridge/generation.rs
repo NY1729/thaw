@@ -504,7 +504,7 @@ fn wrap_as_commonjs_module(
          // would otherwise throw `ReferenceError: process is not defined`\n\
          // the same way an unguarded `Buffer`/`URL` reference would.\n\
          if (typeof globalThis.process === 'undefined') {{\n\
-         \x20\x20globalThis.process = {{ argv: [], env: {{}}, platform: 'linux', version: '', execPath: '/usr/bin/node', config: {{ variables: {{}} }}, versions: {{ node: '', modules: '', uv: '' }}, nextTick: function(fn) {{ var args = Array.prototype.slice.call(arguments, 1); var run = function() {{ fn.apply(undefined, args); }}; if (typeof queueMicrotask === 'function') queueMicrotask(run); else Promise.resolve().then(run); }} }};\n\
+         \x20\x20globalThis.process = {{ argv: [], env: {{}}, platform: 'linux', version: '', execPath: 'node', config: {{ variables: {{}} }}, versions: {{ node: '', modules: '', uv: '' }}, nextTick: function(fn) {{ var args = Array.prototype.slice.call(arguments, 1); var run = function() {{ fn.apply(undefined, args); }}; if (typeof queueMicrotask === 'function') queueMicrotask(run); else Promise.resolve().then(run); }} }};\n\
          }}\n\
          // Likewise `__dirname`/`__filename`: real per-module Node\n\
          // locals, but every package here already runs unwrapped at\n\
