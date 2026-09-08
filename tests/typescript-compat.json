@@ -1,0 +1,28 @@
+{
+  "cases": [
+    { "name": "primitive annotations", "expect": "supported", "source": "function main(): void { const n: number = 1; const s: string = 'x'; const b: boolean = true; console.log(n, s, b); }" },
+    { "name": "array literal", "expect": "supported", "source": "function main(): void { const values: number[] = [1, 2, 3]; console.log(values.length); }" },
+    { "name": "tuple", "expect": "supported", "source": "function main(): void { const pair: [string, number] = ['x', 1]; console.log(pair[0]); }" },
+    { "name": "object type", "expect": "supported", "source": "type User = { name: string; age: number }; function main(): void { const user: User = { name: 'A', age: 1 }; console.log(user.name); }" },
+    { "name": "interface", "expect": "supported", "source": "interface User { name: string; age: number } function main(): void { const user: User = { name: 'A', age: 1 }; console.log(user.age); }" },
+    { "name": "generic function", "expect": "supported", "source": "function first<T>(value: T): T { return value; } function main(): void { console.log(first<number>(42)); }" },
+    { "name": "two parameter generic", "expect": "supported", "source": "function choose<T, U>(left: T, right: U): T { return left; } function main(): void { console.log(choose<number, string>(1, 'x')); }" },
+    { "name": "union narrowing", "expect": "unsupported", "source": "function show(value: string | number): string { return typeof value === 'string' ? value : String(value); } function main(): void { console.log(show(1)); }" },
+    { "name": "intersection", "expect": "supported", "source": "type Named = { name: string }; type Aged = { age: number }; function main(): void { const value: Named & Aged = { name: 'A', age: 1 }; console.log(value.name); }" },
+    { "name": "class fields", "expect": "supported", "source": "class User { name: string = 'A'; age = 1; label(): string { return this.name; } } function main(): void { console.log(new User().label()); }" },
+    { "name": "class inheritance", "expect": "supported", "source": "class Base { value: number = 1; } class Child extends Base { next(): number { return this.value + 1; } } function main(): void { console.log(new Child().next()); }" },
+    { "name": "enum", "expect": "supported", "source": "enum State { Ready, Done } function main(): void { const state: State = State.Done; console.log(state); }" },
+    { "name": "optional property", "expect": "supported", "source": "type Options = { label?: string }; function read(value: Options): string { return value.label ?? 'none'; } function main(): void { console.log(read({})); }" },
+    { "name": "optional chaining", "expect": "supported", "source": "type Box = { value: string } | undefined; function read(box: Box): string { return box?.value ?? 'none'; } function main(): void { console.log(read(undefined)); }" },
+    { "name": "destructuring", "expect": "unsupported", "source": "function main(): void { const { value, nested: [first] } = { value: 1, nested: [2] }; console.log(value + first); }" },
+    { "name": "rest and spread", "expect": "unsupported", "source": "function sum(...values: number[]): number { return values.reduce((a, b) => a + b, 0); } function main(): void { const values: number[] = [1, 2]; console.log(sum(...values)); }" },
+    { "name": "for of", "expect": "supported", "source": "function main(): void { let total: number = 0; for (const value of [1, 2, 3]) total += value; console.log(total); }" },
+    { "name": "try catch finally", "expect": "supported", "source": "function main(): void { try { throw new Error('x'); } catch (error) { console.log(error); } finally { console.log('done'); } }" },
+    { "name": "async await", "expect": "supported", "source": "async function value(): Promise<number> { return 42; } async function main(): Promise<void> { console.log(await value()); }" },
+    { "name": "promise chain", "expect": "supported", "source": "function main(): void { new Promise<number>((resolve) => resolve(1)).then((value) => value + 1).catch(() => 0); }" },
+    { "name": "mapped type", "expect": "unsupported", "source": "type Flags<T> = { [K in keyof T]: boolean }; type Input = { ready: number }; function main(): void { const flags: Flags<Input> = { ready: true }; console.log(flags.ready); }" },
+    { "name": "keyof indexed access", "expect": "unsupported", "source": "type Item = { name: string; count: number }; function read<T, K extends keyof T>(value: T, key: K): T[K] { return value[key]; } function main(): void { console.log(read<Item, 'name'>({ name: 'A', count: 1 }, 'name')); }" },
+    { "name": "conditional type", "expect": "out-of-scope", "source": "type Result<T> = T extends string ? number : boolean;" },
+    { "name": "declaration emit", "expect": "out-of-scope", "source": "export type Public = { value: string };" }
+  ]
+}

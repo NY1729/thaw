@@ -5,6 +5,7 @@ use inkwell::context::Context;
 use thaw_llvm::HirCompiler;
 
 mod module_graph;
+include!("compat.rs");
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -58,9 +59,15 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("compat") => {
+            if let Err(err) = run_compat(&args[2..]) {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         _ => {
             eprintln!(
-                "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
+                "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
             );
             std::process::exit(1);
         }
