@@ -21832,9 +21832,10 @@ fn generate_napi_class_method_overloads_with_callback_instances(
                 shim.push_str(&format!(
                     "declare function {symbol}({params}): {return_type};\n"
                 ));
-                for (argument_index, classes) in overload.callback_instance_classes
-                    [..fixed_count]
+                for (argument_index, classes) in overload
+                    .callback_instance_classes
                     .iter()
+                    .take(fixed_count)
                     .enumerate()
                 {
                     for (parameter_index, class) in classes.iter().enumerate() {
@@ -21848,8 +21849,11 @@ fn generate_napi_class_method_overloads_with_callback_instances(
                         }
                     }
                 }
-                for (argument_index, literal) in
-                    overload.literal_params[..fixed_count].iter().enumerate()
+                for (argument_index, literal) in overload
+                    .literal_params
+                    .iter()
+                    .take(fixed_count)
+                    .enumerate()
                 {
                     if let Some(literal) = literal {
                         method_contexts.push(ClassMethodContext::LiteralArgument(

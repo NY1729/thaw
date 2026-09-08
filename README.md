@@ -3651,10 +3651,16 @@ from the standalone executable
 (`THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli
 registry_add_fetches_and_runs_bcrypt_when_enabled -- --nocapture`).
 The official Linux x64 prebuild from `@serialport/bindings-cpp@12.0.1`
-verifies a real `node-addon-api` class export (`Poller`). Its direct libuv
-references are resolved by exposing the system `libuv.so.1`, matching the
-symbols Node normally provides (`THAW_SERIALPORT_NODE=/path/to/node.napi.glibc.node
-cargo test -p thaw-napi loads_serialport_class_prebuild_when_supplied`).
+verifies a real `node-addon-api` class export (`Poller`). Its unmodified
+`node-gyp-build` wrapper is redirected to the addon already selected by the
+registry, and its direct libuv references are resolved by exposing the system
+`libuv.so.1`, matching the symbols Node normally provides. The opt-in CLI E2E
+fetches the package, embeds it, removes the registry, and runs `autoDetect().list()`
+(`THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli
+registry_add_fetches_and_lists_serial_ports_when_enabled -- --nocapture`).
+NAPI-RS optional packages using the common `linux-<arch>-gnu` target naming are
+also selected; `@node-rs/crc32@1.10.7` is fetched and executed through its
+unmodified wrapper in the same standalone form.
 Packages using `prebuild-install` may keep binaries in GitHub Releases instead
 of the npm tarball. For packages declaring `binary.napi_versions` and an HTTPS
 GitHub repository, `registry add` selects the newest supported N-API version,
@@ -3671,7 +3677,6 @@ constructor work before a callback method and consumes exceptions at their
 async-completion boundary, preventing an earlier completion error from poisoning
 the next call. The official sqlite3 E2E now constructs a real `Database`, calls
 `close(callback)`, and receives the callback after the registry is removed.
-Full TypeScript-style overloaded method selection remains outside that path.
 Registry class shims now retain every supported overload under a distinct
 internal symbol. Calls select an overload by exact argument count and whether
 the final argument is an inline or locally-bound callback. Non-callback
@@ -3771,6 +3776,10 @@ alive until async-work drain, and N-API error/result values are converted back
 to `Json` on the generated program's main thread. The optional bcrypt CLI E2E
 embeds the official prebuild and exercises asynchronous salt, encrypt, compare,
 and error callbacks after deleting the registry directory.
+An opt-in multi-package project gate combines real Zod, Nano ID, Lodash, and
+`@node-rs/crc32` imports in one build without explicit `--use` flags, removes
+the registry, and verifies the standalone executable
+(`registry_add_builds_a_multi_package_project_when_enabled`).
 Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
 to a real `napi_value` Buffer, and addons that return a function as their
 module root are bound to the single declaration name from `package.d.ts`.

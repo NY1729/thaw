@@ -1092,6 +1092,32 @@ fn selects_a_platform_optional_dependency_node_addon() {
 }
 
 #[test]
+fn selects_a_gnu_named_linux_optional_dependency_node_addon() {
+    let (platform, arch, libc) = target_prebuild_components();
+    if platform != "linux" || libc != "glibc" {
+        return;
+    }
+    let node_modules = temp_registry("optional_gnu_native_prebuild");
+    let dependency = format!("@example/addon-linux-{arch}-gnu");
+    let dependency_dir = node_modules.join(&dependency);
+    fs::create_dir_all(&dependency_dir).unwrap();
+    fs::write(
+        dependency_dir.join("package.json"),
+        format!(r#"{{"name":"{dependency}","main":"binding.node"}}"#),
+    )
+    .unwrap();
+    fs::write(dependency_dir.join("binding.node"), b"native bytes").unwrap();
+    let manifest = serde_json::json!({
+        "optionalDependencies": { dependency.clone(): "1.0.0" }
+    });
+    let selected = select_optional_dependency_addon(&node_modules, &manifest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.path, dependency_dir.join("binding.node"));
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn selects_a_node_addon_behind_a_platform_dependency_js_entry() {
     let node_modules = temp_registry("optional_wrapped_native_prebuild");
     let (platform, arch, libc) = target_prebuild_components();
