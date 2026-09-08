@@ -8,6 +8,31 @@ fn contextual_callback_may_ignore_supplied_parameters() {
 }
 
 #[test]
+fn typed_quickjs_calls_are_resolved_at_the_dynamic_await_boundary() {
+    let program = lower(
+        r#"declare function __thaw_typed_js_66(): JsValue;
+        async function main(): Promise<void> {
+            const value: JsValue = await __thaw_typed_js_66();
+            console.log(value);
+        }"#,
+    );
+    assert!(matches!(
+        &program.functions[0].body[0],
+        HirStmt::Let(
+            _,
+            HirType::JsValue,
+            HirExpr::DynamicCall(
+                DynamicSignature {
+                    backend: DynamicBackend::QuickJs,
+                    ..
+                },
+                _
+            )
+        )
+    ));
+}
+
+#[test]
 fn desugars_for_await_of_promise_array_to_awaited_items() {
     let program = lower(
         r#"async function main(): Promise<void> {
