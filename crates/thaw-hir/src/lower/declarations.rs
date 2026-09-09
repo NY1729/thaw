@@ -1204,7 +1204,13 @@ fn lower_function_statements(
         let mut generator_body = Vec::new();
         let state = "__thaw_generator_state".to_string();
         if let Some((entry, locals, state_machine)) =
-            lower_generator_state_machine(&lowered_generator_body, &values, &state)
+            lower_generator_state_machine(
+                &lowered_generator_body,
+                &lowerer.generator_finalizers,
+                &values,
+                &state,
+                &control,
+            )
         {
             lowerer.scope.insert(state.clone(), HirType::F64);
             body.extend(locals);
@@ -1214,15 +1220,6 @@ fn lower_function_statements(
                 HirExpr::Lit(HirLit::F64(entry as f64)),
             ));
             generator_body = state_machine;
-            generator_body.insert(
-                0,
-                generator_cancel_guard(
-                    &control,
-                    &values,
-                    &state,
-                    HirExpr::Lit(HirLit::F64(-1.0)),
-                ),
-            );
         } else {
             let initialized = "__thaw_generator_initialized".to_string();
             lowerer.scope.insert(initialized.clone(), HirType::Bool);

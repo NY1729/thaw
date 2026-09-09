@@ -87,6 +87,7 @@ impl<'a> FnLowerer<'a> {
             expected_return_hint: None,
             expected_arrow_return_hint: None,
             generator_yields: None,
+            generator_finalizers: HashMap::new(),
         }
     }
 
