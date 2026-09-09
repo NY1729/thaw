@@ -244,12 +244,12 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                                     write: (chunk: string) => boolean;
                                     endEncoded: (content: string, encoding: string) => boolean;
                                 }}
-                            ): boolean => {{
+                            ): void => {{
                                 requests = requests + 1;
                                 response.statusCode = 201;
                                 response.setHeader("X-Thaw", request.method);
                                 response.write(prefix);
-                                return response.end(request.url);
+                                response.end(request.url);
                             }}
                         );
                         const target: string = server.listenMany({}, 2);

@@ -846,6 +846,13 @@ fn lower_class_methods(
             method.function.is_generator,
             &mut lowered_body,
         )?;
+        let method_ret = if method.function.is_generator
+            && hir_type_contains_dynamic(&signature.ret)
+        {
+            lowerer.ret_type.clone()
+        } else {
+            signature.ret.clone()
+        };
         if method.kind == MethodKind::Setter {
             lowered_body.push(HirStmt::Return(Some(HirExpr::Var(
                 params.last().expect("setter value parameter").name.clone(),
@@ -854,7 +861,7 @@ fn lower_class_methods(
         functions.push(HirFunction {
             name: symbol.clone(),
             params: params.clone(),
-            ret: signature.ret.clone(),
+            ret: method_ret.clone(),
             is_async: signature.is_async,
             body: lowered_body,
         });
@@ -923,7 +930,7 @@ fn lower_class_methods(
             &patterns,
             receiver_offset,
             None,
-            &signature.ret,
+            &method_ret,
             signatures,
             interfaces,
             generic_interfaces,
@@ -938,7 +945,7 @@ fn lower_class_methods(
             &patterns,
             receiver_offset,
             None,
-            &signature.ret,
+            &method_ret,
             signatures,
             interfaces,
             generic_interfaces,
@@ -957,7 +964,7 @@ fn lower_class_methods(
                 &patterns,
                 0,
                 unbound_context,
-                &signature.ret,
+                &method_ret,
                 signatures,
                 interfaces,
                 generic_interfaces,
@@ -972,7 +979,7 @@ fn lower_class_methods(
                 &patterns,
                 0,
                 unbound_context,
-                &signature.ret,
+                &method_ret,
                 signatures,
                 interfaces,
                 generic_interfaces,
@@ -1162,7 +1169,9 @@ fn lower_fn_decl(
         func.is_generator,
         &mut body,
     )?;
-    let ret = if declared_ret == HirType::Dynamic {
+    let ret = if func.is_generator && hir_type_contains_dynamic(&declared_ret) {
+        lowerer.ret_type
+    } else if declared_ret == HirType::Dynamic {
         lowerer.infer_return_type(&body)?
     } else {
         declared_ret
@@ -1198,13 +1207,16 @@ fn lower_function_statements(
         let HirType::Array(element) = &generated else {
             unreachable!("generator functions lazily return arrays");
         };
-        debug_assert_eq!(params.len(), 4);
+        debug_assert_eq!(params.len(), 6);
         let values = "__thaw_generator_values".to_string();
         let control = "__thaw_generator_control".to_string();
         let error = "__thaw_generator_error".to_string();
         let input = "__thaw_generator_input".to_string();
         let input_type = params[2].clone();
         let returns = "__thaw_generator_returns".to_string();
+        let return_request = "__thaw_generator_return_request".to_string();
+        let pending_return = "__thaw_generator_pending_return".to_string();
+        let forced_return = "__thaw_generator_forced_return".to_string();
         let HirType::Array(return_type) = &params[3] else {
             unreachable!("generator completion channel is an array");
         };
@@ -1212,6 +1224,15 @@ fn lower_function_statements(
         lowerer.scope.insert(values.clone(), generated.clone());
         lowerer.scope.insert(input.clone(), input_type.clone());
         lowerer.scope.insert(returns.clone(), params[3].clone());
+        lowerer
+            .scope
+            .insert(return_request.clone(), params[4].clone());
+        lowerer
+            .scope
+            .insert(pending_return.clone(), params[4].clone());
+        lowerer
+            .scope
+            .insert(forced_return.clone(), params[5].clone());
         lowerer.generator_yields = Some((
             values.clone(),
             element.as_ref().clone(),
@@ -1225,8 +1246,27 @@ fn lower_function_statements(
             generated.clone(),
             HirExpr::ArrayLit(Vec::new()),
         ));
+        body.push(HirStmt::Let(
+            pending_return.clone(),
+            params[4].clone(),
+            HirExpr::ArrayLit(Vec::new()),
+        ));
         let lowered_generator_body = lowerer.lower_stmts(statements)?;
+        if hir_type_contains_dynamic(declared_ret) {
+            let (yielded, returned) =
+                lowerer.infer_generator_types(&lowered_generator_body, &values, &returns)?;
+            lowerer.ret_type = generator_function_type(
+                async_generator,
+                yielded,
+                returned,
+                input_type.clone(),
+            );
+        }
         let generator_suspends = lowered_generator_body.iter().any(stmt_contains_await);
+        let preserves_return = lowerer
+            .generator_finalizers
+            .values()
+            .any(|finalizer| generator_statements_emit_value(finalizer, &values));
         let mut generator_body = Vec::new();
         let state = "__thaw_generator_state".to_string();
         if let Some((entry, locals, state_machine)) =
@@ -1237,10 +1277,23 @@ fn lower_function_statements(
                 &state,
                 &control,
                 &error,
+                "__thaw_generator_initialized",
+                &returns,
+                &return_request,
+                preserves_return.then_some(pending_return.as_str()),
+                &forced_return,
             )
         {
             lowerer.scope.insert(state.clone(), HirType::F64);
+            lowerer
+                .scope
+                .insert("__thaw_generator_initialized".into(), HirType::Bool);
             body.extend(locals);
+            body.push(HirStmt::Let(
+                "__thaw_generator_initialized".into(),
+                HirType::Bool,
+                HirExpr::Lit(HirLit::Bool(false)),
+            ));
             body.push(HirStmt::Let(
                 state.clone(),
                 HirType::F64,
@@ -1284,6 +1337,8 @@ fn lower_function_statements(
             .filter(|name| name != &control)
             .filter(|name| name != &input)
             .filter(|name| name != &returns)
+            .filter(|name| name != &return_request)
+            .filter(|name| name != &forced_return)
             .filter_map(|name| {
                 lowerer
                     .scope
@@ -1308,6 +1363,14 @@ fn lower_function_statements(
                 HirParam {
                     name: returns,
                     ty: params[3].clone(),
+                },
+                HirParam {
+                    name: return_request,
+                    ty: params[4].clone(),
+                },
+                HirParam {
+                    name: forced_return,
+                    ty: params[5].clone(),
                 },
             ];
         let (producer_return, generator_body) = if async_generator && generator_suspends {
@@ -1412,8 +1475,11 @@ fn lower_generator_return_type(
     type_substitution: &HashMap<Symbol, HirType>,
 ) -> Result<HirType, String> {
     let Some(annotation) = return_type else {
-        return Err(format!(
-            "generator function `{fn_name}` needs a `Generator<T>` return annotation"
+        return Ok(generator_function_type(
+            is_async,
+            HirType::Dynamic,
+            HirType::Dynamic,
+            HirType::Undefined,
         ));
     };
     let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() else {
@@ -1457,34 +1523,51 @@ fn lower_generator_return_type(
         })
         .transpose()?
         .unwrap_or(HirType::Undefined);
-    let returned = reference
-        .type_params
-        .as_ref()
-        .and_then(|parameters| parameters.params.get(1))
-        .map(|returned| {
-            resolve_ts_type_with_substitution(
-                returned,
-                type_substitution,
-                interfaces,
-                generic_interfaces,
-                &mut Vec::new(),
-            )
-        })
-        .transpose()?
-        .filter(|returned| returned != &HirType::Void)
-        .unwrap_or(HirType::Undefined);
-    let generated = HirType::Array(Box::new(resolve_ts_type_with_substitution(
+    let yielded = resolve_ts_type_with_substitution(
         yielded,
         type_substitution,
         interfaces,
         generic_interfaces,
         &mut Vec::new(),
-    )?));
-    Ok(HirType::Function(
+    )?;
+    let returned = match reference
+        .type_params
+        .as_ref()
+        .and_then(|parameters| parameters.params.get(1))
+    {
+        Some(returned) => {
+            let returned = resolve_ts_type_with_substitution(
+                returned,
+                type_substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            )?;
+            if returned == HirType::Void {
+                HirType::Undefined
+            } else {
+                returned
+            }
+        }
+        None => yielded.clone(),
+    };
+    Ok(generator_function_type(is_async, yielded, returned, input))
+}
+
+fn generator_function_type(
+    is_async: bool,
+    yielded: HirType,
+    returned: HirType,
+    input: HirType,
+) -> HirType {
+    let generated = HirType::Array(Box::new(yielded.clone()));
+    HirType::Function(
         vec![
             HirType::I64,
             HirType::Str,
             input,
+            HirType::Array(Box::new(returned.clone())),
+            HirType::Array(Box::new(returned.clone())),
             HirType::Array(Box::new(returned)),
         ],
         Box::new(if is_async {
@@ -1492,7 +1575,7 @@ fn lower_generator_return_type(
         } else {
             generated
         }),
-    ))
+    )
 }
 
 /// Computes a function's *unwrapped* return type: `async function`s must be

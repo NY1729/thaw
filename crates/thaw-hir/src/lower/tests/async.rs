@@ -18,6 +18,16 @@ fn contextual_void_callback_may_ignore_its_return_value() {
 }
 
 #[test]
+fn contextual_void_callback_may_discard_a_block_return_value() {
+    lower(
+        r#"declare function consume(callback: () => void): void;
+        function main(): void {
+            consume((): boolean => { return true; });
+        }"#,
+    );
+}
+
+#[test]
 fn timer_callback_may_capture_its_own_handle() {
     lower(
         r#"function main(): void {

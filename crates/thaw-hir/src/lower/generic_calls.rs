@@ -121,7 +121,19 @@ impl<'a> FnLowerer<'a> {
                 .push(self_name.clone());
             recursive_state = Some((internal, self_name, self_type, saved_binding));
         }
-        let lowered = self.lower_contextual_arrow(arrow, &parameter_types, None);
+        let substitutions = signature
+            .generic_type_params
+            .iter()
+            .zip(&concrete_types)
+            .map(|(name, ty)| Ok((name.clone(), Box::new(hir_type_as_ts_type(ty)?))))
+            .collect::<Result<HashMap<_, _>, String>>()?;
+        let mut specialized_arrow = arrow.clone();
+        specialized_arrow.type_params = None;
+        specialized_arrow.visit_mut_with(&mut GenericClassTypeSubstituter {
+            substitutions: &substitutions,
+        });
+        let lowered =
+            self.lower_contextual_arrow(&specialized_arrow, &parameter_types, None);
         if let Some((internal, self_name, _, saved_binding)) = &recursive_state {
             self.scope.remove(self_name);
             if let Some(saved) = saved_binding {

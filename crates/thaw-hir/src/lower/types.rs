@@ -1596,14 +1596,25 @@ fn lower_generic_instance(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let ret = lower_fn_return_type(
-        fn_decl.function.is_async,
-        &fn_decl.function.return_type,
-        &base_name,
-        interfaces,
-        generic_interfaces,
-        &substitution,
-    )?;
+    let ret = if fn_decl.function.is_generator {
+        lower_generator_return_type(
+            fn_decl.function.is_async,
+            &fn_decl.function.return_type,
+            &base_name,
+            interfaces,
+            generic_interfaces,
+            &substitution,
+        )?
+    } else {
+        lower_fn_return_type(
+            fn_decl.function.is_async,
+            &fn_decl.function.return_type,
+            &base_name,
+            interfaces,
+            generic_interfaces,
+            &substitution,
+        )?
+    };
     let mut concrete_signatures = signatures.clone();
     let concrete = concrete_signatures.get_mut(&base_name).unwrap();
     concrete.params = params.iter().map(|param| param.ty.clone()).collect();
@@ -1703,13 +1714,19 @@ fn lower_generic_instance(
             }
         }
     }
-    let body = lowerer.lower_stmts(
-        &fn_decl
-            .function
-            .body
-            .as_ref()
-            .ok_or_else(|| format!("function `{base_name}` has no body"))?
-            .stmts,
+    let statements = &fn_decl
+        .function
+        .body
+        .as_ref()
+        .ok_or_else(|| format!("function `{base_name}` has no body"))?
+        .stmts;
+    let mut body = Vec::new();
+    lower_function_statements(
+        &mut lowerer,
+        statements,
+        &ret,
+        fn_decl.function.is_generator,
+        &mut body,
     )?;
     for param in &mut params {
         param.ty = runtime_generic_type(&param.ty);
@@ -1727,7 +1744,7 @@ fn lower_generic_instance(
         name: specialized_name,
         params,
         ret,
-        is_async: fn_decl.function.is_async,
+        is_async: fn_decl.function.is_async && !fn_decl.function.is_generator,
         body,
     })
 }

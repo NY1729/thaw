@@ -494,7 +494,9 @@ fn lowers_generator_to_a_lazy_array_producer() {
                 HirType::I64,
                 HirType::Str,
                 HirType::Undefined,
-                HirType::Array(Box::new(HirType::Undefined)),
+                HirType::Array(Box::new(HirType::F64)),
+                HirType::Array(Box::new(HirType::F64)),
+                HirType::Array(Box::new(HirType::F64)),
             ],
             Box::new(HirType::Array(Box::new(HirType::F64)))
         )
