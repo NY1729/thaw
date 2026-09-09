@@ -450,6 +450,13 @@ impl<'a> FnLowerer<'a> {
                         self.expression_array_element_discriminants(&for_of.right);
                     let mut values = self.lower_expr(&for_of.right)?;
                     let mut values_type = self.infer_expr_type(&values)?;
+                    if let HirType::Function(params, result) = &values_type {
+                        if params.is_empty() && matches!(result.as_ref(), HirType::Array(_)) {
+                            let result = result.as_ref().clone();
+                            values = HirExpr::Call(Box::new(values), Vec::new());
+                            values_type = result;
+                        }
+                    }
                     if values_type == HirType::Str {
                         values = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_to_array".into())),

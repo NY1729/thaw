@@ -476,7 +476,7 @@ fn accepts_template_strings_array_for_tagged_templates() {
 }
 
 #[test]
-fn lowers_direct_generator_yields_to_an_iterable_array() {
+fn lowers_generator_to_a_lazy_array_producer() {
     let module = thaw_parser::parse_typescript(
         "function* values(): Generator<number> { yield 1; } function main(): void {}",
     )
@@ -487,7 +487,13 @@ fn lowers_direct_generator_yields_to_an_iterable_array() {
         .iter()
         .find(|function| function.name == "values")
         .unwrap();
-    assert_eq!(values.ret, HirType::Array(Box::new(HirType::F64)));
+    assert_eq!(
+        values.ret,
+        HirType::Function(
+            Vec::new(),
+            Box::new(HirType::Array(Box::new(HirType::F64)))
+        )
+    );
 }
 
 #[test]

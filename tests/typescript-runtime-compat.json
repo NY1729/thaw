@@ -356,6 +356,16 @@
       "source": "function* values(): Generator<number> { yield 1; yield* [2, 3]; yield 4; } function main(): void { let sum: number = 0; for (const value of values()) sum += value; console.log(sum); }"
     },
     {
+      "name": "generator next results",
+      "expect": "matched",
+      "source": "function* values(): Generator<number> { yield 4; yield 7; } function main(): void { const iterator = values(); const first = iterator.next(); const second = iterator.next(); const end = iterator.next(); console.log(first.value, first.done); console.log(second.value, second.done); console.log(end.value, end.done); }"
+    },
+    {
+      "name": "generator deferred start",
+      "expect": "matched",
+      "source": "let started: number = 0; function* values(): Generator<number> { started += 1; yield 4; } function main(): void { const iterator = values(); console.log(started); console.log(iterator.next().value); console.log(started); }"
+    },
+    {
       "name": "private class field",
       "expect": "matched",
       "source": "class Counter { #value: number = 0; increment(): number { this.#value++; return this.#value; } } function main(): void { const counter = new Counter(); console.log(counter.increment(), counter.increment()); }"

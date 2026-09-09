@@ -1552,6 +1552,47 @@ fn compiles_generator_yield_delegate() {
 }
 
 #[test]
+fn compiles_generator_next_results() {
+    let source = r#"
+        function* values(): Generator<number> { yield 4; yield 7; }
+        function main(): void {
+            const iterator = values();
+            const first = iterator.next();
+            const second = iterator.next();
+            const end = iterator.next();
+            console.log(first.value, first.done);
+            console.log(second.value, second.done);
+            console.log(end.value, end.done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_next_results"),
+        "4 false\n7 false\nundefined true\n"
+    );
+}
+
+#[test]
+fn defers_generator_body_until_first_consumption() {
+    let source = r#"
+        let started: number = 0;
+        function* values(): Generator<number> {
+            started += 1;
+            yield 4;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(started);
+            console.log(iterator.next().value);
+            console.log(started);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "deferred_generator_body"),
+        "0\n4\n1\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {
