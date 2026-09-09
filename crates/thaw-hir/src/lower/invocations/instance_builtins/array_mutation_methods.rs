@@ -5,6 +5,73 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+                if property.sym == *"next" {
+                    if !call.args.is_empty() {
+                        return Err("generator `.next()` does not accept arguments yet".into());
+                    }
+                    let mut receiver = self.lower_expr(&member.obj)?;
+                    let mut receiver_type = self.infer_expr_type(&receiver)?;
+                    if let HirType::Function(params, result) = &receiver_type {
+                        if params.is_empty() && matches!(result.as_ref(), HirType::Array(_)) {
+                            let result = result.as_ref().clone();
+                            receiver = HirExpr::Call(Box::new(receiver), Vec::new());
+                            receiver_type = result;
+                        }
+                    }
+                    let HirType::Array(element) = &receiver_type else {
+                        return Err(format!(
+                            "`.next()` requires a generator, got {receiver_type:?}"
+                        ));
+                    };
+                    let element = element.as_ref().clone();
+                    let optional = HirType::Optional(Box::new(element.clone()));
+                    let result_type = HirType::Object(vec![
+                        ("value".into(), optional.clone()),
+                        ("done".into(), HirType::Bool),
+                    ]);
+                    let array_name = format!("__thaw_generator_next_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let empty = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                            array_name.clone(),
+                        )))),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    );
+                    let done = HirExpr::ObjectLit(vec![
+                        ("value".into(), HirExpr::OptionalNone(element.clone())),
+                        ("done".into(), HirExpr::Lit(HirLit::Bool(true))),
+                    ]);
+                    let next = HirExpr::ObjectLit(vec![
+                        (
+                            "value".into(),
+                            HirExpr::OptionalSome(
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                                    vec![HirExpr::Var(array_name.clone())],
+                                )),
+                                element,
+                            ),
+                        ),
+                        ("done".into(), HirExpr::Lit(HirLit::Bool(false))),
+                    ]);
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            Vec::new(),
+                            vec![HirParam {
+                                name: array_name,
+                                ty: receiver_type,
+                            }],
+                            result_type,
+                            Box::new(HirExpr::Block(vec![HirStmt::If(
+                                empty,
+                                vec![HirStmt::Return(Some(done))],
+                                vec![HirStmt::Return(Some(next))],
+                            )])),
+                        )),
+                        vec![receiver],
+                    ));
+                }
                 if property.sym == *"forEach" && self.receiver_is_map_or_set(&member.obj) {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
@@ -766,4 +833,3 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 }
-
