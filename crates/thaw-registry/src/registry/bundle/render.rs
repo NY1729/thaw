@@ -105,7 +105,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          }\n\
          globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\n\
          globalThis.__thaw_worker_bundle_source =\n\
-         \x20\x20'var __thaw_bundle_cache = {};\\nvar __thaw_bundle_factories = {' +\n\
+         \x20\x20'var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_factories = {' +\n\
          \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
          \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
          \x20\x20__thaw_bundle_target.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' +\n\
