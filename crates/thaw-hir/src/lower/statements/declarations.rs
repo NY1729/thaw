@@ -70,7 +70,7 @@ impl<'a> FnLowerer<'a> {
                         self.coerce_to_declared(&declared, HirExpr::Var(input))?
                     };
                     let hir_name = self.bind_local(&name, declared.clone());
-                    statements.push(emission);
+                    statements.extend(emission);
                     statements.push(HirStmt::Let(hir_name, declared, resumed));
                     continue;
                 }
