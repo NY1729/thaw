@@ -65,6 +65,7 @@ struct FnLowerer<'a> {
     /// stay a live `JsValue`.
     expected_arrow_return_hint: Option<HirType>,
     generator_yields: Option<(Symbol, HirType)>,
+    generator_finalizers: HashMap<Symbol, Vec<HirStmt>>,
 }
 
 #[derive(Clone)]
