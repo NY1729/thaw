@@ -962,6 +962,22 @@ impl<'a> FnLowerer<'a> {
         if matches!(callee_name.as_str(), "parseFloat" | "parseInt") {
             return self.lower_parse_call(call, callee_name == "parseInt");
         }
+        if callee_name == "Symbol" {
+            if call.args.len() > 1 || call.args.iter().any(|argument| argument.spread.is_some()) {
+                return Err("`Symbol(...)` expects at most one non-spread argument".into());
+            }
+            let description = match call.args.first() {
+                Some(argument) => {
+                    let value = self.lower_expr(&argument.expr)?;
+                    self.coerce_primitive_to_string(value)?
+                }
+                None => HirExpr::Lit(HirLit::Str(String::new())),
+            };
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_symbol_new".into())),
+                vec![description],
+            ));
+        }
 
         // `Object`/`Json` all share the same pointer representation, so
         // this has to be resolved here at lowering time using the
@@ -999,6 +1015,18 @@ impl<'a> FnLowerer<'a> {
             if callee_name == "String" && ty == HirType::F64 {
                 return Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String" && ty == HirType::I64 {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_i64_to_string".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String" && ty == HirType::Symbol {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_symbol_to_string".into())),
                     vec![value],
                 ));
             }

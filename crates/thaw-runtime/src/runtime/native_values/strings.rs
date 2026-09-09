@@ -700,3 +700,35 @@ pub unsafe extern "C" fn thaw_string_normalize(
     };
     arena_c_string(&normalized).map_or(std::ptr::null(), |value| value.cast())
 }
+static NEXT_SYMBOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[no_mangle]
+/// # Safety
+/// `description` must point to a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_symbol_new(description: *const c_char) -> *const c_char {
+    if description.is_null() {
+        return std::ptr::null();
+    }
+    let description = unsafe { CStr::from_ptr(description) }.to_string_lossy();
+    let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    arena_c_string(&format!("\u{3}{id}:{description}"))
+        .map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+/// `symbol` must point to a value returned by `thaw_symbol_new`.
+pub unsafe extern "C" fn thaw_symbol_to_string(symbol: *const c_char) -> *const c_char {
+    if symbol.is_null() {
+        return std::ptr::null();
+    }
+    let symbol = unsafe { CStr::from_ptr(symbol) }.to_string_lossy();
+    let description = symbol.split_once(':').map_or("", |value| value.1);
+    arena_c_string(&format!("Symbol({description})"))
+        .map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_symbol_key(symbol: *const c_char) -> *const c_char {
+    symbol
+}

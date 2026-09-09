@@ -17,3 +17,4 @@ thaw-arena = { path = "../thaw-arena" }
 webpki-roots = "1.0"
 icu_normalizer = { version = "2.3.0", features = ["compiled_data"] }
 regex = "1"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }

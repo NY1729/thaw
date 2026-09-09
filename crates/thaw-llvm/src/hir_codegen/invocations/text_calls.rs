@@ -277,6 +277,23 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap_nullable(result)?.into());
             }
+            "__thaw_regex_exec_groups" => {
+                let [matches] = args else {
+                    return Err("RegExp groups expects one operand".into());
+                };
+                let matches = self.compile_expr(matches)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_regex_exec_groups").unwrap(),
+                        &[matches.into()],
+                        "regex_exec_groups",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("RegExp groups returned no value".into());
+            }
             "__thaw_regex_exec_advance" => {
                 let [value, source, flags, last_index] = args else {
                     return Err("RegExp.exec lastIndex advance expects four operands".into());

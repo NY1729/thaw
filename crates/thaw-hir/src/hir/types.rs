@@ -121,6 +121,7 @@ pub enum HirType {
     Null,
     Void,
     Str,
+    Symbol,
     /// Compile-time generic specialization marker; erased to `Str` in HIR bodies.
     StrLiteral(Symbol),
     Json,
@@ -168,6 +169,7 @@ pub enum HirType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirLit {
     F64(f64),
+    I64(i64),
     Str(String),
     Bool(bool),
     Undefined,

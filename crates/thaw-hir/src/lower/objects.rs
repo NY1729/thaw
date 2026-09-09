@@ -1131,6 +1131,10 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_error_name".to_string())),
                         vec![obj],
                     )),
+                    HirType::Str if prop.sym == *"cause" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_cause".to_string())),
+                        vec![obj],
+                    )),
                     HirType::Map(_, _) | HirType::Set(_) if prop.sym == *"size" => {
                         Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_map_size".to_string())),
@@ -1261,6 +1265,20 @@ impl<'a> FnLowerer<'a> {
             HirType::Array(element) => match &member.prop {
                 MemberProp::Ident(property) if property.sym == *"length" => {
                     (HirExpr::ArrayLen(Box::new(unwrapped)), HirType::F64)
+                }
+                MemberProp::Ident(property)
+                    if property.sym == *"groups" && element.as_ref() == &HirType::Str =>
+                {
+                    let ty = HirType::Dictionary(Box::new(HirType::Optional(Box::new(
+                        HirType::Str,
+                    ))));
+                    (
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_regex_exec_groups".into())),
+                            vec![unwrapped],
+                        ),
+                        ty,
+                    )
                 }
                 MemberProp::Computed(computed) => {
                     let index = self.lower_expr(&computed.expr)?;

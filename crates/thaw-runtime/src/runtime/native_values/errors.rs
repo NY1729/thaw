@@ -21,12 +21,20 @@
 /// Lambda error body or in ordinary program text, and (unlike `\0`) doesn't
 /// truncate the C string it's embedded in.
 const ERROR_TAG_MARKER: char = '\u{1}';
+const ERROR_CAUSE_MARKER: char = '\u{2}';
 
 fn split_error_tag(message: &str) -> (&str, &str) {
     let Some(rest) = message.strip_prefix(ERROR_TAG_MARKER) else {
         return ("Error", message);
     };
-    rest.split_once(ERROR_TAG_MARKER).unwrap_or(("Error", message))
+    let (name, body) = rest
+        .split_once(ERROR_TAG_MARKER)
+        .unwrap_or(("Error", message));
+    (name, body.split_once(ERROR_CAUSE_MARKER).map_or(body, |value| value.0))
+}
+
+fn split_error_cause(message: &str) -> Option<&str> {
+    message.split_once(ERROR_CAUSE_MARKER).map(|value| value.1)
 }
 
 /// # Safety
@@ -58,6 +66,18 @@ pub unsafe extern "C" fn thaw_error_message(message: *const c_char) -> *const c_
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let (_, body) = split_error_tag(&text);
     arena_c_string(body).map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_cause(message: *const c_char) -> *const c_char {
+    if message.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    arena_c_string(split_error_cause(&text).unwrap_or_default())
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 /// # Safety
@@ -190,5 +210,14 @@ mod error_native_tests {
         let tagged = "\u{1}RangeError\u{1}";
         assert_eq!(call_name(tagged), "RangeError");
         assert_eq!(call_message(tagged), "");
+    }
+
+    #[test]
+    fn an_error_cause_is_separate_from_its_message() {
+        let tagged = "\u{1}Error\u{1}outer\u{2}\u{1}TypeError\u{1}root";
+        assert_eq!(call_message(tagged), "outer");
+        let tagged = CString::new(tagged).unwrap();
+        let cause = unsafe { thaw_error_cause(tagged.as_ptr()) };
+        assert_eq!(unsafe { CStr::from_ptr(cause) }.to_string_lossy(), "\u{1}TypeError\u{1}root");
     }
 }

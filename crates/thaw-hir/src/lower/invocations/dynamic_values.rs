@@ -387,6 +387,16 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
                 vec![value],
             )
+        } else if callee_name == "String" && ty == HirType::I64 {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_i64_to_string".to_string())),
+                vec![value],
+            )
+        } else if callee_name == "String" && ty == HirType::Symbol {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_symbol_to_string".to_string())),
+                vec![value],
+            )
         } else if callee_name == "String" && ty == HirType::JsValue {
             HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_js_handle_to_string".to_string())),

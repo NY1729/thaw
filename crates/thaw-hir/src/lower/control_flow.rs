@@ -678,10 +678,12 @@ fn lower_bin_op(op: BinaryOp) -> Result<BinOp, String> {
 
 fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
     match ty {
-        HirType::F64 | HirType::I64 => Some("number"),
+        HirType::F64 => Some("number"),
+        HirType::I64 => Some("bigint"),
         HirType::Undefined => Some("undefined"),
         HirType::Null => Some("object"),
         HirType::Str | HirType::StrLiteral(_) => Some("string"),
+        HirType::Symbol => Some("symbol"),
         HirType::Bool => Some("boolean"),
         HirType::Function(_, _) => Some("function"),
         HirType::CallableFunction(..) => Some("function"),

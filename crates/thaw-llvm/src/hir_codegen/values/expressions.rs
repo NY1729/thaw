@@ -9,6 +9,9 @@ impl<'ctx> HirCompiler<'ctx> {
     fn compile_expr(&mut self, expr: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
         match expr {
             HirExpr::Lit(HirLit::F64(n)) => Ok(self.context.f64_type().const_float(*n).into()),
+            HirExpr::Lit(HirLit::I64(n)) => {
+                Ok(self.context.i64_type().const_int(*n as u64, true).into())
+            }
             HirExpr::Lit(HirLit::Bool(b)) => {
                 Ok(self.context.bool_type().const_int(*b as u64, false).into())
             }

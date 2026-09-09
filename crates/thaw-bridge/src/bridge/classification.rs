@@ -181,12 +181,14 @@ pub fn classify_all(functions: &[DtsFunction]) -> Vec<(String, Classification)> 
 /// arms are just defensive completeness, not expected to be exercised.
 fn render_ts_type(ty: &HirType) -> String {
     match ty {
-        HirType::F64 | HirType::I64 => "number".to_string(),
+        HirType::F64 => "number".to_string(),
+        HirType::I64 => "bigint".to_string(),
         HirType::Bool => "boolean".to_string(),
         HirType::Undefined => "undefined".to_string(),
         HirType::Null => "null".to_string(),
         HirType::Void => "void".to_string(),
         HirType::Str | HirType::StrLiteral(_) => "string".to_string(),
+        HirType::Symbol => "symbol".to_string(),
         HirType::Json => "Json".to_string(),
         HirType::Dictionary(element) => {
             format!("{{ [key: string]: {} }}", render_ts_type(element))

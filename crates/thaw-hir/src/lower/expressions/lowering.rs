@@ -2,6 +2,12 @@ impl<'a> FnLowerer<'a> {
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
+            Expr::Lit(Lit::BigInt(n)) => Ok(HirExpr::Lit(HirLit::I64(
+                n.value
+                    .to_string()
+                    .parse()
+                    .map_err(|_| "bigint literal exceeds Thaw's signed 64-bit range")?,
+            ))),
             Expr::Lit(Lit::Str(s)) => Ok(HirExpr::Lit(HirLit::Str(
                 s.value.to_string_lossy().into_owned(),
             ))),
@@ -1589,9 +1595,9 @@ impl<'a> FnLowerer<'a> {
                                 class.sym
                             ));
                         }
-                        if args.len() > 1 {
+                        if args.len() > 2 {
                             return Err(format!(
-                                "`new {}()` expects zero or one message argument",
+                                "`new {}()` expects at most a message and options argument",
                                 class.sym
                             ));
                         }
@@ -1603,9 +1609,39 @@ impl<'a> FnLowerer<'a> {
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
                         let tag = HirExpr::Lit(HirLit::Str(format!("\u{1}{}\u{1}", class.sym)));
-                        return Ok(HirExpr::Call(
+                        let tagged = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                             vec![tag, message],
+                        );
+                        let Some(options) = args.get(1) else {
+                            return Ok(tagged);
+                        };
+                        let options = self.lower_expr(&options.expr)?;
+                        let options_type = self.infer_expr_type(&options)?;
+                        let HirType::Object(fields) = &options_type else {
+                            return Err("Error options must be an object with a `cause` field".into());
+                        };
+                        let cause_type = fields
+                            .iter()
+                            .find(|(name, _)| name == "cause")
+                            .map(|(_, ty)| ty)
+                            .ok_or("Error options must have a `cause` field")?;
+                        let cause = HirExpr::PropAccess(
+                            Box::new(options),
+                            options_type.clone(),
+                            "cause".to_string(),
+                        );
+                        let cause = match cause_type {
+                            HirType::Str => cause,
+                            _ => self.coerce_primitive_to_string(cause)?,
+                        };
+                        let with_marker = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![tagged, HirExpr::Lit(HirLit::Str("\u{2}".to_string()))],
+                        );
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![with_marker, cause],
                         ));
                     }
                     let constructor = class_constructor_symbol(class.sym.as_ref());

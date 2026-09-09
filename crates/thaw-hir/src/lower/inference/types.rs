@@ -102,6 +102,7 @@ impl<'a> FnLowerer<'a> {
     fn infer_expr_type(&self, expr: &HirExpr) -> Result<HirType, String> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Ok(HirType::F64),
+            HirExpr::Lit(HirLit::I64(_)) => Ok(HirType::I64),
             HirExpr::Lit(HirLit::Str(_)) => Ok(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Ok(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined) => Ok(HirType::Undefined),
@@ -277,6 +278,9 @@ impl<'a> FnLowerer<'a> {
                         Ok(HirType::Bool)
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
+                        if left_ty == HirType::I64 && right_ty == HirType::I64 {
+                            return Ok(HirType::Bool);
+                        }
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
                             || !matches!(right_ty, HirType::F64 | HirType::Dynamic)
                         {
@@ -298,6 +302,12 @@ impl<'a> FnLowerer<'a> {
                     | BinOp::LShift
                     | BinOp::RShift
                     | BinOp::ZeroFillRShift => {
+                        if left_ty == HirType::I64 && right_ty == HirType::I64 {
+                            if *op == BinOp::ZeroFillRShift {
+                                return Err("bigint does not support unsigned right shift".into());
+                            }
+                            return Ok(HirType::I64);
+                        }
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
                             || !matches!(right_ty, HirType::F64 | HirType::Dynamic)
                         {
@@ -706,6 +716,34 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, radix, "toString radix")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_i64_to_string" => {
+                        let [value] = args.as_slice() else {
+                            return Err("bigint string conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::I64, value, "String bigint argument")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_symbol_new" => {
+                        let [description] = args.as_slice() else {
+                            return Err("Symbol expects one description operand".into());
+                        };
+                        self.expect_type(&HirType::Str, description, "Symbol description")?;
+                        return Ok(HirType::Symbol);
+                    }
+                    "__thaw_symbol_to_string" => {
+                        let [symbol] = args.as_slice() else {
+                            return Err("symbol string conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Symbol, symbol, "String symbol argument")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_symbol_key" => {
+                        let [symbol] = args.as_slice() else {
+                            return Err("symbol key conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Symbol, symbol, "computed symbol key")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_length" => {
                         let [argument] = args.as_slice() else {
                             return Err("string length expects one operand".into());
@@ -715,6 +753,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     "__thaw_error_message"
                     | "__thaw_error_name"
+                    | "__thaw_error_cause"
                     | "__thaw_error_to_string" => {
                         let [argument] = args.as_slice() else {
                             return Err(format!("{name} expects one operand"));
@@ -936,6 +975,19 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, value, "RegExp.exec value")?;
                         self.expect_type(&HirType::F64, last_index, "RegExp.exec lastIndex")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
+                    "__thaw_regex_exec_groups" => {
+                        let [matches] = args.as_slice() else {
+                            return Err("RegExp groups expects one operand".into());
+                        };
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::Str)),
+                            matches,
+                            "RegExp groups result",
+                        )?;
+                        return Ok(HirType::Dictionary(Box::new(HirType::Optional(Box::new(
+                            HirType::Str,
+                        )))));
                     }
                     "__thaw_regex_exec_advance" => {
                         let [value, source, flags, last_index] = args.as_slice() else {
