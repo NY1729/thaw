@@ -1142,29 +1142,16 @@ fn lower_fn_decl(
         let HirType::Array(element) = &declared_ret else {
             unreachable!("generator signatures lower to arrays");
         };
-        let mut yielded = Vec::new();
-        for statement in &body_block.stmts {
-            let Stmt::Expr(statement) = statement else {
-                return Err(format!(
-                    "generator function `{name}` currently supports direct `yield` statements only"
-                ));
-            };
-            let Expr::Yield(value) = statement.expr.as_ref() else {
-                return Err(format!(
-                    "generator function `{name}` currently supports direct `yield` statements only"
-                ));
-            };
-            if value.delegate {
-                return Err(format!("generator function `{name}` does not support `yield*` yet"));
-            }
-            let value = value
-                .arg
-                .as_ref()
-                .ok_or_else(|| format!("generator function `{name}` requires a yield value"))?;
-            let value = lowerer.lower_expr_with_expected_type(value, Some(element))?;
-            yielded.push(lowerer.coerce_to_declared(element, value)?);
-        }
-        body.push(HirStmt::Return(Some(HirExpr::ArrayLit(yielded))));
+        let values = "__thaw_generator_values".to_string();
+        lowerer.scope.insert(values.clone(), declared_ret.clone());
+        lowerer.generator_yields = Some((values.clone(), element.as_ref().clone()));
+        body.push(HirStmt::Let(
+            values.clone(),
+            declared_ret.clone(),
+            HirExpr::ArrayLit(Vec::new()),
+        ));
+        body.extend(lowerer.lower_stmts(&body_block.stmts)?);
+        body.push(HirStmt::Return(Some(HirExpr::Var(values))));
     } else {
         body.extend(lowerer.lower_stmts(&body_block.stmts)?);
     }
