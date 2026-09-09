@@ -80,8 +80,8 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if matches!(property.sym.as_ref(), "next" | "throw") {
-                    let mut receiver = self.lower_expr(&member.obj)?;
-                    let mut receiver_type = self.infer_expr_type(&receiver)?;
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Function(params, result) = &receiver_type else {
                         return Err(format!(
                             "`.{}` requires a generator, got {receiver_type:?}",
@@ -96,10 +96,13 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     };
-                    let completion = HirExpr::TypedClosure(
-                        return_channel.clone(),
-                        Box::new(HirExpr::ArrayLit(Vec::new())),
-                    );
+                    let HirType::Array(return_element) = return_channel else {
+                        unreachable!("generator return channel was matched as an array")
+                    };
+                    let return_element = return_element.as_ref().clone();
+                    let completion_name =
+                        format!("__thaw_generator_completion_{}", self.next_binding);
+                    self.next_binding += 1;
                     if !matches!(result.as_ref(), HirType::Array(_)) {
                         return Err(format!(
                             "`.{}` requires a generator, got {receiver_type:?}",
@@ -122,7 +125,7 @@ impl<'a> FnLowerer<'a> {
                                     "generator input type {input_type:?} has no default value"
                                 )
                             })?,
-                            completion,
+                            HirExpr::Var(completion_name.clone()),
                         ]
                     } else {
                         if call.args.len() > 1
@@ -145,23 +148,34 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Lit(HirLit::I64(0)),
                             HirExpr::Lit(HirLit::Str(String::new())),
                             input,
-                            completion,
+                            HirExpr::Var(completion_name.clone()),
                         ]
                     };
                     let result = result.as_ref().clone();
-                    receiver = HirExpr::Call(Box::new(receiver), resume);
-                    receiver_type = result;
-                    let HirType::Array(element) = &receiver_type else {
+                    let generated_type = result;
+                    let HirType::Array(element) = &generated_type else {
                         return Err(format!(
-                            "`.next()` requires a generator, got {receiver_type:?}"
+                            "`.next()` requires a generator, got {generated_type:?}"
                         ));
                     };
                     let element = element.as_ref().clone();
-                    let optional = HirType::Optional(Box::new(element.clone()));
+                    let value_type = if return_element == HirType::Undefined {
+                        HirType::Optional(Box::new(element.clone()))
+                    } else {
+                        let mut members = vec![element.clone()];
+                        if !members.contains(&return_element) {
+                            members.push(return_element.clone());
+                        }
+                        members.push(HirType::Undefined);
+                        HirType::Union(members)
+                    };
                     let result_type = HirType::Object(vec![
-                        ("value".into(), optional.clone()),
+                        ("value".into(), value_type.clone()),
                         ("done".into(), HirType::Bool),
                     ]);
+                    let producer_name =
+                        format!("__thaw_generator_producer_{}", self.next_binding);
+                    self.next_binding += 1;
                     let array_name = format!("__thaw_generator_next_{}", self.next_binding);
                     self.next_binding += 1;
                     let empty = HirExpr::BinOp(
@@ -171,38 +185,102 @@ impl<'a> FnLowerer<'a> {
                         )))),
                         Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                     );
-                    let done = HirExpr::ObjectLit(vec![
-                        ("value".into(), HirExpr::OptionalNone(element.clone())),
+                    let no_completion = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                            completion_name.clone(),
+                        )))),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    );
+                    let completion_shift = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                        vec![HirExpr::Var(completion_name.clone())],
+                    );
+                    let yielded_shift = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                        vec![HirExpr::Var(array_name.clone())],
+                    );
+                    let (undefined, completion, yielded) = match &value_type {
+                        HirType::Optional(_) => (
+                            HirExpr::OptionalNone(element.clone()),
+                            HirExpr::OptionalNone(element.clone()),
+                            HirExpr::OptionalSome(Box::new(yielded_shift), element.clone()),
+                        ),
+                        HirType::Union(members) => (
+                            HirExpr::UnionInject(
+                                Box::new(HirExpr::Lit(HirLit::Undefined)),
+                                members.len() - 1,
+                                members.clone(),
+                            ),
+                            HirExpr::UnionInject(
+                                Box::new(completion_shift),
+                                members
+                                    .iter()
+                                    .position(|member| member == &return_element)
+                                    .expect("generator return type is a result union member"),
+                                members.clone(),
+                            ),
+                            HirExpr::UnionInject(
+                                Box::new(yielded_shift),
+                                0,
+                                members.clone(),
+                            ),
+                        ),
+                        _ => unreachable!("generator result value is optional or a union"),
+                    };
+                    let done_without_value = HirExpr::ObjectLit(vec![
+                        ("value".into(), undefined),
+                        ("done".into(), HirExpr::Lit(HirLit::Bool(true))),
+                    ]);
+                    let done_with_value = HirExpr::ObjectLit(vec![
+                        ("value".into(), completion),
                         ("done".into(), HirExpr::Lit(HirLit::Bool(true))),
                     ]);
                     let next = HirExpr::ObjectLit(vec![
-                        (
-                            "value".into(),
-                            HirExpr::OptionalSome(
-                                Box::new(HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_array_shift".into())),
-                                    vec![HirExpr::Var(array_name.clone())],
-                                )),
-                                element,
-                            ),
-                        ),
+                        ("value".into(), yielded),
                         ("done".into(), HirExpr::Lit(HirLit::Bool(false))),
                     ]);
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Lambda(
                             Vec::new(),
-                            vec![HirParam {
-                                name: array_name,
-                                ty: receiver_type,
-                            }],
+                            vec![
+                                HirParam {
+                                    name: producer_name.clone(),
+                                    ty: receiver_type.clone(),
+                                },
+                                HirParam {
+                                    name: completion_name.clone(),
+                                    ty: return_channel.clone(),
+                                },
+                            ],
                             result_type,
-                            Box::new(HirExpr::Block(vec![HirStmt::If(
-                                empty,
-                                vec![HirStmt::Return(Some(done))],
-                                vec![HirStmt::Return(Some(next))],
-                            )])),
+                            Box::new(HirExpr::Block(vec![
+                                HirStmt::Let(
+                                    array_name,
+                                    generated_type,
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var(producer_name)),
+                                        resume,
+                                    ),
+                                ),
+                                HirStmt::If(
+                                    empty,
+                                    vec![HirStmt::If(
+                                        no_completion,
+                                        vec![HirStmt::Return(Some(done_without_value))],
+                                        vec![HirStmt::Return(Some(done_with_value))],
+                                    )],
+                                    vec![HirStmt::Return(Some(next))],
+                                ),
+                            ])),
                         )),
-                        vec![receiver],
+                        vec![
+                            receiver,
+                            HirExpr::TypedClosure(
+                                return_channel.clone(),
+                                Box::new(HirExpr::ArrayLit(Vec::new())),
+                            ),
+                        ],
                     ));
                 }
                 if property.sym == *"forEach" && self.receiver_is_map_or_set(&member.obj) {
