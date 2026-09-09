@@ -993,6 +993,20 @@ fn contextually_types_a_callback_passed_to_a_dynamic_function() {
 }
 
 #[test]
+fn dynamic_callback_preserves_explicit_native_signature() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        function invoke(register: JsValue): void {
+            register((value: number): number => value * 2);
+        }
+        function main(): void {}
+        "#,
+    )
+    .unwrap();
+    lower_module(&module).unwrap();
+}
+
+#[test]
 fn lowers_numeric_typed_array_constructors_through_the_dynamic_host() {
     let program = lower(
         r#"

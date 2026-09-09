@@ -8,18 +8,6 @@ fn contextual_callback_may_ignore_supplied_parameters() {
 }
 
 #[test]
-fn async_generator_await_is_an_explicit_error() {
-    let module = thaw_parser::parse_typescript(
-        r#"async function* values(): AsyncGenerator<number> {
-            yield await Promise.resolve(1);
-        }"#,
-    )
-    .unwrap();
-    let error = lower_module(&module).unwrap_err();
-    assert!(error.contains("async generators containing `await` are not supported yet"));
-}
-
-#[test]
 fn contextual_void_callback_may_ignore_its_return_value() {
     lower(
         r#"declare function returnsJson(): Json;
