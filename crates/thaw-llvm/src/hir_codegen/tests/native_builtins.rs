@@ -1644,6 +1644,29 @@ fn compiles_generator_next_results() {
 }
 
 #[test]
+fn generator_next_returns_the_generators_natural_completion_value() {
+    let source = r#"
+        function* values(): Generator<number, string> {
+            yield 4;
+            return "done";
+        }
+        function main(): void {
+            const iterator = values();
+            const first = iterator.next();
+            const end = iterator.next();
+            const exhausted = iterator.next();
+            console.log(first.value, first.done);
+            console.log(end.value, end.done);
+            console.log(exhausted.value, exhausted.done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_natural_return"),
+        "4 false\ndone true\nundefined true\n"
+    );
+}
+
+#[test]
 fn generator_return_stops_future_execution() {
     let source = r#"
         let progress: number = 0;
