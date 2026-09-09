@@ -852,7 +852,7 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"Thaw\"\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "Thaw\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

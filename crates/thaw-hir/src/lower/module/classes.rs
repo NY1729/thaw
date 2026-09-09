@@ -256,7 +256,9 @@ fn collect_native_classes<'a>(
             .body
             .iter()
             .filter_map(|member| match member {
-                ClassMember::Constructor(constructor) => Some(&constructor.params),
+                ClassMember::Constructor(constructor) if constructor.body.is_some() => {
+                    Some(&constructor.params)
+                }
                 _ => None,
             })
             .flatten()
