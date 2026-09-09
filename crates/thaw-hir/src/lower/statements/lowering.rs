@@ -1234,6 +1234,8 @@ impl<'a> FnLowerer<'a> {
                 let mut after_try = Vec::new();
                 if let Some(finalizer) = &try_stmt.finalizer {
                     let finalizer = self.lower_scoped_stmts(&finalizer.stmts)?;
+                    self.generator_finalizers
+                        .insert(catch_name.clone(), finalizer.clone());
                     body = inject_finally_before_exits(body, &finalizer, false);
                     catch_body =
                         inject_finally_before_exits(catch_body, &finalizer, true);

@@ -1650,6 +1650,34 @@ fn generator_try_catch_finally_survives_suspension() {
 }
 
 #[test]
+fn generator_return_runs_finally_without_resuming_the_body() {
+    let source = r#"
+        let progress: number = 0;
+        function* values(): Generator<number> {
+            try {
+                yield 1;
+                progress += 10;
+                yield 2;
+            } finally {
+                progress += 100;
+            }
+            progress += 1000;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value, progress);
+            const stopped = iterator.return(9);
+            console.log(stopped.value, stopped.done, progress);
+            console.log(iterator.next().done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_return_finally"),
+        "1 0\n9 true 100\ntrue 100\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;
