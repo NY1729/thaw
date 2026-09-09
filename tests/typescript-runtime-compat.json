@@ -373,7 +373,7 @@
     {
       "name": "generator try catch finally suspension",
       "expect": "matched",
-      "source": "let progress: number = 0; function* values(): Generator<number> { try { yield 1; progress += 1; throw new Error('boom'); } catch (error) { console.log(error); progress += 10; yield 2; } finally { progress += 100; } yield 3; } function main(): void { const iterator = values(); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().done, progress); }"
+      "source": "let progress: number = 0; function* values(): Generator<number> { try { yield 1; progress += 1; throw 'boom'; } catch (error) { console.log(error); progress += 10; yield 2; } finally { progress += 100; } yield 3; } function main(): void { const iterator = values(); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().done, progress); }"
     },
     {
       "name": "generator return runs finally",
