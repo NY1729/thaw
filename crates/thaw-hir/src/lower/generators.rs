@@ -96,13 +96,6 @@ impl<'a> GeneratorStateMachine<'a> {
             )),
             HirStmt::Return(_) => Some(self.block(Vec::new(), GeneratorTerm::Done)),
             HirStmt::Try(..) | HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_) => None,
-            HirStmt::Expr(HirExpr::Assign(name, value))
-                if name == self.values && matches!(value.as_ref(), HirExpr::ArrayConcat(..)) =>
-            {
-                // ponytail: delegated yields keep the eager path until the HIR can suspend
-                // within a returned batch without advancing the producer.
-                None
-            }
             other if generator_emits_value(other, self.values) => Some(self.block(
                 Vec::new(),
                 GeneratorTerm::Yield(other.clone(), continuation),
@@ -120,6 +113,9 @@ fn generator_emits_value(statement: &HirStmt, values: &str) -> bool {
         HirStmt::Expr(HirExpr::Call(callee, arguments)) => {
             matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_array_push")
                 && matches!(arguments.first(), Some(HirExpr::Var(name)) if name == values)
+        }
+        HirStmt::Expr(HirExpr::Assign(name, value)) if name == values => {
+            matches!(value.as_ref(), HirExpr::ArrayConcat(..))
         }
         _ => false,
     }
@@ -191,10 +187,21 @@ fn lower_generator_state_machine(
     Some((
         entry,
         machine.locals,
-        vec![HirStmt::While(
+        vec![
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::Gt,
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(values.into())))),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                ),
+                vec![HirStmt::Return(Some(HirExpr::Var(values.into())))],
+                Vec::new(),
+            ),
+            HirStmt::While(
             HirExpr::Lit(HirLit::Bool(true)),
             dispatch,
-        )],
+            ),
+        ],
     ))
 }
 
