@@ -57,6 +57,7 @@ fn collect_native_classes<'a>(
         };
         let result = Box::new(if method.function.is_generator {
             lower_generator_return_type(
+                method.function.is_async,
                 &method.function.return_type,
                 class,
                 interfaces,

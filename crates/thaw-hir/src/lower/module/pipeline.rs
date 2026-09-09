@@ -246,6 +246,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 );
                 let ret = if func.is_generator {
                     lower_generator_return_type(
+                        func.is_async,
                         &func.return_type,
                         &name,
                         &interfaces,
@@ -334,7 +335,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         native_rest,
                         abstract_class_constructor: false,
                         ret,
-                        is_async: func.is_async,
+                        is_async: func.is_async && !func.is_generator,
                         uses_this: func.this_param.is_some(),
                         is_extern,
                         source_range: (func.span.lo.0, func.span.hi.0),
@@ -570,6 +571,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             .clone()
                     } else if method.function.is_generator {
                         lower_generator_return_type(
+                            method.function.is_async,
                             &method.function.return_type,
                             &format!("{name}.{method_name}"),
                             &interfaces,

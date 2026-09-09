@@ -1170,7 +1170,7 @@ fn lower_fn_decl(
         name,
         params,
         ret,
-        is_async: func.is_async,
+        is_async: func.is_async && !func.is_generator,
         body,
     })
 }
@@ -1183,14 +1183,20 @@ fn lower_function_statements(
     body: &mut Vec<HirStmt>,
 ) -> Result<(), String> {
     if is_generator {
-        let HirType::Function(params, generated) = declared_ret else {
+        let HirType::Function(params, declared_generated) = declared_ret else {
             unreachable!("generator signatures lower to lazy functions");
         };
-        let HirType::Array(element) = generated.as_ref() else {
+        let (generated, async_generator) = match declared_generated.as_ref() {
+            HirType::Array(_) => (declared_generated.as_ref().clone(), false),
+            HirType::Promise(generated) if matches!(generated.as_ref(), HirType::Array(_)) => {
+                (generated.as_ref().clone(), true)
+            }
+            _ => unreachable!("generator functions lazily return arrays"),
+        };
+        let HirType::Array(element) = &generated else {
             unreachable!("generator functions lazily return arrays");
         };
         debug_assert_eq!(params.len(), 4);
-        let generated = generated.as_ref().clone();
         let values = "__thaw_generator_values".to_string();
         let control = "__thaw_generator_control".to_string();
         let error = "__thaw_generator_error".to_string();
@@ -1218,6 +1224,9 @@ fn lower_function_statements(
             HirExpr::ArrayLit(Vec::new()),
         ));
         let lowered_generator_body = lowerer.lower_stmts(statements)?;
+        if async_generator && lowered_generator_body.iter().any(stmt_contains_await) {
+            return Err("async generators containing `await` are not supported yet".into());
+        }
         let mut generator_body = Vec::new();
         let state = "__thaw_generator_state".to_string();
         if let Some((entry, locals, state_machine)) =
@@ -1270,7 +1279,7 @@ fn lower_function_statements(
         let generator_body = HirExpr::Block(generator_body);
         let mut referenced = BTreeSet::new();
         collect_referenced_bindings(&generator_body, &mut referenced);
-        let captures = referenced
+        let captures: Vec<HirParam> = referenced
             .into_iter()
             .filter(|name| name != &control)
             .filter(|name| name != &input)
@@ -1283,9 +1292,7 @@ fn lower_function_statements(
                     .map(|ty| HirParam { name, ty })
             })
             .collect();
-        body.push(HirStmt::Return(Some(HirExpr::Lambda(
-            captures,
-            vec![
+        let producer_params = vec![
                 HirParam {
                     name: control,
                     ty: HirType::I64,
@@ -1302,8 +1309,43 @@ fn lower_function_statements(
                     name: returns,
                     ty: params[3].clone(),
                 },
-            ],
-            generated,
+            ];
+        let (producer_return, generator_body) = if async_generator {
+            let mut inner_captures = captures.clone();
+            inner_captures.extend(producer_params.clone());
+            let inner = HirExpr::Lambda(
+                inner_captures.clone(),
+                Vec::new(),
+                generated.clone(),
+                Box::new(generator_body),
+            );
+            let resolve = "__thaw_async_generator_resolve".to_string();
+            let executor = HirExpr::Lambda(
+                inner_captures,
+                vec![HirParam {
+                    name: resolve.clone(),
+                    ty: HirType::Function(
+                        vec![generated.clone()],
+                        Box::new(HirType::Void),
+                    ),
+                }],
+                HirType::Void,
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var(resolve)),
+                    vec![HirExpr::Call(Box::new(inner), Vec::new())],
+                )),
+            );
+            (
+                HirType::Promise(Box::new(generated.clone())),
+                HirExpr::PromiseNew(Box::new(executor), generated.clone(), false),
+            )
+        } else {
+            (generated.clone(), generator_body)
+        };
+        body.push(HirStmt::Return(Some(HirExpr::Lambda(
+            captures,
+            producer_params,
+            producer_return,
             Box::new(generator_body),
         ))));
     } else {
@@ -1357,6 +1399,7 @@ fn seed_global_scope(
 }
 
 fn lower_generator_return_type(
+    is_async: bool,
     return_type: &Option<Box<swc_ecma_ast::TsTypeAnn>>,
     fn_name: &str,
     interfaces: &HashMap<Symbol, HirType>,
@@ -1378,9 +1421,15 @@ fn lower_generator_return_type(
             "generator function `{fn_name}` must return `Generator<T>`"
         ));
     };
-    if !matches!(name.sym.as_ref(), "Generator" | "IterableIterator") {
+    let valid_name = if is_async {
+        matches!(name.sym.as_ref(), "AsyncGenerator" | "AsyncIterableIterator")
+    } else {
+        matches!(name.sym.as_ref(), "Generator" | "IterableIterator")
+    };
+    if !valid_name {
         return Err(format!(
-            "generator function `{fn_name}` must return `Generator<T>`"
+            "generator function `{fn_name}` must return `{}<T>`",
+            if is_async { "AsyncGenerator" } else { "Generator" }
         ));
     }
     let yielded = reference
@@ -1419,6 +1468,13 @@ fn lower_generator_return_type(
         .transpose()?
         .filter(|returned| returned != &HirType::Void)
         .unwrap_or(HirType::Undefined);
+    let generated = HirType::Array(Box::new(resolve_ts_type_with_substitution(
+        yielded,
+        type_substitution,
+        interfaces,
+        generic_interfaces,
+        &mut Vec::new(),
+    )?));
     Ok(HirType::Function(
         vec![
             HirType::I64,
@@ -1426,15 +1482,11 @@ fn lower_generator_return_type(
             input,
             HirType::Array(Box::new(returned)),
         ],
-        Box::new(HirType::Array(Box::new(
-            resolve_ts_type_with_substitution(
-                yielded,
-                type_substitution,
-                interfaces,
-                generic_interfaces,
-                &mut Vec::new(),
-            )?,
-        ))),
+        Box::new(if is_async {
+            HirType::Promise(Box::new(generated))
+        } else {
+            generated
+        }),
     ))
 }
 
