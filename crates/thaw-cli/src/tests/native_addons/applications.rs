@@ -318,10 +318,10 @@ fn registry_add_runs_a_real_hono_route_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
-        r#"import { Hono, Context } from "hono";
+        r#"import { Hono } from "hono";
 async function main(): Promise<void> {
     const app = new Hono();
-    app.get("/", (c: Context) => c.text("Hello Thaw"));
+    app.get("/", (c) => c.text("Hello Thaw"));
     const response = await app.request("/");
     const body: string = await response.text();
     console.log(response.status);
