@@ -452,7 +452,7 @@ impl<'a> FnLowerer<'a> {
                     let mut values_type = self.infer_expr_type(&values)?;
                     let mut generator_producer = None;
                     if let HirType::Function(params, result) = &values_type {
-                        if params == &[HirType::I64]
+                        if params == &[HirType::I64, HirType::Str]
                             && matches!(result.as_ref(), HirType::Array(_))
                         {
                             let result = result.as_ref().clone();
@@ -696,7 +696,10 @@ impl<'a> FnLowerer<'a> {
                                 values_name.clone(),
                                 Box::new(HirExpr::Call(
                                     Box::new(HirExpr::Var(producer.clone())),
-                                    vec![HirExpr::Lit(HirLit::I64(0))],
+                                    vec![
+                                        HirExpr::Lit(HirLit::I64(0)),
+                                        HirExpr::Lit(HirLit::Str(String::new())),
+                                    ],
                                 )),
                             )),
                             HirStmt::If(
