@@ -33,6 +33,47 @@
   // here, rather than a second Rust-side walk, reuses the exact same
   // hook this file already wires into every JSON-argument parse.
   globalThis.__thaw_json_date_reviver = (key, value) => {
+    if (typeof value === 'string' && value.charCodeAt(0) === 1) {
+      const separator = value.indexOf('\u0001', 1);
+      if (separator > 1) {
+        const error = new Error(value.slice(separator + 1));
+        error.name = value.slice(1, separator);
+        return error;
+      }
+    }
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      Array.isArray(value.__thaw_map_entries__)
+    ) {
+      return new Map(value.__thaw_map_entries__);
+    }
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      Array.isArray(value.__thaw_set_values__)
+    ) {
+      return new Set(value.__thaw_set_values__);
+    }
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      value.__thaw_regexp__ &&
+      typeof value.__thaw_regexp__.source === 'string'
+    ) {
+      const pattern = new RegExp(
+        value.__thaw_regexp__.source,
+        value.__thaw_regexp__.flags || '',
+      );
+      pattern.lastIndex = Number(value.__thaw_regexp__.lastIndex || 0);
+      return pattern;
+    }
     if (
       value &&
       value.type === 'Buffer' &&

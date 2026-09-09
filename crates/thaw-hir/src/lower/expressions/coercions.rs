@@ -572,6 +572,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
                 vec![value],
             )),
+            HirType::Json => Ok(HirExpr::JsonAsNumber(Box::new(value))),
             HirType::JsValue => Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
                 Box::new(HirExpr::Var("readDynamicValue".to_string())),
                 vec![value],
@@ -635,6 +636,22 @@ impl<'a> FnLowerer<'a> {
                 (HirType::Undefined, HirType::Optional(payload)) => Some(HirExpr::OptionalIsNone(
                     Box::new(rhs),
                     payload.as_ref().clone(),
+                )),
+                (HirType::Json, HirType::Null) => Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                    vec![lhs],
+                )),
+                (HirType::Null, HirType::Json) => Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+                    vec![rhs],
+                )),
+                (HirType::Json, HirType::Undefined) => Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                    vec![lhs],
+                )),
+                (HirType::Undefined, HirType::Json) => Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                    vec![rhs],
                 )),
                 (HirType::Nullable(payload), HirType::Null) => Some(HirExpr::NullableIsNone(
                     Box::new(lhs),

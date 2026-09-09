@@ -8,6 +8,58 @@ fn contextual_callback_may_ignore_supplied_parameters() {
 }
 
 #[test]
+fn contextual_void_callback_may_ignore_its_return_value() {
+    lower(
+        r#"declare function returnsJson(): Json;
+        async function main(): Promise<void> {
+            await new Promise<void>((resolve) => returnsJson());
+        }"#,
+    );
+}
+
+#[test]
+fn timer_callback_may_capture_its_own_handle() {
+    lower(
+        r#"function main(): void {
+            const handle = setInterval(() => clearInterval(handle), 1);
+            console.log(handle.hasRef());
+            handle.unref();
+            handle.ref();
+        }"#,
+    );
+}
+
+#[test]
+fn discarded_promise_is_tracked_for_unhandled_rejection() {
+    let program = lower(
+        r#"async function main(): Promise<void> {
+            Promise.reject(new Error("boom"));
+            await Promise.resolve();
+        }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    assert!(matches!(
+        &main.body[0],
+        HirStmt::Expr(HirExpr::Call(callee, _))
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_detach_rejection")
+    ));
+}
+
+#[test]
+fn lowers_queue_microtask_onto_the_promise_queue() {
+    lower(
+        r#"async function main(): Promise<void> {
+            queueMicrotask(() => console.log("microtask"));
+            await Promise.resolve();
+        }"#,
+    );
+}
+
+#[test]
 fn typed_quickjs_calls_are_resolved_at_the_dynamic_await_boundary() {
     let program = lower(
         r#"declare function __thaw_typed_js_66(): JsValue;
@@ -21,15 +73,36 @@ fn typed_quickjs_calls_are_resolved_at_the_dynamic_await_boundary() {
         HirStmt::Let(
             _,
             HirType::JsValue,
-            HirExpr::DynamicCall(
-                DynamicSignature {
-                    backend: DynamicBackend::QuickJs,
-                    ..
-                },
-                _
-            )
+            HirExpr::Call(callee, arguments)
         )
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "resolveDynamicValue")
+                && matches!(arguments.as_slice(), [HirExpr::DynamicCall(
+                    DynamicSignature { backend: DynamicBackend::QuickJs, .. }, _
+                )])
     ));
+}
+
+#[test]
+fn keeps_unannotated_dynamic_method_promises_raw_until_awaited() {
+    let program = lower(
+        r#"declare function loader(): JsValue;
+        async function main(): Promise<void> {
+            const client: JsValue = loader();
+            const pending = client.read();
+            const value = await pending;
+            console.log(value);
+        }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    assert!(main.body.iter().any(|statement| matches!(
+        statement,
+        HirStmt::Let(_, HirType::JsValue, HirExpr::Call(callee, _))
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "callDynamicMethodHandleRaw")
+    )));
 }
 
 #[test]
@@ -292,6 +365,22 @@ fn promise_all_settled_rejects_mixed_and_non_promise_inputs() {
     assert!(lower_module(&plain)
         .unwrap_err()
         .contains("Promise.allSettled element 0 must be a Promise"));
+}
+
+#[test]
+fn untyped_promise_reject_does_not_constrain_combinator_values() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        async function main(): Promise<void> {
+            await Promise.all([Promise.resolve(1), Promise.reject(new Error("all"))]);
+            await Promise.allSettled([Promise.reject("left"), Promise.resolve(2)]);
+            await Promise.race([Promise.reject("race")]);
+            await Promise.any([Promise.reject("any"), Promise.resolve(3)]);
+        }
+        "#,
+    )
+    .unwrap();
+    lower_module(&module).unwrap();
 }
 
 #[test]

@@ -211,6 +211,7 @@ impl<'a> FnLowerer<'a> {
                 .map(|annotation| annotation.type_ann.clone())
                 .or_else(|| inferred_generic_arrow_return_type(arrow)),
             generic_return_pattern: None,
+            type_predicate: None,
         })
     }
 
@@ -373,6 +374,7 @@ impl<'a> FnLowerer<'a> {
                 .collect(),
             generic_return_type: Some(return_type.type_ann.clone()),
             generic_return_pattern: None,
+            type_predicate: None,
         })
     }
 
@@ -496,6 +498,7 @@ impl<'a> FnLowerer<'a> {
                 .collect(),
             generic_return_type: Some(Box::new(return_type.clone())),
             generic_return_pattern: None,
+            type_predicate: None,
         })
     }
 

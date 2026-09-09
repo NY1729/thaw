@@ -998,8 +998,22 @@ fn lower_fn_decl(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    for (param, inferred) in params.iter_mut().zip(&signatures[&name].params) {
+    let this_type = func
+        .this_param
+        .as_ref()
+        .map(|_| signatures[&name].params[0].clone());
+    let inferred = &signatures[&name].params[usize::from(this_type.is_some())..];
+    for (param, inferred) in params.iter_mut().zip(inferred) {
         param.ty = inferred.clone();
+    }
+    if let Some(this_type) = &this_type {
+        params.insert(
+            0,
+            HirParam {
+                name: "__thaw_this".into(),
+                ty: this_type.clone(),
+            },
+        );
     }
 
     let declared_ret = signatures[&name].ret.clone();
@@ -1019,7 +1033,16 @@ fn lower_fn_decl(
         call_constraints,
     );
     seed_global_scope(&mut lowerer, global_types, immutable_globals);
-    for (source, param) in func.params.iter().zip(&params) {
+    if let Some(this_type) = this_type {
+        lowerer.scope.insert("__thaw_this".into(), this_type);
+        lowerer
+            .bindings
+            .entry("this".into())
+            .or_default()
+            .push("__thaw_this".into());
+    }
+    let runtime_params = &params[usize::from(func.this_param.is_some())..];
+    for (source, param) in func.params.iter().zip(runtime_params) {
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
@@ -1105,7 +1128,7 @@ fn lower_fn_decl(
         }
     }
     let mut body = Vec::new();
-    for (source, param) in func.params.iter().zip(&params) {
+    for (source, param) in func.params.iter().zip(runtime_params) {
         if !matches!(source.pat, Pat::Ident(_) | Pat::Rest(_)) {
             lowerer.lower_binding_pattern(
                 &source.pat,
@@ -1161,6 +1184,16 @@ fn lower_fn_return_type(
     generic_interfaces: &GenericInterfaces,
     type_substitution: &HashMap<Symbol, HirType>,
 ) -> Result<HirType, String> {
+    // `never` has no runtime representation: a correctly implemented
+    // function cannot return a value at all, so it uses the existing void
+    // ABI. Call-site lowering separately preserves its control-flow meaning.
+    if matches!(
+        return_type.as_deref().map(|annotation| annotation.type_ann.as_ref()),
+        Some(TsType::TsKeywordType(keyword))
+            if keyword.kind == swc_ecma_ast::TsKeywordTypeKind::TsNeverKeyword
+    ) {
+        return Ok(HirType::Void);
+    }
     let declared = match return_type {
         Some(ann) => resolve_ts_type_with_substitution(
             &ann.type_ann,

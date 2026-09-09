@@ -271,7 +271,7 @@ fn generate_registry_shims(
                     helpers,
                 ));
 
-                for (method, symbol, argument_count, has_callback, parameter_types) in
+                for (method, symbol, argument_count, has_callback, parameter_types, return_class) in
                     generate_napi_class_method_overloads_with_callback_instances(
                         class,
                         false,
@@ -288,6 +288,7 @@ fn generate_registry_shims(
                         argument_count,
                         has_callback,
                         parameter_types,
+                        return_class,
                     ));
                 }
                 for getter in class.methods.iter().filter(|method| {
@@ -452,6 +453,7 @@ fn generate_registry_shims(
                             &property.name,
                             &property.ty,
                             property.is_static,
+                            true,
                             &mut shim,
                         ) {
                             if property.is_static {
@@ -473,7 +475,7 @@ fn generate_registry_shims(
                         }
                     }
                 }
-                for (method, symbol, argument_count, has_callback, parameter_types) in
+                for (method, symbol, argument_count, has_callback, parameter_types, _) in
                     generate_napi_class_method_overloads_with_callback_instances(
                         class,
                         true,
@@ -506,7 +508,8 @@ fn generate_registry_shims(
             // QuickJS-NG symbol/backend instead) -- only instance
             // methods and (see `generate_napi_class_constructors`'s own
             // `napi` parameter) constructors and static methods. Property
-            // getters/setters still remain on the dynamic-value path.
+            // Property reads still remain on the dynamic-value path;
+            // writable instance properties use the typed setter below.
             // Real targets: dayjs/mime never needed constructor support
             // (dayjs's `Dayjs` instances come from calling its factory
             // function, mime's `Mime` instance is a ready-made package
@@ -525,7 +528,7 @@ fn generate_registry_shims(
                         helpers,
                     ));
                 }
-                for (method, symbol, argument_count, has_callback, parameter_types) in
+                for (method, symbol, argument_count, has_callback, parameter_types, return_class) in
                     generate_napi_class_method_overloads_with_callback_instances(
                         class,
                         false,
@@ -542,9 +545,10 @@ fn generate_registry_shims(
                         argument_count,
                         has_callback,
                         parameter_types,
+                        return_class,
                     ));
                 }
-                for (method, symbol, argument_count, has_callback, parameter_types) in
+                for (method, symbol, argument_count, has_callback, parameter_types, _) in
                     generate_napi_class_method_overloads_with_callback_instances(
                         class,
                         true,
@@ -563,6 +567,26 @@ fn generate_registry_shims(
                         has_callback,
                         parameter_types,
                     ));
+                }
+                for property in &class.properties {
+                    if property.is_static || property.readonly {
+                        continue;
+                    }
+                    if let Some((symbol, value_type)) = generate_napi_class_property_setter(
+                        &class.name,
+                        &property.name,
+                        &property.ty,
+                        false,
+                        false,
+                        &mut shim,
+                    ) {
+                        class_setter_rewrites.push((
+                            class.name.clone(),
+                            property.name.clone(),
+                            symbol,
+                            value_type,
+                        ));
+                    }
                 }
             }
         }

@@ -2,11 +2,15 @@
 /// `thaw_promise_destroy` after no coroutine can reference the handle.
 #[no_mangle]
 pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
-    Box::into_raw(Box::new(ThawPromise {
+    let promise = Box::into_raw(Box::new(ThawPromise {
         result: None,
         rejected: false,
+        handled: false,
+        reported_unhandled: false,
         subscribers: Vec::new(),
-    }))
+    }));
+    ACTIVE_PROMISES.with(|active| active.borrow_mut().push(promise));
+    promise
 }
 
 /// Returns 0 for pending, 1 for fulfilled, 2 for rejected, and 255 for an
@@ -28,6 +32,25 @@ pub unsafe extern "C" fn thaw_promise_state(promise: *const ThawPromise) -> u8 {
     }
 }
 
+/// Marks a promise as observed by a non-coroutine consumer such as the JS
+/// bridge, which polls settlement instead of registering a continuation.
+///
+/// # Safety
+///
+/// `promise` must be null or point to a live, exclusively accessible
+/// `ThawPromise`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_mark_handled(promise: *mut ThawPromise) -> u8 {
+    let Some(promise) = (unsafe { promise.as_mut() }) else {
+        return 0;
+    };
+    if promise.reported_unhandled && !promise.handled {
+        PENDING_REJECTION_HANDLED.with(|pending| pending.set(pending.get() + 1));
+    }
+    promise.handled = true;
+    1
+}
+
 /// Registers a coroutine continuation. If already resolved, the callback is
 /// queued immediately, but never invoked reentrantly inside this function.
 /// Returns 1 on success and 0 for an invalid handle.
@@ -45,6 +68,7 @@ pub unsafe extern "C" fn thaw_promise_subscribe(
     let Some(promise) = (unsafe { promise.as_mut() }) else {
         return 0;
     };
+    unsafe { thaw_promise_mark_handled(promise) };
     if let Some(result) = promise.result {
         enqueue_continuation(PromiseSubscription { resume, frame }, result);
     } else {
@@ -68,6 +92,48 @@ pub extern "C" fn thaw_promise_resolve(promise: *mut ThawPromise, result: *const
 #[no_mangle]
 pub extern "C" fn thaw_promise_reject(promise: *mut ThawPromise, error: *const u8) -> u8 {
     settle_promise(promise, error, true)
+}
+
+struct DetachedPromise {
+    promise: *mut ThawPromise,
+    pending_exception: *mut *const u8,
+}
+
+extern "C" fn destroy_detached_promise(frame: *mut u8, result: *const u8) {
+    let state = unsafe { Box::from_raw(frame.cast::<DetachedPromise>()) };
+    if unsafe { thaw_promise_state(state.promise) } == 2 && !state.pending_exception.is_null() {
+        let pending = unsafe { &mut *state.pending_exception };
+        if pending.is_null() {
+            *pending = result;
+        }
+    }
+    unsafe { thaw_promise_destroy(state.promise) };
+}
+
+/// Consumes a fire-and-forget Promise after it settles.
+///
+/// # Safety
+/// `promise` must be null or a live, exclusively accessible `ThawPromise`.
+/// `pending_exception` must remain writable until the promise settles.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_detach(
+    promise: *mut ThawPromise,
+    pending_exception: *mut *const u8,
+) -> u8 {
+    if promise.is_null() {
+        return 0;
+    }
+    let state = Box::into_raw(Box::new(DetachedPromise {
+        promise,
+        pending_exception,
+    }));
+    let subscribed = unsafe {
+        thaw_promise_subscribe(promise, destroy_detached_promise, state.cast::<u8>())
+    };
+    if subscribed == 0 {
+        unsafe { drop(Box::from_raw(state)) };
+    }
+    subscribed
 }
 
 struct PromiseChainState {
@@ -763,8 +829,76 @@ fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) 
 #[no_mangle]
 pub unsafe extern "C" fn thaw_promise_destroy(promise: *mut ThawPromise) {
     if !promise.is_null() {
+        ACTIVE_PROMISES.with(|active| active.borrow_mut().retain(|current| *current != promise));
         TIMERS.with(|timers| timers.borrow_mut().retain(|timer| timer.promise != promise));
         FD_WAITS.with(|waits| waits.borrow_mut().retain(|wait| wait.promise != promise));
         drop(Box::from_raw(promise));
     }
+}
+
+pub type PromiseUnhandledFn = extern "C" fn(*const u8) -> u8;
+pub type PromiseRejectionHandledFn = extern "C" fn();
+
+#[no_mangle]
+pub extern "C" fn thaw_promise_set_unhandled_reporter(reporter: Option<PromiseUnhandledFn>) {
+    UNHANDLED_REPORTER.with(|registered| registered.set(reporter));
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_promise_set_rejection_handled_reporter(
+    reporter: Option<PromiseRejectionHandledFn>,
+) {
+    REJECTION_HANDLED_REPORTER.with(|registered| registered.set(reporter));
+}
+
+fn report_registered_unhandled_rejections() {
+    let reporter = UNHANDLED_REPORTER.with(Cell::get);
+    if thaw_promise_drain_unhandled(reporter) != 0 {
+        UNHANDLED_FAILURE.with(|failed| failed.set(true));
+    }
+    report_pending_rejection_handled();
+}
+
+fn report_pending_rejection_handled() {
+    let count = PENDING_REJECTION_HANDLED.with(|pending| pending.replace(0));
+    if let Some(reporter) = REJECTION_HANDLED_REPORTER.with(Cell::get) {
+        for _ in 0..count {
+            reporter();
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_promise_take_unhandled_failure() -> u8 {
+    UNHANDLED_FAILURE.with(|failed| u8::from(failed.replace(false)))
+}
+
+/// Reports every live rejected Promise which never gained a subscriber.
+/// Returns 1 when at least one rejection had no host handler.
+#[no_mangle]
+pub extern "C" fn thaw_promise_drain_unhandled(
+    reporter: Option<PromiseUnhandledFn>,
+) -> u8 {
+    let rejected = ACTIVE_PROMISES.with(|active| {
+        active
+            .borrow()
+            .iter()
+            .filter_map(|promise| {
+                let promise = unsafe { &mut **promise };
+                (promise.rejected && !promise.handled && !promise.reported_unhandled).then(|| {
+                    promise.reported_unhandled = true;
+                    promise.result.unwrap_or(std::ptr::null())
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut failed = false;
+    for error in rejected {
+        let handled = reporter.is_some_and(|reporter| reporter(error) != 0);
+        if !handled {
+            unsafe { thaw_runtime_report_uncaught(error.cast()) };
+            failed = true;
+        }
+    }
+    u8::from(failed)
 }

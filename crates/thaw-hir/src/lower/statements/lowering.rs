@@ -1,4 +1,69 @@
 impl<'a> FnLowerer<'a> {
+    fn collect_pattern_bindings(pattern: &Pat, names: &mut Vec<String>) {
+        match pattern {
+            Pat::Ident(binding) => names.push(binding.id.sym.to_string()),
+            Pat::Array(array) => {
+                for element in array.elems.iter().flatten() {
+                    Self::collect_pattern_bindings(element, names);
+                }
+            }
+            Pat::Object(object) => {
+                for property in &object.props {
+                    match property {
+                        ObjectPatProp::KeyValue(property) => {
+                            Self::collect_pattern_bindings(&property.value, names)
+                        }
+                        ObjectPatProp::Assign(property) => {
+                            names.push(property.key.id.sym.to_string())
+                        }
+                        ObjectPatProp::Rest(rest) => {
+                            Self::collect_pattern_bindings(&rest.arg, names)
+                        }
+                    }
+                }
+            }
+            Pat::Assign(assignment) => {
+                Self::collect_pattern_bindings(&assignment.left, names)
+            }
+            Pat::Rest(rest) => Self::collect_pattern_bindings(&rest.arg, names),
+            Pat::Expr(_) | Pat::Invalid(_) => {}
+        }
+    }
+
+    fn loop_closure_references(stmt: &Stmt, name: &str) -> bool {
+        struct Finder<'a> {
+            name: &'a str,
+            closure_depth: usize,
+            found: bool,
+        }
+
+        impl Visit for Finder<'_> {
+            fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+                self.closure_depth += 1;
+                arrow.visit_children_with(self);
+                self.closure_depth -= 1;
+            }
+
+            fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+                self.closure_depth += 1;
+                function.visit_children_with(self);
+                self.closure_depth -= 1;
+            }
+
+            fn visit_ident(&mut self, identifier: &swc_ecma_ast::Ident) {
+                self.found |= self.closure_depth > 0 && identifier.sym == self.name;
+            }
+        }
+
+        let mut finder = Finder {
+            name,
+            closure_depth: 0,
+            found: false,
+        };
+        stmt.visit_with(&mut finder);
+        finder.found
+    }
+
     /// Lowers a control-flow condition (`if`/`while`/`do`/`for`) with the
     /// same truthiness coercion JS itself applies there -- any value is
     /// a valid condition, not just a literal `boolean` (`truthiness_expr`
@@ -22,6 +87,17 @@ impl<'a> FnLowerer<'a> {
             // native Thaw executable therefore treats it as a no-op.
             Stmt::Empty(_) | Stmt::Debugger(_) => Ok(Vec::new()),
             Stmt::Return(ret) => {
+                if let Some(arg) = &ret.arg {
+                    if self.expression_never_returns(arg) {
+                        let call = self.lower_expr(arg)?;
+                        return Ok(vec![
+                            HirStmt::Expr(call),
+                            HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                "a function declared as `never` returned".into(),
+                            ))),
+                        ]);
+                    }
+                }
                 let value = match &ret.arg {
                     Some(arg) => {
                         // Hint the declared return type through, mirroring
@@ -91,6 +167,14 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     self.lower_expr(&expr_stmt.expr)?
                 };
+                let value = if matches!(self.infer_expr_type(&value)?, HirType::Promise(_)) {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_detach_rejection".into())),
+                        vec![value],
+                    )
+                } else {
+                    value
+                };
                 Ok(vec![HirStmt::Expr(value)])
             }
             Stmt::Block(block) => self.lower_scoped_stmts(&block.stmts),
@@ -99,6 +183,7 @@ impl<'a> FnLowerer<'a> {
             Stmt::If(if_stmt) => {
                 let narrowing = self.optional_undefined_narrowing(&if_stmt.test);
                 let union_narrowing = self.union_narrowing(&if_stmt.test);
+                let json_narrowing = self.json_typeof_narrowing(&if_stmt.test);
                 let cond = self.lower_condition_expr(&if_stmt.test)?;
                 let then_narrowing = narrowing
                     .as_ref()
@@ -143,12 +228,22 @@ impl<'a> FnLowerer<'a> {
                         &if_stmt.cons,
                         then_union.as_deref(),
                         then_narrowing.as_ref(),
+                        json_narrowing
+                            .as_ref()
+                            .filter(|(_, _, equal)| *equal)
+                            .map(|(name, ty, _)| (name.clone(), ty.clone()))
+                            .as_ref(),
                     )?;
                 let else_branch = match &if_stmt.alt {
                     Some(alt) => self.lower_body_with_union_narrowing(
                         alt,
                         else_union.as_deref(),
                         else_narrowing.as_ref(),
+                        json_narrowing
+                            .as_ref()
+                            .filter(|(_, _, equal)| !*equal)
+                            .map(|(name, ty, _)| (name.clone(), ty.clone()))
+                            .as_ref(),
                     )?,
                     None => Vec::new(),
                 };
@@ -244,16 +339,64 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
 
+                    let iteration_sources = match &for_stmt.init {
+                        Some(VarDeclOrExpr::VarDecl(declaration))
+                            if declaration.kind != VarDeclKind::Var =>
+                        {
+                            let mut names = Vec::new();
+                            for declarator in &declaration.decls {
+                                Self::collect_pattern_bindings(&declarator.name, &mut names);
+                            }
+                            names
+                                .into_iter()
+                                .filter(|name| Self::loop_closure_references(&for_stmt.body, name))
+                                .collect::<Vec<_>>()
+                        }
+                        _ => Vec::new(),
+                    };
+
                     let cond = match &for_stmt.test {
                         Some(test) => self.lower_condition_expr(test)?,
                         None => HirExpr::Lit(HirLit::Bool(true)),
                     };
 
+                    let loop_bindings = self.bindings.clone();
+                    let mut iteration_bindings = Vec::new();
+                    for source in iteration_sources {
+                        let outer = self.resolve_binding(&source);
+                        let ty = self.scope.get(&outer).cloned().ok_or_else(|| {
+                            format!("unknown `for` iteration binding `{source}`")
+                        })?;
+                        let inner = self.bind_local(&source, ty.clone());
+                        iteration_bindings.push((outer, inner, ty));
+                    }
                     let mut body = self.lower_loop_body(&for_stmt.body)?;
+                    self.bindings = loop_bindings;
+                    let mut prefix = iteration_bindings
+                        .iter()
+                        .map(|(outer, inner, ty)| {
+                            HirStmt::Let(inner.clone(), ty.clone(), HirExpr::Var(outer.clone()))
+                        })
+                        .collect::<Vec<_>>();
+                    prefix.append(&mut body);
+                    body = prefix;
+
+                    let mut advance = iteration_bindings
+                        .iter()
+                        .map(|(outer, inner, _)| {
+                            HirStmt::Expr(HirExpr::Assign(
+                                outer.clone(),
+                                Box::new(HirExpr::Var(inner.clone())),
+                            ))
+                        })
+                        .collect::<Vec<_>>();
                     if let Some(update) = &for_stmt.update {
                         let update = self.lower_expr(update)?;
-                        body = inject_for_update_before_continue(body, &update);
-                        body.push(HirStmt::Expr(update));
+                        advance.push(HirStmt::Expr(update));
+                    }
+                    if !advance.is_empty() {
+                        body = inject_for_advance_before_continue(body, &advance);
+                        body.extend(advance);
                     }
 
                     out.push(HirStmt::While(cond, body));
@@ -878,6 +1021,15 @@ impl<'a> FnLowerer<'a> {
                             body,
                             Vec::new(),
                         ));
+                    }
+                    if default_index < case_count
+                        && switch_stmt.cases.iter().all(|case| {
+                            case.cons.last().is_some_and(Self::stmt_definitely_exits)
+                        })
+                    {
+                        out.push(HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                            "unreachable exhaustive switch".into(),
+                        ))));
                     }
                     Ok(out)
                 })();

@@ -14,8 +14,10 @@ tls = ["dep:rustls", "dep:webpki-roots", "dep:x509-parser"]
 wasm = ["dep:wasmi", "dep:wasmi_wasi"]
 
 [dependencies]
+aes = "0.8"
 base64 = "0.22"
 brotli = { version = "8", optional = true }
+cbc = { version = "0.1", features = ["alloc"] }
 flate2 = "1"
 getrandom = "0.2"
 httlib-huffman = "0.3.4"
@@ -25,6 +27,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
+scrypt = "0.11"
 webpki-roots = { version = "1.0", optional = true }
 wasmi = { version = "1.1.0", optional = true }
 wasmi_wasi = { version = "1.1.0", optional = true }

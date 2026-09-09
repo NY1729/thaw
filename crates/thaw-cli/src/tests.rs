@@ -25,6 +25,23 @@ fn compatibility_manifest_detects_expectation_changes() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn compatibility_commands_are_bounded_by_a_timeout() {
+    let output = command_output_with_timeout(
+        Command::new("sh").args(["-c", "printf ok"]),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(output.stdout, b"ok");
+    assert!(command_output_with_timeout(
+        Command::new("sh").args(["-c", "sleep 1"]),
+        Duration::from_millis(10),
+    )
+    .unwrap_err()
+    .contains("timed out"));
+}
+
 include!("tests/static_build.rs");
 
 include!("tests/acceptance.rs");
@@ -620,6 +637,76 @@ fn brotli_host_detection_only_enables_brotli_users() {
     assert!(!source_uses_brotli("new CompressionStream('gzip')"));
     assert!(source_uses_brotli("brotliCompressSync(input)"));
     assert!(source_uses_brotli("new BrotliCompress()"));
+}
+
+#[test]
+fn node_compat_manifest_covers_each_public_builtin_family() {
+    let manifest = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/node-compat.json"
+    ))
+    .unwrap();
+    for builtin in [
+        "assert",
+        "async_hooks",
+        "buffer",
+        "child_process",
+        "cluster",
+        "console",
+        "constants",
+        "crypto",
+        "dgram",
+        "diagnostics_channel",
+        "dns",
+        "dns/promises",
+        "domain",
+        "events",
+        "fs",
+        "fs/promises",
+        "http",
+        "http2",
+        "https",
+        "inspector",
+        "inspector/promises",
+        "module",
+        "net",
+        "os",
+        "path",
+        "path/posix",
+        "path/win32",
+        "perf_hooks",
+        "process",
+        "punycode",
+        "querystring",
+        "readline",
+        "readline/promises",
+        "repl",
+        "stream",
+        "stream/consumers",
+        "stream/promises",
+        "stream/web",
+        "string_decoder",
+        "test",
+        "test/reporters",
+        "timers",
+        "timers/promises",
+        "tls",
+        "trace_events",
+        "tty",
+        "url",
+        "util",
+        "util/types",
+        "v8",
+        "vm",
+        "wasi",
+        "worker_threads",
+        "zlib",
+    ] {
+        assert!(
+            manifest.contains(&format!("node:{builtin}")),
+            "Node compatibility manifest does not cover node:{builtin}"
+        );
+    }
 }
 
 include!("tests/jit_exports.rs");

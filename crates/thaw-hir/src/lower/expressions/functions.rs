@@ -633,6 +633,7 @@ impl<'a> FnLowerer<'a> {
                     .as_ref()
                     .map(|annotation| annotation.type_ann.clone()),
                 generic_return_pattern: None,
+                type_predicate: None,
             };
             let types = infer_generic_type_tuple(
                 &signature,
@@ -772,6 +773,10 @@ impl<'a> FnLowerer<'a> {
                         self.lower_expr(expr)?
                     };
                     let inferred = self.infer_expr_type(&expression)?;
+                    if expected_return == Some(&HirType::Void) {
+                        prefix.push(HirStmt::Expr(expression));
+                        (HirExpr::Block(prefix), HirType::Void)
+                    } else {
                     let body = if prefix.is_empty() {
                         expression
                     } else {
@@ -779,6 +784,7 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Block(prefix)
                     };
                     (body, inferred)
+                    }
                 }
                 ArrowFunctionBody::FunctionBody(block) => {
                     let mut stmts = prefix;

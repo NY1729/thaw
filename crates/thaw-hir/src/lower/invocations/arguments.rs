@@ -4,9 +4,25 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        self.lower_native_spread_values_with_expected(arguments, label, &[], None)
+    }
+
+    fn lower_native_spread_values_with_expected(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+        expected: &[HirType],
+        rest: Option<&HirType>,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
         let lowered = arguments
             .iter()
-            .map(|argument| self.lower_expr(&argument.expr))
+            .enumerate()
+            .map(|(index, argument)| {
+                self.lower_expr_with_expected_type(
+                    &argument.expr,
+                    expected.get(index).or(rest),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let preserve_order = arguments.iter().any(|argument| argument.spread.is_some())
             || lowered.iter().any(contains_await);

@@ -84,6 +84,7 @@ const TOP_LEVEL_INIT_GUARD_SYMBOL: &str = "__thaw_top_level_initialized";
 /// generated-module state preserves the existing function ABI (important for
 /// C FFI) while allowing callers to branch to their nearest lexical catch.
 const PENDING_EXCEPTION_SYMBOL: &str = "__thaw_pending_exception";
+const PENDING_REJECTION_SYMBOL: &str = "__thaw_pending_rejection";
 /// Parallel, opt-in companion to `PENDING_EXCEPTION_SYMBOL`: null unless the
 /// thrown value was a real (Error-family) class instance, in which case it
 /// holds that object's own pointer so a catch site can read fields beyond
@@ -197,6 +198,7 @@ pub struct HirCompiler<'ctx> {
     /// from the current function with the pending exception left intact.
     catch_stack: Vec<BasicBlock<'ctx>>,
     loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
+    loop_promotion_scopes: Vec<(BasicBlock<'ctx>, HashSet<String>)>,
     /// Functions whose async ABI is a Promise-returning ramp rather than the
     /// legacy synchronous V1 ABI. Seeded to a fixed point before declarations
     /// so callers and callees agree on the LLVM signature.
@@ -233,6 +235,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ffi_signatures: HashMap::new(),
             catch_stack: Vec::new(),
             loop_stack: Vec::new(),
+            loop_promotion_scopes: Vec::new(),
             frame_async_functions: HashMap::new(),
             promise_returning_functions: HashSet::new(),
             active_async_completion: None,
@@ -307,6 +310,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_global(ptr_ty, None, PENDING_EXCEPTION_SYMBOL);
         pending.set_linkage(Linkage::Internal);
         pending.set_initializer(&ptr_ty.const_null());
+        let rejection = self
+            .module
+            .add_global(ptr_ty, None, PENDING_REJECTION_SYMBOL);
+        rejection.set_linkage(Linkage::Internal);
+        rejection.set_initializer(&ptr_ty.const_null());
         let pending_object = self
             .module
             .add_global(ptr_ty, None, PENDING_EXCEPTION_OBJECT_SYMBOL);
@@ -547,6 +555,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .get_global(PENDING_EXCEPTION_SYMBOL)
             .expect("exception state is declared before code generation")
+    }
+
+    fn pending_rejection(&self) -> inkwell::values::GlobalValue<'ctx> {
+        self.module
+            .get_global(PENDING_REJECTION_SYMBOL)
+            .expect("rejection state is declared before code generation")
     }
 
     fn pending_exception_object(&self) -> inkwell::values::GlobalValue<'ctx> {

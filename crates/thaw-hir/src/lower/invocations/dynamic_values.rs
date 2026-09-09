@@ -1,4 +1,44 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_dynamic_value_call(
+        &mut self,
+        callee: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+        expected: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        if args.iter().any(|argument| argument.spread.is_some()) {
+            return Err("dynamic function calls do not support spread arguments".into());
+        }
+        let values = args
+            .iter()
+            .map(|argument| {
+                let value = match argument.expr.as_ref() {
+                    Expr::Arrow(arrow) => self.lower_contextual_arrow(
+                        arrow,
+                        &vec![HirType::JsValue; arrow.params.len()],
+                        None,
+                    )?,
+                    _ => self.lower_expr_with_expected_type(
+                        &argument.expr,
+                        Some(&HirType::JsValue),
+                    )?,
+                };
+                self.coerce_to_declared(&HirType::Json, value)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let values = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var(
+                if matches!(expected, Some(HirType::JsValue | HirType::Dynamic)) {
+                    "callDynamicValueHandle"
+                } else {
+                    "callDynamicValue"
+                }
+                .into(),
+            )),
+            vec![HirExpr::Var(callee.into()), values],
+        ))
+    }
+
     fn wrap_call_argument_bindings(
         &mut self,
         mut result: HirExpr,
@@ -94,7 +134,11 @@ impl<'a> FnLowerer<'a> {
         match expr {
             Expr::Ident(receiver) => {
                 let name = self.resolve_binding(receiver.sym.as_ref());
-                self.scope
+                self.native_class_aliases
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| {
+                        self.scope
                     .get(&name)
                     .map(|ty| {
                         if *ty == HirType::Dynamic {
@@ -103,8 +147,9 @@ impl<'a> FnLowerer<'a> {
                             ty.clone()
                         }
                     })
+                    })
                     .or_else(|| {
-                        matches!(receiver.sym.as_ref(), "crypto" | "process")
+                        matches!(receiver.sym.as_ref(), "Atomics" | "crypto" | "process")
                             .then_some(HirType::JsValue)
                     })
             }
@@ -340,6 +385,11 @@ impl<'a> FnLowerer<'a> {
         } else if callee_name == "String" && ty == HirType::F64 {
             HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
+                vec![value],
+            )
+        } else if callee_name == "String" && ty == HirType::JsValue {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_js_handle_to_string".to_string())),
                 vec![value],
             )
         } else if callee_name == "String"

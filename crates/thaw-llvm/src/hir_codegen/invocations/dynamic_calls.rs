@@ -17,10 +17,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_dynamic_handle_operation("thaw_js_get_property_result", args)
             }
             "setDynamicProperty" => self.compile_set_dynamic_property(args),
+            "setDynamicPropertyJson" => self.compile_set_dynamic_property_json(args),
             "callDynamicMethod" => self.compile_call_dynamic_method(args),
             "callDynamicMethodHandle" => self.compile_call_dynamic_method_handle(args, false),
             "callDynamicMethodHandleRaw" => self.compile_call_dynamic_method_handle(args, true),
             "readDynamicValue" => self.compile_read_dynamic_value(args),
+            "resolveDynamicValue" => self.compile_dynamic_handle_operation(
+                "thaw_js_resolve_handle_handle_result",
+                args,
+            ),
             "callDynamicValueMixed" => self.compile_call_dynamic_value_mixed(args),
             "constructDynamicValue" => self.compile_construct_dynamic_value(args),
             "loadNativeAddon" => self.compile_load_native_addon(args),
@@ -51,5 +56,74 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map(Into::into)
             .map_err(|error| error.to_string())
+    }
+
+    fn compile_set_dynamic_property_json(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [receiver, name, value] = args else {
+            return Err("setDynamicPropertyJson expects receiver, name, and value".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let receiver = self.compile_expr(receiver)?.into_int_value();
+        let name = self.compile_expr(name)?.into_pointer_value();
+        let value = self.compile_expr(value)?.into_pointer_value();
+        let array = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_new").unwrap(),
+                &[],
+                "dynamic_set_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_json_array_push_json")
+                    .unwrap(),
+                &[array.into(), value.into()],
+                "push_dynamic_set_value",
+            )
+            .map_err(|error| error.to_string())?;
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[array.into()],
+                "dynamic_set_args_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_set_property_json_result")
+                    .unwrap(),
+                &[receiver.into(), name.into(), args_json.into()],
+                "dynamic_property_json_set",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "dynamic_property_json_set_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(self.context.bool_type().const_int(1, false).into())
     }
 }

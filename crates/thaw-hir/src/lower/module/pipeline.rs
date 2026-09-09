@@ -1,9 +1,61 @@
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
-    let normalized = normalize_top_level_destructuring(module)?;
+    let merged = normalize_interface_merges(module)?;
+    let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
     lower_normalized_module(&normalized)
+}
+
+fn normalize_interface_merges(module: &Module) -> Result<Module, String> {
+    fn interface(item: &ModuleItem) -> Option<&TsInterfaceDecl> {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(value))) => Some(value),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(value)) => match &value.decl {
+                Decl::TsInterface(value) => Some(value),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn interface_mut(item: &mut ModuleItem) -> Option<&mut TsInterfaceDecl> {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(value))) => Some(value),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(value)) => match &mut value.decl {
+                Decl::TsInterface(value) => Some(value),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    let mut body = Vec::with_capacity(module.body.len());
+    let mut positions = HashMap::new();
+    for item in &module.body {
+        let Some(next) = interface(item) else {
+            body.push(item.clone());
+            continue;
+        };
+        let name = next.id.sym.to_string();
+        let Some(&index) = positions.get(&name) else {
+            positions.insert(name, body.len());
+            body.push(item.clone());
+            continue;
+        };
+        let current = interface_mut(&mut body[index]).unwrap();
+        let current_params = current.type_params.as_ref().map(|value| &value.params);
+        let next_params = next.type_params.as_ref().map(|value| &value.params);
+        if current_params.map(Vec::len) != next_params.map(Vec::len) {
+            return Err(format!(
+                "merged interface `{name}` must use the same type parameters"
+            ));
+        }
+        current.body.body.extend(next.body.body.iter().cloned());
+        current.extends.extend(next.extends.iter().cloned());
+    }
+    let mut merged = module.clone();
+    merged.body = body;
+    Ok(merged)
 }
 
 fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
@@ -54,6 +106,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl))) => {
                 let name = fn_decl.ident.sym.to_string();
                 let func = &fn_decl.function;
+                if func.is_generator {
+                    return Err(format!("generator function `{name}` is not supported yet"));
+                }
                 let is_extern = func.body.is_none();
                 if is_extern && func.is_async {
                     return Err(format!("ambient function `{name}` cannot be async"));
@@ -158,7 +213,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     None
                 };
                 let fixed_param_count = func.params.len() - usize::from(variadic.is_some());
-                let params = func
+                let mut params = func
                     .params
                     .iter()
                     .take(fixed_param_count)
@@ -173,7 +228,28 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .map(|p| p.ty)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let ret = if func.return_type.is_none() && !is_extern {
+                if let Some(this) = &func.this_param {
+                    let annotation = this.type_ann.as_ref().ok_or_else(|| {
+                        format!("function `{name}` needs a type annotation for `this`")
+                    })?;
+                    params.insert(
+                        0,
+                        resolve_ts_type_with_substitution(
+                            &annotation.type_ann,
+                            &type_substitution,
+                            &interfaces,
+                            &generic_interfaces,
+                            &mut Vec::new(),
+                        )?,
+                    );
+                }
+                let assertion_function = matches!(
+                    func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()),
+                    Some(TsType::TsTypePredicate(predicate)) if predicate.asserts
+                );
+                let ret = if assertion_function {
+                    HirType::Void
+                } else if func.return_type.is_none() && !is_extern {
                     HirType::Dynamic
                 } else {
                     lower_fn_return_type(
@@ -184,6 +260,41 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         &generic_interfaces,
                         &type_substitution,
                     )?
+                };
+                let type_predicate = match func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()) {
+                    Some(TsType::TsTypePredicate(predicate)) => {
+                        let swc_ecma_ast::TsThisTypeOrIdent::Ident(parameter) = &predicate.param_name else {
+                            return Err(format!("function `{name}` cannot predicate `this` yet"));
+                        };
+                        let index = func
+                            .params
+                            .iter()
+                            .position(|candidate| matches!(&candidate.pat, Pat::Ident(binding) if binding.id.sym == parameter.sym))
+                            .ok_or_else(|| format!("type predicate of `{name}` names an unknown parameter `{}`", parameter.sym))?;
+                        let target = predicate
+                            .type_ann
+                            .as_ref()
+                            .ok_or_else(|| format!("type predicate of `{name}` needs a target type"))?;
+                        let target = if let Some(substitutions) = &generic_substitutions {
+                            generic_type_pattern(
+                                &target.type_ann,
+                                substitutions,
+                                &interfaces,
+                                &generic_interfaces,
+                                &mut Vec::new(),
+                            )?
+                        } else {
+                            GenericTypePattern::Concrete(resolve_ts_type_with_substitution(
+                                &target.type_ann,
+                                &type_substitution,
+                                &interfaces,
+                                &generic_interfaces,
+                                &mut Vec::new(),
+                            )?)
+                        };
+                        Some((index, target, predicate.asserts))
+                    }
+                    _ => None,
                 };
                 let generates_call_wrappers = !is_extern && generic_type_params.is_empty();
                 // A plain (non-ambient, non-generic) function's trailing
@@ -219,7 +330,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         abstract_class_constructor: false,
                         ret,
                         is_async: func.is_async,
-                        uses_this: false,
+                        uses_this: func.this_param.is_some(),
                         is_extern,
                         source_range: (func.span.lo.0, func.span.hi.0),
                         generic_type_params,
@@ -235,6 +346,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             .collect(),
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                         generic_return_pattern,
+                        type_predicate,
                     },
                 );
                 if generates_call_wrappers {
@@ -312,6 +424,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_param_optional: Vec::new(),
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        type_predicate: None,
                     },
                 );
                 let mut initializer_params = vec![instance_type.clone()];
@@ -340,6 +453,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_param_optional: Vec::new(),
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        type_predicate: None,
                     },
                 );
                 if let Some(constructor) = constructors.first() {
@@ -489,6 +603,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_param_optional: Vec::new(),
                             generic_return_type: None,
                             generic_return_pattern: None,
+                            type_predicate: None,
                         },
                     );
                     let patterns = method
@@ -1024,6 +1139,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_param_optional: Vec::new(),
                         generic_return_type: None,
                         generic_return_pattern: None,
+                        type_predicate: None,
                     },
                 );
                 inherited_class_functions.push(HirFunction {
@@ -1054,6 +1170,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_param_optional: Vec::new(),
                             generic_return_type: None,
                             generic_return_pattern: None,
+                            type_predicate: None,
                         },
                     );
                     let parameter = "__thaw_inherited_static_value".to_string();

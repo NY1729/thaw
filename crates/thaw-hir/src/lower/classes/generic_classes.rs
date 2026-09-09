@@ -712,6 +712,12 @@ impl GenericClassUseCollector<'_> {
 }
 
 impl Visit for GenericClassUseCollector<'_> {
+    fn visit_class_method(&mut self, method: &swc_ecma_ast::ClassMethod) {
+        if method.function.type_params.is_none() {
+            method.visit_children_with(self);
+        }
+    }
+
     fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
         self.scopes.push(HashMap::new());
         for parameter in &function.params {
@@ -1087,6 +1093,12 @@ fn class_contains_unresolved_generic_type(
         found: bool,
     }
     impl Visit for Detector<'_> {
+        fn visit_class_method(&mut self, method: &swc_ecma_ast::ClassMethod) {
+            if method.function.type_params.is_none() {
+                method.visit_children_with(self);
+            }
+        }
+
         fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
             if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
                 if self.names.contains(name.sym.as_ref()) {
@@ -1246,7 +1258,16 @@ impl GenericClassReferenceRewriter<'_, '_> {
 }
 
 impl VisitMut for GenericClassReferenceRewriter<'_, '_> {
+    fn visit_mut_class_method(&mut self, method: &mut swc_ecma_ast::ClassMethod) {
+        if method.function.type_params.is_none() {
+            method.visit_mut_children_with(self);
+        }
+    }
+
     fn visit_mut_class(&mut self, class: &mut swc_ecma_ast::Class) {
+        if class.type_params.is_some() {
+            return;
+        }
         class.visit_mut_children_with(self);
         let arguments = class
             .super_type_params
@@ -1436,6 +1457,7 @@ fn specialize_generic_classes(
         })
         .collect::<HashSet<_>>();
     let mut static_owners = HashMap::new();
+    let mut existing_static_owners = HashSet::new();
     for (name, template) in &templates {
         if !template
             .declaration
@@ -1461,9 +1483,7 @@ fn specialize_generic_classes(
         }
         let owner = generic_class_static_owner(name);
         if declared_class_names.contains(&owner) {
-            return Err(format!(
-                "generic class `{name}` static owner `{owner}` conflicts with a class declaration"
-            ));
+            existing_static_owners.insert(owner.clone());
         }
         static_owners.insert(name.clone(), owner);
     }
@@ -1475,6 +1495,9 @@ fn specialize_generic_classes(
         let Some(owner) = static_owners.get(declaration.ident.sym.as_ref()) else {
             continue;
         };
+        if existing_static_owners.contains(owner) {
+            continue;
+        }
         let shared_base = declaration
             .class
             .super_class
@@ -1509,10 +1532,17 @@ fn specialize_generic_classes(
         declaration.class.is_abstract = false;
         declaration.class.body.retain(generic_class_static_member);
     }
-    specialized.body.retain(|item| {
-        !matches!(item, ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
-            if templates.contains_key(declaration.ident.sym.as_ref()))
-    });
+    for (name, template) in &templates {
+        if static_owners.contains_key(name)
+            && !existing_static_owners.contains(&generic_class_static_owner(name))
+        {
+            specialized
+                .body
+                .push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(
+                    template.declaration.clone(),
+                ))));
+        }
+    }
     let mut instances: Vec<(Symbol, Vec<HirType>, Symbol)> = Vec::new();
     let mut constructor_actuals = HashMap::new();
     let mut constructor_symbols = HashMap::new();
@@ -1629,7 +1659,8 @@ fn specialize_generic_classes(
             !matches!(
                 item,
                 ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
-                    if declaration.class.super_type_params.is_some()
+                    if declaration.class.type_params.is_some()
+                        || declaration.class.super_type_params.is_some()
                         || class_contains_unresolved_generic_type(&declaration.class, &names)
             )
         });
@@ -1677,11 +1708,31 @@ fn specialize_generic_classes(
     if let Some(error) = static_rewriter.error {
         return Err(error);
     }
+    if instances.is_empty() {
+        let has_pending_generic_methods = module.body.iter().any(|item| {
+            matches!(item, ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
+                if declaration.class.type_params.is_none()
+                    && declaration.class.body.iter().any(|member| {
+                        matches!(member, ClassMember::Method(method)
+                            if method.function.type_params.is_some())
+                    }))
+        });
+        if has_pending_generic_methods {
+            return Ok(None);
+        }
+        let mut cleaned = specialized;
+        cleaned.body.retain(|item| {
+            !matches!(item, ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
+                if declaration.class.type_params.is_some())
+        });
+        return Ok(Some(cleaned));
+    }
     if specialized.body.iter().any(|item| {
         matches!(
             item,
             ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
-                if class_contains_unresolved_generic_type(&declaration.class, &names)
+                if declaration.class.type_params.is_none()
+                    && class_contains_unresolved_generic_type(&declaration.class, &names)
         )
     }) {
         return Err(

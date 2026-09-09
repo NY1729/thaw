@@ -235,25 +235,48 @@ impl<'ctx> HirCompiler<'ctx> {
         let body_bb = self.context.append_basic_block(function, "whilebody");
         let after_bb = self.context.append_basic_block(function, "whileend");
 
+        let preheader_bb = self.builder.get_insert_block().unwrap();
+
         self.builder
             .build_unconditional_branch(header_bb)
             .map_err(|e| e.to_string())?;
 
-        self.builder.position_at_end(header_bb);
-        let cond_val = self.compile_expr(cond)?.into_int_value();
-        self.builder
-            .build_conditional_branch(cond_val, body_bb, after_bb)
-            .map_err(|e| e.to_string())?;
-
+        let variables_before_body = self.variables.clone();
+        let variable_types_before_body = self.variable_hir_types.clone();
+        let arena_variables_before_body = self.arena_variables.clone();
         self.builder.position_at_end(body_bb);
         self.loop_stack.push((header_bb, after_bb));
+        self.loop_promotion_scopes.push((
+            preheader_bb,
+            variables_before_body.keys().cloned().collect(),
+        ));
         let body_terminated = self.compile_block(body)?;
+        self.loop_promotion_scopes.pop();
         self.loop_stack.pop();
         if !body_terminated {
             self.builder
                 .build_unconditional_branch(header_bb)
                 .map_err(|e| e.to_string())?;
         }
+
+        let body_variables = std::mem::replace(&mut self.variables, variables_before_body.clone());
+        let body_arena_variables =
+            std::mem::replace(&mut self.arena_variables, arena_variables_before_body);
+        self.variable_hir_types = variable_types_before_body;
+        for name in variables_before_body.keys() {
+            if body_arena_variables.contains(name) {
+                if let Some(variable) = body_variables.get(name) {
+                    self.variables.insert(name.clone(), *variable);
+                    self.arena_variables.insert(name.clone());
+                }
+            }
+        }
+
+        self.builder.position_at_end(header_bb);
+        let cond_val = self.compile_expr(cond)?.into_int_value();
+        self.builder
+            .build_conditional_branch(cond_val, body_bb, after_bb)
+            .map_err(|e| e.to_string())?;
 
         self.builder.position_at_end(after_bb);
         // `after_bb` is always reachable (the condition can be false on the

@@ -961,6 +961,67 @@ fn contextually_types_a_callback_inside_an_object_argument() {
 }
 
 #[test]
+fn contextually_types_a_callback_in_an_interface_method_call() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        interface Source {
+            on(event: 'data', callback: (chunk: string) => void): void;
+        }
+        declare function source(): Source;
+        function main(): void {
+            source().on('data', (chunk) => console.log(chunk));
+            source().on('data', () => console.log('done'));
+        }
+        "#,
+    )
+    .unwrap();
+    lower_module(&module).unwrap();
+}
+
+#[test]
+fn contextually_types_a_callback_passed_to_a_dynamic_function() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        function invoke(subscribe: JsValue): void {
+            subscribe((value) => console.log(value));
+        }
+        function main(): void {}
+        "#,
+    )
+    .unwrap();
+    lower_module(&module).unwrap();
+}
+
+#[test]
+fn lowers_numeric_typed_array_constructors_through_the_dynamic_host() {
+    let program = lower(
+        r#"
+        function main(): void {
+            const bytes = new Uint8Array([1, 2, 255]);
+            bytes[1] = 4;
+            console.log(bytes.length, bytes[1]);
+        }
+        "#,
+    );
+    assert!(format!("{:?}", program.functions[0].body).contains("constructDynamicValue"));
+    assert!(format!("{:?}", program.functions[0].body).contains("setDynamicPropertyJson"));
+}
+
+#[test]
+fn lowers_abort_controller_through_the_dynamic_host() {
+    let program = lower(
+        r#"
+        function main(): void {
+            const controller = new AbortController();
+            controller.abort("stop");
+            console.log(controller.signal.aborted);
+        }
+        "#,
+    );
+    assert!(format!("{:?}", program.functions[0].body).contains("constructDynamicValue"));
+}
+
+#[test]
 fn lowers_json_type_annotation() {
     let program = lower(
         r#"function wrap(args: Json): Json {

@@ -1,4 +1,71 @@
 #[test]
+fn preserves_local_function_overloads_while_renaming_modules() {
+    let dir = std::env::temp_dir().join(format!("thaw overload module {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"
+        function label(value: number): string;
+        function label(value: string): string;
+        function label(value: number | string): string {
+            return typeof value === "number" ? "n:" + String(value) : "s:" + value;
+        }
+        function main(): void { console.log(label(4), label("x")); }
+    "#;
+    std::fs::write(&entry, source).unwrap();
+    let module = module_graph::bundle(
+        &entry,
+        source,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    thaw_hir::lower_module(&module).unwrap();
+}
+
+#[test]
+fn create_require_literal_calls_are_external_dependencies() {
+    let dir = std::env::temp_dir().join(format!("thaw create require {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url); const path = require('node:path');";
+    std::fs::write(&entry, source).unwrap();
+    let dependencies = module_graph::external_specifiers(&entry, source).unwrap();
+    assert_eq!(
+        dependencies
+            .iter()
+            .map(|(specifier, _)| specifier.as_str())
+            .collect::<Vec<_>>(),
+        vec!["node:module", "node:path"]
+    );
+}
+
+#[test]
+fn preserves_interface_declarations_for_typescript_merging() {
+    let dir = std::env::temp_dir().join(format!("thaw interface merge {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"interface User { name: string }
+        interface User { age: number }
+        function main(): void {
+            const user: User = { name: "A", age: 1 };
+            console.log(user.name, user.age);
+        }"#;
+    std::fs::write(&entry, source).unwrap();
+    let module = module_graph::bundle(
+        &entry,
+        source,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    thaw_hir::lower_module(&module).unwrap();
+}
+
+#[test]
 fn builds_relative_typescript_module_graph_with_generics_and_aliases() {
     let dir = std::env::temp_dir().join(format!("thaw cli user modules {}", std::process::id()));
     std::fs::create_dir_all(dir.join("lib")).unwrap();

@@ -43,6 +43,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use base64::Engine as _;
+use cbc::cipher::{
+    block_padding::{NoPadding, Pkcs7},
+    BlockDecryptMut, BlockEncryptMut, KeyIvInit,
+};
 use rquickjs::function::Args;
 #[cfg(feature = "wasm")]
 use rquickjs::Persistent;

@@ -2,10 +2,17 @@
 fn rewrite_external_class_methods(
     source: &str,
     classes: &[ClassConstructorRewrite],
-    methods: &[ClassMethodRewrite],
+    methods: &[TestClassMethodRewrite],
 ) -> Result<String, String> {
+    let methods = methods
+        .iter()
+        .cloned()
+        .map(|(class, method, helper, arity, callback, params)| {
+            (class, method, helper, arity, callback, params, None)
+        })
+        .collect::<Vec<_>>();
     rewrite_external_class_methods_with_static(
-        source, classes, methods, &[], &[], &[], &[], &[], &[], &[],
+        source, classes, &methods, &[], &[], &[], &[], &[], &[], &[],
         &[],
     )
 }
@@ -38,8 +45,8 @@ fn rewrite_external_class_methods_with_static(
     use thaw_parser::ast::{
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
         Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
-        Lit, MemberProp, NewExpr, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget,
-        Function, Stmt, SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind,
+        Function, Lit, MemberProp, NewExpr, Pat, Prop, PropName, PropOrSpread,
+        ReturnStmt, SimpleAssignTarget, Stmt, SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind,
         TsLit, TsType, TsTypeAliasDecl, TsTypeElement, TsTypeOperatorOp,
         TsUnionOrIntersectionType, UnaryOp, VarDeclarator, WhileStmt,
     };
@@ -119,6 +126,7 @@ fn rewrite_external_class_methods_with_static(
         expression: &Expr,
         classes: &[ClassConstructorRewrite],
         factories: &[FactoryClassRewrite],
+        methods: &[ClassMethodRewrite],
         variables: &std::collections::HashMap<String, String>,
     ) -> Option<String> {
         match expression {
@@ -127,13 +135,37 @@ fn rewrite_external_class_methods_with_static(
                 .map(|(root, path)| instance_path_key(&root, &path))
                 .and_then(|key| variables.get(&key).cloned()),
             Expr::Paren(parenthesized) => {
-                source_instance_class(&parenthesized.expr, classes, factories, variables)
+                source_instance_class(&parenthesized.expr, classes, factories, methods, variables)
             }
             Expr::TsAs(assertion) => {
-                source_instance_class(&assertion.expr, classes, factories, variables)
+                source_instance_class(&assertion.expr, classes, factories, methods, variables)
             }
             Expr::TsTypeAssertion(assertion) => {
-                source_instance_class(&assertion.expr, classes, factories, variables)
+                source_instance_class(&assertion.expr, classes, factories, methods, variables)
+            }
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else {
+                    return None;
+                };
+                let Expr::Member(member) = callee.as_ref() else {
+                    return factory_call_class(expression, factories).map(str::to_owned);
+                };
+                let method = member_property_name(&member.prop)?;
+                let receiver = source_instance_class(
+                    &member.obj,
+                    classes,
+                    factories,
+                    methods,
+                    variables,
+                )?;
+                methods
+                    .iter()
+                    .find(|candidate| {
+                        candidate.0 == receiver
+                            && candidate.1 == method
+                            && candidate.3 == call.args.len()
+                    })
+                    .and_then(|candidate| candidate.6.clone())
             }
             _ => constructed_class(expression, classes)
                 .or_else(|| factory_call_class(expression, factories))
@@ -209,6 +241,7 @@ fn rewrite_external_class_methods_with_static(
         prefix: &str,
         classes: &[ClassConstructorRewrite],
         factories: &[FactoryClassRewrite],
+        methods: &[ClassMethodRewrite],
         variables: &std::collections::HashMap<String, String>,
         additions: &mut Vec<(String, String)>,
     ) {
@@ -246,10 +279,14 @@ fn rewrite_external_class_methods_with_static(
                 _ => continue,
             };
             let key = format!("{prefix}\u{1f}{name}");
-            if let Some(class) = source_instance_class(value, classes, factories, variables) {
+            if let Some(class) =
+                source_instance_class(value, classes, factories, methods, variables)
+            {
                 additions.push((key.clone(), class));
             }
-            collect_object_instance_classes(value, &key, classes, factories, variables, additions);
+            collect_object_instance_classes(
+                value, &key, classes, factories, methods, variables, additions,
+            );
         }
     }
 
@@ -351,6 +388,20 @@ fn rewrite_external_class_methods_with_static(
                                 return Some(thaw_hir::HirType::Object(Vec::new()));
                             };
                             (identifier.sym.to_string(), value_type)
+                        }
+                        Prop::Method(method) => {
+                            let name = match &method.key {
+                                PropName::Ident(identifier) => identifier.sym.to_string(),
+                                PropName::Str(value) => value.value.to_string_lossy().into_owned(),
+                                PropName::Computed(computed) => match computed.expr.as_ref() {
+                                    Expr::Lit(Lit::Str(value)) => {
+                                        value.value.to_string_lossy().into_owned()
+                                    }
+                                    _ => return Some(thaw_hir::HirType::Object(Vec::new())),
+                                },
+                                _ => return Some(thaw_hir::HirType::Object(Vec::new())),
+                            };
+                            (name, thaw_hir::HirType::Dynamic)
                         }
                         _ => return Some(thaw_hir::HirType::Object(Vec::new())),
                     };
@@ -1418,6 +1469,10 @@ fn rewrite_external_class_methods_with_static(
                 for (name, declared_type) in declared {
                     let (_, actual_type) =
                         actual.iter().find(|(candidate, _)| candidate == name)?;
+                    if matches!(actual_type, thaw_hir::HirType::Dynamic) {
+                        score = score.saturating_add(1);
+                        continue;
+                    }
                     score = score.saturating_add(overload_type_score(declared_type, actual_type)?);
                 }
                 Some(score)
@@ -1970,9 +2025,23 @@ fn rewrite_external_class_methods_with_static(
                     initializer,
                     self.classes,
                     self.factories,
+                    self.methods,
                     &self.variables,
                 ) {
                     self.variables.insert(binding.id.sym.to_string(), class);
+                    if binding.type_ann.is_none()
+                        && matches!(
+                            initializer.as_ref(),
+                            Expr::Call(call)
+                                if matches!(&call.callee, Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Member(_)))
+                        )
+                    {
+                        self.edits.push((
+                            binding.id.span.hi.0,
+                            binding.id.span.hi.0,
+                            ": JsValue".into(),
+                        ));
+                    }
                 }
                 let mut property_classes = Vec::new();
                 collect_object_instance_classes(
@@ -1980,6 +2049,7 @@ fn rewrite_external_class_methods_with_static(
                     binding.id.sym.as_str(),
                     self.classes,
                     self.factories,
+                    self.methods,
                     &self.variables,
                     &mut property_classes,
                 );
@@ -2083,6 +2153,7 @@ fn rewrite_external_class_methods_with_static(
                                         argument_count,
                                         candidate_callback,
                                         _,
+                                        _,
                                     )| {
                                         candidate_class == class
                                             && candidate_method == method.sym.as_str()
@@ -2133,7 +2204,7 @@ fn rewrite_external_class_methods_with_static(
                                     }
                                 })
                                 .map(|(_, candidate)| candidate);
-                            if let Some((_, _, helper, _, _, _)) = selected {
+                            if let Some((_, _, helper, _, _, _, _)) = selected {
                                 let span = member.span();
                                 self.edits.push((span.lo.0, span.hi.0, helper.clone()));
                                 let insertion = if call.args.is_empty() {
@@ -2403,6 +2474,7 @@ fn rewrite_external_class_methods_with_static(
                         &assignment.right,
                         self.classes,
                         self.factories,
+                        self.methods,
                         &self.variables,
                     )
                 })

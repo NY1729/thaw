@@ -11,10 +11,25 @@ fn native_promise_state(promise: *const c_void) -> u8 {
     }
 }
 
+#[cfg(unix)]
+fn native_promise_mark_handled(promise: *mut c_void) {
+    unsafe {
+        let mark = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_promise_mark_handled".as_ptr());
+        if !mark.is_null() {
+            std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*mut c_void) -> u8>(mark)(
+                promise,
+            );
+        }
+    }
+}
+
 #[cfg(not(unix))]
 fn native_promise_state(_promise: *const c_void) -> u8 {
     0
 }
+
+#[cfg(not(unix))]
+fn native_promise_mark_handled(_promise: *mut c_void) {}
 
 /// Evaluates `source` in the (per-thread) global QuickJS context. Top-level
 /// function declarations become callable afterwards via `thaw_js_call`.
@@ -43,6 +58,59 @@ pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
             0
         }
     })
+}
+
+/// Emits a compiled uncaught exception through Node's process event surface.
+#[no_mangle]
+pub extern "C" fn thaw_js_emit_uncaught(message: *const c_char) -> u8 {
+    if message.is_null() {
+        return 0;
+    }
+    let raw = to_str(message);
+    let (name, message) = tagged_error_parts(&raw);
+    let name = json_escape_string(name);
+    let message = json_escape_string(message);
+    with_active_or_context(|ctx| {
+        ctx.eval::<bool, _>(format!(
+            "typeof process !== 'undefined' && (() => {{ const error = new Error({message}); error.name = {name}; process.emit('uncaughtExceptionMonitor', error, 'uncaughtException'); return process.emit('uncaughtException', error, 'uncaughtException'); }})()"
+        ))
+        .unwrap_or(false) as u8
+    })
+}
+
+/// Emits a native Promise rejection through Node's process event surface.
+#[no_mangle]
+pub extern "C" fn thaw_js_emit_unhandled_rejection(message: *const c_char) -> u8 {
+    if message.is_null() {
+        return 0;
+    }
+    let raw = to_str(message);
+    let (name, message) = tagged_error_parts(&raw);
+    let name = json_escape_string(name);
+    let message = json_escape_string(message);
+    with_active_or_context(|ctx| {
+        ctx.eval::<bool, _>(format!(
+            "typeof process !== 'undefined' && (() => {{ const error = new Error({message}); error.name = {name}; return process.emit('unhandledRejection', error, undefined); }})()"
+        ))
+        .unwrap_or(false) as u8
+    })
+}
+
+/// Emits Node's notification that a previously-unhandled Promise gained a handler.
+#[no_mangle]
+pub extern "C" fn thaw_js_emit_rejection_handled() {
+    with_active_or_context(|ctx| {
+        // ponytail: the Promise argument stays undefined until native Promises have JS wrappers.
+        let _ = ctx.eval::<bool, _>(
+            "typeof process !== 'undefined' && process.emit('rejectionHandled', undefined)",
+        );
+    });
+}
+
+fn tagged_error_parts(raw: &str) -> (&str, &str) {
+    raw.strip_prefix('\u{1}')
+        .and_then(|tagged| tagged.split_once('\u{1}'))
+        .unwrap_or(("Error", raw))
 }
 
 /// Real error message for a failed `eval`, extracted the same way
@@ -178,7 +246,7 @@ fn call_impl(ctx: Ctx<'_>, func_name: &str, args_json: &str) -> Result<String, S
         .globals()
         .get(func_name)
         .map_err(|_| format!("no such function `{func_name}` (was it loaded via loadScript?)"))?;
-    invoke_impl(ctx, target, func_name, args_json)
+    invoke_impl(ctx, target, func_name, args_json, false)
 }
 
 fn invoke_impl<'js>(
@@ -186,6 +254,7 @@ fn invoke_impl<'js>(
     target: Function<'js>,
     label: &str,
     args_json: &str,
+    preserve_error: bool,
 ) -> Result<String, String> {
     let to_string_err = |e: rquickjs::Error| e.to_string();
 
@@ -212,11 +281,12 @@ fn invoke_impl<'js>(
     }
 
     let result: Value = target.call_arg(call_args).map_err(|e| match e {
-        rquickjs::Error::Exception => format!("`{label}` threw: {}", describe_exception(&ctx)),
+        rquickjs::Error::Exception if preserve_error => describe_tagged_exception(&ctx),
+        rquickjs::Error::Exception => describe_host_exception(&ctx, label),
         e => format!("`{label}` threw: {e}"),
     })?;
 
-    resolve_value_impl(ctx, result, label)
+    resolve_value_impl(ctx, result, label, preserve_error)
 }
 
 /// Always passes `result` through the realm's Promise resolution
@@ -244,6 +314,7 @@ fn resolve_promise_value<'js>(
     ctx: &Ctx<'js>,
     result: Value<'js>,
     label: &str,
+    preserve_error: bool,
 ) -> Result<Value<'js>, String> {
     let to_string_err = |e: rquickjs::Error| e.to_string();
     let assimilate: Function = ctx
@@ -259,9 +330,7 @@ fn resolve_promise_value<'js>(
         e => format!("`{label}` could not resolve its result: {e}"),
     })?;
     finish_with_platform_events(ctx, &promise).map_err(|e| match e {
-        rquickjs::Error::Exception => {
-            format!("`{label}`'s promise rejected: {}", describe_exception(ctx))
-        }
+        rquickjs::Error::Exception => describe_promise_exception(ctx, label, preserve_error),
         e => format!("`{label}`'s promise rejected or stalled: {e}"),
     })
 }
@@ -270,8 +339,9 @@ fn resolve_value_impl<'js>(
     ctx: Ctx<'js>,
     result: Value<'js>,
     label: &str,
+    preserve_error: bool,
 ) -> Result<String, String> {
-    let result = resolve_promise_value(&ctx, result, label)?;
+    let result = resolve_promise_value(&ctx, result, label, preserve_error)?;
 
     // `ctx.json_stringify` (rather than calling the JS `JSON.stringify`
     // function directly and coercing its return value straight to a Rust
@@ -316,20 +386,7 @@ fn finish_with_platform_events<'js>(
         let next_delay: Function = ctx.globals().get("__thaw_next_timer_delay")?;
         let delay: i64 = next_delay.call(())?;
         if delay < 0 {
-            let active = ctx
-                .globals()
-                .get::<_, Function>("__thaw_worker_active")
-                .ok()
-                .and_then(|probe| probe.call::<_, bool>(()).ok())
-                .unwrap_or(false)
-                || ctx
-                    .globals()
-                    .get::<_, Function>("__thaw_child_process_active")
-                    .ok()
-                .and_then(|probe| probe.call::<_, bool>(()).ok())
-                .unwrap_or(false)
-                || napi_bridge_pending();
-            if active {
+            if platform_activity_pending(ctx) {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
@@ -343,8 +400,21 @@ fn finish_with_platform_events<'js>(
     }
 }
 
+fn platform_activity_pending(ctx: &Ctx<'_>) -> bool {
+    ["__thaw_worker_active", "__thaw_child_process_active"]
+        .into_iter()
+        .any(|name| {
+            ctx.globals()
+                .get::<_, Function>(name)
+                .ok()
+                .and_then(|probe| probe.call::<_, bool>(()).ok())
+                .unwrap_or(false)
+        })
+        || napi_bridge_pending()
+}
+
 #[no_mangle]
-pub extern "C" fn thaw_js_run_event_loop() {
+pub extern "C" fn thaw_js_run_event_loop() -> i32 {
     with_context(|ctx| loop {
         dispatch_pending_process_signal(&ctx);
         if let Ok(poll) = ctx
@@ -356,12 +426,69 @@ pub extern "C" fn thaw_js_run_event_loop() {
         poll_napi_bridge(&ctx);
         while ctx.execute_pending_job() {}
         let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
+            return process_exit_code(&ctx);
+        };
+        let Ok(delay) = next_delay.call::<_, i64>(()) else {
+            return process_exit_code(&ctx);
+        };
+        if delay < 0 {
+            if platform_activity_pending(&ctx) {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            return process_exit_code(&ctx);
+        }
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay as u64));
+        }
+        let Ok(run_due) = ctx.globals().get::<_, Function>("__thaw_run_due_timers") else {
+            return process_exit_code(&ctx);
+        };
+        if let Err(error) = run_due.call::<_, usize>(()) {
+            let message = if matches!(error, rquickjs::Error::Exception) {
+                describe_exception_with_stack(&ctx)
+            } else {
+                error.to_string()
+            };
+            eprintln!("{message}");
+            return 1;
+        }
+    })
+}
+
+/// Interleaves QuickJS platform work with a native Promise until it settles.
+#[no_mangle]
+pub extern "C" fn thaw_js_run_until_native_resolved(promise: *const c_void) {
+    with_context(|ctx| loop {
+        let state = {
+            let _active = ActiveNapiContext::enter(&ctx);
+            native_promise_state(promise)
+        };
+        if state != 0 {
+            return;
+        }
+        dispatch_pending_process_signal(&ctx);
+        if let Ok(poll) = ctx
+            .globals()
+            .get::<_, Function>("__thaw_poll_platform_events")
+        {
+            let _ = poll.call::<_, ()>(());
+        }
+        poll_napi_bridge(&ctx);
+        if ctx.execute_pending_job() {
+            continue;
+        }
+        let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
             return;
         };
         let Ok(delay) = next_delay.call::<_, i64>(()) else {
             return;
         };
         if delay < 0 {
+            if platform_activity_pending(&ctx) {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
             return;
         }
         if delay > 0 {
@@ -385,6 +512,11 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
         };
         retain_value(&ctx, value).unwrap_or(0)
     })
+}
+
+fn process_exit_code(ctx: &Ctx<'_>) -> i32 {
+    ctx.eval("process.exitCode == null ? 0 : Number(process.exitCode)")
+        .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -477,17 +609,43 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
             globals
                 .set("__thaw_value_handle_live", live)
                 .map_err(|error| error.to_string())?;
+            let refs = Array::new(ctx.clone()).map_err(|error| error.to_string())?;
+            globals
+                .set("__thaw_value_handle_refs", refs)
+                .map_err(|error| error.to_string())?;
             handles
         }
     };
+    let live: Array = globals
+        .get("__thaw_value_handle_live")
+        .map_err(|_| "JavaScript value handle liveness registry is empty".to_string())?;
+    let object: Object = globals.get("Object").map_err(|error| error.to_string())?;
+    let identical: Function = object.get("is").map_err(|error| error.to_string())?;
+    let refs: Array = globals
+        .get("__thaw_value_handle_refs")
+        .map_err(|_| "JavaScript value handle reference registry is empty".to_string())?;
+    // ponytail: linear identity lookup keeps the registry simple; replace it
+    // with a WeakMap only if live handle counts become measurably large.
+    for index in 0..handles.len() {
+        if live.get::<bool>(index).unwrap_or(false) {
+            let existing: Value = handles.get(index).map_err(|error| error.to_string())?;
+            if identical
+                .call::<_, bool>((existing, value.clone()))
+                .map_err(|error| error.to_string())?
+            {
+                let count = refs.get::<u64>(index).unwrap_or(1);
+                refs.set(index, count + 1)
+                    .map_err(|error| error.to_string())?;
+                return Ok(index as u64 + 1);
+            }
+        }
+    }
     let index = handles.len();
     handles
         .set(index, value)
         .map_err(|error| error.to_string())?;
-    let live: Array = globals
-        .get("__thaw_value_handle_live")
-        .map_err(|_| "JavaScript value handle liveness registry is empty".to_string())?;
     live.set(index, true).map_err(|error| error.to_string())?;
+    refs.set(index, 1u64).map_err(|error| error.to_string())?;
     Ok(index as u64 + 1)
 }
 
@@ -585,7 +743,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_result(
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         let value = unsafe { invoke_mixed(ctx.clone(), target, &args_json, handles)? };
-        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"))
+        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"), true)
     });
     match result {
         Ok(value) => ThawResult {
@@ -764,6 +922,7 @@ pub extern "C" fn thaw_js_register_native_callback(
             if finish == 0 {
                 to_str(result)
             } else {
+                native_promise_mark_handled(result.cast::<c_void>().cast_mut());
                 format!("promise:{:x}", result as usize)
             }
         })
@@ -855,7 +1014,17 @@ pub extern "C" fn thaw_js_register_native_callback(
              args[i] = {{ __thaw_js_handle_id__: globalThis.__thaw_retain_dynamic_value(args[i]) }}; \
              }} \
              }} \
-             var result = raw(JSON.stringify(args)); \
+             var result = raw(JSON.stringify(args, function(key, value) {{ \
+             if (value === undefined) return {{ $__thaw_napi_undefined$: true }}; \
+             return globalThis.__thaw_json_binary_replacer.call(this, key, value); \
+             }})); \
+             if (result.charCodeAt(0) === 2) {{ \
+             var rawError = result.slice(1); \
+             var separator = rawError.charCodeAt(0) === 1 ? rawError.indexOf('\\u0001', 1) : -1; \
+             var error = new Error(separator > 1 ? rawError.slice(separator + 1) : rawError); \
+             if (separator > 1) error.name = rawError.slice(1, separator); \
+             throw error; \
+             }} \
              if ({void_result} && result.slice(0, 8) !== 'promise:') return undefined; \
              if (result.slice(0, 8) !== 'promise:') return JSON.parse(result, globalThis.__thaw_json_date_reviver); \
              return new Promise(function(resolve, reject) {{ \
@@ -898,14 +1067,18 @@ pub extern "C" fn thaw_js_register_native_callback(
 pub extern "C" fn thaw_js_call_handle_handle_result(
     handle: u64,
     args_json: *const c_char,
+    defer_resolution: bool,
 ) -> ThawHandleResult {
     let args_json = to_str(args_json);
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         let result = invoke_raw(ctx.clone(), target, &args_json)?;
-        let result =
-            resolve_promise_value(&ctx, result, &format!("JavaScript value #{handle}"))?;
+        let result = if defer_resolution {
+            result
+        } else {
+            resolve_promise_value(&ctx, result, &format!("JavaScript value #{handle}"), true)?
+        };
         retain_value(&ctx, result)
     });
     match result {
@@ -930,7 +1103,7 @@ pub extern "C" fn thaw_js_call_handle_value_result(handle: u64, argument: u64) -
             rquickjs::Error::Exception => describe_exception(&ctx),
             error => error.to_string(),
         })?;
-        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"))
+        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"), true)
     });
     match result {
         Ok(text) => ThawResult {
@@ -957,12 +1130,20 @@ pub extern "C" fn thaw_js_release_handle(handle: u64) -> u8 {
         let Ok(live) = ctx.globals().get::<_, Array>("__thaw_value_handle_live") else {
             return 0;
         };
+        let Ok(refs) = ctx.globals().get::<_, Array>("__thaw_value_handle_refs") else {
+            return 0;
+        };
         if !live.get::<bool>(index).unwrap_or(false) {
             return 0;
+        }
+        let count = refs.get::<u64>(index).unwrap_or(1);
+        if count > 1 {
+            return u8::from(refs.set(index, count - 1).is_ok());
         }
         if live.set(index, false).is_err() {
             return 0;
         }
+        let _ = refs.set(index, 0u64);
         u8::from(handles.set(index, Value::new_undefined(ctx)).is_ok())
     })
 }
@@ -977,8 +1158,12 @@ pub extern "C" fn thaw_js_release_all_handles() -> u64 {
         let Ok(live) = Array::new(ctx.clone()) else {
             return 0;
         };
+        let Ok(refs) = Array::new(ctx.clone()) else {
+            return 0;
+        };
         if ctx.globals().set("__thaw_value_handles", handles).is_err()
             || ctx.globals().set("__thaw_value_handle_live", live).is_err()
+            || ctx.globals().set("__thaw_value_handle_refs", refs).is_err()
         {
             return 0;
         }
@@ -1042,6 +1227,49 @@ pub extern "C" fn thaw_js_set_property_result(
     }
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_js_set_property_json_result(
+    handle: u64,
+    name: *const c_char,
+    args_json: *const c_char,
+) -> ThawResult {
+    let name = to_str(name);
+    let args_json = to_str(args_json);
+    let result = with_active_or_context(|ctx| -> Result<String, String> {
+        let object = object_for_handle(&ctx, handle)?;
+        let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
+        let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+        let reviver: Function = ctx
+            .globals()
+            .get("__thaw_json_date_reviver")
+            .map_err(|error| error.to_string())?;
+        let args: Array = parse
+            .call((args_json.as_str(), reviver))
+            .map_err(|error| error.to_string())?;
+        let value: Value = args.get(0).map_err(|error| error.to_string())?;
+        let returned = ctx
+            .json_stringify(value.clone())
+            .map_err(|error| error.to_string())?
+            .map(|value| value.to_string().unwrap_or_default())
+            .unwrap_or_else(|| "null".into());
+        object.set(name.as_str(), value).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => error.to_string(),
+        })?;
+        Ok(returned)
+    });
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap_or_default().into_raw(),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawResult {
+            value: std::ptr::null(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
 fn invoke_method<'js>(
     ctx: &Ctx<'js>,
     handle: u64,
@@ -1079,7 +1307,7 @@ fn invoke_method<'js>(
             .map_err(|error| error.to_string())?;
     }
     method.call_arg(call_args).map_err(|error| match error {
-        rquickjs::Error::Exception => describe_exception(ctx),
+        rquickjs::Error::Exception => describe_tagged_exception(ctx),
         error => error.to_string(),
     })
 }
@@ -1094,7 +1322,7 @@ pub extern "C" fn thaw_js_call_method_result(
     let args_json = to_str(args_json);
     let result = with_active_or_context(|ctx| {
         let value = invoke_method(&ctx, handle, &name, &args_json)?;
-        resolve_value_impl(ctx, value, &format!("JavaScript method `{name}`"))
+        resolve_value_impl(ctx, value, &format!("JavaScript method `{name}`"), true)
     });
     match result {
         Ok(value) => ThawResult {
@@ -1139,7 +1367,12 @@ pub extern "C" fn thaw_js_call_method_handle_result(
         let value = if chain_intermediate {
             value
         } else {
-            resolve_promise_value(&ctx, value, &format!("JavaScript method `{name}`"))?
+            resolve_promise_value(
+                &ctx,
+                value,
+                &format!("JavaScript method `{name}`"),
+                true,
+            )?
         };
         retain_value(&ctx, value)
     });
@@ -1159,7 +1392,7 @@ pub extern "C" fn thaw_js_call_method_handle_result(
 pub extern "C" fn thaw_js_resolve_handle_result(handle: u64) -> ThawResult {
     let result = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
-        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"))
+        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"), true)
     });
     match result {
         Ok(value) => ThawResult {
@@ -1168,6 +1401,30 @@ pub extern "C" fn thaw_js_resolve_handle_result(handle: u64) -> ThawResult {
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_resolve_handle_handle_result(handle: u64) -> ThawHandleResult {
+    let result = with_active_or_context(|ctx| {
+        let value = value_for_handle(&ctx, handle)?;
+        let value = resolve_promise_value(
+            &ctx,
+            value,
+            &format!("JavaScript value #{handle}"),
+            true,
+        )?;
+        retain_value(&ctx, value)
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
             error: CString::new(error).unwrap_or_default().into_raw(),
         },
     }
@@ -1187,6 +1444,7 @@ pub extern "C" fn thaw_js_call_handle_result(handle: u64, args_json: *const c_ch
             target,
             &format!("JavaScript value #{handle}"),
             &args_json,
+            true,
         )
     });
     match result {
@@ -1217,6 +1475,73 @@ fn describe_exception(ctx: &Ctx<'_>) -> String {
         }
     }
     format!("{exc:?}")
+}
+
+fn describe_tagged_exception(ctx: &Ctx<'_>) -> String {
+    let exc = ctx.catch();
+    if let Some(obj) = exc.as_object() {
+        if let Ok(message) = obj.get::<_, String>("message") {
+            if let Ok(name) = obj.get::<_, String>("name") {
+                if name != "Error" {
+                    return format!("\u{1}{name}\u{1}{message}");
+                }
+            }
+            return message;
+        }
+    }
+    if let Some(value) = exc.as_string() {
+        if let Ok(value) = value.to_string() {
+            return value;
+        }
+    }
+    format!("{exc:?}")
+}
+
+fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> String {
+    let exc = ctx.catch();
+    if let Some(obj) = exc.as_object() {
+        if let Ok(message) = obj.get::<_, String>("message") {
+            let body = format!("`{label}` threw: {message}");
+            if let Ok(name) = obj.get::<_, String>("name") {
+                if name != "Error" {
+                    return format!("\u{1}{name}\u{1}{body}");
+                }
+            }
+            return body;
+        }
+    }
+    if let Some(value) = exc.as_string() {
+        if let Ok(value) = value.to_string() {
+            return format!("`{label}` threw: {value}");
+        }
+    }
+    format!("`{label}` threw: {exc:?}")
+}
+
+fn describe_promise_exception(ctx: &Ctx<'_>, label: &str, preserve_error: bool) -> String {
+    let exc = ctx.catch();
+    if let Some(obj) = exc.as_object() {
+        if let Ok(message) = obj.get::<_, String>("message") {
+            if let Ok(name) = obj.get::<_, String>("name") {
+                if preserve_error {
+                    return format!("\u{1}{name}\u{1}{message}");
+                }
+                if name != "Error" {
+                    return format!("\u{1}{name}\u{1}`{label}`'s promise rejected: {message}");
+                }
+            }
+            return format!("`{label}`'s promise rejected: {message}");
+        }
+    }
+    if let Some(value) = exc.as_string() {
+        if let Ok(value) = value.to_string() {
+            if preserve_error {
+                return value;
+            }
+            return format!("`{label}`'s promise rejected: {value}");
+        }
+    }
+    format!("`{label}`'s promise rejected: {exc:?}")
 }
 
 fn describe_exception_with_stack(ctx: &Ctx<'_>) -> String {

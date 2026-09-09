@@ -27,6 +27,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "JSON.stringify" => {
                 return self.compile_single_arg_call("thaw_json_stringify", args, "JSON.stringify")
             }
+            "__thaw_json_typeof" => {
+                return self.compile_single_arg_call("thaw_json_typeof", args, "JSON typeof")
+            }
             "__thaw_json_stringify_number_space" => {
                 let [value, space] = args else {
                     return Err("JSON.stringify expects value and number space".into());
@@ -248,6 +251,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     args,
                     "json_is_null",
                 );
+            }
+            "__thaw_json_is_undefined" => {
+                let [value] = args else {
+                    return Err("JSON undefined check expects one operand".into());
+                };
+                let value = self.compile_expr(value)?;
+                return self.compile_json_is_napi_undefined(value).map(Into::into);
             }
             "__thaw_json_object_is"
             | "__thaw_json_object_is_number"

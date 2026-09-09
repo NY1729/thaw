@@ -101,7 +101,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
             HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
             HirType::Bool => self.compile_json_as_bool_value(json),
-            HirType::Json | HirType::Dictionary(_) => Ok(json),
+            HirType::Json | HirType::Dictionary(_) | HirType::Undefined | HirType::Null => Ok(json),
             HirType::Optional(payload) => {
                 let absent = self.compile_json_is_napi_undefined(json)?;
                 let present = self
@@ -110,6 +110,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 self.compile_json_to_optional_value(json, payload, present)
             }
+            HirType::Nullable(payload) => self.compile_json_to_nullable_field(json, payload),
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(json, ty)
             }
@@ -155,6 +156,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map(Into::into)
                     .map_err(|error| error.to_string())
+            }
+            HirType::Function(params, ret) if **ret == HirType::Void => {
+                self.compile_js_void_callback_from_json(json, params)
+            }
+            HirType::CallableFunction(params, _, None, ret) if **ret == HirType::Void => {
+                self.compile_js_void_callback_from_json(json, params)
             }
             other => Err(format!("unsupported dynamic result value {other:?}")),
         }

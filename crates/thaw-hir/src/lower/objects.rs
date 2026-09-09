@@ -1,6 +1,6 @@
 fn callback_signature(ty: &HirType, supplied: usize) -> Option<(Vec<HirType>, HirType)> {
     match ty {
-        HirType::Function(params, ret) if supplied == usize::MAX || params.len() == supplied => {
+        HirType::Function(params, ret) if supplied == usize::MAX || supplied <= params.len() => {
             Some((params.clone(), ret.as_ref().clone()))
         }
         HirType::CallableFunction(params, optional, rest, ret) => {
@@ -29,6 +29,7 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         method: &swc_ecma_ast::MethodProp,
         receiver: HirType,
+        expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
         struct ReplaceThis<'a>(&'a str);
         impl VisitMut for ReplaceThis<'_> {
@@ -49,27 +50,27 @@ impl<'a> FnLowerer<'a> {
             function: method.function.clone(),
         };
         let mut arrow = function_expression_as_arrow(&expression)?;
-        let receiver_name = format!("__thaw_object_this_{}", self.next_binding);
-        self.next_binding += 1;
-        arrow.body.visit_mut_with(&mut ReplaceThis(&receiver_name));
-        arrow.params.insert(
-            0,
-            Pat::Ident(swc_ecma_ast::BindingIdent {
-                id: swc_ecma_ast::Ident::new_no_ctxt(
-                    receiver_name.into(),
-                    swc_common::DUMMY_SP,
-                ),
-                type_ann: None,
-            }),
-        );
-        let mut params = vec![receiver];
-        params.extend(
-            method
-                .function
-                .params
-                .iter()
-                .map(|parameter| {
-                    lower_param(
+        let uses_this = function_uses_this(&method.function);
+        let contextual = expected.and_then(|ty| callback_signature(ty, method.function.params.len()));
+        let mut params = Vec::new();
+        if uses_this {
+            let receiver_name = format!("__thaw_object_this_{}", self.next_binding);
+            self.next_binding += 1;
+            arrow.body.visit_mut_with(&mut ReplaceThis(&receiver_name));
+            arrow.params.insert(
+                0,
+                Pat::Ident(swc_ecma_ast::BindingIdent {
+                    id: swc_ecma_ast::Ident::new_no_ctxt(
+                        receiver_name.into(),
+                        swc_common::DUMMY_SP,
+                    ),
+                    type_ann: None,
+                }),
+            );
+            params.push(receiver);
+        }
+        params.extend(method.function.params.iter().enumerate().map(|(index, parameter)| {
+            lower_param(
                         &parameter.pat,
                         self.interfaces,
                         self.generic_interfaces,
@@ -77,9 +78,13 @@ impl<'a> FnLowerer<'a> {
                         &HashMap::new(),
                     )
                     .map(|parameter| parameter.ty)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+                    .or_else(|error| {
+                        contextual
+                            .as_ref()
+                            .and_then(|(params, _)| params.get(index).cloned())
+                            .ok_or(error)
+                    })
+        }).collect::<Result<Vec<_>, _>>()?);
         let expected_return = method
             .function
             .return_type
@@ -91,7 +96,8 @@ impl<'a> FnLowerer<'a> {
                     self.generic_interfaces,
                 )
             })
-            .transpose()?;
+            .transpose()?
+            .or_else(|| contextual.as_ref().map(|(_, ret)| ret.clone()));
         self.lower_contextual_arrow(&arrow, &params, expected_return.as_ref())
     }
 
@@ -99,9 +105,7 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         obj_lit: &SwcObjectLit,
     ) -> Result<HirExpr, String> {
-        let mut bindings = Vec::new();
-        let mut entries = Vec::new();
-        let mut element_type = None;
+        let mut properties = Vec::new();
         for (index, property) in obj_lit.props.iter().enumerate() {
             let PropOrSpread::Prop(property) = property else {
                 return Err("computed object literals cannot contain spreads yet".into());
@@ -128,24 +132,40 @@ impl<'a> FnLowerer<'a> {
                 _ => return Err("computed dictionaries support data properties only".into()),
             };
             let value_type = self.infer_expr_type(&value)?;
-            if element_type
-                .as_ref()
-                .is_some_and(|element| element != &value_type)
-            {
-                return Err("computed dictionary values must have one native type".into());
-            }
-            element_type.get_or_insert_with(|| value_type.clone());
+            properties.push((index, key, value, value_type));
+        }
+        let first_type = properties
+            .first()
+            .map(|(_, _, _, ty)| ty.clone())
+            .ok_or("computed dictionary cannot be empty")?;
+        let element = if properties.iter().all(|(_, _, _, ty)| ty == &first_type) {
+            first_type
+        } else {
+            HirType::Json
+        };
+        let mut bindings = Vec::new();
+        let mut entries = Vec::new();
+        for (index, key, value, value_type) in properties {
             let key_name = format!("__thaw_computed_key_{index}_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(key_name.clone(), HirType::Str);
             bindings.push((key_name.clone(), HirType::Str, key));
             let value_name = format!("__thaw_computed_value_{index}_{}", self.next_binding);
             self.next_binding += 1;
+            let value = if element == HirType::Json {
+                self.coerce_to_declared(&HirType::Json, value)?
+            } else {
+                value
+            };
+            let value_type = if element == HirType::Json {
+                HirType::Json
+            } else {
+                value_type
+            };
             self.scope.insert(value_name.clone(), value_type.clone());
             bindings.push((value_name.clone(), value_type, value));
             entries.push((key_name, value_name));
         }
-        let element = element_type.ok_or("computed dictionary cannot be empty")?;
         let dictionary = HirType::Dictionary(Box::new(element.clone()));
         let object_name = format!("__thaw_computed_object_{}", self.next_binding);
         self.next_binding += 1;
@@ -374,7 +394,12 @@ impl<'a> FnLowerer<'a> {
                                 ))))
                                 .collect::<Result<Vec<_>, String>>()?,
                         );
-                        vec![(name, self.lower_object_method(method, receiver)?)]
+                        let expected = expected_fields.and_then(|fields| {
+                            fields
+                                .iter()
+                                .find_map(|(field, ty)| (field == &name).then_some(ty))
+                        });
+                        vec![(name, self.lower_object_method(method, receiver, expected)?)]
                     }
                     _ => {
                         return Err(
@@ -383,6 +408,18 @@ impl<'a> FnLowerer<'a> {
                     }
                 },
             };
+            if matches!(property, PropOrSpread::Prop(_)) {
+                if let Some(expected) = expected_fields {
+                    if let Some((name, _)) = additions
+                        .iter()
+                        .find(|(name, _)| !expected.iter().any(|(field, _)| field == name))
+                    {
+                        return Err(format!(
+                            "object literal property `{name}` is not present in the declared type"
+                        ));
+                    }
+                }
+            }
             for (name, value) in additions {
                 if let Some((_, existing)) =
                     fields.iter_mut().find(|(existing, _)| existing == &name)

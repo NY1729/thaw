@@ -445,6 +445,26 @@ fn quickjs_errors_use_thaw_try_catch_and_finally() {
 }
 
 #[test]
+fn async_await_catches_a_typed_quickjs_promise_rejection() {
+    let source = r#"
+        declare function __thaw_typed_js_6c617465724173796e63(): Promise<string>;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.laterAsync = () => { const error = new Error('stopped'); error.name = 'AbortError'; return Promise.reject(error); };");
+            try {
+                await __thaw_typed_js_6c617465724173796e63();
+            } catch (error) {
+                console.log(error.name, error.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_async_rejection"),
+        "AbortError `laterAsync`'s promise rejected: stopped\n"
+    );
+}
+
+#[test]
 fn guards_top_level_initialization_against_reentry() {
     let source = r#"
         const answer = 42;
@@ -1028,4 +1048,3 @@ fn instanceof_guard_skips_the_as_cast_for_an_unrelated_thrown_value() {
         "not a MyError\nplain string\n"
     );
 }
-
