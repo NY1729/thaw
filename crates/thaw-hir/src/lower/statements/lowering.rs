@@ -132,11 +132,14 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             let completion = format!("__thaw_yield_delegate_return_{}", self.next_binding);
             self.next_binding += 1;
+            let returning = format!("__thaw_yield_delegate_returning_{}", self.next_binding);
+            self.next_binding += 1;
             let producer_array = HirType::Array(Box::new(value_type.clone()));
             self.scope.insert(producer.clone(), producer_array.clone());
             self.scope.insert(chunk.clone(), array_type.clone());
             self.scope
                 .insert(completion.clone(), return_channel.clone());
+            self.scope.insert(returning.clone(), HirType::Bool);
             let fallback = generator_placeholder(return_type).ok_or_else(|| {
                 format!("generator return type {return_type:?} has no default value")
             })?;
@@ -162,6 +165,11 @@ impl<'a> FnLowerer<'a> {
                     return_channel.clone(),
                     HirExpr::ArrayLit(Vec::new()),
                 ),
+                HirStmt::Let(
+                    returning.clone(),
+                    HirType::Bool,
+                    HirExpr::Lit(HirLit::Bool(false)),
+                ),
                 HirStmt::While(
                     HirExpr::Lit(HirLit::Bool(true)),
                     vec![
@@ -175,13 +183,29 @@ impl<'a> FnLowerer<'a> {
                                     value_type.clone(),
                                 )),
                                 vec![
-                                    HirExpr::Lit(HirLit::I64(0)),
-                                    HirExpr::Lit(HirLit::Str(String::new())),
-                                    input,
-                                    HirExpr::Var(completion),
+                                    HirExpr::Var("__thaw_generator_control".into()),
+                                    HirExpr::Var("__thaw_generator_error".into()),
+                                    input.clone(),
+                                    HirExpr::Var(completion.clone()),
                                 ],
                             ),
                         ),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var("__thaw_generator_control".into())),
+                                Box::new(HirExpr::Lit(HirLit::I64(1))),
+                            ),
+                            vec![HirStmt::Expr(HirExpr::Assign(
+                                returning.clone(),
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                            ))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Expr(HirExpr::Assign(
+                            "__thaw_generator_control".into(),
+                            Box::new(HirExpr::Lit(HirLit::I64(0))),
+                        )),
                         HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::EqEqEq,
@@ -190,7 +214,17 @@ impl<'a> FnLowerer<'a> {
                                 )))),
                                 Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                             ),
-                            vec![HirStmt::Break],
+                            vec![
+                                HirStmt::If(
+                                    HirExpr::Var(returning.clone()),
+                                    vec![HirStmt::Expr(HirExpr::Assign(
+                                        "__thaw_generator_control".into(),
+                                        Box::new(HirExpr::Lit(HirLit::I64(1))),
+                                    ))],
+                                    Vec::new(),
+                                ),
+                                HirStmt::Break,
+                            ],
                             Vec::new(),
                         ),
                         HirStmt::Expr(HirExpr::Assign(

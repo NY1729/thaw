@@ -1647,6 +1647,57 @@ fn generator_yield_delegate_forwards_next_values() {
 }
 
 #[test]
+fn generator_yield_delegate_forwards_throw() {
+    let source = r#"
+        function* inner(): Generator<number> {
+            try { yield 1; }
+            catch (error) { console.log(error); yield 2; }
+        }
+        function* outer(): Generator<number> {
+            yield* inner();
+            yield 3;
+        }
+        function main(): void {
+            const iterator = outer();
+            console.log(iterator.next().value);
+            console.log(iterator.throw("boom").value);
+            console.log(iterator.next().value);
+            console.log(iterator.next().done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_delegate_throw"),
+        "1\nboom\n2\n3\ntrue\n"
+    );
+}
+
+#[test]
+fn generator_yield_delegate_forwards_return() {
+    let source = r#"
+        let progress: number = 0;
+        function* inner(): Generator<number> {
+            try { yield 1; }
+            finally { progress += 1; }
+        }
+        function* outer(): Generator<number> {
+            try { yield* inner(); yield 99; }
+            finally { progress += 100; }
+        }
+        function main(): void {
+            const iterator = outer();
+            console.log(iterator.next().value, progress);
+            const stopped = iterator.return(9);
+            console.log(stopped.value, stopped.done, progress);
+            console.log(iterator.next().done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_delegate_return"),
+        "1 0\n9 true 101\ntrue 101\n"
+    );
+}
+
+#[test]
 fn compiles_generator_next_results() {
     let source = r#"
         function* values(): Generator<number> { yield 4; yield 7; }
