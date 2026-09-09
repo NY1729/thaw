@@ -87,6 +87,7 @@ impl<'a> FnLowerer<'a> {
         yield_expr: &swc_ecma_ast::YieldExpr,
         values: &str,
         element: &HirType,
+        input: &str,
     ) -> Result<GeneratorYieldEmission, String> {
         let value = yield_expr
             .arg
@@ -124,9 +125,7 @@ impl<'a> FnLowerer<'a> {
                     result.as_ref()
                 ));
             }
-            let input = generator_placeholder(input_type).ok_or_else(|| {
-                format!("generator input type {input_type:?} has no default value")
-            })?;
+            let input = self.coerce_to_declared(input_type, HirExpr::Var(input.into()))?;
             let producer = format!("__thaw_yield_delegate_{}", self.next_binding);
             self.next_binding += 1;
             let chunk = format!("__thaw_yield_delegate_chunk_{}", self.next_binding);
@@ -320,9 +319,7 @@ impl<'a> FnLowerer<'a> {
                         .cloned()
                         .ok_or_else(|| format!("unknown assignment target `{target}`"))?;
                             let (emission, delegated) = self.lower_generator_yield_emission(
-                                yield_expr,
-                                &values,
-                                &element,
+                                yield_expr, &values, &element, &input,
                             )?;
                             let resumed = self.coerce_to_declared(
                                 &target_type,
@@ -340,11 +337,12 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if let Expr::Yield(yield_expr) = expr_stmt.expr.as_ref() {
-                    let Some((values, element, _, _, _, _)) = self.generator_yields.clone() else {
+                    let Some((values, element, input, _, _, _)) = self.generator_yields.clone()
+                    else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
                     return self
-                        .lower_generator_yield_emission(yield_expr, &values, &element)
+                        .lower_generator_yield_emission(yield_expr, &values, &element, &input)
                         .map(|(statements, _)| statements);
                 }
                 let discarded_dynamic_call = |expr: &Expr| {

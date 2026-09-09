@@ -1624,6 +1624,29 @@ fn generator_yield_delegate_consumes_an_inner_generator_lazily() {
 }
 
 #[test]
+fn generator_yield_delegate_forwards_next_values() {
+    let source = r#"
+        function* inner(): Generator<number, void, number> {
+            const received: number = yield 1;
+            yield received * 2;
+        }
+        function* outer(): Generator<number, void, number> {
+            yield* inner();
+        }
+        function main(): void {
+            const iterator = outer();
+            console.log(iterator.next().value);
+            console.log(iterator.next(9).value);
+            console.log(iterator.next().done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_delegate_next_value"),
+        "1\n18\ntrue\n"
+    );
+}
+
+#[test]
 fn compiles_generator_next_results() {
     let source = r#"
         function* values(): Generator<number> { yield 4; yield 7; }
