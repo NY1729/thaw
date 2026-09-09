@@ -1189,13 +1189,21 @@ fn lower_function_statements(
         let HirType::Array(element) = generated.as_ref() else {
             unreachable!("generator functions lazily return arrays");
         };
-        debug_assert_eq!(params, &[HirType::I64, HirType::Str]);
+        debug_assert_eq!(params.len(), 3);
         let generated = generated.as_ref().clone();
         let values = "__thaw_generator_values".to_string();
         let control = "__thaw_generator_control".to_string();
         let error = "__thaw_generator_error".to_string();
+        let input = "__thaw_generator_input".to_string();
+        let input_type = params[2].clone();
         lowerer.scope.insert(values.clone(), generated.clone());
-        lowerer.generator_yields = Some((values.clone(), element.as_ref().clone()));
+        lowerer.scope.insert(input.clone(), input_type.clone());
+        lowerer.generator_yields = Some((
+            values.clone(),
+            element.as_ref().clone(),
+            input.clone(),
+            input_type.clone(),
+        ));
         body.push(HirStmt::Let(
             values.clone(),
             generated.clone(),
@@ -1257,6 +1265,7 @@ fn lower_function_statements(
         let captures = referenced
             .into_iter()
             .filter(|name| name != &control)
+            .filter(|name| name != &input)
             .filter_map(|name| {
                 lowerer
                     .scope
@@ -1275,6 +1284,10 @@ fn lower_function_statements(
                 HirParam {
                     name: error,
                     ty: HirType::Str,
+                },
+                HirParam {
+                    name: input,
+                    ty: input_type,
                 },
             ],
             generated,
@@ -1362,8 +1375,23 @@ fn lower_generator_return_type(
         .as_ref()
         .and_then(|parameters| parameters.params.first())
         .ok_or_else(|| format!("generator function `{fn_name}` needs a yield type"))?;
+    let input = reference
+        .type_params
+        .as_ref()
+        .and_then(|parameters| parameters.params.get(2))
+        .map(|input| {
+            resolve_ts_type_with_substitution(
+                input,
+                type_substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            )
+        })
+        .transpose()?
+        .unwrap_or(HirType::Undefined);
     Ok(HirType::Function(
-        vec![HirType::I64, HirType::Str],
+        vec![HirType::I64, HirType::Str, input],
         Box::new(HirType::Array(Box::new(
             resolve_ts_type_with_substitution(
                 yielded,

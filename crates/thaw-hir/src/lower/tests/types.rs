@@ -490,7 +490,7 @@ fn lowers_generator_to_a_lazy_array_producer() {
     assert_eq!(
         values.ret,
         HirType::Function(
-            vec![HirType::I64, HirType::Str],
+            vec![HirType::I64, HirType::Str, HirType::Undefined],
             Box::new(HirType::Array(Box::new(HirType::F64)))
         )
     );

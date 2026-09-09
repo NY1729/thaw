@@ -35,6 +35,43 @@ impl<'a> FnLowerer<'a> {
                     .init
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
+                if let Expr::Yield(yield_expr) = init {
+                    let Some((values, element, input, input_type)) =
+                        self.generator_yields.clone()
+                    else {
+                        return Err("`yield` is only valid inside a generator function".into());
+                    };
+                    if yield_expr.delegate {
+                        return Err("a delegated `yield*` cannot initialize a variable yet".into());
+                    }
+                    let yielded = yield_expr
+                        .arg
+                        .as_ref()
+                        .ok_or("generator `yield` requires a value")?;
+                    let yielded =
+                        self.lower_expr_with_expected_type(yielded, Some(&element))?;
+                    let yielded = self.coerce_to_declared(&element, yielded)?;
+                    let declared = binding
+                        .type_ann
+                        .as_ref()
+                        .map(|annotation| {
+                            lower_ts_type(
+                                &annotation.type_ann,
+                                self.interfaces,
+                                self.generic_interfaces,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or_else(|| input_type.clone());
+                    let resumed = self.coerce_to_declared(&declared, HirExpr::Var(input))?;
+                    let hir_name = self.bind_local(&name, declared.clone());
+                    statements.push(HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![HirExpr::Var(values), yielded],
+                    )));
+                    statements.push(HirStmt::Let(hir_name, declared, resumed));
+                    continue;
+                }
                 let correlated_alias_source = self.expression_identifier_alias_source(init);
                 if let (Expr::Arrow(arrow), Some(annotation)) = (init, binding.type_ann.as_ref()) {
                     if arrow.type_params.is_some() {
