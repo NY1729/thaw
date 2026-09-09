@@ -85,29 +85,104 @@ impl<'a> FnLowerer<'a> {
         yield_expr: &swc_ecma_ast::YieldExpr,
         values: &str,
         element: &HirType,
-    ) -> Result<HirStmt, String> {
+    ) -> Result<Vec<HirStmt>, String> {
         let value = yield_expr
             .arg
             .as_ref()
             .ok_or("generator `yield` requires a value")?;
         if yield_expr.delegate {
             let array_type = HirType::Array(Box::new(element.clone()));
-            let value = self.lower_expr_with_expected_type(value, Some(&array_type))?;
-            let value = self.coerce_to_declared(&array_type, value)?;
-            return Ok(HirStmt::Expr(HirExpr::Assign(
-                values.into(),
-                Box::new(HirExpr::ArrayConcat(
-                    vec![HirExpr::Var(values.into()), value],
-                    element.clone(),
-                )),
-            )));
+            let value = self.lower_expr(value)?;
+            let value_type = self.infer_expr_type(&value)?;
+            if value_type == array_type {
+                return Ok(vec![HirStmt::Expr(HirExpr::Assign(
+                    values.into(),
+                    Box::new(HirExpr::ArrayConcat(
+                        vec![HirExpr::Var(values.into()), value],
+                        element.clone(),
+                    )),
+                ))]);
+            }
+            let HirType::Function(params, result) = &value_type else {
+                return Err(format!(
+                    "`yield*` requires an array or generator, got {value_type:?}"
+                ));
+            };
+            let [HirType::I64, HirType::Str, input_type] = params.as_slice() else {
+                return Err(format!("`yield*` requires a generator, got {value_type:?}"));
+            };
+            if result.as_ref() != &array_type {
+                return Err(format!(
+                    "delegated generator yields {:?}, expected {element:?}",
+                    result.as_ref()
+                ));
+            }
+            let input = generator_placeholder(input_type).ok_or_else(|| {
+                format!("generator input type {input_type:?} has no default value")
+            })?;
+            let producer = format!("__thaw_yield_delegate_{}", self.next_binding);
+            self.next_binding += 1;
+            let chunk = format!("__thaw_yield_delegate_chunk_{}", self.next_binding);
+            self.next_binding += 1;
+            let producer_array = HirType::Array(Box::new(value_type.clone()));
+            self.scope.insert(producer.clone(), producer_array.clone());
+            self.scope.insert(chunk.clone(), array_type.clone());
+            return Ok(vec![
+                HirStmt::Let(producer.clone(), producer_array, HirExpr::ArrayLit(vec![value])),
+                HirStmt::While(
+                    HirExpr::Lit(HirLit::Bool(true)),
+                    vec![
+                        HirStmt::Let(
+                            chunk.clone(),
+                            array_type,
+                            HirExpr::Call(
+                                Box::new(HirExpr::TypedIndex(
+                                    Box::new(HirExpr::Var(producer)),
+                                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                    value_type,
+                                )),
+                                vec![
+                                    HirExpr::Lit(HirLit::I64(0)),
+                                    HirExpr::Lit(HirLit::Str(String::new())),
+                                    input,
+                                ],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                                    chunk.clone(),
+                                )))),
+                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            ),
+                            vec![HirStmt::Break],
+                            Vec::new(),
+                        ),
+                        HirStmt::Expr(HirExpr::Assign(
+                            values.into(),
+                            Box::new(HirExpr::ArrayConcat(
+                                vec![
+                                    HirExpr::Var(values.into()),
+                                    HirExpr::Var(chunk.clone()),
+                                ],
+                                element.clone(),
+                            )),
+                        )),
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                            vec![HirExpr::Var(chunk)],
+                        )),
+                    ],
+                ),
+            ]);
         }
         let value = self.lower_expr_with_expected_type(value, Some(element))?;
         let value = self.coerce_to_declared(element, value)?;
-        Ok(HirStmt::Expr(HirExpr::Call(
+        Ok(vec![HirStmt::Expr(HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_array_push".into())),
             vec![HirExpr::Var(values.into()), value],
-        )))
+        ))])
     }
 
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
@@ -211,10 +286,12 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Var(input)
                                 },
                             )?;
-                            return Ok(vec![
-                                emission,
-                                HirStmt::Expr(HirExpr::Assign(target, Box::new(resumed))),
-                            ]);
+                            let mut statements = emission;
+                            statements.push(HirStmt::Expr(HirExpr::Assign(
+                                target,
+                                Box::new(resumed),
+                            )));
+                            return Ok(statements);
                     }
                     }
                 }
@@ -222,11 +299,11 @@ impl<'a> FnLowerer<'a> {
                     let Some((values, element, _, _)) = self.generator_yields.clone() else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
-                    return Ok(vec![self.lower_generator_yield_emission(
+                    return self.lower_generator_yield_emission(
                         yield_expr,
                         &values,
                         &element,
-                    )?]);
+                    );
                 }
                 let discarded_dynamic_call = |expr: &Expr| {
                     matches!(
