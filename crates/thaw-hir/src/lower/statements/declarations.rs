@@ -41,16 +41,8 @@ impl<'a> FnLowerer<'a> {
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
-                    if yield_expr.delegate {
-                        return Err("a delegated `yield*` cannot initialize a variable yet".into());
-                    }
-                    let yielded = yield_expr
-                        .arg
-                        .as_ref()
-                        .ok_or("generator `yield` requires a value")?;
-                    let yielded =
-                        self.lower_expr_with_expected_type(yielded, Some(&element))?;
-                    let yielded = self.coerce_to_declared(&element, yielded)?;
+                    let emission =
+                        self.lower_generator_yield_emission(yield_expr, &values, &element)?;
                     let declared = binding
                         .type_ann
                         .as_ref()
@@ -62,13 +54,23 @@ impl<'a> FnLowerer<'a> {
                             )
                         })
                         .transpose()?
-                        .unwrap_or_else(|| input_type.clone());
-                    let resumed = self.coerce_to_declared(&declared, HirExpr::Var(input))?;
+                        .unwrap_or_else(|| {
+                            if yield_expr.delegate {
+                                HirType::Undefined
+                            } else {
+                                input_type.clone()
+                            }
+                        });
+                    let resumed = if yield_expr.delegate {
+                        self.coerce_to_declared(
+                            &declared,
+                            HirExpr::Lit(HirLit::Undefined),
+                        )?
+                    } else {
+                        self.coerce_to_declared(&declared, HirExpr::Var(input))?
+                    };
                     let hir_name = self.bind_local(&name, declared.clone());
-                    statements.push(HirStmt::Expr(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_array_push".into())),
-                        vec![HirExpr::Var(values), yielded],
-                    )));
+                    statements.push(emission);
                     statements.push(HirStmt::Let(hir_name, declared, resumed));
                     continue;
                 }

@@ -1573,6 +1573,28 @@ fn suspends_generator_delegation_until_its_batch_is_consumed() {
 }
 
 #[test]
+fn array_yield_delegate_assigns_undefined_after_completion() {
+    let source = r#"
+        function* values(): Generator<number> {
+            const completion = yield* [1, 2];
+            console.log(completion === undefined);
+            yield 3;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value);
+            console.log(iterator.next().value);
+            console.log(iterator.next().value);
+            console.log(iterator.next().done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_yield_delegate_completion"),
+        "1\n2\ntrue\n3\ntrue\n"
+    );
+}
+
+#[test]
 fn compiles_generator_next_results() {
     let source = r#"
         function* values(): Generator<number> { yield 4; yield 7; }

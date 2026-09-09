@@ -80,6 +80,36 @@ impl<'a> FnLowerer<'a> {
         self.truthiness_expr(cond, &ty)
     }
 
+    fn lower_generator_yield_emission(
+        &mut self,
+        yield_expr: &swc_ecma_ast::YieldExpr,
+        values: &str,
+        element: &HirType,
+    ) -> Result<HirStmt, String> {
+        let value = yield_expr
+            .arg
+            .as_ref()
+            .ok_or("generator `yield` requires a value")?;
+        if yield_expr.delegate {
+            let array_type = HirType::Array(Box::new(element.clone()));
+            let value = self.lower_expr_with_expected_type(value, Some(&array_type))?;
+            let value = self.coerce_to_declared(&array_type, value)?;
+            return Ok(HirStmt::Expr(HirExpr::Assign(
+                values.into(),
+                Box::new(HirExpr::ArrayConcat(
+                    vec![HirExpr::Var(values.into()), value],
+                    element.clone(),
+                )),
+            )));
+        }
+        let value = self.lower_expr_with_expected_type(value, Some(element))?;
+        let value = self.coerce_to_declared(element, value)?;
+        Ok(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_push".into())),
+            vec![HirExpr::Var(values.into()), value],
+        )))
+    }
+
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         match stmt {
             // Empty statements have no runtime effect. `debugger` only has an
@@ -155,9 +185,6 @@ impl<'a> FnLowerer<'a> {
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
-                    if yield_expr.delegate {
-                        return Err("a delegated `yield*` cannot be assigned yet".into());
-                    }
                     let AssignTarget::Simple(SimpleAssignTarget::Ident(binding)) = &assign.left
                     else {
                         return Err("a `yield` result currently requires a variable target".into());
@@ -171,22 +198,23 @@ impl<'a> FnLowerer<'a> {
                         .get(&target)
                         .cloned()
                         .ok_or_else(|| format!("unknown assignment target `{target}`"))?;
-                    let yielded = yield_expr
-                        .arg
-                        .as_ref()
-                        .ok_or("generator `yield` requires a value")?;
-                    let yielded =
-                        self.lower_expr_with_expected_type(yielded, Some(&element))?;
-                    let yielded = self.coerce_to_declared(&element, yielded)?;
-                    let resumed =
-                        self.coerce_to_declared(&target_type, HirExpr::Var(input))?;
-                        return Ok(vec![
-                            HirStmt::Expr(HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_array_push".into())),
-                                vec![HirExpr::Var(values), yielded],
-                            )),
-                            HirStmt::Expr(HirExpr::Assign(target, Box::new(resumed))),
-                        ]);
+                            let emission = self.lower_generator_yield_emission(
+                                yield_expr,
+                                &values,
+                                &element,
+                            )?;
+                            let resumed = self.coerce_to_declared(
+                                &target_type,
+                                if yield_expr.delegate {
+                                    HirExpr::Lit(HirLit::Undefined)
+                                } else {
+                                    HirExpr::Var(input)
+                                },
+                            )?;
+                            return Ok(vec![
+                                emission,
+                                HirStmt::Expr(HirExpr::Assign(target, Box::new(resumed))),
+                            ]);
                     }
                     }
                 }
@@ -194,28 +222,11 @@ impl<'a> FnLowerer<'a> {
                     let Some((values, element, _, _)) = self.generator_yields.clone() else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
-                    let value = yield_expr
-                        .arg
-                        .as_ref()
-                        .ok_or("generator `yield` requires a value")?;
-                    if yield_expr.delegate {
-                        let array_type = HirType::Array(Box::new(element.clone()));
-                        let value = self.lower_expr_with_expected_type(value, Some(&array_type))?;
-                        let value = self.coerce_to_declared(&array_type, value)?;
-                        return Ok(vec![HirStmt::Expr(HirExpr::Assign(
-                            values.clone(),
-                            Box::new(HirExpr::ArrayConcat(
-                                vec![HirExpr::Var(values), value],
-                                element,
-                            )),
-                        ))]);
-                    }
-                    let value = self.lower_expr_with_expected_type(value, Some(&element))?;
-                    let value = self.coerce_to_declared(&element, value)?;
-                    return Ok(vec![HirStmt::Expr(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_array_push".into())),
-                        vec![HirExpr::Var(values), value],
-                    ))]);
+                    return Ok(vec![self.lower_generator_yield_emission(
+                        yield_expr,
+                        &values,
+                        &element,
+                    )?]);
                 }
                 let discarded_dynamic_call = |expr: &Expr| {
                     matches!(

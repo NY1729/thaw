@@ -361,6 +361,11 @@
       "source": "let progress: number = 0; function* values(): Generator<number> { yield* [1, 2]; progress += 10; } function main(): void { const iterator = values(); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().done, progress); }"
     },
     {
+      "name": "array generator delegation completion",
+      "expect": "matched",
+      "source": "function* values(): Generator<number> { const completion = yield* [1, 2]; console.log(completion === undefined); yield 3; } function main(): void { const iterator = values(); console.log(iterator.next().value); console.log(iterator.next().value); console.log(iterator.next().value); console.log(iterator.next().done); }"
+    },
+    {
       "name": "generator next results",
       "expect": "matched",
       "source": "function* values(): Generator<number> { yield 4; yield 7; } function main(): void { const iterator = values(); const first = iterator.next(); const second = iterator.next(); const end = iterator.next(); console.log(first.value, first.done); console.log(second.value, second.done); console.log(end.value, end.done); }"
