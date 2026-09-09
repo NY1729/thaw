@@ -11,6 +11,7 @@ struct GeneratorBlock {
     term: GeneratorTerm,
     handler: Option<GeneratorHandler>,
     cancel_target: usize,
+    forwards_control: bool,
 }
 
 #[derive(Clone)]
@@ -49,6 +50,7 @@ impl<'a> GeneratorStateMachine<'a> {
             term,
             handler,
             cancel_target,
+            forwards_control: false,
         });
         id
     }
@@ -127,6 +129,10 @@ impl<'a> GeneratorStateMachine<'a> {
                 ))
             }
             HirStmt::While(condition, body) => {
+                let first_block = self.blocks.len();
+                let forwards_control = body.iter().any(|statement| {
+                    matches!(statement, HirStmt::Let(name, _, _) if name.starts_with("__thaw_yield_delegate_chunk_"))
+                });
                 let condition_id = self.block(
                     Vec::new(),
                     GeneratorTerm::Done,
@@ -143,6 +149,11 @@ impl<'a> GeneratorStateMachine<'a> {
                 )?;
                 self.blocks[condition_id].term =
                     GeneratorTerm::Branch(condition.clone(), body_entry, continuation);
+                if forwards_control {
+                    for block in &mut self.blocks[first_block..] {
+                        block.forwards_control = true;
+                    }
+                }
                 Some(condition_id)
             }
             HirStmt::Break => Some(self.block(
@@ -295,10 +306,12 @@ fn lower_generator_state_machine(
                 selected.push(HirStmt::Return(Some(HirExpr::Var(values.into()))));
             }
         }
-        selected.insert(
-            0,
-            generator_control_transition(control, error, values, state, cancel_target),
-        );
+        if !block.forwards_control {
+            selected.insert(
+                0,
+                generator_control_transition(control, error, values, state, cancel_target),
+            );
+        }
         if let Some(handler) = block.handler {
             let caught = format!("__thaw_generator_caught_{id}");
             selected = vec![HirStmt::Try(
