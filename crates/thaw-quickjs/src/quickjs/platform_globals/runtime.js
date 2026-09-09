@@ -194,13 +194,13 @@
     unref() { return this; }
   });
   Object.assign(globalThis.process, {
-    argv: globalThis.process.argv || [],
+    argv: globalThis.process.argv || JSON.parse(globalThis.__thaw_host_argv_json || '[]'),
     env: Object.assign({}, JSON.parse(globalThis.__thaw_host_env_json || '{}'),
                        globalThis.process.env || {}),
     platform: globalThis.process.platform || hostInfo.platform || 'linux',
     arch: globalThis.process.arch || hostInfo.arch || '',
     version: globalThis.process.version || '',
-    execPath: globalThis.process.execPath || 'node',
+    execPath: globalThis.process.execPath || JSON.parse(globalThis.__thaw_host_argv_json || '["node"]')[0],
     config: globalThis.process.config || { variables: {} },
     versions: Object.assign({ node: '', modules: '', uv: '' },
                             globalThis.process.versions || {}),
