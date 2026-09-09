@@ -1174,7 +1174,7 @@ fn class_field_layout_cycle(module: &Module) -> Option<Vec<Symbol>> {
                 ClassMember::PrivateProp(property) if !property.is_static => {
                     property.type_ann.visit_with(&mut references);
                 }
-                ClassMember::Constructor(constructor) => {
+                ClassMember::Constructor(constructor) if constructor.body.is_some() => {
                     for parameter in &constructor.params {
                         if matches!(parameter, ParamOrTsParamProp::TsParamProp(_)) {
                             class_constructor_param_pattern(parameter).visit_with(&mut references);
@@ -1395,7 +1395,9 @@ fn specialize_generic_classes(
             .body
             .iter()
             .find_map(|member| match member {
-                ClassMember::Constructor(constructor) => Some(&constructor.params),
+                ClassMember::Constructor(constructor) if constructor.body.is_some() => {
+                    Some(&constructor.params)
+                }
                 _ => None,
             })
             .map(|constructor_params| {
@@ -1781,7 +1783,7 @@ fn specialize_generic_classes(
                         validate(&annotation.type_ann)?;
                     }
                 }
-                ClassMember::Constructor(constructor) => {
+                ClassMember::Constructor(constructor) if constructor.body.is_some() => {
                     for parameter in &constructor.params {
                         if !matches!(parameter, ParamOrTsParamProp::TsParamProp(_)) {
                             continue;

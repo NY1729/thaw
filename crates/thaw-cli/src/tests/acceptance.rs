@@ -19,6 +19,27 @@ fn record_acceptance_metrics(name: &str, build_time: Duration, output: &Path) {
 }
 
 #[test]
+fn builds_and_runs_a_constructor_overload() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-constructor-overload-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "class Value { value: number; constructor(value: string); constructor(value: number); constructor(value: string | number) { this.value = typeof value === 'number' ? value + 1 : value.length; } } function main(): void { console.log(new Value(41).value); }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     let measure_performance = std::env::var("THAW_RUN_PERFORMANCE").as_deref() == Ok("1");
     if !measure_performance && std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {

@@ -382,7 +382,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     .body
                     .iter()
                     .filter_map(|member| match member {
-                        ClassMember::Constructor(constructor) => Some(constructor),
+                        ClassMember::Constructor(constructor) if constructor.body.is_some() => {
+                            Some(constructor)
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -721,7 +723,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 .class
                 .body
                 .iter()
-                .any(|member| matches!(member, ClassMember::Constructor(_)))
+                .any(|member| {
+                    matches!(member, ClassMember::Constructor(constructor) if constructor.body.is_some())
+                })
             {
                 continue;
             }
