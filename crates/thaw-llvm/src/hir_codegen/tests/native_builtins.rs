@@ -1597,14 +1597,15 @@ fn array_yield_delegate_assigns_undefined_after_completion() {
 #[test]
 fn generator_yield_delegate_consumes_an_inner_generator_lazily() {
     let source = r#"
-        function* inner(): Generator<number> {
+        function* inner(): Generator<number, string> {
             yield 2;
             yield 3;
+            return "inner done";
         }
         function* outer(): Generator<number> {
             yield 1;
-            const completion = yield* inner();
-            console.log(completion === undefined);
+            const completion: string = yield* inner();
+            console.log(completion);
             yield 4;
         }
         function main(): void {
@@ -1618,7 +1619,7 @@ fn generator_yield_delegate_consumes_an_inner_generator_lazily() {
     "#;
     assert_eq!(
         compile_and_run(source, "generator_yield_delegate_generator"),
-        "1\n2\n3\ntrue\n4\ntrue\n"
+        "1\n2\n3\ninner done\n4\ntrue\n"
     );
 }
 

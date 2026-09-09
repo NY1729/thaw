@@ -1189,20 +1189,28 @@ fn lower_function_statements(
         let HirType::Array(element) = generated.as_ref() else {
             unreachable!("generator functions lazily return arrays");
         };
-        debug_assert_eq!(params.len(), 3);
+        debug_assert_eq!(params.len(), 4);
         let generated = generated.as_ref().clone();
         let values = "__thaw_generator_values".to_string();
         let control = "__thaw_generator_control".to_string();
         let error = "__thaw_generator_error".to_string();
         let input = "__thaw_generator_input".to_string();
         let input_type = params[2].clone();
+        let returns = "__thaw_generator_returns".to_string();
+        let HirType::Array(return_type) = &params[3] else {
+            unreachable!("generator completion channel is an array");
+        };
+        let return_type = return_type.as_ref().clone();
         lowerer.scope.insert(values.clone(), generated.clone());
         lowerer.scope.insert(input.clone(), input_type.clone());
+        lowerer.scope.insert(returns.clone(), params[3].clone());
         lowerer.generator_yields = Some((
             values.clone(),
             element.as_ref().clone(),
             input.clone(),
             input_type.clone(),
+            returns.clone(),
+            return_type,
         ));
         body.push(HirStmt::Let(
             values.clone(),
@@ -1266,6 +1274,7 @@ fn lower_function_statements(
             .into_iter()
             .filter(|name| name != &control)
             .filter(|name| name != &input)
+            .filter(|name| name != &returns)
             .filter_map(|name| {
                 lowerer
                     .scope
@@ -1288,6 +1297,10 @@ fn lower_function_statements(
                 HirParam {
                     name: input,
                     ty: input_type,
+                },
+                HirParam {
+                    name: returns,
+                    ty: params[3].clone(),
                 },
             ],
             generated,
@@ -1390,8 +1403,29 @@ fn lower_generator_return_type(
         })
         .transpose()?
         .unwrap_or(HirType::Undefined);
+    let returned = reference
+        .type_params
+        .as_ref()
+        .and_then(|parameters| parameters.params.get(1))
+        .map(|returned| {
+            resolve_ts_type_with_substitution(
+                returned,
+                type_substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            )
+        })
+        .transpose()?
+        .filter(|returned| returned != &HirType::Void)
+        .unwrap_or(HirType::Undefined);
     Ok(HirType::Function(
-        vec![HirType::I64, HirType::Str, input],
+        vec![
+            HirType::I64,
+            HirType::Str,
+            input,
+            HirType::Array(Box::new(returned)),
+        ],
         Box::new(HirType::Array(Box::new(
             resolve_ts_type_with_substitution(
                 yielded,
