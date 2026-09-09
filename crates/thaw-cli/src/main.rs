@@ -12,6 +12,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     match args.get(1).map(String::as_str) {
+        Some("--version" | "-V") => println!("thaw {}", env!("CARGO_PKG_VERSION")),
         Some("build") => {
             if let Err(err) = run_build(&args[2..]) {
                 eprintln!("error: {err}");

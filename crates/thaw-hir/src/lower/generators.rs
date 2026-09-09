@@ -249,6 +249,24 @@ fn generator_emits_value(statement: &HirStmt, values: &str) -> bool {
     }
 }
 
+fn generator_statements_emit_value(statements: &[HirStmt], values: &str) -> bool {
+    statements.iter().any(|statement| {
+        generator_emits_value(statement, values)
+            || match statement {
+                HirStmt::If(_, then_body, else_body) => {
+                    generator_statements_emit_value(then_body, values)
+                        || generator_statements_emit_value(else_body, values)
+                }
+                HirStmt::While(_, body) => generator_statements_emit_value(body, values),
+                HirStmt::Try(try_body, _, catch_body) => {
+                    generator_statements_emit_value(try_body, values)
+                        || generator_statements_emit_value(catch_body, values)
+                }
+                _ => false,
+            }
+    })
+}
+
 fn generator_placeholder(ty: &HirType) -> Option<HirExpr> {
     Some(match ty {
         HirType::F64 => HirExpr::Lit(HirLit::F64(0.0)),
@@ -277,6 +295,7 @@ fn generator_placeholder(ty: &HirType) -> Option<HirExpr> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_generator_state_machine(
     statements: &[HirStmt],
     finalizers: &HashMap<Symbol, Vec<HirStmt>>,
@@ -284,10 +303,39 @@ fn lower_generator_state_machine(
     state: &str,
     control: &str,
     error: &str,
+    initialized: &str,
+    returns: &str,
+    return_request: &str,
+    pending_return: Option<&str>,
+    forced_return: &str,
 ) -> Option<(usize, Vec<HirStmt>, Vec<HirStmt>)> {
     let mut machine = GeneratorStateMachine::new(values, finalizers);
     let done = machine.block(Vec::new(), GeneratorTerm::Done, None, 0);
     let entry = machine.sequence(statements, done, None, None, None, done)?;
+    let cancel_dispatch = machine.blocks.iter().enumerate().rev().fold(
+        Vec::new(),
+        |otherwise, (id, block)| {
+            vec![HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(state.into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(id as f64))),
+                ),
+                if block.forwards_control {
+                    Vec::new()
+                } else {
+                    vec![
+                        HirStmt::Expr(HirExpr::Assign(
+                            control.into(),
+                            Box::new(HirExpr::Lit(HirLit::I64(0))),
+                        )),
+                        generator_set_state(state, block.cancel_target),
+                    ]
+                },
+                otherwise,
+            )]
+        },
+    );
     let mut dispatch = Vec::with_capacity(machine.blocks.len());
     for (id, block) in machine.blocks.into_iter().enumerate() {
         let cancel_target = block.cancel_target;
@@ -306,11 +354,29 @@ fn lower_generator_state_machine(
                 selected.push(HirStmt::Continue);
             }
             GeneratorTerm::Yield(value, next) => {
+                if let Some(pending_return) = pending_return {
+                    selected.push(generator_transfer_return(
+                        return_request,
+                        pending_return,
+                    ));
+                }
                 selected.push(value);
                 selected.push(generator_set_state(state, next));
                 selected.push(HirStmt::Return(Some(HirExpr::Var(values.into()))));
             }
             GeneratorTerm::Done => {
+                if let Some(pending_return) = pending_return {
+                    selected.push(generator_transfer_return_unless_completed(
+                        pending_return,
+                        forced_return,
+                        returns,
+                    ));
+                }
+                selected.push(generator_transfer_return_unless_completed(
+                    return_request,
+                    forced_return,
+                    returns,
+                ));
                 selected.push(HirStmt::Expr(HirExpr::Assign(
                     state.into(),
                     Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
@@ -356,13 +422,78 @@ fn lower_generator_state_machine(
             HirStmt::If(
                 HirExpr::BinOp(
                     BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(initialized.into())),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                ),
+                vec![HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::Var(control.into())),
+                        Box::new(HirExpr::Lit(HirLit::I64(0))),
+                    ),
+                    vec![HirStmt::Expr(HirExpr::Assign(
+                        initialized.into(),
+                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                    ))],
+                    vec![
+                        HirStmt::Expr(HirExpr::Assign(
+                            state.into(),
+                            Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+                        )),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(control.into())),
+                                Box::new(HirExpr::Lit(HirLit::I64(2))),
+                            ),
+                            vec![HirStmt::Throw(HirExpr::Var(error.into()))],
+                            vec![
+                                generator_transfer_return(return_request, forced_return),
+                                HirStmt::Return(Some(HirExpr::Var(values.into()))),
+                            ],
+                        ),
+                    ],
+                )],
+                Vec::new(),
+            ),
+            pending_return.map(|pending_return| HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
                     Box::new(HirExpr::Var(control.into())),
                     Box::new(HirExpr::Lit(HirLit::I64(1))),
                 ),
-                vec![HirStmt::Expr(HirExpr::Assign(
-                    values.into(),
-                    Box::new(HirExpr::ArrayLit(Vec::new())),
-                ))],
+                vec![
+                    HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::Gt,
+                            Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                                pending_return.into(),
+                            )))),
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        ),
+                        vec![HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                            vec![HirExpr::Var(pending_return.into())],
+                        ))],
+                        Vec::new(),
+                    ),
+                ],
+                Vec::new(),
+            )).unwrap_or(HirStmt::Expr(HirExpr::Lit(HirLit::Undefined))),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(control.into())),
+                    Box::new(HirExpr::Lit(HirLit::I64(1))),
+                ),
+                {
+                    let mut cancel = vec![HirStmt::Expr(HirExpr::Assign(
+                        values.into(),
+                        Box::new(HirExpr::ArrayLit(Vec::new())),
+                    ))];
+                    cancel.extend(cancel_dispatch);
+                    cancel
+                },
                 Vec::new(),
             ),
             HirStmt::If(
@@ -371,7 +502,32 @@ fn lower_generator_state_machine(
                     Box::new(HirExpr::Var(state.into())),
                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                 ),
-                vec![HirStmt::Return(Some(HirExpr::Var(values.into())))],
+                {
+                    let mut done = Vec::new();
+                    done.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::Var(control.into())),
+                            Box::new(HirExpr::Lit(HirLit::I64(2))),
+                        ),
+                        vec![HirStmt::Throw(HirExpr::Var(error.into()))],
+                        Vec::new(),
+                    ));
+                    if let Some(pending_return) = pending_return {
+                        done.push(generator_transfer_return_unless_completed(
+                            pending_return,
+                            forced_return,
+                            returns,
+                        ));
+                    }
+                    done.push(generator_transfer_return_unless_completed(
+                        return_request,
+                        forced_return,
+                        returns,
+                    ));
+                    done.push(HirStmt::Return(Some(HirExpr::Var(values.into()))));
+                    done
+                },
                 Vec::new(),
             ),
             HirStmt::If(
@@ -389,6 +545,45 @@ fn lower_generator_state_machine(
             ),
         ],
     ))
+}
+
+fn generator_transfer_return(source: &str, destination: &str) -> HirStmt {
+    HirStmt::If(
+        HirExpr::BinOp(
+            BinOp::Gt,
+            Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                source.into(),
+            )))),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        ),
+        vec![HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_push".into())),
+            vec![
+                HirExpr::Var(destination.into()),
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                    vec![HirExpr::Var(source.into())],
+                ),
+            ],
+        ))],
+        Vec::new(),
+    )
+}
+
+fn generator_transfer_return_unless_completed(
+    source: &str,
+    destination: &str,
+    returns: &str,
+) -> HirStmt {
+    HirStmt::If(
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(returns.into())))),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        ),
+        vec![generator_transfer_return(source, destination)],
+        Vec::new(),
+    )
 }
 
 fn generator_control_transition(

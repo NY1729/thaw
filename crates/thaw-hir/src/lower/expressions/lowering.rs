@@ -1,4 +1,88 @@
 impl<'a> FnLowerer<'a> {
+    fn collect_generator_for_array_spread(
+        &mut self,
+        generator: HirExpr,
+        generator_type: &HirType,
+    ) -> Result<Option<(HirExpr, HirType)>, String> {
+        let HirType::Function(params, result) = generator_type else {
+            return Ok(None);
+        };
+        let [HirType::I64, HirType::Str, input, completion, request, forced] =
+            params.as_slice()
+        else {
+            return Ok(None);
+        };
+        let HirType::Array(element) = result.as_ref() else {
+            return Ok(None);
+        };
+        let element = element.as_ref().clone();
+        let array_type = result.as_ref().clone();
+        let producer = format!("__thaw_spread_generator_{}", self.next_binding);
+        self.next_binding += 1;
+        let output = format!("__thaw_spread_output_{}", self.next_binding);
+        self.next_binding += 1;
+        let chunk = format!("__thaw_spread_chunk_{}", self.next_binding);
+        self.next_binding += 1;
+        let empty_channel = |ty: &HirType| {
+            HirExpr::TypedClosure(ty.clone(), Box::new(HirExpr::ArrayLit(Vec::new())))
+        };
+        let resume = HirExpr::Call(
+            Box::new(HirExpr::Var(producer.clone())),
+            vec![
+                HirExpr::Lit(HirLit::I64(0)),
+                HirExpr::Lit(HirLit::Str(String::new())),
+                generator_placeholder(input).ok_or_else(|| {
+                    format!("generator input type {input:?} has no default value")
+                })?,
+                empty_channel(completion),
+                empty_channel(request),
+                empty_channel(forced),
+            ],
+        );
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(output.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(chunk.clone(), array_type.clone(), HirExpr::ArrayLit(Vec::new())),
+            HirStmt::While(
+                HirExpr::Lit(HirLit::Bool(true)),
+                vec![
+                    HirStmt::Expr(HirExpr::Assign(chunk.clone(), Box::new(resume))),
+                    HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(chunk.clone())))),
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        ),
+                        vec![HirStmt::Break],
+                        Vec::new(),
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(
+                        output.clone(),
+                        Box::new(HirExpr::ArrayConcat(
+                            vec![HirExpr::Var(output.clone()), HirExpr::Var(chunk.clone())],
+                            element.clone(),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(HirExpr::Var(output))),
+        ]);
+        Ok(Some((
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: producer,
+                        ty: generator_type.clone(),
+                    }],
+                    array_type,
+                    Box::new(body),
+                )),
+                vec![generator],
+            ),
+            element,
+        )))
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
@@ -1143,7 +1227,11 @@ impl<'a> FnLowerer<'a> {
                         // conversions that path uses, rather than requiring
                         // a typed array up front.
                         let spread_source_type = self.infer_expr_type(&value)?;
-                        if spread_source_type == HirType::Str {
+                        if let Some((collected, _)) = self
+                            .collect_generator_for_array_spread(value.clone(), &spread_source_type)?
+                        {
+                            value = collected;
+                        } else if spread_source_type == HirType::Str {
                             value = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),
                                 vec![value],

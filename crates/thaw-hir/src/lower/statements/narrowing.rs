@@ -210,6 +210,76 @@ impl<'a> FnLowerer<'a> {
         Ok(first)
     }
 
+    fn infer_generator_types(
+        &self,
+        body: &[HirStmt],
+        yields: &str,
+        returns: &str,
+    ) -> Result<(HirType, HirType), String> {
+        fn collect<'a>(
+            statements: &'a [HirStmt],
+            yields: &str,
+            returns: &str,
+            yielded: &mut Vec<&'a HirExpr>,
+            returned: &mut Vec<&'a HirExpr>,
+        ) {
+            for statement in statements {
+                match statement {
+                    HirStmt::Expr(HirExpr::Assign(channel, value)) if channel == yields => {
+                        if matches!(value.as_ref(), HirExpr::ArrayConcat(..)) {
+                            yielded.push(value);
+                        }
+                    }
+                    HirStmt::Expr(HirExpr::Call(callee, arguments))
+                        if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_array_push") =>
+                    {
+                        if let [HirExpr::Var(channel), value] = arguments.as_slice() {
+                            if channel == yields {
+                                yielded.push(value);
+                            } else if channel == returns {
+                                returned.push(value);
+                            }
+                        }
+                    }
+                    HirStmt::If(_, then_body, else_body) => {
+                        collect(then_body, yields, returns, yielded, returned);
+                        collect(else_body, yields, returns, yielded, returned);
+                    }
+                    HirStmt::While(_, loop_body) => {
+                        collect(loop_body, yields, returns, yielded, returned)
+                    }
+                    HirStmt::Try(try_body, _, catch_body) => {
+                        collect(try_body, yields, returns, yielded, returned);
+                        collect(catch_body, yields, returns, yielded, returned);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut yielded = Vec::new();
+        let mut returned = Vec::new();
+        collect(body, yields, returns, &mut yielded, &mut returned);
+        let infer = |values: Vec<&HirExpr>| -> Result<HirType, String> {
+            let mut types = Vec::new();
+            for value in values {
+                let ty = match value {
+                    HirExpr::ArrayConcat(_, element) => element.clone(),
+                    _ => self.infer_expr_type(value)?,
+                };
+                if ty != HirType::Dynamic && !types.contains(&ty) {
+                    types.push(ty);
+                }
+            }
+            Ok(match types.as_slice() {
+                [] => HirType::Undefined,
+                [ty] => ty.clone(),
+                _ => HirType::Union(types),
+            })
+        };
+        Ok((infer(yielded)?, infer(returned)?))
+    }
+
     /// Normalizes a `for`/`while`/`if` body, which SWC represents as a
     /// single `Stmt` (either a `{ ... }` block or one bare statement), into
     /// a flat HIR statement list.

@@ -426,9 +426,39 @@
       "source": "type Pair = { left: number; right: number }; function* values(): Generator<number, void, Pair> { const holder = { value: { left: 0, right: 0 } }; const items: Pair[] = [{ left: 0, right: 0 }]; let left: number = 0; let right: number = 0; holder.value = yield 1; items[0] = yield 2; ({ left, right } = yield 3); console.log(holder.value.left, items[0].right, left + right); } function main(): void { const iterator = values(); iterator.next(); iterator.next({ left: 4, right: 40 }); iterator.next({ left: 50, right: 5 }); iterator.next({ left: 6, right: 7 }); }"
     },
     {
+      "name": "generator dynamic resume target",
+      "expect": "matched",
+      "source": "function* values(target: any): Generator<number, void, number> { target.value = yield 1; console.log(target.value); } function main(): void { const target: any = {}; const iterator = values(target); console.log(iterator.next().value); console.log(iterator.next(42).done); }"
+    },
+    {
+      "name": "generator function expression",
+      "expect": "matched",
+      "source": "function main(): void { let started: number = 0; const values = function* (): Generator<number> { started += 1; yield 4; }; const iterator = values(); console.log(started); console.log(iterator.next().value); console.log(started); }"
+    },
+    {
+      "name": "async generator function expression",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { let offset: number = 4; const values = async function* (): AsyncGenerator<number> { await Promise.resolve(); yield offset; offset += 1; yield offset; }; const iterator = values(); console.log((await iterator.next()).value); console.log((await iterator.next()).value); console.log(offset); }"
+    },
+    {
+      "name": "contextual generator callback",
+      "expect": "matched",
+      "source": "function consume(factory: (start: number) => Generator<number>): number { return factory(40).next().value ?? 0; } function main(): void { console.log(consume(function* (start): Generator<number> { yield start + 2; })); }"
+    },
+    {
+      "name": "contextual async generator callback",
+      "expect": "matched",
+      "source": "async function consume(factory: (start: number) => AsyncGenerator<number>): Promise<number> { return (await factory(40).next()).value ?? 0; } async function main(): Promise<void> { console.log(await consume(async function* (start): AsyncGenerator<number> { await Promise.resolve(); yield start + 2; })); }"
+    },
+    {
       "name": "async generator next results",
       "expect": "matched",
       "source": "async function* values(): AsyncGenerator<number, string> { yield 4; return 'done'; } async function main(): Promise<void> { const iterator = values(); const first = await iterator.next(); const end = await iterator.next(); console.log(first.value, first.done); console.log(end.value, end.done); }"
+    },
+    {
+      "name": "async generator next value",
+      "expect": "matched",
+      "source": "async function* values(): AsyncGenerator<number, void, number> { const value: number = yield 1; yield value * 2; } async function main(): Promise<void> { const iterator = values(); console.log((await iterator.next()).value); console.log((await iterator.next(9)).value); console.log((await iterator.next()).done); }"
     },
     {
       "name": "async generator await suspension",
@@ -439,6 +469,87 @@
       "name": "async closure capture identity",
       "expect": "matched",
       "source": "async function main(): Promise<void> { let count: number = 0; const advance = async (): Promise<number> => { await Promise.resolve(); count += 1; return count; }; console.log(await advance(), await advance(), count); }"
+    },
+    {
+      "name": "async generator throw resumes through catch",
+      "expect": "matched",
+      "source": "async function* values(): AsyncGenerator<number> { try { yield 1; } catch (error) { console.log(error); yield 2; } } async function main(): Promise<void> { const iterator = values(); console.log((await iterator.next()).value); const caught = await iterator.throw('boom'); console.log(caught.value, caught.done); console.log((await iterator.next()).done); }"
+    },
+    {
+      "name": "async generator throw awaits inside catch",
+      "expect": "matched",
+      "source": "async function* values(): AsyncGenerator<number> { try { yield 1; } catch (error) { await Promise.resolve(); console.log(error); yield 2; } } async function main(): Promise<void> { const iterator = values(); console.log((await iterator.next()).value); console.log((await iterator.throw('boom')).value); console.log((await iterator.next()).done); }"
+    },
+    {
+      "name": "async generator return skips pending await",
+      "expect": "matched",
+      "source": "async function* values(): AsyncGenerator<number> { yield 1; await Promise.resolve(); yield 2; } async function main(): Promise<void> { const iterator = values(); console.log((await iterator.next()).value); const stopped = await iterator.return(9); console.log(stopped.value, stopped.done); console.log((await iterator.next()).done); }"
+    },
+    {
+      "name": "async generator return awaits inside finally",
+      "expect": "matched",
+      "source": "let progress: number = 0; async function* values(): AsyncGenerator<number> { try { yield 1; } finally { await Promise.resolve(); progress += 10; } } async function main(): Promise<void> { const iterator = values(); console.log((await iterator.next()).value, progress); const stopped = await iterator.return(9); console.log(stopped.value, stopped.done, progress); console.log((await iterator.next()).done, progress); }"
+    },
+    {
+      "name": "async generator return runs finally",
+      "expect": "matched",
+      "source": "let progress: number = 0; async function* values(): AsyncGenerator<number> { try { yield 1; yield 2; } finally { progress += 10; } } async function main(): Promise<void> { const iterator = values(); console.log((await iterator.next()).value, progress); const stopped = await iterator.return(9); console.log(stopped.value, stopped.done, progress); console.log((await iterator.next()).done, progress); }"
+    },
+    {
+      "name": "async generator delegation return across await",
+      "expect": "unsupported",
+      "detailContains": "output differs",
+      "source": "let progress: number = 0; async function* inner(): AsyncGenerator<number> { try { yield 1; } finally { await Promise.resolve(); progress += 1; } } async function* outer(): AsyncGenerator<number> { try { yield* inner(); yield 99; } finally { progress += 100; } } async function main(): Promise<void> { const iterator = outer(); console.log((await iterator.next()).value, progress); const stopped = await iterator.return(9); console.log(stopped.value, stopped.done, progress); console.log((await iterator.next()).done, progress); }"
+    },
+    {
+      "name": "generator return resumes yielding finally",
+      "expect": "matched",
+      "source": "function* values(): Generator<number> { try { yield 1; } finally { yield 2; } } function main(): void { const iterator = values(); console.log(iterator.next().value); const paused = iterator.return(9); console.log(paused.value, paused.done); const stopped = iterator.next(); console.log(stopped.value, stopped.done); }"
+    },
+    {
+      "name": "async generator return resumes yielding finally",
+      "expect": "matched",
+      "source": "async function* values(): AsyncGenerator<number> { try { yield 1; } finally { await Promise.resolve(); yield 2; } } async function main(): Promise<void> { const iterator = values(); console.log((await iterator.next()).value); const paused = await iterator.return(9); console.log(paused.value, paused.done); const stopped = await iterator.next(); console.log(stopped.value, stopped.done); }"
+    },
+    {
+      "name": "generator control before start and after completion",
+      "expect": "matched",
+      "source": "let entered: number = 0; function* values(): Generator<number> { try { entered += 1; yield 1; } finally { entered += 10; } } function main(): void { const unopened = values(); const stopped = unopened.return(9); console.log(stopped.value, stopped.done, entered); const completed = values(); completed.next(); completed.next(); try { completed.throw('late'); } catch (error) { console.log(error); } const unstarted = values(); try { unstarted.throw('early'); } catch (error) { console.log(error, entered); } }"
+    },
+    {
+      "name": "async generator throw after completion",
+      "expect": "matched",
+      "source": "async function* values(): AsyncGenerator<number> { yield 1; } async function main(): Promise<void> { const iterator = values(); await iterator.next(); await iterator.next(); try { await iterator.throw('late'); } catch (error) { console.log(error); } }"
+    },
+    {
+      "name": "class async generator method",
+      "expect": "matched",
+      "source": "class Range { start: number; constructor(start: number) { this.start = start; } async *values(): AsyncGenerator<number> { yield this.start; await Promise.resolve(); yield this.start + 1; } } async function main(): Promise<void> { const iterator = new Range(4).values(); console.log((await iterator.next()).value); console.log((await iterator.next()).value); console.log((await iterator.next()).done); }"
+    },
+    {
+      "name": "generic async generator specialization",
+      "expect": "matched",
+      "source": "async function* echo<T>(value: T): AsyncGenerator<T> { await Promise.resolve(); yield value; } async function main(): Promise<void> { console.log((await echo<number>(4).next()).value); console.log((await echo<string>('ok').next()).value); }"
+    },
+    {
+      "name": "generic generator function expressions",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { const echo = function* <T>(value: T): Generator<T> { yield value; }; console.log(echo<number>(4).next().value); console.log(echo<string>('ok').next().value); const echoAsync = async function* <T>(value: T): AsyncGenerator<T> { await Promise.resolve(); yield value; }; console.log((await echoAsync<number>(5).next()).value); console.log((await echoAsync<string>('async').next()).value); }"
+    },
+    {
+      "name": "async generator delegation",
+      "expect": "matched",
+      "source": "async function* inner(): AsyncGenerator<number> { yield 2; await Promise.resolve(); yield 3; } async function* outer(): AsyncGenerator<number> { yield 1; yield* inner(); yield 4; } async function main(): Promise<void> { const iterator = outer(); console.log((await iterator.next()).value); console.log((await iterator.next()).value); console.log((await iterator.next()).value); console.log((await iterator.next()).value); console.log((await iterator.next()).done); }"
+    },
+    {
+      "name": "for await consumes async generator",
+      "expect": "matched",
+      "source": "async function* values(): AsyncGenerator<number> { yield 1; await Promise.resolve(); yield 2; yield 3; } async function main(): Promise<void> { let total: number = 0; for await (const value of values()) total += value; console.log(total); }"
+    },
+    {
+      "name": "generic class async generator method",
+      "expect": "matched",
+      "source": "class Values { async *echo<T>(value: T): AsyncGenerator<T> { await Promise.resolve(); yield value; } } async function main(): Promise<void> { const values = new Values(); console.log((await values.echo<number>(4).next()).value); console.log((await values.echo<string>('ok').next()).value); }"
     },
     {
       "name": "generator deferred start",
@@ -609,6 +720,21 @@
       "name": "error cause option",
       "expect": "matched",
       "source": "function main(): void { const cause = new Error('root'); const error = new Error('outer', { cause }); console.log(error.message, error.cause.message); }"
+    },
+    {
+      "name": "unannotated generator inference",
+      "expect": "matched",
+      "source": "function* values() { yield 1; yield 2; return 'done'; } function main(): void { const iterator = values(); console.log(iterator.next().value, iterator.next().value, iterator.next().value); }"
+    },
+    {
+      "name": "generator return completion type",
+      "expect": "matched",
+      "source": "function* values(): Generator<number, string> { try { yield 1; } finally { console.log('finally'); } } function main(): void { const iterator = values(); iterator.next(); const stopped = iterator.return('forced'); console.log(stopped.value, stopped.done); }"
+    },
+    {
+      "name": "generator finally return overrides requested return",
+      "expect": "matched",
+      "source": "function* values(): Generator<number, number> { try { yield 1; } finally { return 7; } } function main(): void { const iterator = values(); console.log(iterator.next().value); const stopped = iterator.return(9); console.log(stopped.value, stopped.done); }"
     }
   ]
 }

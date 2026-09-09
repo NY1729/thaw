@@ -245,6 +245,12 @@ fn compiles_async_arrows() {
                 return 0;
             };
             console.log(await choose(true));
+            const chooseBeforeAwait: (enabled: boolean) => Promise<number> = async enabled => {
+                if (enabled) return 41 + offset;
+                await sleep(1);
+                return 0;
+            };
+            console.log(await chooseBeforeAwait(true));
             const finish: () => Promise<void> = async () => {
                 console.log("done");
             };
@@ -289,7 +295,7 @@ fn compiles_async_arrows() {
     "#;
     assert_eq!(
         compile_and_run(source, "expression_bodied_async_arrow"),
-        "42\n42\ndone\n42\n42\n42\n42\n42\nvoid\ncaught boom\n"
+        "42\n42\n43\ndone\n42\n42\n42\n42\n42\nvoid\ncaught boom\n"
     );
 }
 
@@ -654,4 +660,3 @@ fn async_main_drains_napi_before_destroying_its_promise() {
     let destroy = ir[resume..].find("call void @thaw_promise_destroy").unwrap();
     assert!(drain < resume && destroy > 0);
 }
-
