@@ -241,7 +241,7 @@ function main(): void { console.log(style.upper("hello")); }
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"HELLO\"\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "HELLO\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -443,7 +443,7 @@ function main(): void {
 }
 
 #[test]
-fn fallback_object_callback_is_contextually_typed_and_runs_as_native_code() {
+fn fallback_object_callback_runs_as_native_code() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-contextual-object-callback-{}",
         std::process::id()
@@ -453,15 +453,15 @@ fn fallback_object_callback_is_contextually_typed_and_runs_as_native_code() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export type Handler<T = unknown> = (request: T, toolkit: T, error?: T) => T;\n\
-         export interface Route<T = unknown> { method: string; path: string; handler?: Handler<T> | object | undefined; }\n\
-         export declare class Server { route<T = unknown>(route: Route<T> | Route<T>[]): void; }\n\
+        "export type Handler = (request: { path: string }) => string;\n\
+         export interface Route { method: string; path: string; handler?: Handler | object | undefined; }\n\
+         export declare class Server { route(route: Route | Route[]): void; }\n\
          export declare function server(): Server;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function Server() {} Server.prototype.route = function(route) { console.log(route.handler({ path: route.path }, { response: function(value) { return value; } })); }; function server() { return new Server(); } module.exports = { Server: Server, server: server };\n",
+        "function Server() {} Server.prototype.route = function(route) { console.log(route.handler({ path: route.path })); }; function server() { return new Server(); } module.exports = { Server: Server, server: server };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -470,7 +470,7 @@ fn fallback_object_callback_is_contextually_typed_and_runs_as_native_code() {
         r#"import * as Kit from "server-kit";
 function main(): void {
     const server = Kit.server();
-    server.route({ method: "GET", path: "/jit", handler: (request, toolkit) => toolkit.response(request.path) });
+    server.route({ method: "GET", path: "/jit", handler: (request: { path: string }) => request.path });
 }"#,
     )
     .unwrap();

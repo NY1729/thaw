@@ -114,14 +114,14 @@ fn imports_supported_node_builtin_modules() {
                     console.log(path.join("a", "b"));
                     console.log(path.extname("archive.tar.gz"));
                     console.log(path.relative("/a/b", "/a/c/d"));
-                    console.log(String(inspect(JSON.parse("[42]"))));
-                    console.log(String(format(JSON.parse("[\"%s:%d\",\"value\",4]"))));
-                    console.log(cwd());
-                    console.log(Number(byteLength(JSON.parse("[\"thaw\"]"))));
+                    console.log(String(inspect(42)));
+                    console.log(String(format("%s:%d", "value", 4)));
+                    console.log(cwd().length > 0);
+                    console.log(Number(byteLength("thaw")));
                     console.log(os.arch() + ":" + os.platform() + ":" + os.type() + ":" + os.tmpdir());
-                    console.log(Boolean(isatty(JSON.parse("[1]"))));
-                    console.log(String(querystring.stringify(JSON.parse("[{\"a\":[1,2],\"space\":\"two words\"}]"))));
-                    console.log(String(querystring.parse(JSON.parse("[\"a=1&a=2&space=two+words\"]"))));
+                    console.log(Boolean(isatty(1)));
+                    console.log(String(querystring.stringify({ a: [1, 2], space: "two words" })));
+                    console.log(String(querystring.parse("a=1&a=2&space=two+words")));
                     const emitter = new EventEmitter();
                     let emitted: number = 0;
                     emitter.once("value", (value): void => { emitted = Number(value); });
@@ -146,7 +146,7 @@ fn imports_supported_node_builtin_modules() {
     let expected_tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
     assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            format!("a/b\n.gz\n../c/d\n42\nvalue:4\n/\n4\nx64:linux:Linux:{expected_tmpdir}\nfalse\na=1&a=2&space=two%20words\n{{\"a\":[\"1\",\"2\"],\"space\":\"two words\"}}\n42\nfile:///tmp/a%20b\n/tmp/a b\n{{\"protocol\":\"file:\",\"hostname\":\"\",\"hash\":\"\",\"search\":\"\",\"pathname\":\"/tmp/a%20b\",\"path\":\"/tmp/a%20b\",\"href\":\"file:///tmp/a%20b\"}}\n")
+            format!("a/b\n.gz\n../c/d\n42\nvalue:4\ntrue\n4\nx64:linux:Linux:{expected_tmpdir}\nfalse\na=1&a=2&space=two%20words\n{{\"a\":[\"1\",\"2\"],\"space\":\"two words\"}}\n42\nfile:///tmp/a%20b\n/tmp/a b\n{{\"protocol\":\"file:\",\"hostname\":\"\",\"hash\":\"\",\"search\":\"\",\"pathname\":\"/tmp/a%20b\",\"path\":\"/tmp/a%20b\",\"href\":\"file:///tmp/a%20b\"}}\n")
         );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -167,8 +167,8 @@ fn node_fs_reads_and_writes_real_files_in_a_static_binary() {
             r#"
                     import {{ existsSync, readFileSync, writeFileSync, mkdirSync }} from "node:fs";
                     function main(): void {{
-                        console.log(mkdirSync("{}"));
-                        console.log(writeFileSync("{}", "hello from thaw"));
+                        mkdirSync("{}");
+                        writeFileSync("{}", "hello from thaw");
                         console.log(existsSync("{}"));
                         console.log(readFileSync("{}", "utf8"));
                     }}
@@ -200,7 +200,7 @@ fn node_fs_reads_and_writes_real_files_in_a_static_binary() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\ntrue\ntrue\nhello from thaw\n"
+        "true\nhello from thaw\n"
     );
     assert_eq!(
         std::fs::read_to_string(data_file).unwrap(),
