@@ -518,9 +518,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     ) {
                         continue;
                     }
-                    if method.function.type_params.is_some() || method.function.is_generator {
+                    if method.function.type_params.is_some() {
                         return Err(format!(
-                            "class `{name}` method `{}` cannot be generic or a generator yet",
+                            "class `{name}` method `{}` cannot be generic yet",
+                            class_property_name(&method.key)?
+                        ));
+                    }
+                    if method.function.is_generator && method.function.is_async {
+                        return Err(format!(
+                            "class `{name}` method `{}` cannot be an async generator yet",
                             class_property_name(&method.key)?
                         ));
                     }
@@ -562,6 +568,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             .last()
                             .expect("a setter has one declared value parameter")
                             .clone()
+                    } else if method.function.is_generator {
+                        lower_generator_return_type(
+                            &method.function.return_type,
+                            &format!("{name}.{method_name}"),
+                            &interfaces,
+                            &generic_interfaces,
+                            &HashMap::new(),
+                        )?
                     } else {
                         lower_fn_return_type(
                             method.function.is_async,

@@ -391,6 +391,11 @@
       "source": "let progress: number = 0; function* values(): Generator<number> { progress += 1; yield 1; progress += 10; yield 2; progress += 100; } function main(): void { for (const value of values()) { console.log(value, progress); break; } console.log(progress); }"
     },
     {
+      "name": "class generator method",
+      "expect": "matched",
+      "source": "class Range { start: number; constructor(start: number) { this.start = start; } *values(): Generator<number> { yield this.start; yield this.start + 1; } } function main(): void { let total: number = 0; for (const value of new Range(4).values()) total += value; console.log(total); }"
+    },
+    {
       "name": "private class field",
       "expect": "matched",
       "source": "class Counter { #value: number = 0; increment(): number { this.#value++; return this.#value; } } function main(): void { const counter = new Counter(); console.log(counter.increment(), counter.increment()); }"
