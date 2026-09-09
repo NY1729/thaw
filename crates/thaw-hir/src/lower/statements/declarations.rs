@@ -41,8 +41,12 @@ impl<'a> FnLowerer<'a> {
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
-                    let (emission, delegated) =
-                        self.lower_generator_yield_emission(yield_expr, &values, &element)?;
+                    let (emission, delegated) = self.lower_generator_yield_emission(
+                        yield_expr,
+                        &values,
+                        &element,
+                        &input,
+                    )?;
                     let declared = binding
                         .type_ann
                         .as_ref()
