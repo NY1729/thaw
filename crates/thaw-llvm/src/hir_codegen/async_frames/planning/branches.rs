@@ -199,6 +199,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 catch_body,
                 &activation_guard,
                 rejection_handler,
+                loop_guards,
                 frame_names,
                 extra_locals,
                 guarded_rethrow_handlers,

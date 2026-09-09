@@ -14,12 +14,37 @@ impl<'ctx> HirCompiler<'ctx> {
         })
     }
 
+    fn async_stmt_exits(stmt: &HirStmt) -> bool {
+        match stmt {
+            HirStmt::Return(_) | HirStmt::Throw(_) => true,
+            HirStmt::If(_, then_body, else_body) => then_body
+                .iter()
+                .chain(else_body)
+                .any(Self::async_stmt_exits),
+            HirStmt::While(_, body) => body.iter().any(Self::async_stmt_exits),
+            HirStmt::Try(try_body, _, catch_body) => try_body
+                .iter()
+                .chain(catch_body)
+                .any(Self::async_stmt_exits),
+            _ => false,
+        }
+    }
+
     fn frame_await_plan(&self, func: &HirFunction) -> Result<Option<FrameAsyncPlan>, String> {
         if !self.frame_async_functions.contains_key(&func.name) {
             return Ok(None);
         }
         let normalized_body = self.flatten_async_finally_only_tries(&func.body)?;
         let returns_on_all_paths = Self::async_block_returns_on_all_paths(&normalized_body);
+        let frame_names = self
+            .frame_async_functions
+            .keys()
+            .chain(self.promise_returning_functions.iter())
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let will_split = normalized_body
+            .iter()
+            .any(|stmt| Self::stmt_awaits_frame_source(stmt, &frame_names));
         let mut segments = vec![AsyncSegment {
             stmts: Vec::new(),
             awaited: None,
@@ -114,6 +139,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                         nested_catch_body,
                                         &inner_try_guard,
                                         Some(inner_handler.clone()),
+                                        &[],
                                         &frame_names,
                                         &mut extra_locals,
                                         &mut guarded_rethrow_handlers,
@@ -179,6 +205,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                         nested_catch_body,
                                         &inner_catch_guard,
                                         Some(enclosing),
+                                        &[],
                                         &frame_names,
                                         &mut extra_locals,
                                         &mut guarded_rethrow_handlers,
@@ -487,17 +514,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
             if let HirStmt::If(cond, then_body, else_body) = stmt {
-                let frame_names = self
-                    .frame_async_functions
-                    .keys()
-                    .chain(self.promise_returning_functions.iter())
-                    .cloned()
-                    .collect::<std::collections::HashSet<_>>();
                 let branches_await = then_body
                     .iter()
                     .chain(else_body)
                     .any(|nested| Self::stmt_awaits_frame_source(nested, &frame_names));
-                if branches_await {
+                let branches_exit = then_body
+                    .iter()
+                    .chain(else_body)
+                    .any(Self::async_stmt_exits);
+                if branches_await || (will_split && branches_exit) {
                     found = true;
                     let mut rewritten_condition = cond.clone();
                     loop {

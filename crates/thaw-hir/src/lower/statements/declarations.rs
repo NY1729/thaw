@@ -262,9 +262,9 @@ impl<'a> FnLowerer<'a> {
                         Expr::Fn(function) => function_expression_as_arrow(function)?,
                         _ => unreachable!(),
                     };
-                    if arrow.is_async || arrow.is_generator {
+                    if arrow.is_async && !arrow.is_generator {
                         return Err(
-                            "async and generator generic arrow variables are not supported".into(),
+                            "async generic arrow variables are not supported".into(),
                         );
                     }
                     let hir_name = self.bind_local(&name, HirType::Dynamic);

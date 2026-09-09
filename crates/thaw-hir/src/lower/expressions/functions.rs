@@ -118,8 +118,8 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_arrow(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
-        if arrow.is_generator || arrow.type_params.is_some() {
-            return Err("generator and generic arrow functions are not supported yet".into());
+        if arrow.type_params.is_some() {
+            return Err("generic arrow functions are not supported yet".into());
         }
         let source_params = arrow
             .params
@@ -134,6 +134,9 @@ impl<'a> FnLowerer<'a> {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if arrow.is_generator {
+            return self.lower_generator_arrow(arrow, source_params, None);
+        }
         let declared_return = arrow
             .return_type
             .as_ref()
@@ -371,6 +374,88 @@ impl<'a> FnLowerer<'a> {
         result
     }
 
+    fn lower_generator_arrow(
+        &mut self,
+        arrow: &swc_ecma_ast::ArrowExpr,
+        source_params: Vec<HirParam>,
+        inferred_return: Option<HirType>,
+    ) -> Result<HirExpr, String> {
+        let ArrowFunctionBody::FunctionBody(block) = arrow.body.as_ref() else {
+            return Err("generator function expression needs a body".into());
+        };
+        let declared_return = match inferred_return {
+            Some(inferred) => inferred,
+            None => lower_generator_return_type(
+                arrow.is_async,
+                &arrow.return_type,
+                "<anonymous>",
+                self.interfaces,
+                self.generic_interfaces,
+                &HashMap::new(),
+            )?,
+        };
+        let saved_scope = self.scope.clone();
+        let saved_bindings = self.bindings.clone();
+        let saved_return = self.ret_type.clone();
+        let saved_generator_yields = self.generator_yields.clone();
+        let saved_generator_finalizers = self.generator_finalizers.clone();
+        let result = (|| {
+            let mut params = Vec::with_capacity(source_params.len());
+            let mut body = Vec::new();
+            for (pattern, param) in arrow.params.iter().zip(source_params.clone()) {
+                let name = self.bind_local(&param.name, param.ty.clone());
+                if !matches!(pattern, Pat::Ident(_) | Pat::Rest(_)) {
+                    self.lower_binding_pattern(
+                        pattern,
+                        HirExpr::Var(name.clone()),
+                        &param.ty,
+                        &mut body,
+                    )?;
+                }
+                params.push(HirParam { name, ty: param.ty });
+            }
+            self.ret_type = declared_return.clone();
+            lower_function_statements(
+                self,
+                &block.stmts,
+                &declared_return,
+                true,
+                &mut body,
+            )?;
+            let expression = HirExpr::Block(body);
+            let mut referenced = BTreeSet::new();
+            collect_referenced_bindings(&expression, &mut referenced);
+            let captures = referenced
+                .into_iter()
+                .filter_map(|name| {
+                    saved_scope
+                        .get(&name)
+                        .cloned()
+                        .map(|ty| HirParam { name, ty })
+                })
+                .collect();
+            Ok(HirExpr::Lambda(
+                captures,
+                params,
+                declared_return.clone(),
+                Box::new(expression),
+            ))
+        })();
+        let inferred_return = self.ret_type.clone();
+        self.scope = saved_scope;
+        self.bindings = saved_bindings;
+        self.ret_type = saved_return;
+        self.generator_yields = saved_generator_yields;
+        self.generator_finalizers = saved_generator_finalizers;
+        if result.is_ok()
+            && hir_type_contains_dynamic(&declared_return)
+            && inferred_return != declared_return
+        {
+            return self.lower_generator_arrow(arrow, source_params, Some(inferred_return));
+        }
+        result
+    }
+
     fn lower_generic_instantiation_expression(
         &mut self,
         instantiation: &swc_ecma_ast::TsInstantiation,
@@ -508,10 +593,26 @@ impl<'a> FnLowerer<'a> {
                 arrow.params.len()
             ));
         }
-        if arrow.is_async {
-            if arrow.is_generator {
-                return Err("async generator arrow functions are not supported".into());
+        if arrow.is_generator {
+            let mut contextual = arrow.clone();
+            for (parameter, ty) in contextual.params.iter_mut().zip(parameter_types) {
+                let annotation = match parameter {
+                    Pat::Ident(binding) => &mut binding.type_ann,
+                    Pat::Rest(rest) => &mut rest.type_ann,
+                    Pat::Object(object) => &mut object.type_ann,
+                    Pat::Array(array) => &mut array.type_ann,
+                    _ => return Err("unsupported contextual generator parameter pattern".into()),
+                };
+                if annotation.is_none() {
+                    *annotation = Some(Box::new(swc_ecma_ast::TsTypeAnn {
+                        span: swc_common::DUMMY_SP,
+                        type_ann: Box::new(hir_type_as_ts_type(ty)?),
+                    }));
+                }
             }
+            return self.lower_arrow(&contextual);
+        }
+        if arrow.is_async {
             let mut contextual = arrow.clone();
             for (parameter, ty) in contextual.params.iter_mut().zip(parameter_types) {
                 let annotation = match parameter {
@@ -558,9 +659,6 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             return self.lower_arrow(&contextual);
-        }
-        if arrow.is_generator {
-            return Err("generator Promise callbacks are not supported".into());
         }
         let generic_return = if let Some(type_params) = &arrow.type_params {
             validate_trailing_type_parameter_defaults(

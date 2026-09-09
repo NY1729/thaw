@@ -89,15 +89,30 @@ impl<'a> FnLowerer<'a> {
         element: &HirType,
         input: &str,
     ) -> Result<GeneratorYieldEmission, String> {
-        let value = yield_expr
-            .arg
-            .as_ref()
-            .ok_or("generator `yield` requires a value")?;
         if yield_expr.delegate {
-            let array_type = HirType::Array(Box::new(element.clone()));
+            let value = yield_expr
+                .arg
+                .as_ref()
+                .ok_or("generator `yield*` requires a value")?;
+            let expected_array_type = HirType::Array(Box::new(element.clone()));
             let value = self.lower_expr(value)?;
             let value_type = self.infer_expr_type(&value)?;
-            if value_type == array_type {
+            if let HirType::Array(actual_element) = &value_type {
+                if element == &HirType::Dynamic || actual_element.as_ref() == element {
+                    let concat_element = actual_element.as_ref().clone();
+                    return Ok((
+                        vec![HirStmt::Expr(HirExpr::Assign(
+                            values.into(),
+                            Box::new(HirExpr::ArrayConcat(
+                                vec![HirExpr::Var(values.into()), value],
+                                concat_element,
+                            )),
+                        ))],
+                        Some((HirExpr::Lit(HirLit::Undefined), HirType::Undefined)),
+                    ));
+                }
+            }
+            if value_type == expected_array_type {
                 return Ok((
                     vec![HirStmt::Expr(HirExpr::Assign(
                         values.into(),
@@ -114,16 +129,44 @@ impl<'a> FnLowerer<'a> {
                     "`yield*` requires an array or generator, got {value_type:?}"
                 ));
             };
-            let [HirType::I64, HirType::Str, input_type, return_channel @ HirType::Array(return_type)] =
-                params.as_slice()
+            let [
+                HirType::I64,
+                HirType::Str,
+                input_type,
+                return_channel @ HirType::Array(return_type),
+                HirType::Array(_return_request),
+                HirType::Array(_forced_return),
+            ] = params.as_slice()
             else {
                 return Err(format!("`yield*` requires a generator, got {value_type:?}"));
             };
-            if result.as_ref() != &array_type {
+            let generated = match result.as_ref() {
+                HirType::Array(_) => result.as_ref(),
+                HirType::Promise(generated) => generated.as_ref(),
+                _ => result.as_ref(),
+            };
+            let HirType::Array(delegate_element) = generated else {
+                return Err(format!("`yield*` requires a generator, got {value_type:?}"));
+            };
+            let array_type = HirType::Array(Box::new(delegate_element.as_ref().clone()));
+            let async_delegate = matches!(result.as_ref(), HirType::Promise(inner) if inner.as_ref() == &array_type);
+            if element != &HirType::Dynamic
+                && result.as_ref() != &expected_array_type
+                && !matches!(result.as_ref(), HirType::Promise(inner) if inner.as_ref() == &expected_array_type)
+            {
                 return Err(format!(
                     "delegated generator yields {:?}, expected {element:?}",
                     result.as_ref()
                 ));
+            }
+            if async_delegate
+                && !matches!(
+                    &self.ret_type,
+                    HirType::Function(_, result)
+                        if matches!(result.as_ref(), HirType::Promise(_))
+                )
+            {
+                return Err("a synchronous generator cannot delegate to an async generator".into());
             }
             let input = self.coerce_to_declared(input_type, HirExpr::Var(input.into()))?;
             let producer = format!("__thaw_yield_delegate_{}", self.next_binding);
@@ -175,8 +218,32 @@ impl<'a> FnLowerer<'a> {
                     vec![
                         HirStmt::Let(
                             chunk.clone(),
-                            array_type,
-                            HirExpr::Call(
+                            array_type.clone(),
+                            if async_delegate {
+                                HirExpr::AwaitPromise(
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::TypedIndex(
+                                            Box::new(HirExpr::Var(producer)),
+                                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                            value_type.clone(),
+                                        )),
+                                        vec![
+                                            HirExpr::Var("__thaw_generator_control".into()),
+                                            HirExpr::Var("__thaw_generator_error".into()),
+                                            input.clone(),
+                                            HirExpr::Var(completion.clone()),
+                                            HirExpr::Var(
+                                                "__thaw_generator_return_request".into(),
+                                            ),
+                                            HirExpr::Var(
+                                                "__thaw_generator_forced_return".into(),
+                                            ),
+                                        ],
+                                    )),
+                                    array_type.clone(),
+                                )
+                            } else {
+                                HirExpr::Call(
                                 Box::new(HirExpr::TypedIndex(
                                     Box::new(HirExpr::Var(producer)),
                                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
@@ -187,8 +254,11 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Var("__thaw_generator_error".into()),
                                     input.clone(),
                                     HirExpr::Var(completion.clone()),
+                                    HirExpr::Var("__thaw_generator_return_request".into()),
+                                    HirExpr::Var("__thaw_generator_forced_return".into()),
                                 ],
-                            ),
+                                )
+                            },
                         ),
                         HirStmt::If(
                             HirExpr::BinOp(
@@ -234,7 +304,7 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Var(values.into()),
                                     HirExpr::Var(chunk.clone()),
                                 ],
-                                element.clone(),
+                                delegate_element.as_ref().clone(),
                             )),
                         )),
                         HirStmt::Expr(HirExpr::Call(
@@ -245,7 +315,10 @@ impl<'a> FnLowerer<'a> {
                 ),
             ], Some((completed, return_type.as_ref().clone()))));
         }
-        let value = self.lower_expr_with_expected_type(value, Some(element))?;
+        let value = match &yield_expr.arg {
+            Some(value) => self.lower_expr_with_expected_type(value, Some(element))?,
+            None => HirExpr::Lit(HirLit::Undefined),
+        };
         let value = self.coerce_to_declared(element, value)?;
         Ok((
             vec![HirStmt::Expr(HirExpr::Call(
@@ -318,8 +391,12 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(&HirType::F64, index, "JSON array index")?;
                 self.coerce_to_declared(&HirType::Json, value)?
             }
-            Target::DynamicProperty(_, _) => {
-                return Err("dynamic generator resume targets are not supported".into())
+            Target::DynamicProperty(object, key) => {
+                let value = self.coerce_to_declared(&HirType::Json, value)?;
+                return Ok(vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
+                    vec![object.clone(), key.as_ref().clone(), value],
+                ))]);
             }
             Target::Prop(_, other, field) => {
                 return Err(format!(
@@ -378,13 +455,13 @@ impl<'a> FnLowerer<'a> {
                         let ret_type = self.ret_type.clone();
                         let value = self.lower_expr_with_expected_type(arg, Some(&ret_type))?;
                         if self.ret_type == HirType::Void {
-                            if self.infer_expr_type(&value)? == HirType::Void
-                                && contains_await(&value)
-                            {
-                                Some(value)
-                            } else {
-                                return Err("a void function cannot return a value".into());
+                            if self.infer_expr_type(&value)? != HirType::Void {
+                                return Ok(vec![
+                                    HirStmt::Expr(value),
+                                    HirStmt::Return(None),
+                                ]);
                             }
+                            Some(value)
                         } else {
                             Some(self.coerce_to_declared(&self.ret_type.clone(), value)?)
                         }
@@ -722,12 +799,21 @@ impl<'a> FnLowerer<'a> {
                     let mut values_type = self.infer_expr_type(&values)?;
                     let mut generator_producer = None;
                     if let HirType::Function(params, result) = &values_type {
-                        if params.len() == 4
+                        let (result, async_generator) = match result.as_ref() {
+                            HirType::Array(_) => (Some(result.as_ref().clone()), false),
+                            HirType::Promise(result)
+                                if for_of.is_await
+                                    && matches!(result.as_ref(), HirType::Array(_)) =>
+                            {
+                                (Some(result.as_ref().clone()), true)
+                            }
+                            _ => (None, false),
+                        };
+                        if let Some(result) = result.filter(|_| {
+                            params.len() == 6
                             && params[0] == HirType::I64
                             && params[1] == HirType::Str
-                            && matches!(result.as_ref(), HirType::Array(_))
-                        {
-                            let result = result.as_ref().clone();
+                        }) {
                             let producer_type = values_type.clone();
                             let producer = format!(
                                 "__thaw_generator_producer_{}",
@@ -735,7 +821,8 @@ impl<'a> FnLowerer<'a> {
                             );
                             self.next_binding += 1;
                             self.scope.insert(producer.clone(), producer_type.clone());
-                            generator_producer = Some((producer, producer_type, values));
+                            generator_producer =
+                                Some((producer, producer_type, values, async_generator));
                             values_type = result;
                             values = HirExpr::ArrayLit(Vec::new());
                         }
@@ -962,14 +1049,44 @@ impl<'a> FnLowerer<'a> {
                         }
                     };
                     let mut body = Vec::new();
-                    if let Some((producer, producer_type, _)) = &generator_producer {
+                    if let Some((producer, producer_type, _, async_generator)) = &generator_producer {
                         let HirType::Function(params, _) = producer_type else {
                             unreachable!("generator producer type was checked above");
                         };
                         body.extend([
                             HirStmt::Expr(HirExpr::Assign(
                                 values_name.clone(),
-                                Box::new(HirExpr::Call(
+                                Box::new(if *async_generator {
+                                    HirExpr::AwaitPromise(
+                                        Box::new(HirExpr::Call(
+                                            Box::new(HirExpr::Var(producer.clone())),
+                                            vec![
+                                                HirExpr::Lit(HirLit::I64(0)),
+                                                HirExpr::Lit(HirLit::Str(String::new())),
+                                                generator_placeholder(&params[2]).ok_or_else(|| {
+                                                    format!(
+                                                        "generator input type {:?} has no default value",
+                                                        params[2]
+                                                    )
+                                                })?,
+                                                HirExpr::TypedClosure(
+                                                    params[3].clone(),
+                                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                                ),
+                                                HirExpr::TypedClosure(
+                                                    params[4].clone(),
+                                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                                ),
+                                                HirExpr::TypedClosure(
+                                                    params[5].clone(),
+                                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                                ),
+                                            ],
+                                        )),
+                                        values_type.clone(),
+                                    )
+                                } else {
+                                    HirExpr::Call(
                                     Box::new(HirExpr::Var(producer.clone())),
                                     vec![
                                         HirExpr::Lit(HirLit::I64(0)),
@@ -984,8 +1101,17 @@ impl<'a> FnLowerer<'a> {
                                             params[3].clone(),
                                             Box::new(HirExpr::ArrayLit(Vec::new())),
                                         ),
+                                        HirExpr::TypedClosure(
+                                            params[4].clone(),
+                                            Box::new(HirExpr::ArrayLit(Vec::new())),
+                                        ),
+                                        HirExpr::TypedClosure(
+                                            params[5].clone(),
+                                            Box::new(HirExpr::ArrayLit(Vec::new())),
+                                        ),
                                     ],
-                                )),
+                                    )
+                                }),
                             )),
                             HirStmt::If(
                                 HirExpr::BinOp(
@@ -1039,7 +1165,7 @@ impl<'a> FnLowerer<'a> {
                         ),
                         HirStmt::While(condition, body),
                     ];
-                    let Some((producer, producer_type, init)) = generator_producer else {
+                    let Some((producer, producer_type, init, _)) = generator_producer else {
                         return Ok(statements);
                     };
                     statements.push(HirStmt::Return(None));

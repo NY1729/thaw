@@ -527,12 +527,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             class_property_name(&method.key)?
                         ));
                     }
-                    if method.function.is_generator && method.function.is_async {
-                        return Err(format!(
-                            "class `{name}` method `{}` cannot be an async generator yet",
-                            class_property_name(&method.key)?
-                        ));
-                    }
                     let method_name = class_property_name(&method.key)?;
                     if method.kind == MethodKind::Getter && !method.function.params.is_empty() {
                         return Err(format!(
@@ -615,7 +609,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             native_rest: None,
                             abstract_class_constructor: false,
                             ret,
-                            is_async: method.function.is_async,
+                            is_async: method.function.is_async && !method.function.is_generator,
                             uses_this: function_uses_this(&method.function),
                             is_extern: false,
                             source_range: (method.span.lo.0, method.span.hi.0),
@@ -1276,9 +1270,36 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 &immutable_globals,
                 Some(&call_constraints),
             )?;
-            if signatures[&name].ret == HirType::Dynamic && function.ret != HirType::Dynamic {
+            if hir_type_contains_dynamic(&signatures[&name].ret)
+                && function.ret != signatures[&name].ret
+            {
                 signatures.get_mut(&name).unwrap().ret = function.ret;
                 changed = true;
+            }
+        }
+        for declaration in class_decls
+            .iter()
+            .copied()
+            .chain(inherited_virtual_class_decls.iter())
+        {
+            let methods = lower_class_methods(
+                declaration,
+                &signatures,
+                &interfaces,
+                &generic_interfaces,
+                &enum_values,
+                &enum_reverse_values,
+                &global_types,
+                &immutable_globals,
+            )?;
+            for function in methods {
+                let Some(signature) = signatures.get(&function.name) else {
+                    continue;
+                };
+                if hir_type_contains_dynamic(&signature.ret) && function.ret != signature.ret {
+                    signatures.get_mut(&function.name).unwrap().ret = function.ret;
+                    changed = true;
+                }
             }
         }
         for constraint in call_constraints.into_inner() {
@@ -1375,7 +1396,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     let unresolved = signatures.iter().find(|(_, signature)| {
         !signature.is_extern
             && signature.generic_type_params.is_empty()
-            && signature.ret == HirType::Dynamic
+            && hir_type_contains_dynamic(&signature.ret)
     });
     if let Some((name, signature)) = unresolved {
         return Err(format!(

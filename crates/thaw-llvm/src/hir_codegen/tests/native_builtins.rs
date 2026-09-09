@@ -1936,13 +1936,15 @@ fn async_generator_next_returns_promised_iterator_results() {
             const iterator = values();
             const first = await iterator.next();
             const end = await iterator.next();
+            const after = await iterator.next();
             console.log(first.value, first.done);
             console.log(end.value, end.done);
+            console.log(after.value, after.done);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "async_generator_next"),
-        "4 false\ndone true\n"
+        "4 false\ndone true\nundefined true\n"
     );
 }
 
@@ -1970,6 +1972,627 @@ fn async_generator_suspends_at_await_between_yields() {
     assert_eq!(
         compile_and_run(source, "async_generator_await"),
         "4 false 1\n5 false 11\ntrue\n"
+    );
+}
+
+#[test]
+fn async_generator_throw_resumes_through_catch() {
+    let source = r#"
+        async function* values(): AsyncGenerator<number> {
+            try { yield 1; }
+            catch (error) {
+                console.log(error);
+                yield 2;
+            }
+        }
+        async function main(): Promise<void> {
+            const iterator = values();
+            console.log((await iterator.next()).value);
+            const caught = await iterator.throw("boom");
+            console.log(caught.value, caught.done);
+            console.log((await iterator.next()).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_throw"),
+        "1\nboom\n2 false\ntrue\n"
+    );
+}
+
+#[test]
+fn class_async_generator_method_preserves_this() {
+    let source = r#"
+        class Range {
+            start: number;
+            constructor(start: number) { this.start = start; }
+            async *values(): AsyncGenerator<number> {
+                yield this.start;
+                await Promise.resolve();
+                yield this.start + 1;
+            }
+        }
+        async function main(): Promise<void> {
+            const iterator = new Range(4).values();
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "class_async_generator"),
+        "4\n5\ntrue\n"
+    );
+}
+
+#[test]
+fn inherited_and_static_async_generator_methods_work() {
+    let source = r#"
+        class Base {
+            start: number;
+            constructor(start: number) { this.start = start; }
+            async *values(): AsyncGenerator<number> {
+                await Promise.resolve();
+                yield this.start;
+            }
+            static async *defaults(): AsyncGenerator<number> {
+                yield 7;
+            }
+        }
+        class Derived extends Base {}
+        async function main(): Promise<void> {
+            console.log((await new Derived(5).values().next()).value);
+            console.log((await Base.defaults().next()).value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "inherited_static_async_generator"),
+        "5\n7\n"
+    );
+}
+
+#[test]
+fn generic_async_generator_specializes_per_call_type() {
+    let source = r#"
+        async function* echo<T>(value: T): AsyncGenerator<T> {
+            await Promise.resolve();
+            yield value;
+        }
+        async function main(): Promise<void> {
+            console.log((await echo<number>(4).next()).value);
+            console.log((await echo<string>("ok").next()).value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_async_generator"),
+        "4\nok\n"
+    );
+}
+
+#[test]
+fn async_generator_delegates_to_sync_generator() {
+    let source = r#"
+        function* inner(): Generator<number> {
+            yield 2;
+            yield 3;
+        }
+        async function* outer(): AsyncGenerator<number> {
+            yield 1;
+            yield* inner();
+            await Promise.resolve();
+            yield 4;
+        }
+        async function main(): Promise<void> {
+            const iterator = outer();
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_delegation"),
+        "1\n2\n3\n4\ntrue\n"
+    );
+}
+
+#[test]
+fn async_generator_delegates_to_async_generator() {
+    let source = r#"
+        async function* inner(): AsyncGenerator<number> {
+            yield 2;
+            await Promise.resolve();
+            yield 3;
+        }
+        async function* outer(): AsyncGenerator<number> {
+            yield 1;
+            yield* inner();
+            yield 4;
+        }
+        async function main(): Promise<void> {
+            const iterator = outer();
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_async_delegation"),
+        "1\n2\n3\n4\ntrue\n"
+    );
+}
+
+#[test]
+fn sync_generator_rejects_async_generator_delegation() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+            async function* inner(): AsyncGenerator<number> { yield 1; }
+            function* outer(): Generator<number> { yield* inner(); }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        thaw_hir::lower_module(&module).unwrap_err(),
+        "a synchronous generator cannot delegate to an async generator"
+    );
+}
+
+#[test]
+fn generic_async_generator_method_specializes_per_call_type() {
+    let source = r#"
+        class Values {
+            async *echo<T>(value: T): AsyncGenerator<T> {
+                await Promise.resolve();
+                yield value;
+            }
+        }
+        async function main(): Promise<void> {
+            const values = new Values();
+            console.log((await values.echo<number>(4).next()).value);
+            console.log((await values.echo<string>("ok").next()).value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_async_generator_method"),
+        "4\nok\n"
+    );
+}
+
+#[test]
+fn generator_resume_assigns_dynamic_property() {
+    let source = r#"
+        function* values(target: any): Generator<number, void, number> {
+            target.value = yield 1;
+            console.log(target.value);
+        }
+        function main(): void {
+            const target: any = {};
+            const iterator = values(target);
+            console.log(iterator.next().value);
+            console.log(iterator.next(42).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_dynamic_resume_target"),
+        "1\n42\ntrue\n"
+    );
+}
+
+#[test]
+fn generator_function_expression_is_lazy() {
+    let source = r#"
+        function main(): void {
+            let started: number = 0;
+            const values = function* (): Generator<number> {
+                started += 1;
+                yield 4;
+            };
+            const iterator = values();
+            console.log(started);
+            console.log(iterator.next().value);
+            console.log(started);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_function_expression"),
+        "0\n4\n1\n"
+    );
+}
+
+#[test]
+fn async_generator_function_expression_awaits_and_captures() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let offset: number = 4;
+            const values = async function* (): AsyncGenerator<number> {
+                await Promise.resolve();
+                yield offset;
+                offset += 1;
+                yield offset;
+            };
+            const iterator = values();
+            console.log((await iterator.next()).value);
+            console.log((await iterator.next()).value);
+            console.log(offset);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_function_expression"),
+        "4\n5\n5\n"
+    );
+}
+
+#[test]
+fn generator_callback_uses_contextual_parameter_types() {
+    let source = r#"
+        function consume(factory: (start: number) => Generator<number>): number {
+            return factory(40).next().value ?? 0;
+        }
+        function consumeObject(factory: (input: { start: number }) => Generator<number>): number {
+            return factory({ start: 39 }).next().value ?? 0;
+        }
+        function main(): void {
+            const result = consume(function* (start): Generator<number> {
+                yield start + 2;
+            });
+            console.log(result);
+            console.log(consumeObject(function* ({ start }): Generator<number> {
+                yield start + 3;
+            }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "contextual_generator_callback"),
+        "42\n42\n"
+    );
+}
+
+#[test]
+fn async_generator_callback_uses_contextual_parameter_types() {
+    let source = r#"
+        async function consume(
+            factory: (start: number) => AsyncGenerator<number>,
+        ): Promise<number> {
+            return (await factory(40).next()).value ?? 0;
+        }
+        async function main(): Promise<void> {
+            const result = await consume(async function* (start): AsyncGenerator<number> {
+                await Promise.resolve();
+                yield start + 2;
+            });
+            console.log(result);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "contextual_async_generator_callback"),
+        "42\n"
+    );
+}
+
+#[test]
+fn async_generator_return_resolves_and_runs_finally() {
+    let source = r#"
+        let progress: number = 0;
+        async function* values(): AsyncGenerator<number> {
+            try {
+                yield 1;
+                yield 2;
+            } finally {
+                progress += 10;
+            }
+        }
+        async function main(): Promise<void> {
+            const iterator = values();
+            console.log((await iterator.next()).value, progress);
+            const stopped = await iterator.return(9);
+            console.log(stopped.value, stopped.done, progress);
+            console.log((await iterator.next()).done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_return"),
+        "1 0\n9 true 10\ntrue 10\n"
+    );
+}
+
+#[test]
+fn async_generator_throw_awaits_inside_catch() {
+    let source = r#"
+        async function* values(): AsyncGenerator<number> {
+            try {
+                yield 1;
+            } catch (error) {
+                await Promise.resolve();
+                console.log(error);
+                yield 2;
+            }
+        }
+        async function main(): Promise<void> {
+            const iterator = values();
+            console.log((await iterator.next()).value);
+            console.log((await iterator.throw("boom")).value);
+            console.log((await iterator.next()).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_throw_await"),
+        "1\nboom\n2\ntrue\n"
+    );
+}
+
+#[test]
+fn async_generator_return_skips_pending_await_path() {
+    let source = r#"
+        async function* values(): AsyncGenerator<number> {
+            yield 1;
+            await Promise.resolve();
+            yield 2;
+        }
+        async function main(): Promise<void> {
+            const iterator = values();
+            console.log((await iterator.next()).value);
+            const stopped = await iterator.return(9);
+            console.log(stopped.value, stopped.done);
+            const after = await iterator.next();
+            console.log(after.value, after.done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_return_pending_await"),
+        "1\n9 true\nundefined true\n"
+    );
+}
+
+#[test]
+fn async_generator_return_awaits_inside_finally() {
+    let source = r#"
+        let progress: number = 0;
+        async function* values(): AsyncGenerator<number> {
+            try {
+                yield 1;
+            } finally {
+                await Promise.resolve();
+                progress += 10;
+            }
+        }
+        async function main(): Promise<void> {
+            const iterator = values();
+            console.log((await iterator.next()).value, progress);
+            const stopped = await iterator.return(9);
+            console.log(stopped.value, stopped.done, progress);
+            console.log((await iterator.next()).done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_return_await_finally"),
+        "1 0\n9 true 10\ntrue 10\n"
+    );
+}
+
+#[test]
+fn generator_return_resumes_yielding_finally() {
+    let source = r#"
+        function* values(): Generator<number> {
+            try {
+                yield 1;
+            } finally {
+                yield 2;
+            }
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value);
+            const paused = iterator.return(9);
+            console.log(paused.value, paused.done);
+            const stopped = iterator.next();
+            console.log(stopped.value, stopped.done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_return_yielding_finally"),
+        "1\n2 false\n9 true\n"
+    );
+}
+
+#[test]
+fn generator_return_uses_the_declared_completion_type() {
+    let source = r#"
+        function* values(): Generator<number, string> {
+            try { yield 1; } finally { console.log("sync finally"); yield 3; }
+            return "natural";
+        }
+        async function* asyncValues(): AsyncGenerator<number, string> {
+            try { yield 2; } finally { await Promise.resolve(); console.log("async finally"); }
+            return "natural async";
+        }
+        async function main(): Promise<void> {
+            const sync = values();
+            sync.next();
+            const paused = sync.return("forced");
+            console.log(paused.value, paused.done);
+            const stopped = sync.next();
+            console.log(stopped.value, stopped.done);
+            const async = asyncValues();
+            await async.next();
+            const asyncStopped = await async.return("forced async");
+            console.log(asyncStopped.value, asyncStopped.done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_return_completion_type"),
+        "sync finally\n3 false\nforced true\nasync finally\nforced async true\n"
+    );
+}
+
+#[test]
+fn async_generator_return_resumes_yielding_finally() {
+    let source = r#"
+        async function* values(): AsyncGenerator<number> {
+            try {
+                yield 1;
+            } finally {
+                await Promise.resolve();
+                yield 2;
+            }
+        }
+        async function main(): Promise<void> {
+            const iterator = values();
+            console.log((await iterator.next()).value);
+            const paused = await iterator.return(9);
+            console.log(paused.value, paused.done);
+            const stopped = await iterator.next();
+            console.log(stopped.value, stopped.done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_return_yielding_finally"),
+        "1\n2 false\n9 true\n"
+    );
+}
+
+#[test]
+fn generator_protocol_handles_control_before_start_and_after_completion() {
+    let source = r#"
+        let entered: number = 0;
+        function* values(): Generator<number> {
+            try { entered += 1; yield 1; } finally { entered += 10; }
+        }
+        function main(): void {
+            const unopened = values();
+            const stopped = unopened.return(9);
+            console.log(stopped.value, stopped.done, entered);
+            const completed = values();
+            completed.next();
+            completed.next();
+            try { completed.throw("late"); } catch (error) { console.log(error); }
+            const unstartedThrow = values();
+            try { unstartedThrow.throw("early"); } catch (error) { console.log(error, entered); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_protocol_boundaries"),
+        "9 true 0\nlate\nearly 11\n"
+    );
+}
+
+#[test]
+fn async_generator_throw_rejects_after_completion() {
+    let source = r#"
+        async function* values(): AsyncGenerator<number> { yield 1; }
+        async function main(): Promise<void> {
+            const iterator = values();
+            await iterator.next();
+            await iterator.next();
+            try { await iterator.throw("late"); } catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_throw_after_done"),
+        "late\n"
+    );
+}
+
+#[test]
+fn generic_generator_function_expression_specializes_per_call_type() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const echo = function* <T>(value: T): Generator<T> { yield value; };
+            console.log(echo<number>(4).next().value);
+            console.log(echo<string>("ok").next().value);
+            const echoAsync = async function* <T>(value: T): AsyncGenerator<T> {
+                await Promise.resolve(); yield value;
+            };
+            console.log((await echoAsync<number>(5).next()).value);
+            console.log((await echoAsync<string>("async").next()).value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generic_generator_function_expression"),
+        "4\nok\n5\nasync\n"
+    );
+}
+
+#[test]
+fn infers_unannotated_generator_yield_and_return_types() {
+    let source = r#"
+        function* values(enabled: boolean) {
+            if (enabled) { yield 1; }
+            yield 2;
+            return "done";
+        }
+        async function* asyncValues() {
+            await Promise.resolve();
+            yield 3;
+            return "async done";
+        }
+        function* delegated(): Generator<number> { yield 4; }
+        function* inferredDelegation() { yield* delegated(); }
+        function* emptyYield() { yield; }
+        function* mixed() { yield 1; yield "two"; }
+        class InferredGenerators {
+            *values() { yield 7; return "method done"; }
+            static async *asyncValues() {
+                await Promise.resolve(); yield 8; return "static async done";
+            }
+        }
+        class DerivedGenerators extends InferredGenerators {}
+        async function main(): Promise<void> {
+            const local = function* () { yield 5; return "local done"; };
+            const localAsync = async function* () {
+                await Promise.resolve(); yield 6; return "async local done";
+            };
+            const iterator = values(true);
+            console.log(iterator.next().value);
+            console.log(iterator.next().value);
+            console.log(iterator.next().value);
+            const asyncIterator = asyncValues();
+            console.log((await asyncIterator.next()).value);
+            console.log((await asyncIterator.next()).value);
+            console.log(inferredDelegation().next().value);
+            console.log(emptyYield().next().done);
+            const mixedIterator = mixed();
+            console.log(mixedIterator.next().done, mixedIterator.next().done);
+            const localIterator = local();
+            console.log(localIterator.next().value, localIterator.next().value);
+            const localAsyncIterator = localAsync();
+            console.log((await localAsyncIterator.next()).value);
+            console.log((await localAsyncIterator.next()).value);
+            const methodIterator = new InferredGenerators().values();
+            console.log(methodIterator.next().value, methodIterator.next().value);
+            const staticIterator = InferredGenerators.asyncValues();
+            console.log((await staticIterator.next()).value);
+            console.log(new DerivedGenerators().values().next().value);
+            console.log((await staticIterator.next()).value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "unannotated_generator_inference"),
+        "1\n2\ndone\n3\nasync done\n4\nfalse\nfalse false\n5 local done\n6\nasync local done\n7 method done\n8\n7\nstatic async done\n"
+    );
+}
+
+#[test]
+fn for_await_consumes_async_generator() {
+    let source = r#"
+        async function* values(): AsyncGenerator<number> {
+            yield 1;
+            await Promise.resolve();
+            yield 2;
+            yield 3;
+        }
+        async function main(): Promise<void> {
+            let total: number = 0;
+            for await (const value of values()) {
+                total += value;
+            }
+            console.log(total);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "for_await_async_generator"),
+        "6\n"
     );
 }
 

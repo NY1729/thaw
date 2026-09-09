@@ -1,6 +1,5 @@
 impl<'ctx> HirCompiler<'ctx> {
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn append_nested_async_try(
         &self,
         segments: &mut Vec<AsyncSegment>,
@@ -9,6 +8,7 @@ impl<'ctx> HirCompiler<'ctx> {
         catch_body: &[HirStmt],
         activation_guard: &str,
         enclosing_handler: Option<AsyncRejectionHandler>,
+        loop_guards: &[(String, String)],
         frame_names: &std::collections::HashSet<String>,
         extra_locals: &mut Vec<(String, HirType)>,
         guarded_rethrow_handlers: &mut HashMap<String, AsyncRejectionHandler>,
@@ -55,6 +55,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     nested_catch,
                     &try_guard,
                     Some(handler.clone()),
+                    loop_guards,
                     frame_names,
                     extra_locals,
                     guarded_rethrow_handlers,
@@ -90,7 +91,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 stmt,
                 &try_guard,
                 true,
-                &[],
+                loop_guards,
                 frame_names,
                 extra_locals,
                 guarded_rethrow_handlers,
@@ -118,6 +119,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     nested_catch,
                     &catch_guard,
                     catch_enclosing.clone(),
+                    loop_guards,
                     frame_names,
                     extra_locals,
                     guarded_rethrow_handlers,
@@ -142,7 +144,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     stmt,
                     &catch_guard,
                     true,
-                    &[],
+                    loop_guards,
                     frame_names,
                     extra_locals,
                     guarded_rethrow_handlers,

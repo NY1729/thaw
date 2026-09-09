@@ -987,6 +987,62 @@ fn resolve_ts_type_with_substitution(
                     in_progress,
                 );
             }
+            if matches!(
+                ref_name,
+                "Generator" | "IterableIterator" | "AsyncGenerator" | "AsyncIterableIterator"
+            ) {
+                let parameters = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|parameters| parameters.params.as_slice())
+                    .unwrap_or_default();
+                let yielded = parameters
+                    .first()
+                    .ok_or_else(|| format!("{ref_name}<T> requires a yield type"))?;
+                let yielded = resolve_ts_type_with_substitution(
+                    yielded,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
+                let returned = match parameters.get(1) {
+                    Some(returned) => {
+                        let returned = resolve_ts_type_with_substitution(
+                            returned,
+                            substitution,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )?;
+                        if returned == HirType::Void {
+                            HirType::Undefined
+                        } else {
+                            returned
+                        }
+                    }
+                    None => yielded.clone(),
+                };
+                let input = parameters
+                    .get(2)
+                    .map(|input| {
+                        resolve_ts_type_with_substitution(
+                            input,
+                            substitution,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or(HirType::Undefined);
+                return Ok(generator_function_type(
+                    matches!(ref_name, "AsyncGenerator" | "AsyncIterableIterator"),
+                    yielded,
+                    returned,
+                    input,
+                ));
+            }
             if ref_name == "Record" {
                 let [keys, value] = ty_ref
                     .type_params
