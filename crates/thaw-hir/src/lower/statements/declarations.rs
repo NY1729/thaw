@@ -36,12 +36,12 @@ impl<'a> FnLowerer<'a> {
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
                 if let Expr::Yield(yield_expr) = init {
-                    let Some((values, element, input, input_type)) =
+                    let Some((values, element, input, input_type, _, _)) =
                         self.generator_yields.clone()
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
-                    let emission =
+                    let (emission, delegated) =
                         self.lower_generator_yield_emission(yield_expr, &values, &element)?;
                     let declared = binding
                         .type_ann
@@ -55,20 +55,15 @@ impl<'a> FnLowerer<'a> {
                         })
                         .transpose()?
                         .unwrap_or_else(|| {
-                            if yield_expr.delegate {
-                                HirType::Undefined
-                            } else {
-                                input_type.clone()
-                            }
+                            delegated
+                                .as_ref()
+                                .map(|(_, ty)| ty.clone())
+                                .unwrap_or_else(|| input_type.clone())
                         });
-                    let resumed = if yield_expr.delegate {
-                        self.coerce_to_declared(
-                            &declared,
-                            HirExpr::Lit(HirLit::Undefined),
-                        )?
-                    } else {
-                        self.coerce_to_declared(&declared, HirExpr::Var(input))?
-                    };
+                    let resumed = delegated
+                        .map(|(value, _)| value)
+                        .unwrap_or_else(|| HirExpr::Var(input));
+                    let resumed = self.coerce_to_declared(&declared, resumed)?;
                     let hir_name = self.bind_local(&name, declared.clone());
                     statements.extend(emission);
                     statements.push(HirStmt::Let(hir_name, declared, resumed));
