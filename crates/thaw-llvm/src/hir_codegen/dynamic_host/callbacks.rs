@@ -1,4 +1,158 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_js_void_callback_from_json(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        params: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let key = self
+            .builder
+            .build_global_string_ptr("__thaw_js_handle_id__", "js_callback_handle_key")
+            .map_err(|error| error.to_string())?;
+        let handle_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_get").unwrap(),
+                &[json.into(), key.as_pointer_value().into()],
+                "js_callback_handle_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_get did not return a callback handle")?;
+        let handle_number = self.compile_json_as_value(handle_json, "thaw_json_as_number")?;
+        let retained_handle = self
+            .builder
+            .build_float_to_unsigned_int(
+                handle_number.into_float_value(),
+                self.context.i64_type(),
+                "js_callback_handle",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let parent = self
+            .builder
+            .get_insert_block()
+            .ok_or("JS callback must be decoded inside a function")?;
+        let name = format!("__thaw_js_void_callback_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let adapter = self.module.add_function(
+            &name,
+            self.function_type(params, &HirType::Void)?,
+            Some(Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(entry);
+        let environment = adapter
+            .get_first_param()
+            .ok_or("JS callback adapter is missing its environment")?
+            .into_pointer_value();
+        let handle_slot = unsafe {
+            self.builder.build_in_bounds_gep(
+                self.context.i8_type(),
+                environment,
+                &[self.context.i64_type().const_int(CLOSURE_CAPTURE_BASE, false)],
+                "js_callback_handle_slot",
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        let adapter_handle = self
+            .builder
+            .build_load(self.context.i64_type(), handle_slot, "js_callback_handle")
+            .map_err(|error| error.to_string())?;
+        let arguments = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_new").unwrap(),
+                &[],
+                "js_callback_arguments",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_array_new did not return callback arguments")?;
+        for (index, ty) in params.iter().enumerate() {
+            let value = adapter
+                .get_nth_param((index + 1) as u32)
+                .ok_or("JS callback adapter is missing an argument")?;
+            self.compile_json_array_push_native(arguments, value, ty)?;
+        }
+        let arguments = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[arguments.into()],
+                "js_callback_arguments_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_stringify did not return callback arguments")?;
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_js_call_handle_result").unwrap(),
+                &[adapter_handle.into(), arguments.into()],
+                "js_callback_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_js_call_handle_result did not return a result")?
+            .into_struct_value();
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "js_callback_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.builder.build_return(None).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(parent);
+
+        let closure = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    self.context
+                        .i64_type()
+                        .const_int(CLOSURE_CAPTURE_BASE + 8, false)
+                        .into(),
+                    self.context.i64_type().const_int(8, false).into(),
+                ],
+                "js_callback_closure",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a callback closure")?
+            .into_pointer_value();
+        self.builder
+            .build_store(closure, adapter.as_global_value().as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        for offset in [CLOSURE_THIS_ENTRY_OFFSET, CLOSURE_CAPTURE_BASE] {
+            let slot = unsafe {
+                self.builder.build_in_bounds_gep(
+                    self.context.i8_type(),
+                    closure,
+                    &[self.context.i64_type().const_int(offset, false)],
+                    "js_callback_closure_slot",
+                )
+            }
+            .map_err(|error| error.to_string())?;
+            if offset == CLOSURE_CAPTURE_BASE {
+                self.builder
+                    .build_store(slot, retained_handle)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                self.builder
+                    .build_store(slot, adapter.as_global_value().as_pointer_value())
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(closure.into())
+    }
+
     fn compile_jit_argument_slots(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -347,6 +501,44 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
             .map_err(|error| error.to_string())?;
+        let pending_slot = self.pending_exception().as_pointer_value();
+        let pending = self
+            .builder
+            .build_load(self.context.ptr_type(AddressSpace::default()), pending_slot, "callback_exception")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let failed = self
+            .builder
+            .build_is_not_null(pending, "callback_failed")
+            .map_err(|error| error.to_string())?;
+        let failed_block = self.context.append_basic_block(adapter, "callback_failed");
+        let success_block = self.context.append_basic_block(adapter, "callback_succeeded");
+        self.builder
+            .build_conditional_branch(failed, failed_block, success_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(failed_block);
+        let framed = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_callback_error").unwrap(),
+                &[pending.into()],
+                "callback_error_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_callback_error returned no value")?;
+        self.builder
+            .build_store(
+                pending_slot,
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_return(Some(&framed))
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(success_block);
         if defer_promise && matches!(ret, HirType::Promise(_)) {
             let promise = call
                 .try_as_basic_value()
@@ -677,7 +869,12 @@ impl<'ctx> HirCompiler<'ctx> {
         let jsvalue_param_mask: u64 = params
             .iter()
             .enumerate()
-            .filter(|(_, param)| **param == HirType::JsValue)
+            .filter(|(_, param)| {
+                matches!(
+                    param,
+                    HirType::JsValue | HirType::Function(_, _) | HirType::CallableFunction(..)
+                )
+            })
             .map(|(index, _)| 1u64 << index)
             .sum();
         let (adapter, closure, finish) =
@@ -1033,6 +1230,38 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
+            HirType::Promise(resolved) => {
+                let promise = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_promise_new").unwrap(),
+                        &[],
+                        "dynamic_promise",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_promise_new returned no value")?
+                    .into_pointer_value();
+                let payload = if **resolved == HirType::Void {
+                    self.context.ptr_type(AddressSpace::default()).const_null()
+                } else {
+                    let value = self.compile_typed_dynamic_result(json, resolved)?;
+                    let slot = self.allocate_arena_cell(self.basic_type(resolved)?, "dynamic_promise_result")?;
+                    self.builder
+                        .build_store(slot, value)
+                        .map_err(|error| error.to_string())?;
+                    slot
+                };
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_promise_resolve").unwrap(),
+                        &[promise.into(), payload.into()],
+                        "resolve_dynamic_promise",
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(promise.into())
+            }
             // A `void`-returning dynamic call still marshals a JSON result
             // back across the boundary (there's no "no value" JSON
             // representation to special-case on the JS side), but the

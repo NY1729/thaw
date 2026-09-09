@@ -18,6 +18,7 @@ fn lower_ts_type(
     generic_interfaces: &GenericInterfaces,
 ) -> Result<HirType, String> {
     match ty {
+        TsType::TsTypePredicate(_) => Ok(HirType::Bool),
         TsType::TsParenthesizedType(parenthesized) => lower_ts_type(
             &parenthesized.type_ann,
             interfaces,
@@ -57,6 +58,7 @@ fn lower_ts_type(
             swc_ecma_ast::TsLit::Number(_) => Ok(HirType::F64),
             swc_ecma_ast::TsLit::Str(_) => Ok(HirType::Str),
             swc_ecma_ast::TsLit::Bool(_) => Ok(HirType::Bool),
+            swc_ecma_ast::TsLit::Tpl(_) => Ok(HirType::Str),
             other => Err(format!("unsupported literal type {other:?}")),
         },
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
@@ -164,13 +166,37 @@ fn lower_ts_type(
             interfaces,
             generic_interfaces,
         )?))),
-        TsType::TsTupleType(tuple) => Ok(HirType::Tuple(
-            tuple
-                .elem_types
-                .iter()
-                .map(|element| lower_ts_type(&element.ty, interfaces, generic_interfaces))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
+        TsType::TsOptionalType(optional) => Ok(HirType::Optional(Box::new(lower_ts_type(
+            &optional.type_ann,
+            interfaces,
+            generic_interfaces,
+        )?))),
+        TsType::TsTupleType(tuple) => {
+            if let Some(TsType::TsRestType(rest)) =
+                tuple.elem_types.last().map(|element| element.ty.as_ref())
+            {
+                let HirType::Array(rest) =
+                    lower_ts_type(&rest.type_ann, interfaces, generic_interfaces)?
+                else {
+                    return Err("tuple rest element needs an array type".into());
+                };
+                let prefix = tuple.elem_types[..tuple.elem_types.len() - 1]
+                    .iter()
+                    .map(|element| lower_ts_type(&element.ty, interfaces, generic_interfaces))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if prefix.iter().all(|element| element == rest.as_ref()) {
+                    return Ok(HirType::Array(rest));
+                }
+                return Ok(HirType::Array(Box::new(HirType::Json)));
+            }
+            Ok(HirType::Tuple(
+                tuple
+                    .elem_types
+                    .iter()
+                    .map(|element| lower_ts_type(&element.ty, interfaces, generic_interfaces))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
         TsType::TsMappedType(mapped) => {
             if mapped.name_type.is_some() {
                 return Err("mapped type key remapping is not supported".into());
@@ -202,7 +228,10 @@ fn lower_ts_type(
         ),
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
             if function.type_params.is_some() {
-                return Err("generic function types are not supported yet".into());
+                // Generic callable values have no single native ABI. Class/interface
+                // method calls with a known receiver still specialize through the
+                // existing generic-method pipeline.
+                return Ok(HirType::Dynamic);
             }
             let mut params = Vec::new();
             let mut optional = Vec::new();
@@ -431,6 +460,10 @@ fn lower_ts_type(
                     [elem] => Some(elem.as_ref()),
                     _ => None,
                 });
+
+            if ref_name == Some("TemplateStringsArray") && ty_ref.type_params.is_none() {
+                return Ok(HirType::Array(Box::new(HirType::Str)));
+            }
 
             match (ref_name, single_type_param) {
                 (Some("Array" | "ReadonlyArray"), Some(elem)) => Ok(HirType::Array(Box::new(
@@ -770,9 +803,12 @@ fn resolve_generic_interface(
                 "interface `{name}` property `{field_name}` does not match its index value type"
             ));
         }
-        if fields.iter().any(|(existing, _)| existing == &field_name) {
+        if let Some((_, existing)) = fields.iter().find(|(name, _)| name == &field_name) {
+            if existing == &field_ty {
+                continue;
+            }
             return Err(format!(
-                "interface `{name}` declares field `{field_name}`, which collides with an inherited field"
+                "interface `{name}` redeclares field `{field_name}` with an incompatible type"
             ));
         }
         fields.push((field_name, field_ty));
@@ -1040,6 +1076,7 @@ fn resolve_ts_type_with_substitution(
     }
 
     match ty {
+        TsType::TsTypePredicate(_) => Ok(HirType::Bool),
         TsType::TsParenthesizedType(parenthesized) => resolve_ts_type_with_substitution(
             &parenthesized.type_ann,
             substitution,
@@ -1079,21 +1116,62 @@ fn resolve_ts_type_with_substitution(
                 in_progress,
             )?)))
         }
-        TsType::TsTupleType(tuple) => Ok(HirType::Tuple(
-            tuple
-                .elem_types
-                .iter()
-                .map(|element| {
-                    resolve_ts_type_with_substitution(
-                        &element.ty,
-                        substitution,
-                        interfaces,
-                        generic_interfaces,
-                        in_progress,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
+        TsType::TsOptionalType(optional) => Ok(HirType::Optional(Box::new(
+            resolve_ts_type_with_substitution(
+                &optional.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?,
+        ))),
+        TsType::TsTupleType(tuple) => {
+            if let Some(TsType::TsRestType(rest)) =
+                tuple.elem_types.last().map(|element| element.ty.as_ref())
+            {
+                let HirType::Array(rest) = resolve_ts_type_with_substitution(
+                    &rest.type_ann,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?
+                else {
+                    return Err("tuple rest element needs an array type".into());
+                };
+                let prefix = tuple.elem_types[..tuple.elem_types.len() - 1]
+                    .iter()
+                    .map(|element| {
+                        resolve_ts_type_with_substitution(
+                            &element.ty,
+                            substitution,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if prefix.iter().all(|element| element == rest.as_ref()) {
+                    return Ok(HirType::Array(rest));
+                }
+                return Ok(HirType::Array(Box::new(HirType::Json)));
+            }
+            Ok(HirType::Tuple(
+                tuple
+                    .elem_types
+                    .iter()
+                    .map(|element| {
+                        resolve_ts_type_with_substitution(
+                            &element.ty,
+                            substitution,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
         TsType::TsMappedType(mapped) => {
             if mapped.name_type.is_some() {
                 return Err("mapped type key remapping is not supported".into());
@@ -1114,22 +1192,30 @@ fn resolve_ts_type_with_substitution(
                 .type_ann
                 .as_ref()
                 .ok_or("mapped type needs a value annotation")?;
-            let mut value = resolve_ts_type_with_substitution(
-                value,
-                substitution,
-                interfaces,
-                generic_interfaces,
-                in_progress,
-            )?;
-            if matches!(
+            let optional = matches!(
                 mapped.optional,
                 Some(swc_ecma_ast::TruePlusMinus::True | swc_ecma_ast::TruePlusMinus::Plus)
-            ) {
-                value = optional_parameter_type(value);
+            );
+            let mut fields = Vec::with_capacity(keys.len());
+            for key in keys {
+                let mut nested = substitution.clone();
+                nested.insert(
+                    mapped.type_param.name.sym.to_string(),
+                    HirType::StrLiteral(key.clone()),
+                );
+                let mut value = resolve_ts_type_with_substitution(
+                    value,
+                    &nested,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
+                if optional {
+                    value = optional_parameter_type(value);
+                }
+                fields.push((key, value));
             }
-            Ok(HirType::Object(
-                keys.into_iter().map(|key| (key, value.clone())).collect(),
-            ))
+            Ok(HirType::Object(fields))
         }
         TsType::TsIndexedAccessType(indexed) => {
             let object = resolve_ts_type_with_substitution(
@@ -1250,7 +1336,7 @@ fn resolve_ts_type_with_substitution(
         }
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
             if function.type_params.is_some() {
-                return Err("generic function types are not supported yet".into());
+                return Ok(HirType::Dynamic);
             }
             let mut params = Vec::new();
             let mut optional = Vec::new();

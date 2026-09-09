@@ -41,7 +41,7 @@ impl<'a> FnLowerer<'a> {
                         "NaN" => return Ok(HirExpr::Lit(HirLit::F64(f64::NAN))),
                         "Infinity" => return Ok(HirExpr::Lit(HirLit::F64(f64::INFINITY))),
                         "undefined" => return Ok(HirExpr::Lit(HirLit::Undefined)),
-                        global @ ("crypto" | "process") => {
+                        global @ ("Atomics" | "crypto" | "process") => {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
                                 vec![HirExpr::Lit(HirLit::Str(global.to_string()))],
@@ -58,6 +58,15 @@ impl<'a> FnLowerer<'a> {
                             elements.clone(),
                         ));
                     }
+                }
+                if let Some(narrowed) = self.json_narrowings.get(&name) {
+                    let value = Box::new(HirExpr::Var(name));
+                    return Ok(match narrowed {
+                        HirType::Str => HirExpr::JsonAsString(value),
+                        HirType::F64 => HirExpr::JsonAsNumber(value),
+                        HirType::Bool => HirExpr::JsonAsBool(value),
+                        _ => unreachable!("validated typeof narrowing target"),
+                    });
                 }
                 match self
                     .narrowings
@@ -606,10 +615,16 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     other
-                        if (self.infer_expr_type(&lhs)? == HirType::JsValue
+                        if (matches!(
+                            self.infer_expr_type(&lhs)?,
+                            HirType::JsValue | HirType::Json
+                        )
                             && self.infer_expr_type(&rhs)? == HirType::F64)
                             || (self.infer_expr_type(&lhs)? == HirType::F64
-                                && self.infer_expr_type(&rhs)? == HirType::JsValue) =>
+                                && matches!(
+                                    self.infer_expr_type(&rhs)?,
+                                    HirType::JsValue | HirType::Json
+                                )) =>
                     {
                         HirExpr::BinOp(
                             lower_bin_op(other)?,
@@ -741,6 +756,24 @@ impl<'a> FnLowerer<'a> {
                         }
                         .map(Ok)
                         .unwrap_or_else(|| self.infer_expr_type(&value))?;
+                        if operand_type == HirType::Json {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                                vec![value],
+                            ));
+                        }
+                        if operand_type == HirType::JsValue {
+                            let callable = HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".into())),
+                                vec![HirExpr::Lit(HirLit::Str(
+                                    "__thaw_typeof_dynamic_value".into(),
+                                ))],
+                            );
+                            return Ok(HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+                                vec![callable, value],
+                            ))));
+                        }
                         if let HirType::Union(elements) = &operand_type {
                             let parameter = format!("__thaw_typeof_union_{}", self.next_binding);
                             self.next_binding += 1;
@@ -1240,7 +1273,13 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Await(await_expr) => {
                 let value = self.lower_expr(&await_expr.arg)?;
-                if let HirType::Promise(resolved) = self.infer_expr_type(&value)? {
+                let value_type = self.infer_expr_type(&value)?;
+                if value_type == HirType::JsValue {
+                    Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("resolveDynamicValue".into())),
+                        vec![value],
+                    ))
+                } else if let HirType::Promise(resolved) = value_type {
                     if *resolved == HirType::Void {
                         Ok(HirExpr::Await(Box::new(value)))
                     } else {
@@ -1272,6 +1311,52 @@ impl<'a> FnLowerer<'a> {
 
             Expr::New(new_expr) => {
                 if let Expr::Ident(class) = new_expr.callee.as_ref() {
+                    if matches!(
+                        class.sym.as_ref(),
+                        "AbortController"
+                            | "TextDecoder"
+                            | "TextEncoder"
+                            | "Int8Array"
+                            | "Uint8Array"
+                            | "Uint8ClampedArray"
+                            | "Int16Array"
+                            | "Uint16Array"
+                            | "Int32Array"
+                            | "Uint32Array"
+                            | "Float32Array"
+                            | "Float64Array"
+                            | "ArrayBuffer"
+                            | "SharedArrayBuffer"
+                            | "DataView"
+                    ) {
+                        let args = new_expr.args.as_deref().unwrap_or_default();
+                        if args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err(format!(
+                                "`new {}()` does not support spread arguments",
+                                class.sym
+                            ));
+                        }
+                        let values = args
+                            .iter()
+                            .map(|argument| {
+                                let value = self.lower_expr_with_expected_type(
+                                    &argument.expr,
+                                    Some(&HirType::JsValue),
+                                )?;
+                                self.coerce_to_declared(&HirType::Json, value)
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        let values = self
+                            .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+                        let constructor = HirExpr::Call(
+                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                            vec![HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+                        );
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("constructDynamicValue".into())),
+                            vec![constructor, values],
+                        ));
+                    }
                     if class.sym == *"RegExp" {
                         let args = new_expr.args.clone().unwrap_or_default();
                         if !(1..=2).contains(&args.len()) {
@@ -1702,6 +1787,31 @@ impl<'a> FnLowerer<'a> {
         expr: &Expr,
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        if let Some(expected) = expected {
+            let supplied = match expr {
+                Expr::Arrow(arrow) => Some(arrow.params.len()),
+                Expr::Fn(function) => Some(function.function.params.len()),
+                Expr::Ident(ident) => {
+                    let name = self.resolve_binding(ident.sym.as_ref());
+                    (self
+                        .scope
+                        .get(&name)
+                        .is_some_and(|ty| {
+                            matches!(ty, HirType::Function(_, _) | HirType::CallableFunction(..))
+                        })
+                        || self.generic_arrows.contains_key(&name)
+                        || self.generic_named_templates.contains_key(&name)
+                        || self.signatures.contains_key(&name))
+                    .then_some(usize::MAX)
+                }
+                _ => None,
+            };
+            if let Some((params, ret)) = supplied
+                .and_then(|supplied| callback_signature(expected, supplied))
+            {
+                return self.lower_promise_callback(expr, &params, Some(&ret));
+            }
+        }
         if let (Expr::Object(object), Some(expected)) = (expr, expected) {
             let fields = match expected {
                 HirType::Object(fields) => Some(fields.as_slice()),
@@ -1711,10 +1821,6 @@ impl<'a> FnLowerer<'a> {
                     HirType::Object(fields) => Some(fields.as_slice()),
                     _ => None,
                 },
-                HirType::Union(elements) => elements.iter().find_map(|element| match element {
-                    HirType::Object(fields) => Some(fields.as_slice()),
-                    _ => None,
-                }),
                 _ => None,
             };
             if let Some(fields) = fields {

@@ -32,7 +32,7 @@ fn run_compat(args: &[String]) -> Result<(), String> {
         let source = case["source"]
             .as_str()
             .ok_or_else(|| format!("case `{name}` is missing `source`"))?;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             thaw_parser::parse_typescript_with_source_map(source).and_then(
                 |(module, source_map)| {
                     thaw_hir::lower_module_with_source_map(&module, &source_map, name)
@@ -40,8 +40,9 @@ fn run_compat(args: &[String]) -> Result<(), String> {
                         .map_err(|error| error.to_string())
                 },
             )
-        }))
-        .unwrap_or_else(|panic| {
+        }));
+        let panicked = attempted.is_err();
+        let outcome = attempted.unwrap_or_else(|panic| {
             let message = panic
                 .downcast_ref::<&str>()
                 .copied()
@@ -54,7 +55,15 @@ fn run_compat(args: &[String]) -> Result<(), String> {
         } else {
             "unsupported"
         };
-        let classification = if actual == expected { actual } else { "bug" };
+        let expected_error = case.get("errorContains").and_then(serde_json::Value::as_str);
+        let error_matches = expected_error.is_none_or(|expected| {
+            matches!(&outcome, Err(error) if error.contains(expected))
+        });
+        let classification = if !panicked && actual == expected && error_matches {
+            actual
+        } else {
+            "bug"
+        };
         bugs += usize::from(classification == "bug");
         let mut result = serde_json::json!({
             "name": name,
@@ -64,6 +73,9 @@ fn run_compat(args: &[String]) -> Result<(), String> {
         });
         if let Err(error) = outcome {
             result["error"] = error.into();
+        }
+        if let Some(expected_error) = expected_error {
+            result["errorContains"] = expected_error.into();
         }
         results.push(result);
     }

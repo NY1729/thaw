@@ -1,3 +1,22 @@
+fn is_untyped_promise_reject(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    let Callee::Expr(callee) = &call.callee else {
+        return false;
+    };
+    let Expr::Member(member) = callee.as_ref() else {
+        return false;
+    };
+    matches!(
+        (member.obj.as_ref(), &member.prop),
+        (Expr::Ident(object), MemberProp::Ident(property))
+            if object.sym == *"Promise"
+                && property.sym == *"reject"
+                && call.type_args.is_none()
+    )
+}
+
 impl<'a> FnLowerer<'a> {
     fn lower_promise_member_call(
         &mut self,
@@ -177,7 +196,9 @@ impl<'a> FnLowerer<'a> {
                             "Promise.all element {index} must be a Promise, got {other:?}"
                         ))?,
                     };
-                    if resolved == HirType::Void {
+                    if resolved == HirType::Void
+                        && !is_untyped_promise_reject(&element.expr)
+                    {
                         return Err(format!("Promise.all element {index} resolves to void"));
                     }
                     element_types.push(resolved);
@@ -246,6 +267,9 @@ impl<'a> FnLowerer<'a> {
                         ))?,
                     };
                     if resolved == HirType::Void {
+                        if is_untyped_promise_reject(&element.expr) {
+                            return Ok(value);
+                        }
                         return Err(format!(
                             "Promise.allSettled element {index} resolves to void"
                         ));
@@ -321,6 +345,9 @@ impl<'a> FnLowerer<'a> {
                         ))?,
                     };
                     if resolved == HirType::Void {
+                        if is_untyped_promise_reject(&element.expr) {
+                            return Ok(value);
+                        }
                         return Err(format!("Promise.race element {index} resolves to void"));
                     }
                     if let Some(expected) = &element_type {
@@ -337,7 +364,7 @@ impl<'a> FnLowerer<'a> {
                 .collect::<Result<Vec<_>, String>>()?;
             return Ok(HirExpr::PromiseRace(
                 promises,
-                element_type.expect("non-empty Promise.race"),
+                element_type.unwrap_or(HirType::F64),
             ));
         }
 
@@ -394,6 +421,9 @@ impl<'a> FnLowerer<'a> {
                         ))?,
                     };
                     if resolved == HirType::Void {
+                        if is_untyped_promise_reject(&element.expr) {
+                            return Ok(value);
+                        }
                         return Err(format!("Promise.any element {index} resolves to void"));
                     }
                     if let Some(expected) = &element_type {
@@ -410,7 +440,7 @@ impl<'a> FnLowerer<'a> {
                 .collect::<Result<Vec<_>, String>>()?;
             return Ok(HirExpr::PromiseAny(
                 promises,
-                element_type.expect("non-empty Promise.any"),
+                element_type.unwrap_or(HirType::F64),
             ));
         }
         unreachable!("promise static dispatch was checked before lowering")

@@ -401,9 +401,9 @@ pub struct ModuleBundle<'a> {
 /// `function` declarations, which rely on top-level scope becoming
 /// global properties directly, the same way `loadScript` already worked
 /// before this), then copies whatever the source assigned to
-/// `module.exports` onto the global scope too, so `callDynamic`'s
-/// by-name lookup (`thaw_js_call`, which only ever looks up *global*
-/// functions) can find it either way.
+/// `module.exports` into still-unoccupied global names, so package
+/// exports cannot replace platform globals such as `setTimeout`.
+/// Package-qualified aliases are captured directly from `module.exports`.
 ///
 /// Validated by running real, unmodified npm packages through the
 /// Fallback path: `left-pad` (`module.exports = leftPad`) and `slugify`
@@ -570,7 +570,7 @@ fn wrap_as_commonjs_module(
          }}\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
-         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ globalThis[k] = module.exports[k]; }} catch (e) {{}} }} }}\n\
+         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ if (typeof globalThis[k] === 'undefined') globalThis[k] = module.exports[k]; }} catch (e) {{}} }} }}\n\
          {bind_nested_namespaces}\
          {bind_default_exports}\
          }};\n\

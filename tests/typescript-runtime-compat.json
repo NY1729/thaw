@@ -11,6 +11,31 @@
       "source": "function makeAdder(offset: number): (value: number) => number { return (value: number): number => offset + value; } function main(): void { console.log(makeAdder(10)(3)); }"
     },
     {
+      "name": "for let closure captures per iteration",
+      "expect": "matched",
+      "source": "function main(): void { const callbacks: (() => number)[] = []; for (let index: number = 0; index < 3; index++) callbacks.push((): number => index); const first = callbacks[0]; const second = callbacks[1]; const third = callbacks[2]; console.log(first(), second(), third()); }"
+    },
+    {
+      "name": "for let closure preserves continue and body mutation",
+      "expect": "matched",
+      "source": "function main(): void { const callbacks: (() => number)[] = []; for (let index: number = 0; index < 4; index++) { callbacks.push((): number => index); if (index === 0) continue; index++; } const first = callbacks[0]; const second = callbacks[1]; const third = callbacks[2]; console.log(first(), second(), third()); }"
+    },
+    {
+      "name": "destructured for let closure captures per iteration",
+      "expect": "matched",
+      "source": "function main(): void { const callbacks: (() => number)[] = []; for (let [index]: [number] = [0]; index < 3; index++) callbacks.push((): number => index); const first = callbacks[0]; const second = callbacks[1]; const third = callbacks[2]; console.log(first(), second(), third()); }"
+    },
+    {
+      "name": "for of closure captures per iteration",
+      "expect": "matched",
+      "source": "function main(): void { const callbacks: (() => number)[] = []; for (const value of [10, 20, 30]) callbacks.push((): number => value); const first = callbacks[0]; const second = callbacks[1]; const third = callbacks[2]; console.log(first(), second(), third()); }"
+    },
+    {
+      "name": "for in closure captures per iteration",
+      "expect": "matched",
+      "source": "function main(): void { const callbacks: (() => string)[] = []; const value = { alpha: 1, beta: 2 }; for (const key in value) callbacks.push((): string => key); const first = callbacks[0]; const second = callbacks[1]; console.log(first(), second()); }"
+    },
+    {
       "name": "object and destructuring",
       "expect": "matched",
       "source": "type User = { name: string; score: number }; function main(): void { const user: User = { name: 'A', score: 4 }; const { name, score } = user; console.log(name + ':' + score); }"
@@ -49,6 +74,421 @@
       "name": "throw and catch",
       "expect": "matched",
       "source": "function main(): void { try { throw new Error('broken'); } catch (error) { console.log(String(error)); } }"
+    },
+    {
+      "name": "array transforms",
+      "expect": "matched",
+      "source": "function main(): void { const values: number[] = [1, 2, 3, 4].map((value: number): number => value * 2).filter((value: number): boolean => value > 4); console.log(values.join(','), values.reduce((sum: number, value: number): number => sum + value, 0)); }"
+    },
+    {
+      "name": "switch and loop control",
+      "expect": "matched",
+      "source": "function label(value: number): string { switch (value) { case 1: return 'one'; case 2: return 'two'; default: return 'other'; } } function main(): void { console.log(label(2)); }"
+    },
+    {
+      "name": "switch case fallthrough",
+      "expect": "matched",
+      "source": "function main(): void { let result: string = ''; switch (2) { case 1: result += 'a'; case 2: result += 'b'; case 3: result += 'c'; break; default: result += 'd'; } console.log(result); }"
+    },
+    {
+      "name": "do while continue semantics",
+      "expect": "matched",
+      "source": "function main(): void { let index: number = 0; let total: number = 0; do { index++; if (index < 3) continue; total += index; } while (index < 4); console.log(index, total); }"
+    },
+    {
+      "name": "default and optional parameters",
+      "expect": "matched",
+      "source": "function label(value?: string, suffix: string = '!'): string { return (value ?? 'none') + suffix; } function main(): void { console.log(label(), label('yes', '?')); }"
+    },
+    {
+      "name": "tuple spread",
+      "expect": "matched",
+      "source": "function add(left: number, right: number): number { return left + right; } function main(): void { const pair: [number, number] = [20, 22]; console.log(add(...pair)); }"
+    },
+    {
+      "name": "computed object property",
+      "expect": "matched",
+      "source": "function main(): void { const key: string = 'answer'; const value = { [key]: 42, label: 'ok' }; console.log(JSON.stringify(value)); }"
+    },
+    {
+      "name": "string operations",
+      "expect": "matched",
+      "source": "function main(): void { const value: string = '  Thaw Runtime  '; console.log(value.trim().toLowerCase().includes('thaw'), value.slice(2, 6)); }"
+    },
+    {
+      "name": "logical assignments",
+      "expect": "matched",
+      "source": "function main(): void { let name: string = ''; let count: number | undefined = undefined; name ||= 'thaw'; count ??= 2; console.log(name, count); }"
+    },
+    {
+      "name": "destructuring defaults",
+      "expect": "matched",
+      "source": "function main(): void { const { value = 42, nested: [first] } = { nested: [3] }; console.log(value, first); }"
+    },
+    {
+      "name": "class accessors and static member",
+      "expect": "matched",
+      "source": "class Counter { static offset: number = 1; private current: number = 0; get value(): number { return this.current; } set value(next: number) { this.current = next; } next(): number { this.value = this.value + Counter.offset; return this.value; } } function main(): void { const counter = new Counter(); console.log(counter.next(), counter.next()); }"
+    },
+    {
+      "name": "regular expression",
+      "expect": "matched",
+      "source": "function main(): void { const pattern: RegExp = /^thaw\\s+(runtime)$/i; const match = pattern.exec('Thaw Runtime'); console.log(pattern.test('thaw runtime'), match?.[1] ?? 'none'); }"
+    },
+    {
+      "name": "discriminated union branches",
+      "expect": "matched",
+      "source": "type Result = { ok: true; value: number } | { ok: false; error: string }; function read(result: Result): string { return result.ok ? String(result.value) : result.error; } function main(): void { console.log(read({ ok: true, value: 42 }), read({ ok: false, error: 'bad' })); }"
+    },
+    {
+      "name": "generic class instances",
+      "expect": "matched",
+      "source": "class Box<T> { value: T; constructor(value: T) { this.value = value; } map<U>(fn: (value: T) => U): Box<U> { return new Box<U>(fn(this.value)); } } function main(): void { console.log(new Box<number>(21).map<string>((value: number): string => String(value * 2)).value); }"
+    },
+    {
+      "name": "object rest and spread",
+      "expect": "matched",
+      "source": "function main(): void { const source = { first: 1, second: 'two', third: true }; const { first, ...rest } = source; const merged = { zero: 0, ...rest }; console.log(first, JSON.stringify(merged)); }"
+    },
+    {
+      "name": "map entry iteration",
+      "expect": "matched",
+      "source": "function main(): void { const map = new Map<string, number>([['a', 1], ['b', 2]]); let text: string = ''; for (const [key, value] of map) text += key + String(value); console.log(text); }"
+    },
+    {
+      "name": "async catch and finally",
+      "expect": "matched",
+      "source": "async function fail(): Promise<number> { throw new Error('bad'); } async function main(): Promise<void> { let trace: string = ''; try { await fail(); } catch (error) { trace += error instanceof Error ? error.message : 'unknown'; } finally { trace += ':done'; } console.log(trace); }"
+    },
+    {
+      "name": "generic callback return inference",
+      "expect": "matched",
+      "source": "function transform<T, U>(value: T, fn: (value: T) => U): U { return fn(value); } function main(): void { const result: string = transform(21, (value: number): string => String(value * 2)); console.log(result); }"
+    },
+    {
+      "name": "generic class method callback inference",
+      "expect": "matched",
+      "source": "class Box<T> { value: T; constructor(value: T) { this.value = value; } map<U>(fn: (value: T) => U): Box<U> { return new Box<U>(fn(this.value)); } } function main(): void { const result: string = new Box(21).map((value: number): string => String(value * 2)).value; console.log(result); }"
+    },
+    {
+      "name": "generic class method rest inference",
+      "expect": "matched",
+      "source": "class Collector { collect<T>(first: T, ...rest: T[]): T[] { return [first, ...rest]; } } function main(): void { const collector = new Collector(); console.log(collector.collect(1, 2, 3).join(',')); }"
+    },
+    {
+      "name": "utility object types at runtime",
+      "expect": "matched",
+      "source": "type User = { id: number; name: string; active: boolean }; function main(): void { const partial: Partial<User> = { name: 'A' }; const picked: Pick<User, 'id' | 'name'> = { id: 7, name: 'B' }; const record: Record<string, number> = { left: 20, right: 22 }; console.log(partial.name, picked.id, record.left + record.right); }"
+    },
+    {
+      "name": "overload implementation dispatch",
+      "expect": "matched",
+      "source": "function label(value: number): string; function label(value: string): string; function label(value: number | string): string { return typeof value === 'number' ? 'n:' + String(value) : 's:' + value; } function main(): void { console.log(label(4), label('x')); }"
+    },
+    {
+      "name": "private field and interface implementation",
+      "expect": "matched",
+      "source": "interface Named { name(): string; } class User implements Named { #value: string; constructor(value: string) { this.#value = value; } name(): string { return this.#value; } } function main(): void { const user: Named = new User('Alice'); console.log(user.name()); }"
+    },
+    {
+      "name": "contextual generic callback inference",
+      "expect": "matched",
+      "source": "function transform<T, U>(value: T, fn: (value: T) => U): U { return fn(value); } function main(): void { const result: string = transform(21, value => String(value * 2)); console.log(result); }"
+    },
+    {
+      "name": "interface optional and rest method",
+      "expect": "matched",
+      "source": "interface Formatter { format(prefix?: string, ...values: number[]): string; } class Joined implements Formatter { format(prefix: string = '', ...values: number[]): string { return prefix + values.join(','); } } function main(): void { const formatter: Formatter = new Joined(); console.log(formatter.format('n:', 1, 2, 3)); }"
+    },
+    {
+      "name": "generic keyof indexed access",
+      "expect": "matched",
+      "source": "function read<T, K extends keyof T>(value: T, key: K): T[K] { return value[key]; } function main(): void { const user = { name: 'Alice', age: 21 }; console.log(read(user, 'name'), read(user, 'age')); }"
+    },
+    {
+      "name": "in and typeof narrowing",
+      "expect": "matched",
+      "source": "type Value = { text: string } | { count: number }; function show(value: Value): string { if ('text' in value && typeof value.text === 'string') return value.text; return String(value.count); } function main(): void { console.log(show({ text: 'ok' }), show({ count: 42 })); }"
+    },
+    {
+      "name": "inherited interface method implementation",
+      "expect": "matched",
+      "source": "interface Named { name(): string; } class Base { name(): string { return 'base'; } } class Child extends Base implements Named { value: number = 42; } function main(): void { const item: Named = new Child(); console.log(item.name()); }"
+    },
+    {
+      "name": "generic class inheritance",
+      "expect": "matched",
+      "source": "class Box<T> { value: T; constructor(value: T) { this.value = value; } get(): T { return this.value; } } class StringBox extends Box<string> { upper(): string { return this.get().toUpperCase(); } } function main(): void { console.log(new StringBox('hello').upper()); }"
+    },
+    {
+      "name": "user defined type predicate",
+      "expect": "matched",
+      "source": "type Value = string | number; function isString(value: Value): value is string { return typeof value === 'string'; } function show(value: Value): string { return isString(value) ? value.toUpperCase() : String(value * 2); } function main(): void { console.log(show('ok'), show(21)); }"
+    },
+    {
+      "name": "const assertion tuple indexing",
+      "expect": "matched",
+      "source": "function main(): void { const values = ['left', 42] as const; const first: string = values[0]; const second: number = values[1]; console.log(first, second); }"
+    },
+    {
+      "name": "optional tuple elements",
+      "expect": "matched",
+      "source": "function show(value: [string, number?]): string { const [name, count = 0] = value; return name + ':' + String(count); } function main(): void { console.log(show(['a']), show(['b', 2])); }"
+    },
+    {
+      "name": "interface extension implementation",
+      "expect": "matched",
+      "source": "interface Named { name(): string; } interface Identified extends Named { id(): number; } class User implements Identified { name(): string { return 'Alice'; } id(): number { return 7; } } function main(): void { const user: Identified = new User(); console.log(user.id(), user.name()); }"
+    },
+    {
+      "name": "named tuple elements",
+      "expect": "matched",
+      "source": "function format(value: [name: string, count: number]): string { return value[0] + ':' + String(value[1]); } function main(): void { console.log(format(['items', 3])); }"
+    },
+    {
+      "name": "heterogeneous rest tuple elements",
+      "expect": "matched",
+      "source": "function total(value: [string, ...number[]]): string { let sum: number = 0; for (let index: number = 1; index < value.length; index++) sum += value[index]; return value[0] + ':' + String(sum); } function main(): void { console.log(total(['n', 1, 2, 3])); }"
+    },
+    {
+      "name": "homogeneous rest tuple elements",
+      "expect": "matched",
+      "source": "function total(values: [number, ...number[]]): number { let sum: number = 0; for (const value of values) sum += value; return sum; } function main(): void { console.log(total([1, 2, 3])); }"
+    },
+    {
+      "name": "assertion function narrowing",
+      "expect": "matched",
+      "source": "type Value = string | number; function assertString(value: Value): asserts value is string { if (typeof value !== 'string') throw new Error('not string'); } function upper(value: Value): string { assertString(value); return value.toUpperCase(); } function main(): void { console.log(upper('ok')); }"
+    },
+    {
+      "name": "generic interface method",
+      "expect": "matched",
+      "source": "interface Mapper { map<T, U>(value: T, fn: (value: T) => U): U; } class DirectMapper implements Mapper { map<T, U>(value: T, fn: (value: T) => U): U { return fn(value); } } function main(): void { const mapper: Mapper = new DirectMapper(); console.log(mapper.map<number, string>(21, (value: number): string => String(value * 2))); }"
+    },
+    {
+      "name": "contextual generic interface callback",
+      "expect": "matched",
+      "source": "interface Mapper { map<T, U>(value: T, fn: (value: T) => U): U; } class DirectMapper implements Mapper { map<T, U>(value: T, fn: (value: T) => U): U { return fn(value); } } function main(): void { const mapper: Mapper = new DirectMapper(); console.log(mapper.map(21, value => String(value * 2))); }"
+    },
+    {
+      "name": "intersection object value",
+      "expect": "matched",
+      "source": "type Named = { name: string }; type Counted = { count: number }; function show(value: Named & Counted): string { return value.name + ':' + String(value.count); } function main(): void { console.log(show({ name: 'items', count: 3 })); }"
+    },
+    {
+      "name": "unknown typeof narrowing",
+      "expect": "matched",
+      "source": "function show(value: unknown): string { if (typeof value === 'string') return value.toUpperCase(); if (typeof value === 'number') return String(value * 2); return 'other'; } function main(): void { console.log(show('ok'), show(21), show(false)); }"
+    },
+    {
+      "name": "generic type predicate",
+      "expect": "matched",
+      "source": "function present<T>(value: T | undefined): value is T { return value !== undefined; } function show(value: string | undefined): string { return present(value) ? value.toUpperCase() : 'none'; } function main(): void { console.log(show('ok'), show(undefined)); }"
+    },
+    {
+      "name": "never return type",
+      "expect": "matched",
+      "source": "function fail(message: string): never { throw new Error(message); } function value(flag: boolean): string { if (flag) return 'ok'; return fail('bad'); } function main(): void { console.log(value(true)); }"
+    },
+    {
+      "name": "readonly tuple",
+      "expect": "matched",
+      "source": "function show(value: readonly [string, number]): string { return value[0] + ':' + String(value[1]); } function main(): void { console.log(show(['items', 3] as const)); }"
+    },
+    {
+      "name": "this parameter",
+      "expect": "matched",
+      "source": "function label(this: { prefix: string }, value: number): string { return this.prefix + String(value); } function main(): void { const context = { prefix: 'n:' }; console.log(label.call(context, 42)); }"
+    },
+    {
+      "name": "for in object keys",
+      "expect": "matched",
+      "source": "function main(): void { const value = { a: 1, b: 2 }; let out: string = ''; for (const key in value) out += key; console.log(out); }"
+    },
+    {
+      "name": "object entries and fromEntries",
+      "expect": "matched",
+      "source": "function main(): void { const entries = Object.entries({ a: 1, b: 2 }); const value = Object.fromEntries(entries); console.log(JSON.stringify(value)); }"
+    },
+    {
+      "name": "function this bind",
+      "expect": "matched",
+      "source": "function label(this: { prefix: string }, value: number): string { return this.prefix + String(value); } function main(): void { const bound = label.bind({ prefix: 'n-' }); console.log(bound(7)); }"
+    },
+    {
+      "name": "optional catch binding",
+      "expect": "matched",
+      "source": "function main(): void { try { throw new Error('x'); } catch { console.log('caught'); } }"
+    },
+    {
+      "name": "function this apply",
+      "expect": "matched",
+      "source": "function label(this: { prefix: string }, value: number): string { return this.prefix + String(value); } function main(): void { console.log(label.apply({ prefix: 'v-' }, [9])); }"
+    },
+    {
+      "name": "labeled break and continue",
+      "expect": "matched",
+      "source": "function main(): void { let sum: number = 0; outer: for (let i: number = 0; i < 3; i++) { for (let j: number = 0; j < 3; j++) { if (j === 1) continue outer; sum += i + j; } } console.log(sum); }"
+    },
+    {
+      "name": "array isArray narrowing",
+      "expect": "matched",
+      "source": "function size(value: unknown): number { if (Array.isArray(value)) return value.length; return 0; } function main(): void { console.log(size([1, 2, 3]), size('x')); }"
+    },
+    {
+      "name": "tagged template",
+      "expect": "matched",
+      "source": "function tag(parts: TemplateStringsArray, value: number): string { return parts[0] + String(value * 2) + parts[1]; } function main(): void { console.log(tag`value=${21}!`); }"
+    },
+    {
+      "name": "generator iteration",
+      "expect": "unsupported",
+      "detailContains": "generator function `__thawmod0_values` is not supported yet",
+      "source": "function* values(): Generator<number> { yield 1; yield 2; yield 3; } function main(): void { let sum: number = 0; for (const value of values()) sum += value; console.log(sum); }"
+    },
+    {
+      "name": "private class field",
+      "expect": "matched",
+      "source": "class Counter { #value: number = 0; increment(): number { this.#value++; return this.#value; } } function main(): void { const counter = new Counter(); console.log(counter.increment(), counter.increment()); }"
+    },
+    {
+      "name": "class static block",
+      "expect": "matched",
+      "source": "class Config { static value: number = 1; static { Config.value += 2; } } function main(): void { console.log(Config.value); }"
+    },
+    {
+      "name": "class getter and setter",
+      "expect": "matched",
+      "source": "class Box { private value: number = 0; get current(): number { return this.value; } set current(value: number) { this.value = value; } } function main(): void { const box = new Box(); box.current = 42; console.log(box.current); }"
+    },
+    {
+      "name": "satisfies expression",
+      "expect": "matched",
+      "source": "type Point = { x: number; y: number }; function main(): void { const point = { x: 20, y: 22 } satisfies Point; console.log(point.x + point.y); }"
+    },
+    {
+      "name": "optional call and nullish assignment",
+      "expect": "matched",
+      "source": "type Handler = ((value: number) => number) | undefined; function main(): void { let handler: Handler = undefined; let value: number | undefined = undefined; value ??= handler?.(20) ?? 42; console.log(value); }"
+    },
+    {
+      "name": "named function assigned to optional callable",
+      "expect": "matched",
+      "source": "type Handler = ((value: number) => number) | undefined; function double(value: number): number { return value * 2; } function main(): void { const handler: Handler = double; console.log(handler?.(21)); }"
+    },
+    {
+      "name": "arrow assigned to optional callable",
+      "expect": "matched",
+      "source": "type Handler = ((value: number) => number) | undefined; function main(): void { const handler: Handler = (value) => value * 2; console.log(handler?.(21)); }"
+    },
+    {
+      "name": "bigint arithmetic",
+      "expect": "unsupported",
+      "detailContains": "unsupported type keyword TsBigIntKeyword",
+      "source": "function main(): void { const left: bigint = 9007199254740993n; const right: bigint = 7n; console.log(String(left + right)); }"
+    },
+    {
+      "name": "symbol keyed property",
+      "expect": "unsupported",
+      "detailContains": "unsupported type keyword TsSymbolKeyword",
+      "source": "function main(): void { const key: symbol = Symbol('value'); const record = { [key]: 42 }; console.log(record[key], String(key)); }"
+    },
+    {
+      "name": "map and set iteration",
+      "expect": "matched",
+      "source": "function main(): void { const map = new Map<string, number>([['a', 20], ['b', 22]]); const set = new Set<number>(map.values()); let total: number = 0; for (const value of set) total += value; console.log(map.get('a'), set.has(22), total); }"
+    },
+    {
+      "name": "regular expression named capture",
+      "expect": "unsupported",
+      "detailContains": "unsupported optional array member",
+      "source": "function main(): void { const match = /(?<word>[a-z]+)-(?<count>\\d+)/.exec('item-42'); console.log(match?.groups?.word, match?.groups?.count); }"
+    },
+    {
+      "name": "nested async function result",
+      "expect": "matched",
+      "source": "async function add(left: number, right: number): Promise<number> { await Promise.resolve(); return left + right; } async function main(): Promise<void> { console.log(await add(20, 22)); }"
+    },
+    {
+      "name": "interface declaration merging runtime",
+      "expect": "matched",
+      "source": "interface User { name: string } interface User { age: number } function main(): void { const user: User = { name: 'A', age: 1 }; console.log(user.name, user.age); }"
+    },
+    {
+      "name": "modern array transforms",
+      "expect": "matched",
+      "source": "function main(): void { const values: number[] = [3, 1, 2]; values.sort((left, right) => left - right); const expanded: number[] = values.flatMap((value) => [value, value * 10]); console.log(values.join(','), expanded.join(','), expanded.findLast((value) => value < 10), values.toReversed().join(',')); }"
+    },
+    {
+      "name": "modern string operations",
+      "expect": "matched",
+      "source": "function main(): void { const matches: string[] = Array.from('a1b22'.matchAll(/\\d+/g)).map((match) => match[0]); console.log('7'.padStart(3, '0'), 'a-a'.replaceAll('a', 'x'), matches.join(','), '😀'.codePointAt(0)); }"
+    },
+    {
+      "name": "typed array construction and reads",
+      "expect": "matched",
+      "source": "function main(): void { const bytes = new Uint8Array([1, 2, 255]); const copy = bytes.slice(1); console.log(bytes.length, bytes[1], copy.join(',')); }"
+    },
+    {
+      "name": "typed array mutation",
+      "expect": "matched",
+      "source": "function main(): void { const bytes = new Uint8Array([1, 2, 255]); bytes[1] = 4; const copy = bytes.slice(1); console.log(bytes.length, bytes[1], copy.join(',')); }"
+    },
+    {
+      "name": "typed array numeric coercions",
+      "expect": "matched",
+      "source": "function main(): void { const signed = new Int8Array([130, -130]); const clamped = new Uint8ClampedArray([-1, 12.7, 300]); const floating = new Float32Array([1 / 3]); console.log(signed.join(','), clamped.join(','), Number(floating[0]).toFixed(6)); }"
+    },
+    {
+      "name": "dynamic property assignment result",
+      "expect": "matched",
+      "source": "function main(): void { const bytes = new Uint8Array([1]); const assigned: number = (bytes[0] = 300); console.log(bytes[0], assigned); }"
+    },
+    {
+      "name": "array buffer data view",
+      "expect": "matched",
+      "source": "function main(): void { const buffer = new ArrayBuffer(4); const view = new DataView(buffer); view.setUint16(0, 0x1234); view.setInt8(2, -2); console.log(buffer.byteLength, view.getUint16(0), view.getInt8(2)); }"
+    },
+    {
+      "name": "shared array buffer atomics",
+      "expect": "matched",
+      "source": "function main(): void { const buffer = new SharedArrayBuffer(8); const values = new Int32Array(buffer); Atomics.store(values, 0, 20); console.log(Atomics.add(values, 0, 22), Atomics.load(values, 0), buffer.byteLength); }"
+    },
+    {
+      "name": "typed array buffer views",
+      "expect": "matched",
+      "source": "function main(): void { const buffer = new ArrayBuffer(8); const all = new Uint8Array(buffer); all.set([1, 2, 3, 4], 2); const view = new Uint8Array(buffer, 2, 4); const part = view.subarray(1, 3); console.log(view.join(','), part.join(','), view.byteOffset, view.byteLength); }"
+    },
+    {
+      "name": "promise rejection combinators",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { try { await Promise.all([Promise.resolve(1), Promise.reject(new Error('all'))]); } catch (error) { console.log(error.message); } try { await Promise.race([Promise.reject(new Error('race'))]); } catch (error) { console.log(error.message); } console.log(await Promise.any([Promise.reject(new Error('any')), Promise.resolve(42)])); const settled = await Promise.allSettled([Promise.reject(new Error('left')), Promise.reject(new Error('right'))]); console.log(settled.map((result) => result.status).join(',')); }"
+    },
+    {
+      "name": "array flat map",
+      "expect": "matched",
+      "source": "function main(): void { const values: number[] = [1, 2].flatMap((value: number): number[] => [value, value * 10]); console.log(values.join(',')); }"
+    },
+    {
+      "name": "array at negative index",
+      "expect": "matched",
+      "source": "function main(): void { const values: number[] = [10, 20, 30]; console.log(values.at(-1), values.at(0)); }"
+    },
+    {
+      "name": "array copying sort methods",
+      "expect": "matched",
+      "source": "function main(): void { const values: number[] = [3, 1, 2]; const sorted = values.toSorted((left: number, right: number): number => left - right); console.log(values.join(','), sorted.join(',')); }"
+    },
+    {
+      "name": "object has own property",
+      "expect": "matched",
+      "source": "function main(): void { const value = { own: 1 }; console.log(Object.hasOwn(value, 'own'), Object.hasOwn(value, 'missing')); }"
+    },
+    {
+      "name": "error cause option",
+      "expect": "unsupported",
+      "detailContains": "`new Error()` expects zero or one message argument",
+      "source": "function main(): void { const cause = new Error('root'); const error = new Error('outer', { cause }); console.log(error.message, error.cause.message); }"
     }
   ]
 }

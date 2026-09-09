@@ -524,8 +524,8 @@ fn generated_module_init_round_trips_through_real_lowering() {
 
 /// A bundle's `qualified_aliases` capture the bare name under the
 /// qualified key *immediately* after that bundle's own `loadScript`
-/// -- before a later, colliding package's `loadScript` gets a chance
-/// to overwrite the bare name.
+/// -- independently of whether a later, colliding package can claim the
+/// already-occupied bare name.
 #[test]
 fn generate_module_init_captures_qualified_aliases_right_after_load() {
     let qs_fallback = vec!["stringify".to_string()];

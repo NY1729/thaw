@@ -67,12 +67,13 @@ fn console_log_serializes_arrays_objects_and_json_values() {
             console.log(item);
             console.log(maybe);
             console.log(JSON.parse("{\"nested\":[1,true,null]}"));
+            console.log(JSON.parse("\"dynamic text\""), JSON.parse("null"));
         }
     "#;
 
     assert_eq!(
         compile_and_run(source, "structured_console_log"),
-        "[1,2] [\"a\",\"b\"] [true,false]\n[[1,2],[3]]\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"nested\":[1,true,null]}\n"
+        "[1,2] [\"a\",\"b\"] [true,false]\n[[1,2],[3]]\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"nested\":[1,true,null]}\ndynamic text null\n"
     );
 }
 
@@ -766,6 +767,42 @@ fn closures_share_mutable_bindings_with_their_outer_scope() {
         compile_and_run(source, "mutable_captured_arrow"),
         "41\n42\n42\n"
     );
+}
+
+#[test]
+fn loop_conditions_follow_cells_promoted_by_body_closures() {
+    let source = r#"
+        function main(): void {
+            let index: number = 0;
+            const callbacks: (() => number)[] = [];
+            while (index < 3) {
+                callbacks.push((): number => index);
+                index++;
+            }
+            const first = callbacks[0];
+            const second = callbacks[1];
+            const third = callbacks[2];
+            console.log(first(), second(), third());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "loop_promoted_capture"), "3 3 3\n");
+}
+
+#[test]
+fn for_let_closures_capture_each_iteration_binding() {
+    let source = r#"
+        function main(): void {
+            const callbacks: (() => number)[] = [];
+            for (let index: number = 0; index < 3; index++) {
+                callbacks.push((): number => index);
+            }
+            const first = callbacks[0];
+            const second = callbacks[1];
+            const third = callbacks[2];
+            console.log(first(), second(), third());
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "for_let_closures"), "0 1 2\n");
 }
 
 #[test]
@@ -1915,6 +1952,47 @@ fn passes_callbacks_to_typed_quickjs_calls() {
     assert_eq!(
         compile_and_run(source, "typed_quickjs_callback_argument"),
         "42\n"
+    );
+}
+
+#[test]
+fn decodes_nullable_typed_quickjs_callback_arguments() {
+    let source = r#"
+        declare function __thaw_typed_js_72756e4e756c6c43616c6c6261636b(
+            callback: (error: Json | null) => void,
+        ): JsValue;
+
+        function main(): void {
+            loadScript("globalThis.runNullCallback = callback => { callback(null); return null; };");
+            __thaw_typed_js_72756e4e756c6c43616c6c6261636b(
+                (error: Json | null): void => console.log(error === null),
+            );
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nullable_quickjs_callback"), "true\n");
+}
+
+#[test]
+fn propagates_synchronous_native_callback_exceptions_to_quickjs() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b6543616c6c6261636b(
+            callback: () => void,
+        ): void;
+
+        function main(): void {
+            loadScript("globalThis.invokeCallback = callback => callback();");
+            try {
+                __thaw_typed_js_696e766f6b6543616c6c6261636b(
+                    (): void => { throw new Error("callback failed"); },
+                );
+            } catch (error) {
+                console.log(error.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_callback_exception"),
+        "`invokeCallback` threw: callback failed\n"
     );
 }
 

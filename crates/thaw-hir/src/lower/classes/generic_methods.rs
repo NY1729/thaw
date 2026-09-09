@@ -198,11 +198,71 @@ impl GenericClassMethodUseCollector<'_, '_> {
         }
     }
 
-    fn call_actual_params(&self, call: &CallExpr) -> Result<Vec<HirType>, String> {
+    fn contextual_argument_type(
+        &self,
+        expression: &Expr,
+        pattern: &GenericTypePattern,
+        inferred: &HashMap<Symbol, HirType>,
+    ) -> Result<HirType, String> {
+        let (Expr::Arrow(arrow), GenericTypePattern::Function(params, _, _, _)) =
+            (expression, pattern)
+        else {
+            return self.infer_actual_type(expression);
+        };
+        if arrow.params.len() != params.len() {
+            return self.infer_actual_type(expression);
+        }
+        let params = params
+            .iter()
+            .map(|param| instantiate_generic_pattern(param, inferred))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut scopes = self.scopes.clone();
+        let mut scope = HashMap::new();
+        for (parameter, ty) in arrow.params.iter().zip(&params) {
+            let Pat::Ident(binding) = parameter else {
+                return Err("contextual generic callback requires identifier parameters".into());
+            };
+            scope.insert(binding.id.sym.to_string(), ty.clone());
+        }
+        scopes.push(scope);
+        let result = if let Some(annotation) = arrow.return_type.as_ref() {
+            lower_ts_type(&annotation.type_ann, self.interfaces, self.generic_interfaces)?
+        } else {
+            let ArrowFunctionBody::Expr(body) = arrow.body.as_ref() else {
+                return Err(
+                    "block-bodied contextual generic callback needs a return annotation".into(),
+                );
+            };
+            infer_generic_constructor_expr_type(
+                body,
+                self.interfaces,
+                self.generic_interfaces,
+                &scopes,
+                self.call_results,
+            )?
+        };
+        Ok(HirType::Function(params, Box::new(result)))
+    }
+
+    fn call_actual_params(
+        &self,
+        call: &CallExpr,
+        template: &GenericClassMethodTemplate,
+    ) -> Result<Vec<HirType>, String> {
         let mut actual = Vec::new();
-        for argument in &call.args {
-            let ty = self.infer_actual_type(&argument.expr)?;
+        let mut inferred = HashMap::new();
+        let fixed_count = template
+            .parameter_patterns
+            .len()
+            .saturating_sub(usize::from(template.rest_pattern.is_some()));
+        for (index, argument) in call.args.iter().enumerate() {
+            let pattern = (index < fixed_count)
+                .then(|| &template.parameter_patterns[index])
+                .or(template.rest_pattern.as_ref())
+                .ok_or("generic method received too many arguments")?;
+            let ty = self.contextual_argument_type(&argument.expr, pattern, &inferred)?;
             if argument.spread.is_none() {
+                match_generic_pattern(pattern, &ty, &mut inferred)?;
                 actual.push(ty);
                 continue;
             }
@@ -266,31 +326,30 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
             let Pat::Ident(binding) = &declarator.name else {
                 continue;
             };
-            let ty = binding
-                .type_ann
-                .as_ref()
-                .and_then(|annotation| {
-                    lower_ts_type(
-                        &annotation.type_ann,
-                        self.interfaces,
-                        self.generic_interfaces,
-                    )
-                    .ok()
+            let ty = declarator
+                .init
+                .as_deref()
+                .and_then(|initializer| match initializer {
+                    Expr::New(construction) => {
+                        let class = construction.callee.as_ident()?;
+                        self.interfaces.get(class.sym.as_ref()).cloned()
+                    }
+                    Expr::Ident(identifier) => self
+                        .scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(identifier.sym.as_ref()).cloned()),
+                    _ => None,
                 })
                 .or_else(|| {
-                    let initializer = declarator.init.as_deref()?;
-                    match initializer {
-                        Expr::New(construction) => {
-                            let class = construction.callee.as_ident()?;
-                            self.interfaces.get(class.sym.as_ref()).cloned()
-                        }
-                        Expr::Ident(identifier) => self
-                            .scopes
-                            .iter()
-                            .rev()
-                            .find_map(|scope| scope.get(identifier.sym.as_ref()).cloned()),
-                        _ => None,
-                    }
+                    binding.type_ann.as_ref().and_then(|annotation| {
+                        lower_ts_type(
+                            &annotation.type_ann,
+                            self.interfaces,
+                            self.generic_interfaces,
+                        )
+                        .ok()
+                    })
                 });
             if let Some(ty) = ty {
                 self.scopes
@@ -310,7 +369,10 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                 ) {
                     if let Some(owner) = self.template_owner(&class, &method) {
                         let actual_params = if call.type_args.is_none() {
-                            match self.call_actual_params(call) {
+                            match self.call_actual_params(
+                                call,
+                                &self.templates[&(owner.clone(), method.clone())],
+                            ) {
                                 Ok(actual) => Some(actual),
                                 Err(error) => {
                                     self.error = Some(format!(
@@ -344,7 +406,10 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                         .and_then(|parent| self.template_owner(parent, &method));
                     if let Some(owner) = owner {
                         let actual_params = if call.type_args.is_none() {
-                            match self.call_actual_params(call) {
+                            match self.call_actual_params(
+                                call,
+                                &self.templates[&(owner.clone(), method.clone())],
+                            ) {
                                 Ok(actual) => Some(actual),
                                 Err(error) => {
                                     self.error = Some(format!(
@@ -715,6 +780,9 @@ fn specialize_generic_class_methods(
         let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
             continue;
         };
+        if declaration.class.type_params.is_some() {
+            continue;
+        }
         for member in &declaration.class.body {
             let ClassMember::Method(method) = member else {
                 continue;
@@ -1036,6 +1104,13 @@ fn specialize_generic_class_methods(
             continue;
         };
         let class = declaration.ident.sym.to_string();
+        if !has_uses && templates.keys().any(|(owner, _)| owner == &class) {
+            // `implements` was checked before specialization. Once its generic
+            // method template is removed, checking the rewritten class again
+            // would mistake the generated, type-specific methods for a missing
+            // source method.
+            declaration.class.implements.clear();
+        }
         declaration.class.body.retain(|member| {
             !matches!(member, ClassMember::Method(method)
                 if method.function.type_params.is_some()

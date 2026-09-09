@@ -108,6 +108,21 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_js_emit_uncaught",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_emit_unhandled_rejection",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_emit_rejection_handled",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
 
         // Lambda captures stdout via a pipe, not a TTY, so libc's stdio
         // fully-buffers it by default -- output could sit in the buffer
@@ -146,6 +161,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_json_stringify",
             json_stringify_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_callback_error",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -980,6 +1000,16 @@ impl<'ctx> HirCompiler<'ctx> {
             json_as_string_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_json_console_string",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_typeof",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
 
         // Returns i8 (0/1), not i1 -- see thaw-std's `thaw_json_as_bool`
         // doc comment on why it avoids relying on `bool`'s C ABI shape.
@@ -1139,7 +1169,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_function("thaw_js_load", js_load_type, Some(Linkage::External));
         self.module.add_function(
             "thaw_js_run_event_loop",
-            self.context.void_type().fn_type(&[], false),
+            self.context.i32_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_run_until_native_resolved",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
 
@@ -1174,7 +1209,14 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_js_call_handle_handle_result",
             self.context
                 .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false)
-                .fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+                .fn_type(
+                    &[
+                        self.context.i64_type().into(),
+                        i8_ptr.into(),
+                        self.context.bool_type().into(),
+                    ],
+                    false,
+                ),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -1229,6 +1271,14 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_set_property_json_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_call_method_handle_result",
             handle_result_type.fn_type(
                 &[
@@ -1244,6 +1294,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_js_resolve_handle_result",
             result_type.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_resolve_handle_handle_result",
+            handle_result_type.fn_type(&[self.context.i64_type().into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -1526,6 +1581,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_runtime_run_until_idle",
+            i64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_promise_new",
             i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
@@ -1564,6 +1624,33 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_promise_destroy",
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_detach",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_drain_unhandled",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_set_unhandled_reporter",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_set_rejection_handled_reporter",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_take_unhandled_failure",
+            self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),
         );
         self.module.add_function(

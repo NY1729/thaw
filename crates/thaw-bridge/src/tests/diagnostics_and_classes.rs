@@ -83,6 +83,15 @@ fn extracts_class_constructors_methods_properties_and_overloads() {
         .filter(|method| method.name == "run")
         .collect::<Vec<_>>();
     assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|method| method.return_instance_class.is_none()));
+    assert_eq!(
+        database
+            .methods
+            .iter()
+            .find(|method| method.name == "verbose")
+            .and_then(|method| method.return_instance_class.as_deref()),
+        Some("Database")
+    );
     assert!(runs.iter().all(|method| method.overloaded));
     assert!(runs
         .iter()

@@ -199,6 +199,16 @@ fn type_property_name(key: &Expr) -> Option<String> {
     }
 }
 
+fn named_return_type(annotation: Option<&swc_ecma_ast::TsTypeAnn>) -> Option<String> {
+    let TsType::TsTypeRef(reference) = annotation?.type_ann.as_ref() else {
+        return None;
+    };
+    Some(match &reference.type_name {
+        TsEntityName::Ident(name) => name.sym.to_string(),
+        TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
+    })
+}
+
 fn index_signature_value(signature: &swc_ecma_ast::TsIndexSignature) -> Result<&TsType, String> {
     let [TsFnParam::Ident(key)] = signature.params.as_slice() else {
         return Err("index signature requires one identifier key".into());
@@ -730,6 +740,7 @@ fn lower_dts_class(
                     }
                 }
                 let rest_param = function.rest_param;
+                let return_instance_class = named_return_type(method.function.return_type.as_deref());
                 methods.push(DtsMethod {
                     name: function.name,
                     params,
@@ -745,6 +756,7 @@ fn lower_dts_class(
                         .count(),
                     rest_param,
                     ret: function.ret,
+                    return_instance_class,
                     callback_instance_classes: callback_instance_classes(&method.function),
                     literal_params: literal_params(&method.function),
                     is_static: method.is_static,
@@ -764,6 +776,7 @@ fn lower_dts_class(
                     TsFnOrConstructorType::TsFnType(function),
                 )) = property.type_ann.as_ref().map(|annotation| annotation.type_ann.as_ref())
                 {
+                    let return_instance_class = named_return_type(Some(&function.type_ann));
                     let function = lower_dts_fn_type(
                         &property_name,
                         function,
@@ -776,6 +789,7 @@ fn lower_dts_class(
                         required_params: function.required_params,
                         rest_param: function.rest_param,
                         ret: function.ret,
+                        return_instance_class,
                         callback_instance_classes: Vec::new(),
                         literal_params: Vec::new(),
                         is_static: property.is_static,

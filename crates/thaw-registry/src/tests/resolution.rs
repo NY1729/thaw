@@ -1653,3 +1653,95 @@ fn normalizes_dot_and_dot_dot_segments() {
     assert_eq!(normalize_path_string("lib/../parse"), "parse");
     assert_eq!(normalize_path_string("a/b/../../c"), "c");
 }
+
+#[test]
+fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
+    let buffer = resolve_builtin("node:buffer").unwrap().dts_source;
+    assert!(buffer.contains("static alloc(size: number"));
+    assert!(buffer.contains("readInt32BE(offset?: number): number"));
+
+    let crypto = resolve_builtin("node:crypto").unwrap().dts_source;
+    assert!(crypto.contains("function pbkdf2Sync("));
+    assert!(crypto.contains("function scryptSync("));
+    assert!(crypto.contains("function scryptSync("));
+
+    let fs = resolve_builtin("node:fs").unwrap().dts_source;
+    assert!(fs.contains("readdirSync(path: string): string[]"));
+    assert!(fs.contains("rmSync(path: string, options?: any)"));
+
+    let fs_promises = resolve_builtin("node:fs/promises").unwrap().dts_source;
+    assert!(fs_promises.contains("rm(path: string, options?: any): Promise<void>"));
+
+    let events = resolve_builtin("node:events").unwrap().dts_source;
+    assert!(events.contains("once(emitter: EventEmitter, event: any"));
+
+    let stream = resolve_builtin("node:stream").unwrap().dts_source;
+    assert!(stream.contains("static from(value: Json, options?: any): Readable"));
+
+    let diagnostics = resolve_builtin("node:diagnostics_channel")
+        .unwrap()
+        .dts_source;
+    assert!(diagnostics.contains("channel(name: string): JsValue"));
+
+    let module = resolve_builtin("node:module").unwrap().dts_source;
+    assert!(module.contains("createRequire(filename: string): JsValue"));
+
+    let timers = resolve_builtin("node:timers").unwrap().dts_source;
+    assert!(timers.contains("setInterval(callback: () => void, delay?: number): JsValue"));
+    assert!(timers.contains("clearInterval(handle: JsValue): void"));
+
+    let cluster = resolve_builtin("node:cluster").unwrap().dts_source;
+    assert!(cluster.contains("const SCHED_NONE: number"));
+    assert!(cluster.contains("let schedulingPolicy: number"));
+
+    let console = resolve_builtin("node:console").unwrap().dts_source;
+    assert!(console.contains("class Console"));
+
+    let dns = resolve_builtin("node:dns").unwrap().dts_source;
+    assert!(dns.contains("callback: (error: unknown, address: string, family: number) => void"));
+
+    let readline = resolve_builtin("node:readline").unwrap().dts_source;
+    assert!(readline.contains("class Interface"));
+    assert!(readline.contains("on(event: string, listener: (line: string) => void): Interface"));
+
+    let tls = resolve_builtin("node:tls").unwrap().dts_source;
+    assert!(tls.contains("const DEFAULT_MIN_VERSION: string"));
+    assert!(tls.contains("function getCiphers(): string[]"));
+
+    let trace_events = resolve_builtin("node:trace_events").unwrap().dts_source;
+    assert!(trace_events.contains("class Tracing"));
+
+    let http2 = resolve_builtin("node:http2").unwrap().dts_source;
+    assert!(http2.contains("interface Http2Settings"));
+    assert!(http2.contains("getPackedSettings(settings: Http2Settings): JsValue"));
+
+    let inspector = resolve_builtin("node:inspector").unwrap().dts_source;
+    assert!(inspector.contains("class Session"));
+    assert!(inspector.contains("error: Json | null"));
+
+    let inspector_promises = resolve_builtin("node:inspector/promises")
+        .unwrap()
+        .dts_source;
+    assert!(inspector_promises.contains("post(method: string, params?: any): Promise<JsValue>"));
+
+    let domain = resolve_builtin("node:domain").unwrap().dts_source;
+    assert!(domain.contains("class Domain"));
+    assert!(domain.contains("listener: (error: JsValue) => void"));
+
+    let readline_promises = resolve_builtin("node:readline/promises")
+        .unwrap()
+        .dts_source;
+    assert!(readline_promises.contains("question(query: string, options?: any): Promise<string>"));
+
+    let dgram = resolve_builtin("node:dgram").unwrap().dts_source;
+    assert!(dgram.contains("class Socket"));
+    assert!(dgram.contains("address(): SocketAddressInfo"));
+
+    let wasi = resolve_builtin("node:wasi").unwrap().dts_source;
+    assert!(wasi.contains("class WASI"));
+    assert!(wasi.contains("getImportObject(): JsValue"));
+
+    let test_reporters = resolve_builtin("node:test/reporters").unwrap().dts_source;
+    assert!(test_reporters.contains("class Reporter"));
+    assert!(test_reporters.contains("dot(source: Json): Reporter"));
+}

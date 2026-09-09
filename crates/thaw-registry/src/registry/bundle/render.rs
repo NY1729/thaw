@@ -23,6 +23,7 @@
 fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     let mut out = String::from("module.exports = (function() {\n");
 
+    out.push_str("var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\n");
     out.push_str("var __thaw_bundle_cache = {};\n");
     out.push_str("var __thaw_bundle_factories = {\n");
     for module in modules {
@@ -97,7 +98,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20var keys = Object.keys(__thaw_bundle_require_maps);\n\
          \x20\x20var factoryKey = keys.indexOf(text) >= 0 ? text : keys.find(function(key) { return text.endsWith('/' + key) || text.endsWith(key); });\n\
          \x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
-         \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && globalThis.require && typeof globalThis.require.addon === 'function') return globalThis.require.addon; var target = __thaw_bundle_target(map, String(spec)); if (target) return __thaw_bundle_require(target.key, target.factory); return require(String(spec)); };\n\
+         \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && globalThis.require && typeof globalThis.require.addon === 'function') return globalThis.require.addon; spec = String(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return __thaw_bundle_exports[spec]; var target = __thaw_bundle_target(map, spec); if (!target && !factoryKey) { for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec); } if (target) return __thaw_bundle_require(target.key, target.factory); return require(spec); };\n\
          \x20\x20created.addon = require.addon;\n\
          \x20\x20created.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
@@ -193,6 +194,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     out.push_str(&format!(
         "var __thaw_bundle_entry_key = {};\n\
          var __thaw_bundle_entry = __thaw_bundle_require(__thaw_bundle_entry_key);\n\
+         __thaw_bundle_exports[__thaw_bundle_entry_key] = __thaw_bundle_entry;\n\
          globalThis.__thaw_module_ready = __thaw_bundle_cache[__thaw_bundle_entry_key].ready;\n\
          return __thaw_bundle_entry;\n",
         js_string_literal(main_key)

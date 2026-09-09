@@ -226,6 +226,9 @@ impl<'a> FnLowerer<'a> {
         if let Some(invoked) = self.lower_native_static_call_or_apply(call)? {
             return Ok(invoked);
         }
+        if let Some(invoked) = self.lower_this_parameter_call_or_apply(call)? {
+            return Ok(invoked);
+        }
         if let Some(bound) = self.lower_function_bind(call)? {
             return Ok(bound);
         }
@@ -519,8 +522,18 @@ impl<'a> FnLowerer<'a> {
                             resolved_property.to_string(),
                         );
                         let label = format!("method `{object_label}.{property}`");
-                        let (mut args, bindings) =
-                            self.lower_native_spread_values(&call.args, &label)?;
+                        let expected = if receiver_parameter {
+                            &params[1..]
+                        } else {
+                            &params[..]
+                        };
+                        let (mut args, bindings) = self
+                            .lower_native_spread_values_with_expected(
+                                &call.args,
+                                &label,
+                                expected,
+                                rest.as_ref(),
+                            )?;
                         if receiver_parameter {
                             let HirType::Object(receiver_fields) = &params[0] else {
                                 unreachable!()
@@ -619,6 +632,51 @@ impl<'a> FnLowerer<'a> {
                     .into(),
             ),
         };
+
+        if matches!(
+            callee_name.as_str(),
+            "setTimeout"
+                | "clearTimeout"
+                | "setInterval"
+                | "clearInterval"
+                | "setImmediate"
+                | "clearImmediate"
+        ) && !self.scope.contains_key(&callee_name)
+            && !self.signatures.contains_key(&callee_name)
+        {
+            let binding = format!("__thaw_global_timer_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(binding.clone(), HirType::JsValue);
+            let timer_handle = matches!(
+                callee_name.as_str(),
+                "setTimeout" | "setInterval" | "setImmediate"
+            )
+            .then_some(HirType::JsValue);
+            let result = self.lower_dynamic_value_call(
+                &binding,
+                &call.args,
+                expected_return_hint.as_ref().or(timer_handle.as_ref()),
+            )?;
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(
+                    binding,
+                    HirType::JsValue,
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str(callee_name))],
+                    ),
+                )],
+            );
+        }
+
+        if self.scope.get(&callee_name) == Some(&HirType::JsValue) {
+            return self.lower_dynamic_value_call(
+                &callee_name,
+                &call.args,
+                expected_return_hint.as_ref(),
+            );
+        }
 
         if let Some(arrow) = self.generic_arrows.get(&callee_name).cloned() {
             return self.lower_generic_arrow_call(&callee_name, &arrow, call);
@@ -736,6 +794,52 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
+        if callee_name == "queueMicrotask" {
+            let [callback] = call.args.as_slice() else {
+                return Err("`queueMicrotask` expects exactly one callback".into());
+            };
+            if callback.spread.is_some() {
+                return Err("`queueMicrotask` does not support a spread callback".into());
+            }
+            let callback = self.lower_promise_callback(&callback.expr, &[], None)?;
+            let HirType::Function(_, callback_output) = self.infer_expr_type(&callback)? else {
+                unreachable!()
+            };
+            let (output, flatten) = match callback_output.as_ref() {
+                HirType::Promise(inner) => (inner.as_ref().clone(), true),
+                output => (output.clone(), false),
+            };
+            let resolve_type = HirType::Function(Vec::new(), Box::new(HirType::Void));
+            let source = HirExpr::PromiseNew(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: "__thaw_microtask_resolve".into(),
+                        ty: resolve_type,
+                    }],
+                    HirType::Void,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_microtask_resolve".into())),
+                        Vec::new(),
+                    )),
+                )),
+                HirType::Void,
+                false,
+            );
+            let pending = HirExpr::PromiseThen(
+                Box::new(source),
+                Box::new(callback),
+                HirType::Void,
+                output,
+                false,
+                flatten,
+            );
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_detach_promise".into())),
+                vec![pending],
+            ));
+        }
+
         if matches!(callee_name.as_str(), "Promise.all" | "Promise.allSettled" | "Promise.race" | "Promise.any") {
             return self.lower_promise_static_call(&callee_name, call);
         }
@@ -751,6 +855,31 @@ impl<'a> FnLowerer<'a> {
             // assimilating an already-Promise value exactly as a bare
             // `return somePromise` inside an executor would.
             let is_reject = callee_name == "Promise.reject";
+            if !is_reject && call.args.is_empty() {
+                if call.type_args.as_ref().is_some_and(|args| {
+                    !matches!(args.params.as_slice(), [] | [_])
+                }) {
+                    return Err("`Promise.resolve` accepts at most one type argument".into());
+                }
+                let resolve_ty = HirType::Function(Vec::new(), Box::new(HirType::Void));
+                let executor = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: "__thaw_promise_resolve".into(),
+                        ty: resolve_ty,
+                    }],
+                    HirType::Void,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_promise_resolve".into())),
+                        Vec::new(),
+                    )),
+                );
+                return Ok(HirExpr::PromiseNew(
+                    Box::new(executor),
+                    HirType::Void,
+                    false,
+                ));
+            }
             let [argument] = call.args.as_slice() else {
                 return Err(format!("`{callee_name}` expects exactly one argument"));
             };
@@ -873,6 +1002,12 @@ impl<'a> FnLowerer<'a> {
                     vec![value],
                 ));
             }
+            if callee_name == "String" && ty == HirType::JsValue {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_js_handle_to_string".into())),
+                    vec![value],
+                ));
+            }
             if callee_name == "String"
                 && matches!(
                     ty,
@@ -967,14 +1102,54 @@ impl<'a> FnLowerer<'a> {
         let mut lowered_arguments = Vec::new();
         let mut forwarded_rest_array = false;
         let mut lowered = Vec::with_capacity(call.args.len());
+        let generic_placeholder = signature
+            .as_ref()
+            .is_some_and(|signature| !signature.generic_type_params.is_empty());
+        let mut generic_inferred = HashMap::new();
         for (index, argument) in call.args.iter().enumerate() {
-            let contextual_function = if argument.spread.is_none() {
+            let generic_context = signature
+                .as_ref()
+                .filter(|_| argument.spread.is_none())
+                .and_then(|signature| signature.generic_param_patterns.get(index))
+                .and_then(|pattern| match pattern {
+                    GenericTypePattern::Function(params, optional, rest, result) => {
+                        let params = params
+                            .iter()
+                            .zip(optional)
+                            .map(|(param, optional)| {
+                                instantiate_generic_pattern(param, &generic_inferred).map(|ty| {
+                                    if *optional {
+                                        optional_parameter_type(ty)
+                                    } else {
+                                        ty
+                                    }
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                            .ok()?;
+                        let mut params = params;
+                        if let Some(rest) = rest {
+                            params.push(HirType::Array(Box::new(
+                                instantiate_generic_pattern(rest, &generic_inferred).ok()?,
+                            )));
+                        }
+                        Some((
+                            params,
+                            instantiate_generic_pattern(result, &generic_inferred).ok(),
+                        ))
+                    }
+                    _ => None,
+                });
+            let contextual_function = generic_context.or_else(|| {
+                if argument.spread.is_some() || generic_placeholder {
+                    return None;
+                }
                 param_types
                     .as_ref()
                     .and_then(|params| params.get(index))
                     .and_then(|expected| match expected {
                         HirType::Function(params, ret) => {
-                            Some((params.clone(), ret.as_ref().clone()))
+                            Some((params.clone(), Some(ret.as_ref().clone())))
                         }
                         HirType::CallableFunction(params, _, rest, ret) => {
                             let mut abi_params = params.clone();
@@ -1002,24 +1177,24 @@ impl<'a> FnLowerer<'a> {
                                     );
                                 }
                             }
-                            Some((abi_params, ret.as_ref().clone()))
+                            Some((abi_params, Some(ret.as_ref().clone())))
                         }
                         _ => None,
                     })
-            } else {
-                None
-            };
+            });
             let value = if let Some((params, ret)) = contextual_function {
                 if matches!(
                     argument.expr.as_ref(),
                     Expr::Arrow(_) | Expr::Fn(_) | Expr::Ident(_)
                 ) {
-                    self.lower_promise_callback(&argument.expr, &params, Some(&ret))?
+                    self.lower_promise_callback(&argument.expr, &params, ret.as_ref())?
                 } else {
                     self.lower_expr(&argument.expr)?
                 }
             } else {
-                let expected = param_types.as_ref().and_then(|params| params.get(index));
+                let expected = (!generic_placeholder)
+                    .then(|| param_types.as_ref().and_then(|params| params.get(index)))
+                    .flatten();
                 match argument.expr.as_ref() {
                     Expr::Arrow(arrow)
                         if signature.as_ref().is_some_and(|signature| signature.is_extern)
@@ -1037,6 +1212,13 @@ impl<'a> FnLowerer<'a> {
                     _ => self.lower_expr_with_expected_type(&argument.expr, expected)?,
                 }
             };
+            if let Some(pattern) = signature
+                .as_ref()
+                .and_then(|signature| signature.generic_param_patterns.get(index))
+            {
+                let actual = self.infer_expr_type(&value)?;
+                let _ = match_generic_pattern(pattern, &actual, &mut generic_inferred);
+            }
             lowered.push(value);
         }
         let preserve_argument_order =
@@ -1312,9 +1494,40 @@ impl<'a> FnLowerer<'a> {
             .as_ref()
             .filter(|signature| !signature.generic_type_params.is_empty())
         {
+            let preserves_key_literal = |index: usize| {
+                let Some(GenericTypePattern::Variable(name)) =
+                    signature.generic_param_patterns.get(index)
+                else {
+                    return false;
+                };
+                signature
+                    .generic_type_params
+                    .iter()
+                    .position(|parameter| parameter == name)
+                    .and_then(|index| signature.generic_type_constraints.get(index))
+                    .and_then(Option::as_deref)
+                    .is_some_and(|constraint| {
+                        matches!(constraint, TsType::TsTypeOperator(operator) if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf)
+                    })
+            };
             let actual = args
                 .iter()
-                .map(|arg| self.infer_expr_type(arg))
+                .enumerate()
+                .map(|(index, arg)| {
+                    match (call.type_args.is_none() && preserves_key_literal(index))
+                        .then(|| call.args.get(index))
+                        .flatten()
+                        .filter(|argument| argument.spread.is_none())
+                    {
+                        Some(argument) => match argument.expr.as_ref() {
+                            Expr::Lit(Lit::Str(value)) => Ok(HirType::StrLiteral(
+                                value.value.to_string_lossy().into_owned(),
+                            )),
+                            _ => self.infer_expr_type(arg),
+                        },
+                        None => self.infer_expr_type(arg),
+                    }
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let types = if let Some(type_args) = &call.type_args {
                 resolve_explicit_generic_type_tuple(

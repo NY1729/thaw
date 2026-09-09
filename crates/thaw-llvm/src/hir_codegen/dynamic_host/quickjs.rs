@@ -1,4 +1,91 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_typed_quickjs_setter(
+        &mut self,
+        signature: &DynamicSignature,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [receiver, assigned] = args else {
+            return Err("typed QuickJS setter expects a receiver and value".into());
+        };
+        let receiver = self.compile_expr(receiver)?;
+        let assigned_type = signature
+            .params
+            .get(1)
+            .ok_or("typed QuickJS setter is missing its value type")?;
+        let array = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_new").unwrap(),
+                &[],
+                "quickjs_setter_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let assigned = self.compile_expr(assigned)?;
+        self.compile_typed_dynamic_argument(array, assigned, assigned_type)?;
+        let property = dynamic_member_name(&signature.symbol, false)
+            .ok_or("invalid typed QuickJS setter symbol")?;
+        let property = self
+            .builder
+            .build_global_string_ptr(&property, "quickjs_setter_name")
+            .map_err(|error| error.to_string())?;
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[array.into()],
+                "quickjs_setter_args_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_set_property_json_result")
+                    .unwrap(),
+                &[
+                    receiver.into(),
+                    property.as_pointer_value().into(),
+                    args_json.into(),
+                ],
+                "quickjs_setter_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "quickjs_setter_json")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "quickjs_setter_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[value.into()],
+                "quickjs_setter_parsed",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_parse returned no setter value")?;
+        self.compile_typed_dynamic_result(json, &signature.ret)
+    }
+
     /// `loadScript(source): boolean`, via thaw-quickjs's `thaw_js_load`.
     /// Same `i8` -> `i1` conversion as `compile_json_as_bool` and for the
     /// same reason (the extern function avoids relying on `bool`'s C ABI
@@ -214,7 +301,11 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("callDynamicValueHandle expects exactly two arguments".into());
         };
         let handle = self.compile_expr(handle)?;
-        let call_args = self.compile_expr(call_args)?;
+        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        self.compiling_quickjs_dynamic_arguments = true;
+        let call_args = self.compile_expr(call_args);
+        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        let call_args = call_args?;
         let args_json = self
             .builder
             .build_call(
@@ -232,7 +323,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.module
                     .get_function("thaw_js_call_handle_handle_result")
                     .unwrap(),
-                &[handle.into(), args_json.into()],
+                &[
+                    handle.into(),
+                    args_json.into(),
+                    self.context.bool_type().const_zero().into(),
+                ],
                 "dynamic_handle_result",
             )
             .map_err(|error| error.to_string())?
@@ -659,7 +754,11 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("constructDynamicValue expects constructor and JSON arguments".into());
         };
         let constructor = self.compile_expr(constructor)?;
-        let json_args = self.compile_expr(json_args)?;
+        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        self.compiling_quickjs_dynamic_arguments = true;
+        let json_args = self.compile_expr(json_args);
+        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        let json_args = json_args?;
         let text = self
             .builder
             .build_call(

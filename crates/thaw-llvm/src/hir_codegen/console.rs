@@ -306,17 +306,22 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(_) => self.compile_native_object_to_json(value, ty)?,
             _ => return Err(format!("console.log cannot serialize {ty:?}")),
         };
+        let formatter = if matches!(ty, HirType::Json) {
+            "thaw_json_console_string"
+        } else {
+            "thaw_json_stringify"
+        };
         let text = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function(formatter).unwrap(),
                 &[json.into()],
-                "console_json_stringify",
+                "console_json_format",
             )
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or("thaw_json_stringify returned no value")?
+            .ok_or("JSON console formatter returned no value")?
             .into_pointer_value();
         self.compile_console_text(text, newline, "console_structured", descriptor)
     }

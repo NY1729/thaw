@@ -1,4 +1,26 @@
 impl<'a> FnLowerer<'a> {
+    fn expression_never_returns(&self, expr: &Expr) -> bool {
+        let Expr::Call(call) = expr else {
+            return false;
+        };
+        let Callee::Expr(callee) = &call.callee else {
+            return false;
+        };
+        let Expr::Ident(callee) = callee.as_ref() else {
+            return false;
+        };
+        self.signatures
+            .get(&self.resolve_binding(callee.sym.as_ref()))
+            .and_then(|signature| signature.generic_return_type.as_deref())
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    TsType::TsKeywordType(keyword)
+                        if keyword.kind == swc_ecma_ast::TsKeywordTypeKind::TsNeverKeyword
+                )
+            })
+    }
+
     fn stmt_is_iteration(stmt: &Stmt) -> bool {
         match stmt {
             Stmt::While(_) | Stmt::DoWhile(_) | Stmt::For(_) | Stmt::ForIn(_) | Stmt::ForOf(_) => {
@@ -24,6 +46,7 @@ impl<'a> FnLowerer<'a> {
             narrowings: HashMap::new(),
             nullable_narrowings: HashMap::new(),
             nullish_narrowings: HashMap::new(),
+            json_narrowings: HashMap::new(),
             union_narrowings: HashMap::new(),
             union_discriminants: HashMap::new(),
             array_element_discriminants: HashMap::new(),
@@ -52,6 +75,9 @@ impl<'a> FnLowerer<'a> {
             generic_arrow_self_names: HashMap::new(),
             generic_named_templates: HashMap::new(),
             native_method_values: HashMap::new(),
+            native_class_aliases: HashMap::new(),
+            member_receiver_bindings: HashSet::new(),
+            awaited_bindings: HashSet::new(),
             loop_depth: 0,
             labels: Vec::new(),
             super_initializer: None,

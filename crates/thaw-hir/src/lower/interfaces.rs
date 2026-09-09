@@ -499,11 +499,6 @@ fn resolve_interface(
                 ))
             }
         };
-        if fields.iter().any(|(n, _)| *n == field_name) {
-            return Err(format!(
-                "interface `{name}` declares field `{field_name}`, which collides with an inherited field of the same name"
-            ));
-        }
         let mut field_ty = resolve_type_with_interfaces(
             &field_type,
             raw,
@@ -514,6 +509,14 @@ fn resolve_interface(
         )?;
         if optional {
             field_ty = optional_parameter_type(field_ty);
+        }
+        if let Some((_, existing)) = fields.iter().find(|(n, _)| *n == field_name) {
+            if existing == &field_ty {
+                continue;
+            }
+            return Err(format!(
+                "interface `{name}` redeclares field `{field_name}` with an incompatible type"
+            ));
         }
         if dictionary
             .as_ref()

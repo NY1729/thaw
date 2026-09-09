@@ -1,4 +1,75 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_this_parameter_call_or_apply(
+        &mut self,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(operation) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let Some(operation_name) = member_property_name(&operation.prop) else {
+            return Ok(None);
+        };
+        if operation_name != "call" && operation_name != "apply" && operation_name != "bind" {
+            return Ok(None);
+        }
+        let Expr::Ident(target) = operation.obj.as_ref() else {
+            return Ok(None);
+        };
+        let symbol = self.resolve_binding(target.sym.as_ref());
+        if !self
+            .signatures
+            .get(&symbol)
+            .is_some_and(|signature| signature.uses_this)
+        {
+            return Ok(None);
+        }
+        if operation_name == "bind" {
+            let mut args = vec![swc_ecma_ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Lit(Lit::Bool(swc_ecma_ast::Bool {
+                    span: call.span,
+                    value: false,
+                }))),
+            }];
+            args.extend_from_slice(&call.args);
+            return self.lower_function_bind(&CallExpr {
+                span: call.span,
+                ctxt: call.ctxt,
+                callee: call.callee.clone(),
+                args,
+                type_args: call.type_args.clone(),
+            });
+        }
+        let Some((this_argument, supplied)) = call.args.split_first() else {
+            return Err(format!("function `{symbol}.{operation_name}` expects a thisArg"));
+        };
+        let mut args = vec![this_argument.clone()];
+        if operation_name == "apply" {
+            let [arguments] = supplied else {
+                return Err(format!(
+                    "function `{symbol}.apply` expects a thisArg and one argument tuple"
+                ));
+            };
+            args.push(swc_ecma_ast::ExprOrSpread {
+                spread: Some(call.span),
+                expr: arguments.expr.clone(),
+            });
+        } else {
+            args.extend_from_slice(supplied);
+        }
+        self.lower_call(&CallExpr {
+            span: call.span,
+            ctxt: call.ctxt,
+            callee: Callee::Expr(Box::new(Expr::Ident(target.clone()))),
+            args,
+            type_args: call.type_args.clone(),
+        })
+        .map(Some)
+    }
+
     fn native_class_expression_type(&self, expression: &Expr) -> Option<HirType> {
         match expression {
             Expr::Ident(identifier) => self

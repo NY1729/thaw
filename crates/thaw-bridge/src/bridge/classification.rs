@@ -96,7 +96,7 @@ fn supports_direct_ffi_collections(ty: &HirType) -> bool {
     match ty {
         // A source union has an internal tagged layout, but an arbitrary C
         // symbol has no matching discriminator ABI unless one is declared.
-        HirType::Union(_) => false,
+        HirType::Union(_) | HirType::Promise(_) => false,
         HirType::Array(element) => matches!(
             element.as_ref(),
             HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue

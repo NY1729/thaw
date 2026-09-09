@@ -1,4 +1,31 @@
 impl<'a> FnLowerer<'a> {
+    fn initializer_callback_references(expression: &Expr, name: &str) -> bool {
+        use swc_ecma_visit::{Visit, VisitWith};
+
+        struct Finder<'a> {
+            name: &'a str,
+            found: bool,
+        }
+
+        impl Visit for Finder<'_> {
+            fn visit_ident(&mut self, identifier: &swc_ecma_ast::Ident) {
+                self.found |= identifier.sym == self.name;
+            }
+        }
+
+        let Expr::Call(call) = expression else {
+            return false;
+        };
+        call.args.iter().any(|argument| {
+            if !matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
+                return false;
+            }
+            let mut finder = Finder { name, found: false };
+            argument.expr.visit_with(&mut finder);
+            finder.found
+        })
+    }
+
     fn lower_var_decl(&mut self, var_decl: &VarDecl) -> Result<Vec<HirStmt>, String> {
         let mut statements = Vec::new();
         for decl in &var_decl.decls {
@@ -141,6 +168,37 @@ impl<'a> FnLowerer<'a> {
                         )
                     })
                     .transpose()?;
+                let recursive_binding_type = if Self::initializer_callback_references(init, &name)
+                {
+                    annotated.clone().or_else(|| {
+                        let Expr::Call(call) = init else {
+                            return None;
+                        };
+                        let Callee::Expr(callee) = &call.callee else {
+                            return None;
+                        };
+                        let Expr::Ident(callee) = callee.as_ref() else {
+                            return None;
+                        };
+                        self.signatures
+                            .get(&self.resolve_binding(callee.sym.as_ref()))
+                            .map(|signature| signature.ret.clone())
+                            .or_else(|| {
+                                matches!(
+                                    callee.sym.as_ref(),
+                                    "setTimeout"
+                                        | "setInterval"
+                                        | "setImmediate"
+                                )
+                                .then_some(HirType::JsValue)
+                            })
+                    })
+                } else {
+                    None
+                };
+                let recursive_binding = recursive_binding_type
+                    .as_ref()
+                    .map(|ty| self.bind_local(&name, ty.clone()));
                 if let Expr::Fn(function) = init {
                     if let Some((hir_name, ty, value)) = self.lower_recursive_function_expression(
                         &name,
@@ -205,6 +263,34 @@ impl<'a> FnLowerer<'a> {
                     self.expression_function_object_array_property_discriminants(init);
                 let propagated_function_object_function_property_discriminants =
                     self.expression_function_object_function_property_discriminants(init);
+                let dynamic_call = matches!(
+                    init,
+                    Expr::Call(call)
+                        if matches!(
+                            &call.callee,
+                            Callee::Expr(callee)
+                                if match callee.as_ref() {
+                                    Expr::Ident(identifier) => self.scope
+                                        .get(&self.resolve_binding(identifier.sym.as_ref()))
+                                        == Some(&HirType::JsValue),
+                                    Expr::Member(member) => self
+                                        .infer_member_receiver_type(&member.obj)
+                                        == Some(HirType::JsValue),
+                                    _ => false,
+                                }
+                        )
+                );
+                let inferred_expected = if annotated.is_none() && dynamic_call {
+                    if self.awaited_bindings.contains(&name) {
+                        Some(HirType::Dynamic)
+                    } else if self.member_receiver_bindings.contains(&name) {
+                        Some(HirType::JsValue)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let value = match (init, annotated.as_ref()) {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
@@ -253,21 +339,46 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::FunctionRef(source, signature.params.clone(), ret)
                         }
                     }
-                    _ => self.lower_expr_with_expected_type(init, annotated.as_ref())?,
+                    _ => self.lower_expr_with_expected_type(
+                        init,
+                        annotated.as_ref().or(inferred_expected.as_ref()),
+                    )?,
                 };
 
+                let actual_type = self.infer_expr_type(&value).map_err(|error| {
+                    format!(
+                        "cannot infer the type of `{name}`: {error} \
+                         (add an explicit type annotation)"
+                    )
+                })?;
                 let ty = match annotated {
                     Some(ty) => ty,
-                    None => self.infer_expr_type(&value).map_err(|e| {
-                        format!(
-                            "cannot infer the type of `{name}`: {e} \
-                             (add an explicit type annotation)"
-                        )
-                    })?,
+                    None => actual_type.clone(),
                 };
-                let value = self.coerce_to_declared(&ty, value)?;
+                let mut value = self.coerce_to_declared(&ty, value)?;
 
-                let hir_name = self.bind_local(&name, ty.clone());
+                let storage_type = if class_name_from_type(&actual_type).is_some()
+                    && matches!(&ty, HirType::Object(fields) if fields.iter().any(|(_, field)| *field == HirType::Dynamic))
+                {
+                    actual_type.clone()
+                } else {
+                    ty.clone()
+                };
+                let hir_name = if let Some(hir_name) = recursive_binding {
+                    self.scope.insert(hir_name.clone(), storage_type.clone());
+                    value = HirExpr::RecursiveClosure(
+                        hir_name.clone(),
+                        storage_type.clone(),
+                        Box::new(value),
+                    );
+                    hir_name
+                } else {
+                    self.bind_local(&name, storage_type.clone())
+                };
+                if class_name_from_type(&actual_type).is_some() && actual_type != storage_type {
+                    self.native_class_aliases
+                        .insert(hir_name.clone(), actual_type);
+                }
                 if let Some(source) = correlated_alias_source {
                     self.propagate_destructured_union_alias(&source, &hir_name);
                 }
@@ -403,7 +514,7 @@ impl<'a> FnLowerer<'a> {
                 if let Some(method) = native_method_value {
                     self.native_method_values.insert(hir_name.clone(), method);
                 }
-                statements.push(HirStmt::Let(hir_name, ty, value));
+                statements.push(HirStmt::Let(hir_name, storage_type, value));
                 continue;
             }
 

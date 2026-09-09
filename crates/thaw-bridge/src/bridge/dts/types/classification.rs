@@ -510,11 +510,20 @@ fn classify_ts_type(
                 };
             }
 
-            // Note: no `Promise<T>` recognition here (unlike
-            // thaw-hir's `lower_ts_type`) -- a `.d.ts` signature using
-            // either still needs a real decision about arena lifetime
-            // (arrays) or the async ABI (promises) across a *foreign* FFI
-            // boundary that section 5 of the design doc explicitly defers.
+            if ref_name == "Promise" {
+                let Some(value) = ty_ref
+                    .type_params
+                    .as_ref()
+                    .and_then(|params| params.params.first())
+                else {
+                    return DtsType::Unsupported("Promise<T> needs one type argument".into());
+                };
+                return match classify_ts_type(value, interfaces, generic_interfaces) {
+                    DtsType::Native(value) => DtsType::Native(HirType::Promise(Box::new(value))),
+                    unsupported => unsupported,
+                };
+            }
+
             DtsType::Unsupported(format!(
                 "type reference `{ref_name}` is not classified yet (Array<T>/Promise<T>)"
             ))

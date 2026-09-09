@@ -134,6 +134,7 @@ fn rewrites_methods_on_instances_received_by_callbacks() {
                         Box::new(thaw_hir::HirType::Void),
                     ),
                 ],
+                None,
             ),
             (
                 "Server".into(),
@@ -148,6 +149,7 @@ fn rewrites_methods_on_instances_received_by_callbacks() {
                         Box::new(thaw_hir::HirType::Void),
                     ),
                 ],
+                None,
             ),
             (
                 "Socket".into(),
@@ -156,6 +158,7 @@ fn rewrites_methods_on_instances_received_by_callbacks() {
                 1,
                 false,
                 vec![thaw_hir::HirType::Str],
+                None,
             ),
         ],
         &[
@@ -383,6 +386,31 @@ fn selects_same_arity_napi_constructors_by_argument_type() {
 }
 
 #[test]
+fn selects_constructor_overloads_by_object_method_shape() {
+    let callback = thaw_hir::HirType::Dynamic;
+    let basic = thaw_hir::HirType::Object(vec![("transform".into(), callback.clone())]);
+    let flush = thaw_hir::HirType::Object(vec![
+        ("transform".into(), callback.clone()),
+        ("flush".into(), callback),
+    ]);
+    let rewritten = rewrite_external_class_methods(
+        "const a = new NativeBox({ transform() {} }); const b = new NativeBox({ transform() {}, flush() {} });",
+        &[(
+            "pkg".into(),
+            "NativeBox".into(),
+            vec![
+                (1, "basic_ctor".into(), vec![basic]),
+                (1, "flush_ctor".into(), vec![flush]),
+            ],
+        )],
+        &[],
+    )
+    .unwrap();
+    assert!(rewritten.contains("const a = basic_ctor({ transform() {} })"));
+    assert!(rewritten.contains("const b = flush_ctor({ transform() {}, flush() {} })"));
+}
+
+#[test]
 fn generates_typed_napi_tuple_class_shims() {
     let class = thaw_bridge::parse_dts_classes(
         r#"export class PairBox {
@@ -420,6 +448,7 @@ fn generates_typed_napi_tuple_class_shims() {
         &property.name,
         &property.ty,
         false,
+        true,
         &mut shim,
     )
     .is_some());
@@ -441,6 +470,24 @@ fn generates_typed_napi_tuple_class_shims() {
     .unwrap();
     assert!(!rewritten.contains("new PairBox"));
     assert!(rewritten.contains(&methods[0].1));
+}
+
+#[test]
+fn class_returning_methods_keep_a_live_js_handle() {
+    let class = thaw_bridge::parse_dts_classes(
+        "export class Hash { update(value: string): Hash; digest(): string; }",
+    )
+    .unwrap()
+    .remove(0);
+    let mut shim = String::new();
+    generate_napi_class_method_overloads(
+        &class,
+        false,
+        &std::collections::HashMap::new(),
+        &mut shim,
+        false,
+    );
+    assert!(shim.contains("receiver: JsValue, value: string): JsValue;"));
 }
 
 #[test]
@@ -486,6 +533,7 @@ fn generates_typed_napi_recursive_array_shims() {
         &property.name,
         &property.ty,
         false,
+        true,
         &mut shim,
     )
     .is_some());
@@ -558,6 +606,7 @@ fn generates_typed_napi_nullable_shims() {
         &property.name,
         &property.ty,
         false,
+        true,
         &mut shim,
     )
     .is_some());
@@ -621,6 +670,7 @@ fn generates_typed_napi_optional_and_nullish_shims() {
         &property.name,
         &property.ty,
         false,
+        true,
         &mut shim,
     )
     .is_some());
@@ -662,11 +712,13 @@ fn generates_napi_class_property_accessor_helpers() {
     let instance_getter =
         generate_napi_class_property_getter("Client", "name", &ty, false, &mut shim).unwrap();
     let (instance_setter, setter_type) =
-        generate_napi_class_property_setter("Client", "name", &ty, false, &mut shim).unwrap();
+        generate_napi_class_property_setter("Client", "name", &ty, false, true, &mut shim)
+            .unwrap();
     let static_getter =
         generate_napi_class_property_getter("Client", "version", &ty, true, &mut shim).unwrap();
     let (static_setter, _) =
-        generate_napi_class_property_setter("Client", "version", &ty, true, &mut shim).unwrap();
+        generate_napi_class_property_setter("Client", "version", &ty, true, true, &mut shim)
+            .unwrap();
 
     assert_eq!(setter_type, thaw_hir::HirType::Str);
     assert!(shim.contains(&format!(
@@ -921,6 +973,7 @@ fn generates_typed_napi_static_method_shims_without_instance_receivers() {
             required_params: 1,
             rest_param: None,
             ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+            return_instance_class: None,
             callback_instance_classes: vec![vec![]],
             literal_params: vec![None],
             is_static: true,
@@ -972,6 +1025,7 @@ fn generates_napi_method_arity_that_omits_an_unsupported_optional_parameter() {
             required_params: 2,
             rest_param: None,
             ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::Void),
+            return_instance_class: None,
             callback_instance_classes: vec![vec![], vec![], vec![]],
             literal_params: vec![None, None, None],
             is_static: false,

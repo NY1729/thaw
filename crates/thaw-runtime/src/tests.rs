@@ -8,6 +8,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
 static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static UNHANDLED_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn record_unhandled_rejection(_: *const u8) -> u8 {
+    UNHANDLED_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+    1
+}
+
+extern "C" fn ignore_promise_result(_: *mut u8, _: *const u8) {}
 
 /// A settled `Promise<Array<_>>`'s (or `Promise<Tuple<_>>`'s) own resolved
 /// value is an array/tuple handle - a one-word cell holding the raw
@@ -217,6 +225,71 @@ fn timed_value(milliseconds: u64, value: f64) -> *mut ThawPromise {
         1
     );
     output
+}
+
+#[test]
+fn reports_only_unsubscribed_rejected_promises() {
+    UNHANDLED_REJECTIONS.store(0, Ordering::Relaxed);
+    thaw_promise_set_unhandled_reporter(Some(record_unhandled_rejection));
+    let unhandled = thaw_promise_new();
+    thaw_promise_reject(unhandled, c"boom".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    assert_eq!(UNHANDLED_REJECTIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        thaw_promise_drain_unhandled(Some(record_unhandled_rejection)),
+        0
+    );
+    assert_eq!(UNHANDLED_REJECTIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        thaw_promise_drain_unhandled(Some(record_unhandled_rejection)),
+        0
+    );
+    assert_eq!(UNHANDLED_REJECTIONS.load(Ordering::Relaxed), 1);
+    let handled = thaw_promise_new();
+    assert_eq!(
+        thaw_promise_subscribe(handled, ignore_promise_result, std::ptr::null_mut()),
+        1
+    );
+    thaw_promise_reject(handled, c"handled".as_ptr().cast());
+    thaw_runtime_run_until_idle();
+    let polled = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_mark_handled(polled) }, 1);
+    thaw_promise_reject(polled, c"polled".as_ptr().cast());
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        thaw_promise_drain_unhandled(Some(record_unhandled_rejection)),
+        0
+    );
+    assert_eq!(UNHANDLED_REJECTIONS.load(Ordering::Relaxed), 1);
+    unsafe { thaw_promise_destroy(unhandled) };
+    unsafe { thaw_promise_destroy(handled) };
+    unsafe { thaw_promise_destroy(polled) };
+    thaw_promise_set_unhandled_reporter(None);
+}
+
+#[test]
+fn reports_a_rejection_handled_after_the_unhandled_checkpoint() {
+    static HANDLED: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn record_handled() {
+        HANDLED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    HANDLED.store(0, Ordering::Relaxed);
+    thaw_promise_set_unhandled_reporter(Some(record_unhandled_rejection));
+    thaw_promise_set_rejection_handled_reporter(Some(record_handled));
+    let promise = thaw_promise_new();
+    thaw_promise_reject(promise, c"late".as_ptr().cast());
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    assert_eq!(
+        thaw_promise_subscribe(promise, ignore_promise_result, std::ptr::null_mut()),
+        1
+    );
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(thaw_runtime_poll_one(), 0);
+    assert_eq!(HANDLED.load(Ordering::Relaxed), 1);
+    unsafe { thaw_promise_destroy(promise) };
+    thaw_promise_set_unhandled_reporter(None);
+    thaw_promise_set_rejection_handled_reporter(None);
 }
 
 fn local_tls_configs() -> (Arc<ClientConfig>, Arc<ServerConfig>) {

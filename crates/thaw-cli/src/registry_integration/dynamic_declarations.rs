@@ -66,14 +66,45 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
         thaw_hir::HirType::Void => Some("void".into()),
         thaw_hir::HirType::Json => Some("Json".into()),
         thaw_hir::HirType::JsValue => Some("JsValue".into()),
+        thaw_hir::HirType::Promise(payload) => {
+            render_dynamic_type(payload).map(|payload| format!("Promise<{payload}>") )
+        }
         thaw_hir::HirType::Optional(payload) => {
-            render_dynamic_type(payload).map(|payload| format!("{payload} | undefined"))
+            render_dynamic_type(payload).map(|rendered| {
+                if matches!(
+                    payload.as_ref(),
+                    thaw_hir::HirType::Function(..)
+                        | thaw_hir::HirType::CallableFunction(..)
+                ) {
+                    format!("({rendered}) | undefined")
+                } else {
+                    format!("{rendered} | undefined")
+                }
+            })
         }
         thaw_hir::HirType::Nullable(payload) => {
-            render_dynamic_type(payload).map(|payload| format!("{payload} | null"))
+            render_dynamic_type(payload).map(|rendered| {
+                if matches!(
+                    payload.as_ref(),
+                    thaw_hir::HirType::Function(..)
+                        | thaw_hir::HirType::CallableFunction(..)
+                ) {
+                    format!("({rendered}) | null")
+                } else {
+                    format!("{rendered} | null")
+                }
+            })
         }
-        thaw_hir::HirType::Nullish(payload) => render_dynamic_type(payload)
-            .map(|payload| format!("{payload} | null | undefined")),
+        thaw_hir::HirType::Nullish(payload) => render_dynamic_type(payload).map(|rendered| {
+            if matches!(
+                payload.as_ref(),
+                thaw_hir::HirType::Function(..) | thaw_hir::HirType::CallableFunction(..)
+            ) {
+                format!("({rendered}) | null | undefined")
+            } else {
+                format!("{rendered} | null | undefined")
+            }
+        }),
         thaw_hir::HirType::Union(elements) => elements
             .iter()
             .map(|element| {
@@ -165,11 +196,12 @@ fn typed_dynamic_callable_adapter(
         }
         _ => return Some((target, declarations)),
     };
-    let convert = match callback_ret {
-        thaw_hir::HirType::Str => "String",
-        thaw_hir::HirType::F64 => "Number",
-        thaw_hir::HirType::Bool => "Boolean",
-        thaw_hir::HirType::Json => "",
+    let (convert, handle_result) = match callback_ret {
+        thaw_hir::HirType::Str => ("String", false),
+        thaw_hir::HirType::F64 => ("Number", false),
+        thaw_hir::HirType::Bool => ("Boolean", false),
+        thaw_hir::HirType::Json => ("", false),
+        thaw_hir::HirType::JsValue if !napi => ("", true),
         _ => return Some((target, declarations)),
     };
     let callback_types = callback_params
@@ -205,7 +237,9 @@ fn typed_dynamic_callable_adapter(
         .collect::<Vec<_>>()
         .join(", ");
     let callback_type = render_dynamic_type(ret)?;
-    let call_value = if napi {
+    let call_value = if handle_result {
+        "callDynamicValueHandle"
+    } else if napi {
         "callNativeAddonValue"
     } else {
         "callDynamicValue"
@@ -316,6 +350,11 @@ fn typed_dynamic_rest_declaration(
         .collect::<Option<Vec<_>>>()?;
     let ret_ty = match &function.ret {
         thaw_bridge::DtsType::Native(ty) => ty.clone(),
+        thaw_bridge::DtsType::Unsupported(reason)
+            if reason == "`any` is not supported" || reason == "`unknown` is not supported" =>
+        {
+            thaw_hir::HirType::Json
+        }
         thaw_bridge::DtsType::Unsupported(_) if function.generic.is_some() => {
             thaw_hir::HirType::JsValue
         }
@@ -956,6 +995,7 @@ fn typed_dynamic_bare_alias(
                     | thaw_hir::HirType::F64
                     | thaw_hir::HirType::Bool
                     | thaw_hir::HirType::Json
+                    | thaw_hir::HirType::JsValue
             )
         }
         thaw_hir::HirType::CallableFunction(_, _, None, ret) => {
@@ -965,6 +1005,7 @@ fn typed_dynamic_bare_alias(
                     | thaw_hir::HirType::F64
                     | thaw_hir::HirType::Bool
                     | thaw_hir::HirType::Json
+                    | thaw_hir::HirType::JsValue
             )
         }
         _ => false,
@@ -1081,25 +1122,23 @@ fn typed_dynamic_declaration(
         if napi { "napi" } else { "js" },
         encoded
     );
-    // `argsArray` is this codebase's own reserved convention name for
-    // "this single parameter already holds the whole, pre-packed args
-    // array to spread onto the real call" -- thaw-bridge's own generic
-    // fallback (`generate_shim`, `function {name}(argsArray: Json):
-    // Json { return callDynamic(...); }`) and thaw-registry's hand-
-    // written node built-in shims (`declare function join(argsArray:
-    // any): any;`) both rely on it. Indistinguishable, from a `.d.ts`
-    // signature alone, from an ordinary single-parameter function that
-    // happens to classify the same way (`Unsupported`/`Json`) -- but
-    // this function's own per-parameter JSON packing would wrap it as
-    // one more argument slot rather than spreading it, breaking the
-    // real call's arity (real example: `path.join("a","b")`, which this
-    // would otherwise call as `join(["a","b"])`, joining the array's
-    // own `.toString()` instead of its two path segments). Bails so the
-    // untyped fallback -- which already passes `argsArray` straight
-    // through with no such wrapping -- wins instead.
+    // `argsArray` is this codebase's reserved spelling for an untyped
+    // variadic API. Turn it into a real rest parameter so observed call
+    // arities get normal forwarding wrappers instead of a one-argument
+    // function that rejects valid multi-argument calls.
     if let [(name, _)] = function.params.as_slice() {
         if name == "argsArray" && function.rest_param.is_none() {
-            return None;
+            let mut variadic = function.clone();
+            let (_, ty) = variadic.params.pop().unwrap();
+            variadic.required_params = 0;
+            variadic.rest_param = Some((name.clone(), ty));
+            return typed_dynamic_rest_declaration(
+                &variadic,
+                napi,
+                &encoded,
+                &base_symbol,
+                observed_call_arities,
+            );
         }
     }
     if function.rest_param.is_some() {

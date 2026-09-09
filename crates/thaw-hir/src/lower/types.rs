@@ -477,6 +477,28 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
                 format!("map_{}_{}", fingerprint(key), fingerprint(value))
             }
             HirType::Set(element) => format!("set_{}", fingerprint(element)),
+            HirType::Optional(element) => format!("optional_{}", fingerprint(element)),
+            HirType::Nullable(element) => format!("nullable_{}", fingerprint(element)),
+            HirType::Nullish(element) => format!("nullish_{}", fingerprint(element)),
+            HirType::Function(params, result) => format!(
+                "fn_{}_to_{}",
+                params.iter().map(fingerprint).collect::<Vec<_>>().join("_"),
+                fingerprint(result)
+            ),
+            HirType::CallableFunction(params, optional, rest, result) => format!(
+                "callable_{}_optional_{}_rest_{}_to_{}",
+                params.iter().map(fingerprint).collect::<Vec<_>>().join("_"),
+                match optional {
+                    HirOptionalMask::Inline(mask) => format!("{mask:x}"),
+                    HirOptionalMask::Extended(words) => words
+                        .iter()
+                        .map(|word| format!("{word:x}"))
+                        .collect::<Vec<_>>()
+                        .join("_"),
+                },
+                rest.as_deref().map(fingerprint).unwrap_or_else(|| "none".into()),
+                fingerprint(result)
+            ),
             other => panic!("unsupported generic specialization type: {other:?}"),
         }
     }
@@ -517,6 +539,15 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         GenericTypePattern::Object(fields) => fields
             .iter()
             .any(|(_, field)| generic_pattern_contains_variable(field, variable)),
+        GenericTypePattern::Function(params, _, rest, result) => {
+            params
+                .iter()
+                .any(|param| generic_pattern_contains_variable(param, variable))
+                || rest
+                    .as_deref()
+                    .is_some_and(|rest| generic_pattern_contains_variable(rest, variable))
+                || generic_pattern_contains_variable(result, variable)
+        }
         GenericTypePattern::Concrete(_) => false,
     }
 }
@@ -588,6 +619,28 @@ fn instantiate_generic_pattern(
                 })
                 .collect::<Result<Vec<_>, String>>()?,
         )),
+        GenericTypePattern::Function(params, optional, rest, result) => {
+            let params = params
+                .iter()
+                .map(|param| instantiate_generic_pattern(param, substitution))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = Box::new(instantiate_generic_pattern(result, substitution)?);
+            let rest = rest
+                .as_deref()
+                .map(|rest| instantiate_generic_pattern(rest, substitution))
+                .transpose()?
+                .map(Box::new);
+            Ok(if rest.is_some() || optional.iter().any(|value| *value) {
+                HirType::CallableFunction(
+                    params,
+                    optional_parameter_mask(optional),
+                    rest,
+                    result,
+                )
+            } else {
+                HirType::Function(params, result)
+            })
+        }
     }
 }
 
@@ -970,6 +1023,38 @@ fn generic_type_pattern(
         }
     }
     match ty {
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            let mut payload = None;
+            let mut undefined = false;
+            for member in &union.types {
+                if matches!(member.as_ref(), TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsUndefinedKeyword)
+                {
+                    undefined = true;
+                } else if payload.is_none() {
+                    payload = Some(member.as_ref());
+                } else {
+                    return Ok(GenericTypePattern::Concrete(lower_ts_type(
+                        ty,
+                        interfaces,
+                        generic_interfaces,
+                    )?));
+                }
+            }
+            if undefined {
+                return Ok(GenericTypePattern::Optional(Box::new(generic_type_pattern(
+                    payload.ok_or("generic optional union needs a payload type")?,
+                    substitutions,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?)));
+            }
+            Ok(GenericTypePattern::Concrete(lower_ts_type(
+                ty,
+                interfaces,
+                generic_interfaces,
+            )?))
+        }
         TsType::TsTypeOperator(operator)
             if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf =>
         {
@@ -1111,6 +1196,70 @@ fn generic_type_pattern(
                     .collect::<Result<Vec<_>, String>>()?,
             ))
         }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function))
+            if function.type_params.is_none() =>
+        {
+            let mut params = Vec::new();
+            let mut optional = Vec::new();
+            let mut rest = None;
+            for (index, param) in function.params.iter().enumerate() {
+                match param {
+                    TsFnParam::Ident(param) => {
+                        let annotation = param.type_ann.as_ref().ok_or_else(|| {
+                            format!("function parameter `{}` needs a type annotation", param.id.sym)
+                        })?;
+                        params.push(generic_type_pattern(
+                            &annotation.type_ann,
+                            substitutions,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )?);
+                        optional.push(param.id.optional);
+                    }
+                    TsFnParam::Rest(param) if index + 1 == function.params.len() => {
+                        let annotation = param
+                            .type_ann
+                            .as_ref()
+                            .ok_or("function rest parameter needs an array type annotation")?;
+                        let GenericTypePattern::Array(element) = generic_type_pattern(
+                            &annotation.type_ann,
+                            substitutions,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )?
+                        else {
+                            return Err(
+                                "function rest parameter needs an array type annotation".into(),
+                            );
+                        };
+                        rest = Some(element);
+                    }
+                    TsFnParam::Rest(_) => {
+                        return Err("function rest parameter must be last".into())
+                    }
+                    _ => {
+                        return Err(
+                            "function types only support identifier and trailing rest parameters"
+                                .into(),
+                        )
+                    }
+                }
+            }
+            Ok(GenericTypePattern::Function(
+                params,
+                optional,
+                rest,
+                Box::new(generic_type_pattern(
+                    &function.type_ann.type_ann,
+                    substitutions,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?),
+            ))
+        }
         other => Ok(GenericTypePattern::Concrete(lower_ts_type(
             other,
             interfaces,
@@ -1191,6 +1340,31 @@ fn match_generic_pattern(
                 match_generic_pattern(expected_ty, actual_ty, inferred)?;
             }
             Ok(())
+        }
+        (GenericTypePattern::Function(expected, _, expected_rest, expected_result), actual) => {
+            let (actual_params, actual_rest, actual_result) = match actual {
+                HirType::Function(params, result) => (params, None, result.as_ref()),
+                HirType::CallableFunction(params, _, rest, result) => {
+                    (params, rest.as_deref(), result.as_ref())
+                }
+                _ => {
+                    return Err(format!(
+                        "generic argument has type {actual:?}, incompatible with parameter pattern {pattern:?}"
+                    ))
+                }
+            };
+            if expected.len() != actual_params.len() || expected_rest.is_some() != actual_rest.is_some() {
+                return Err(format!(
+                    "generic callback has type {actual:?}, incompatible with parameter pattern {pattern:?}"
+                ));
+            }
+            for (expected, actual) in expected.iter().zip(actual_params) {
+                match_generic_pattern(expected, actual, inferred)?;
+            }
+            if let (Some(expected), Some(actual)) = (expected_rest.as_deref(), actual_rest) {
+                match_generic_pattern(expected, actual, inferred)?;
+            }
+            match_generic_pattern(expected_result, actual_result, inferred)
         }
         // A parameter whose type parameter got substituted away into a
         // plain `Json` fallback (a generic Fallback declaration doing the

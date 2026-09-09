@@ -66,6 +66,11 @@ thread_local! {
     static FD_WAITS: RefCell<Vec<PromiseFdWait>> = const { RefCell::new(Vec::new()) };
     static FD_WATCHERS: RefCell<Vec<FdWatcher>> = const { RefCell::new(Vec::new()) };
     static ACTIVE_PROMISE_JOINS: Cell<usize> = const { Cell::new(0) };
+    static ACTIVE_PROMISES: RefCell<Vec<*mut ThawPromise>> = const { RefCell::new(Vec::new()) };
+    static UNHANDLED_REPORTER: Cell<Option<PromiseUnhandledFn>> = const { Cell::new(None) };
+    static REJECTION_HANDLED_REPORTER: Cell<Option<PromiseRejectionHandledFn>> = const { Cell::new(None) };
+    static PENDING_REJECTION_HANDLED: Cell<usize> = const { Cell::new(0) };
+    static UNHANDLED_FAILURE: Cell<bool> = const { Cell::new(false) };
     // The current Lambda invocation's wall-clock deadline, derived from the
     // Runtime API's `Lambda-Runtime-Deadline-Ms` header, paired with the
     // countdown it started from (kept only to phrase the timeout message).
@@ -383,10 +388,12 @@ fn next_timer_delay() -> Option<Duration> {
 /// their own polling with this function without a multi-threaded executor.
 #[no_mangle]
 pub extern "C" fn thaw_runtime_poll_one() -> u8 {
+    report_pending_rejection_handled();
     promote_due_timers();
     let io_events = poll_fd_waits(Some(Duration::ZERO));
     let next = READY_CONTINUATIONS.with(|ready| ready.borrow_mut().pop_front());
     let Some((subscription, result)) = next else {
+        report_registered_unhandled_rejections();
         return u8::from(io_events != 0);
     };
     (subscription.resume)(subscription.frame, result);
@@ -578,6 +585,8 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
 pub struct ThawPromise {
     result: Option<*const u8>,
     rejected: bool,
+    handled: bool,
+    reported_unhandled: bool,
     subscribers: Vec<PromiseSubscription>,
 }
 

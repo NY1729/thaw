@@ -430,13 +430,79 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 self.builder.position_at_end(schedule);
             }
+            // Evaluating the operand of `await` can itself throw before it
+            // produces a native Promise (notably when a QuickJS-backed call
+            // returns a rejected JavaScript Promise). JavaScript turns that
+            // into an awaited rejection, so route the existing exception
+            // slot through the same resume/rejection machinery instead of
+            // returning early from the async ramp or resume function.
+            let function = self.current_function();
+            let sync_rejection = self
+                .context
+                .append_basic_block(function, "await_operand_rejected");
+            self.catch_stack.push(sync_rejection);
             let waiting = match awaited {
                 HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
-                    self.compile_single_arg_call("thaw_http_get_async", args, "async_fetch")?
-                        .into_pointer_value()
+                    self.compile_single_arg_call("thaw_http_get_async", args, "async_fetch")
                 }
-                _ => self.compile_expr(awaited)?.into_pointer_value(),
+                _ => self.compile_expr(awaited),
             };
+            self.catch_stack.pop();
+            let waiting = waiting?.into_pointer_value();
+            let fulfilled_block = self.builder.get_insert_block().unwrap();
+            let await_ready = self.context.append_basic_block(function, "await_operand_ready");
+            self.builder
+                .build_unconditional_branch(await_ready)
+                .map_err(|e| e.to_string())?;
+
+            self.builder.position_at_end(sync_rejection);
+            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+            let error = self
+                .builder
+                .build_load(
+                    ptr_ty,
+                    self.pending_exception().as_pointer_value(),
+                    "await_operand_error",
+                )
+                .map_err(|e| e.to_string())?
+                .into_pointer_value();
+            self.builder
+                .build_store(
+                    self.pending_exception().as_pointer_value(),
+                    ptr_ty.const_null(),
+                )
+                .map_err(|e| e.to_string())?;
+            let rejected = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_promise_new").unwrap(),
+                    &[],
+                    "await_rejected_promise",
+                )
+                .map_err(|e| e.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_promise_new returned no value")?
+                .into_pointer_value();
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_reject").unwrap(),
+                    &[rejected.into(), error.into()],
+                    "reject_await_operand",
+                )
+                .map_err(|e| e.to_string())?;
+            let rejected_block = self.builder.get_insert_block().unwrap();
+            self.builder
+                .build_unconditional_branch(await_ready)
+                .map_err(|e| e.to_string())?;
+
+            self.builder.position_at_end(await_ready);
+            let waiting_phi = self
+                .builder
+                .build_phi(ptr_ty, "await_operand")
+                .map_err(|e| e.to_string())?;
+            waiting_phi.add_incoming(&[(&waiting, fulfilled_block), (&rejected, rejected_block)]);
+            let waiting = waiting_phi.as_basic_value().into_pointer_value();
             let waiting_slot =
                 self.async_frame_field(frame, ASYNC_WAITING_OFFSET, "waiting_slot")?;
             self.builder

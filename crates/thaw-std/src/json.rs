@@ -90,6 +90,29 @@ pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
     stringify_value(&ordered_json(value), &[])
 }
 
+#[no_mangle]
+/// Prefixes a native callback exception so the JavaScript callback wrapper can
+/// distinguish it from a successful JSON result.
+///
+/// # Safety
+///
+/// `message` must point to a valid NUL-terminated string.
+pub unsafe extern "C" fn thaw_json_callback_error(message: *const c_char) -> *const c_char {
+    CString::new(format!("\u{2}{}", to_str(message)))
+        .unwrap_or_default()
+        .into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
+    let value = unsafe { &*value };
+    let text = match value {
+        Value::String(value) => value.clone(),
+        other => serde_json::to_string(&ordered_json(other)).unwrap_or_else(|_| "null".into()),
+    };
+    CString::new(text).unwrap_or_default().into_raw()
+}
+
 fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
     if indent.is_empty() {
         let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
@@ -288,6 +311,22 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
     CString::new(text).unwrap_or_default().into_raw() as *const c_char
 }
 
+#[no_mangle]
+/// # Safety
+/// `value` must point to a live JSON value allocated by this runtime.
+pub unsafe extern "C" fn thaw_json_typeof(value: *const Value) -> *const c_char {
+    let value = unsafe { &*value };
+    if is_napi_undefined(value) {
+        return c"undefined".as_ptr();
+    }
+    match value {
+        Value::Null | Value::Array(_) | Value::Object(_) => c"object".as_ptr(),
+        Value::Bool(_) => c"boolean".as_ptr(),
+        Value::Number(_) => c"number".as_ptr(),
+        Value::String(_) => c"string".as_ptr(),
+    }
+}
+
 /// Returns `0` or `1` rather than a Rust `bool` -- deliberately avoids
 /// relying on `bool`'s C ABI representation across the FFI boundary; the
 /// LLVM caller compares this against zero itself (see `compile_expr`'s
@@ -295,6 +334,9 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
     let value = unsafe { &*value };
+    if is_napi_undefined(value) {
+        return 0;
+    }
     match value {
         Value::Null => 0,
         Value::Bool(value) => u8::from(*value),
@@ -302,6 +344,14 @@ pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
         Value::String(value) => u8::from(!value.is_empty()),
         Value::Array(_) | Value::Object(_) => 1,
     }
+}
+
+fn is_napi_undefined(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Object(object)
+            if object.get("$__thaw_napi_undefined$") == Some(&Value::Bool(true))
+    )
 }
 
 #[no_mangle]
@@ -994,6 +1044,23 @@ mod tests {
     }
 
     #[test]
+    fn reports_javascript_typeof_categories_for_json_values() {
+        for (source, expected) in [
+            ("null", "object"),
+            ("[]", "object"),
+            ("true", "boolean"),
+            ("42", "number"),
+            (r#""text""#, "string"),
+            (r#"{"$__thaw_napi_undefined$":true}"#, "undefined"),
+        ] {
+            assert_eq!(
+                read_c_string(unsafe { thaw_json_typeof(parse(source)) }),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn round_trips_object_field_access() {
         let value = parse(r#"{"name": "thaw", "version": 2, "stable": false}"#);
 
@@ -1011,6 +1078,22 @@ mod tests {
     }
 
     #[test]
+    fn formats_dynamic_json_like_console_log() {
+        assert_eq!(
+            read_c_string(thaw_json_console_string(parse(r#""text""#))),
+            "text"
+        );
+        assert_eq!(
+            read_c_string(thaw_json_console_string(parse("null"))),
+            "null"
+        );
+        assert_eq!(
+            read_c_string(thaw_json_console_string(parse(r#"{"value":1}"#))),
+            r#"{"value":1}"#
+        );
+    }
+
+    #[test]
     fn applies_javascript_truthiness_to_json_values() {
         for (source, expected) in [
             ("null", 0),
@@ -1022,6 +1105,7 @@ mod tests {
             (r#""text""#, 1),
             ("[]", 1),
             ("{}", 1),
+            (r#"{"$__thaw_napi_undefined$":true}"#, 0),
         ] {
             assert_eq!(thaw_json_as_bool(parse(source)), expected, "{source}");
         }

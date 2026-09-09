@@ -27,6 +27,7 @@ impl<'a> FnLowerer<'a> {
         let saved_narrowings = self.narrowings.clone();
         let saved_nullable_narrowings = self.nullable_narrowings.clone();
         let saved_nullish_narrowings = self.nullish_narrowings.clone();
+        let saved_json_narrowings = self.json_narrowings.clone();
         let saved_union_narrowings = self.union_narrowings.clone();
         let saved_generic_arrows = self.generic_arrows.clone();
         let saved_generic_arrow_self_names = self.generic_arrow_self_names.clone();
@@ -37,6 +38,7 @@ impl<'a> FnLowerer<'a> {
         self.narrowings = saved_narrowings;
         self.nullable_narrowings = saved_nullable_narrowings;
         self.nullish_narrowings = saved_nullish_narrowings;
+        self.json_narrowings = saved_json_narrowings;
         self.union_narrowings = saved_union_narrowings;
         self.generic_arrows = saved_generic_arrows;
         self.generic_arrow_self_names = saved_generic_arrow_self_names;
@@ -46,9 +48,44 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
+        #[derive(Default)]
+        struct BindingConsumers {
+            members: HashSet<Symbol>,
+            awaited: HashSet<Symbol>,
+        }
+        impl Visit for BindingConsumers {
+            fn visit_member_expr(&mut self, member: &MemberExpr) {
+                if let Expr::Ident(receiver) = member.obj.as_ref() {
+                    self.members.insert(receiver.sym.to_string());
+                }
+                member.visit_children_with(self);
+            }
+
+            fn visit_await_expr(&mut self, await_expr: &AwaitExpr) {
+                if let Expr::Ident(value) = await_expr.arg.as_ref() {
+                    self.awaited.insert(value.sym.to_string());
+                }
+                await_expr.visit_children_with(self);
+            }
+        }
+        let mut consumers = BindingConsumers::default();
+        for stmt in stmts {
+            stmt.visit_with(&mut consumers);
+        }
+        self.member_receiver_bindings.extend(consumers.members);
+        self.awaited_bindings.extend(consumers.awaited);
+
         let mut out = Vec::new();
         for stmt in stmts {
             out.extend(self.lower_stmt_seq(stmt)?);
+            if let Stmt::Expr(expression) = stmt {
+                if let Some(targets) = self.assertion_union_narrowing(&expression.expr) {
+                    for target in targets {
+                        self.union_narrowings
+                            .insert(target.name, (target.matching, target.elements));
+                    }
+                }
+            }
             if let Stmt::If(if_stmt) = stmt {
                 if if_stmt.alt.is_none() && Self::stmt_definitely_exits(&if_stmt.cons) {
                     if let Some((name, payload, present_when_true, absence_kind)) =
@@ -280,6 +317,12 @@ impl<'a> FnLowerer<'a> {
     /// Returns the optional binding tested by an undefined comparison and
     /// whether its payload is present in the true branch.
     fn optional_undefined_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool, u8)> {
+        if let Some((name, predicate)) = self.predicate_call_target(expr) {
+            if matches!(self.scope.get(&name), Some(HirType::Optional(payload)) if payload.as_ref() == &predicate)
+            {
+                return Some((name, predicate, true, 0));
+            }
+        }
         if let Expr::Paren(paren) = expr {
             return self.optional_undefined_narrowing(&paren.expr);
         }
@@ -433,6 +476,38 @@ impl<'a> FnLowerer<'a> {
                 true,
             )
         })
+    }
+
+    fn json_typeof_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool)> {
+        let Expr::Bin(binary) = expr else { return None };
+        let equal_when_true = match binary.op {
+            BinaryOp::EqEqEq | BinaryOp::EqEq => true,
+            BinaryOp::NotEqEq | BinaryOp::NotEq => false,
+            _ => return None,
+        };
+        let (target, type_name) = match (binary.left.as_ref(), binary.right.as_ref()) {
+            (Expr::Unary(unary), Expr::Lit(Lit::Str(name))) if unary.op == UnaryOp::TypeOf => {
+                (unary.arg.as_ref(), name.value.to_string_lossy())
+            }
+            (Expr::Lit(Lit::Str(name)), Expr::Unary(unary)) if unary.op == UnaryOp::TypeOf => {
+                (unary.arg.as_ref(), name.value.to_string_lossy())
+            }
+            _ => return None,
+        };
+        let Expr::Ident(target) = target else {
+            return None;
+        };
+        let name = self.resolve_binding(target.sym.as_ref());
+        if self.scope.get(&name) != Some(&HirType::Json) {
+            return None;
+        }
+        let narrowed = match type_name.as_ref() {
+            "string" => HirType::Str,
+            "number" => HirType::F64,
+            "boolean" => HirType::Bool,
+            _ => return None,
+        };
+        Some((name, narrowed, equal_when_true))
     }
 
     fn union_member_equality_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
@@ -721,6 +796,92 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    fn predicate_call_target(&self, expr: &Expr) -> Option<(Symbol, HirType)> {
+        let Expr::Call(call) = expr else { return None };
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Ident(callee) = callee.as_ref() else {
+            return None;
+        };
+        let signature = self.signatures.get(callee.sym.as_ref())?;
+        let (parameter, predicate, _) = signature.type_predicate.as_ref()?;
+        let argument = call.args.get(*parameter)?;
+        if argument.spread.is_some() {
+            return None;
+        }
+        let Expr::Ident(argument) = argument.expr.as_ref() else {
+            return None;
+        };
+        let name = self.resolve_binding(argument.sym.as_ref());
+        let mut inferred = HashMap::new();
+        for (pattern, argument) in signature.generic_param_patterns.iter().zip(&call.args) {
+            let actual = match argument.expr.as_ref() {
+                Expr::Ident(argument) => self
+                    .scope
+                    .get(&self.resolve_binding(argument.sym.as_ref()))?
+                    .clone(),
+                Expr::Lit(Lit::Num(_)) => HirType::F64,
+                Expr::Lit(Lit::Str(_)) => HirType::Str,
+                Expr::Lit(Lit::Bool(_)) => HirType::Bool,
+                _ => continue,
+            };
+            match_generic_pattern(pattern, &actual, &mut inferred).ok()?;
+        }
+        let predicate = instantiate_generic_pattern(predicate, &inferred).ok()?;
+        Some((name, predicate))
+    }
+
+    fn union_predicate_call_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        let (name, predicate) = self.predicate_call_target(expr)?;
+        let HirType::Union(elements) = self.scope.get(&name)? else {
+            return None;
+        };
+        let allowed = self
+            .union_narrowings
+            .get(&name)
+            .map(|(allowed, _)| allowed.clone())
+            .unwrap_or_else(|| (0..elements.len()).collect());
+        let matching = allowed
+            .iter()
+            .copied()
+            .filter(|index| type_satisfies_constraint(&elements[*index], &predicate))
+            .collect::<Vec<_>>();
+        (!matching.is_empty()).then(|| {
+            (
+                vec![UnionNarrowingTarget {
+                    name,
+                    matching,
+                    allowed,
+                    elements: elements.clone(),
+                }],
+                true,
+                true,
+            )
+        })
+    }
+
+    fn assertion_union_narrowing(&self, expr: &Expr) -> Option<Vec<UnionNarrowingTarget>> {
+        let Expr::Call(call) = expr else { return None };
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Ident(callee) = callee.as_ref() else {
+            return None;
+        };
+        if !self
+            .signatures
+            .get(callee.sym.as_ref())?
+            .type_predicate
+            .as_ref()?
+            .2
+        {
+            return None;
+        }
+        self.union_predicate_call_narrowing(expr)
+            .map(|(targets, _, _)| targets)
+    }
+
     fn union_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
         if let Expr::Paren(parenthesized) = expr {
             return self.union_narrowing(&parenthesized.expr);
@@ -757,6 +918,51 @@ impl<'a> FnLowerer<'a> {
                         })
                         .collect()
                 };
+                if let Some((right_targets, right_equal, right_complement)) =
+                    self.union_narrowing(&binary.right)
+                {
+                    let left_truth: Vec<_> = branch_targets(true);
+                    let right_truth = |target: &UnionNarrowingTarget| {
+                        if right_equal {
+                            target.matching.clone()
+                        } else if right_complement {
+                            target
+                                .allowed
+                                .iter()
+                                .filter(|index| !target.matching.contains(index))
+                                .copied()
+                                .collect()
+                        } else {
+                            target.allowed.clone()
+                        }
+                    };
+                    if left_truth.len() == right_targets.len()
+                        && left_truth.iter().zip(&right_targets).all(|(left, right)| {
+                            left.name == right.name
+                                && left.allowed == right.allowed
+                                && left.elements == right.elements
+                        })
+                    {
+                        let combined = left_truth
+                            .into_iter()
+                            .zip(&right_targets)
+                            .map(|(mut left, right)| {
+                                let right = right_truth(right);
+                                if binary.op == BinaryOp::LogicalAnd {
+                                    left.matching.retain(|index| right.contains(index));
+                                } else {
+                                    for index in right {
+                                        if !left.matching.contains(&index) {
+                                            left.matching.push(index);
+                                        }
+                                    }
+                                }
+                                left
+                            })
+                            .collect();
+                        return Some((combined, true, true));
+                    }
+                }
                 return if binary.op == BinaryOp::LogicalAnd {
                     Some((branch_targets(true), true, false))
                 } else {
@@ -765,6 +971,7 @@ impl<'a> FnLowerer<'a> {
             }
         }
         self.union_typeof_narrowing(expr)
+            .or_else(|| self.union_predicate_call_narrowing(expr))
             .or_else(|| self.union_member_equality_narrowing(expr))
             .or_else(|| self.union_boolean_discriminant_narrowing(expr))
             .or_else(|| self.union_instanceof_narrowing(expr))
@@ -776,8 +983,10 @@ impl<'a> FnLowerer<'a> {
         stmt: &Stmt,
         narrowing: Option<&[UnionNarrowingTarget]>,
         optional: Option<&(Symbol, HirType, u8)>,
+        json: Option<&(Symbol, HirType)>,
     ) -> Result<Vec<HirStmt>, String> {
         let saved = self.union_narrowings.clone();
+        let saved_json = self.json_narrowings.clone();
         if let Some(targets) = narrowing {
             for target in targets {
                 self.union_narrowings.insert(
@@ -786,8 +995,12 @@ impl<'a> FnLowerer<'a> {
                 );
             }
         }
+        if let Some((name, ty)) = json {
+            self.json_narrowings.insert(name.clone(), ty.clone());
+        }
         let lowered = self.lower_body_with_optional_narrowing(stmt, optional);
         self.union_narrowings = saved;
+        self.json_narrowings = saved_json;
         lowered
     }
 

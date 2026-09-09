@@ -33,7 +33,8 @@ use swc_ecma_ast::{
     ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop,
     PropName, PropOrSpread, SimpleAssignTarget, Stmt, SuperProp, TsEntityName,
     TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsParamPropParam,
-    TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
+    TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclKind,
+    VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
@@ -119,6 +120,7 @@ struct FnSignature {
     generic_param_patterns: Vec<GenericTypePattern>,
     generic_param_optional: Vec<bool>,
     generic_return_type: Option<Box<TsType>>,
+    type_predicate: Option<(usize, GenericTypePattern, bool)>,
     /// The return type's own `GenericTypePattern`, when the type
     /// parameters used to build `generic_param_patterns` also cover it --
     /// used only as a *fallback* source for inferring a type parameter a
@@ -201,6 +203,12 @@ enum GenericTypePattern {
     IndexedAccess(Box<GenericTypePattern>, GenericIndexKeys),
     Dictionary(Box<GenericTypePattern>),
     Object(Vec<(Symbol, GenericTypePattern)>),
+    Function(
+        Vec<GenericTypePattern>,
+        Vec<bool>,
+        Option<Box<GenericTypePattern>>,
+        Box<GenericTypePattern>,
+    ),
 }
 
 #[derive(Clone, Debug, PartialEq)]

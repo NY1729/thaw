@@ -230,6 +230,15 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             builder.position_at_end(entry);
         }
+        self.build_arena_cell(&builder, ty, name)
+    }
+
+    fn build_arena_cell(
+        &self,
+        builder: &Builder<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
         let size = ty

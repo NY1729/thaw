@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use thaw_parser::ast::{
-    Callee, Decl, Expr, ImportSpecifier, Module, ModuleDecl, ModuleExportName, ModuleItem,
-    TsEntityName, TsInterfaceDecl, TsTypeRef,
+    Callee, Decl, Expr, ImportSpecifier, MemberProp, Module, ModuleDecl, ModuleExportName,
+    ModuleItem, Pat, TsEntityName, TsInterfaceDecl, TsTypeRef, VarDeclarator,
 };
 
 type SourceTransform<'a> = dyn Fn(&str) -> Result<String, String> + 'a;
@@ -158,6 +158,8 @@ fn resolve_relative(from: &Path, specifier: &str) -> Result<PathBuf, String> {
 
 fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
     let mut specs = Vec::new();
+    let mut create_require_functions = HashSet::new();
+    let mut module_namespaces = HashSet::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(decl) = item else {
             continue;
@@ -176,6 +178,98 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
             if !specs.iter().any(|existing| existing == spec) {
                 specs.push(spec.to_string());
             }
+            if matches!(spec, "module" | "node:module") {
+                if let ModuleDecl::Import(import) = decl {
+                    for specifier in &import.specifiers {
+                        match specifier {
+                            ImportSpecifier::Named(named)
+                                if export_name(&named.imported.clone().unwrap_or_else(|| {
+                                    ModuleExportName::Ident(named.local.clone())
+                                }))? == "createRequire" =>
+                            {
+                                create_require_functions.insert(named.local.sym.to_string());
+                            }
+                            ImportSpecifier::Namespace(namespace) => {
+                                module_namespaces.insert(namespace.local.sym.to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    struct CreatedRequires<'a> {
+        functions: &'a HashSet<String>,
+        namespaces: &'a HashSet<String>,
+        aliases: HashSet<String>,
+    }
+    impl Visit for CreatedRequires<'_> {
+        fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
+            let (Pat::Ident(binding), Some(Expr::Call(call))) =
+                (&declaration.name, declaration.init.as_deref())
+            else {
+                declaration.visit_children_with(self);
+                return;
+            };
+            let created = match &call.callee {
+                Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Ident(function) => self.functions.contains(function.sym.as_str()),
+                    Expr::Member(member) => matches!(
+                        (member.obj.as_ref(), &member.prop),
+                        (Expr::Ident(namespace), MemberProp::Ident(method))
+                            if self.namespaces.contains(namespace.sym.as_str())
+                                && method.sym == *"createRequire"
+                    ),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if created {
+                self.aliases.insert(binding.id.sym.to_string());
+            }
+            declaration.visit_children_with(self);
+        }
+    }
+    let mut created = CreatedRequires {
+        functions: &create_require_functions,
+        namespaces: &module_namespaces,
+        aliases: HashSet::new(),
+    };
+    module.visit_with(&mut created);
+
+    struct RequiredSpecs<'a> {
+        aliases: &'a HashSet<String>,
+        specs: Vec<String>,
+    }
+    impl Visit for RequiredSpecs<'_> {
+        fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                if matches!(callee.as_ref(), Expr::Ident(name) if self.aliases.contains(name.sym.as_str()))
+                {
+                    if let Some(specifier) = call.args.first().and_then(|argument| {
+                        argument
+                            .spread
+                            .is_none()
+                            .then(|| constant_string(&argument.expr))
+                            .flatten()
+                    }) {
+                        self.specs.push(specifier);
+                    }
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let mut required = RequiredSpecs {
+        aliases: &created.aliases,
+        specs: Vec::new(),
+    };
+    module.visit_with(&mut required);
+    for specifier in required.specs {
+        if !specs.contains(&specifier) {
+            specs.push(specifier);
         }
     }
     Ok(specs)
@@ -1225,19 +1319,6 @@ pub fn bundle_with_source_transform(
         bundled_items.extend(items);
     }
 
-    let mut seen = HashSet::new();
-    bundled_items.retain(|item| {
-        let name = match item {
-            ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Fn(decl))) => {
-                Some(decl.ident.sym.to_string())
-            }
-            ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::TsInterface(decl))) => {
-                Some(decl.id.sym.to_string())
-            }
-            _ => None,
-        };
-        name.map(|name| seen.insert(name)).unwrap_or(true)
-    });
     Ok(Module {
         span: modules[entry_index].module.span,
         body: bundled_items,

@@ -418,6 +418,12 @@ fn multiple_bundled_packages_dont_stomp_each_others_module_state() {
              not package B's, after B has loaded into the shared global context"
     );
 
+    let result = thaw_quickjs::eval_json(
+        "globalThis.__thaw_bundle_create_require('/tmp/main.js')('pkg-a/index.js')()",
+    )
+    .unwrap();
+    assert_eq!(result.as_deref(), Some("\"from lazy\""));
+
     let _ = fs::remove_dir_all(&dir_a);
     let _ = fs::remove_dir_all(&dir_b);
     let _ = fs::remove_dir_all(&node_modules_dir);

@@ -45,6 +45,26 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_console_stderr", stderr)
                     .expect("failed to install JavaScript stderr writer");
+                let cwd = Function::new(ctx.clone(), || -> rquickjs::Result<String> {
+                    std::env::current_dir()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .map_err(|error| {
+                            rquickjs::Error::new_from_js_message("process", "cwd", error.to_string())
+                        })
+                })
+                .expect("failed to create process cwd bridge");
+                ctx.globals()
+                    .set("__thaw_process_cwd", cwd)
+                    .expect("failed to install process cwd bridge");
+                let chdir = Function::new(ctx.clone(), |path: String| -> rquickjs::Result<()> {
+                    std::env::set_current_dir(path).map_err(|error| {
+                        rquickjs::Error::new_from_js_message("process", "chdir", error.to_string())
+                    })
+                })
+                .expect("failed to create process chdir bridge");
+                ctx.globals()
+                    .set("__thaw_process_chdir", chdir)
+                    .expect("failed to install process chdir bridge");
                 let configure_signal = Function::new(ctx.clone(), configure_process_signal)
                     .expect("failed to create process signal bridge");
                 ctx.globals()
@@ -342,11 +362,101 @@ fn ensure_context() {
                             &hex_decode(&password),
                             &hex_decode(&salt),
                             iterations,
-                            length as usize,
+                            (length as usize).clamp(10, 64),
                         ))
                     },
                 )
                 .expect("failed to create JavaScript PBKDF2 function");
+                let scrypt_hex = Function::new(
+                    ctx.clone(),
+                    |password: String,
+                     salt: String,
+                     length: u32,
+                     cost: u32,
+                     block_size: u32,
+                     parallelization: u32| {
+                        if cost < 2 || !cost.is_power_of_two() {
+                            return Err(rquickjs::Error::new_from_js_message(
+                                "scrypt cost",
+                                "power of two greater than one",
+                                cost.to_string(),
+                            ));
+                        }
+                        let params = scrypt::Params::new(
+                            cost.ilog2() as u8,
+                            block_size,
+                            parallelization,
+                            (length as usize).clamp(10, 64),
+                        )
+                        .map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "scrypt options",
+                                "valid scrypt options",
+                                format!(
+                                    "{error}: N={cost}, r={block_size}, p={parallelization}, length={length}"
+                                ),
+                            )
+                        })?;
+                        let mut output = vec![0; length as usize];
+                        scrypt::scrypt(
+                            &hex_decode(&password),
+                            &hex_decode(&salt),
+                            &params,
+                            &mut output,
+                        )
+                        .map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "scrypt input",
+                                "derived key",
+                                error.to_string(),
+                            )
+                        })?;
+                        Ok(hex_encode(&output))
+                    },
+                )
+                .expect("failed to create JavaScript scrypt function");
+                let cipher_hex = Function::new(
+                    ctx.clone(),
+                    |algorithm: String,
+                     key: String,
+                     iv: String,
+                     value: String,
+                     decrypt: bool,
+                     finalize: bool|
+                     -> rquickjs::Result<String> {
+                        if !algorithm.eq_ignore_ascii_case("aes-256-cbc") {
+                            return Err(rquickjs::Error::new_from_js_message(
+                                "cipher",
+                                "aes-256-cbc",
+                                algorithm,
+                            ));
+                        }
+                        let key = hex_decode(&key);
+                        let iv = hex_decode(&iv);
+                        let value = hex_decode(&value);
+                        if decrypt {
+                            let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(&key, &iv)
+                                .map_err(|_| rquickjs::Error::new_from_js("key/iv", "AES-256-CBC"))?;
+                            let output = if finalize {
+                                cipher.decrypt_padded_vec_mut::<Pkcs7>(&value)
+                            } else {
+                                cipher.decrypt_padded_vec_mut::<NoPadding>(&value)
+                            }
+                                .map_err(|_| rquickjs::Error::new_from_js("ciphertext", "padded AES-256-CBC data"))?;
+                            Ok(hex_encode(&output))
+                        } else {
+                            let cipher = cbc::Encryptor::<aes::Aes256>::new_from_slices(&key, &iv)
+                                .map_err(|_| rquickjs::Error::new_from_js("key/iv", "AES-256-CBC"))?;
+                            let output = if finalize {
+                                cipher.encrypt_padded_vec_mut::<Pkcs7>(&value)
+                            } else {
+                                cipher.encrypt_padded_vec_mut::<NoPadding>(&value)
+                            };
+                            Ok(hex_encode(&output))
+                        }
+                    },
+                )
+                .expect("failed to create JavaScript cipher function");
                 let hpack_huffman_encode = Function::new(ctx.clone(), |value: String| {
                     let mut output = Vec::new();
                     httlib_huffman::encode(&hex_decode(&value), &mut output)
@@ -712,6 +822,12 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_crypto_pbkdf2_hex", pbkdf2_hex)
                     .expect("failed to install JavaScript PBKDF2 function");
+                ctx.globals()
+                    .set("__thaw_crypto_scrypt_hex", scrypt_hex)
+                    .expect("failed to install JavaScript scrypt function");
+                ctx.globals()
+                    .set("__thaw_crypto_cipher_hex", cipher_hex)
+                    .expect("failed to install JavaScript cipher function");
                 ctx.globals()
                     .set("__thaw_hpack_huffman_encode", hpack_huffman_encode)
                     .expect("failed to install HPACK Huffman encoder");

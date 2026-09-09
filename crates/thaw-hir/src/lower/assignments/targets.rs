@@ -51,6 +51,19 @@ impl<'a> FnLowerer<'a> {
                     )),
                 }
             }
+            HirType::JsValue | HirType::Dynamic => {
+                let key = self.lower_expr(&computed.expr)?;
+                let key = match self.infer_expr_type(&key)? {
+                    HirType::Str | HirType::Dynamic => key,
+                    HirType::F64 => self.coerce_primitive_to_string(key)?,
+                    other => {
+                        return Err(format!(
+                            "dynamic assignment key must be string or number, got {other:?}"
+                        ))
+                    }
+                };
+                Ok(Target::DynamicProperty(object, Box::new(key)))
+            }
             _ => Err(format!(
                 "cannot assign through a computed key on a value of type {object_type:?}"
             )),
@@ -120,6 +133,10 @@ impl<'a> FnLowerer<'a> {
                                 obj,
                                 Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                                 HirType::Json,
+                            )),
+                            HirType::JsValue | HirType::Dynamic => Ok(Target::DynamicProperty(
+                                obj,
+                                Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
                             )),
                             other => Err(format!(
                                 "cannot assign to `.{}` on a value of type {other:?}",

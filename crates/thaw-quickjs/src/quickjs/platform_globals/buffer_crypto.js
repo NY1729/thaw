@@ -140,6 +140,17 @@
     writeUInt32BE(value, offset = 0) { const index = Number(offset), number = Number(value) >>> 0; this[index] = number >>> 24; this[index + 1] = number >>> 16; this[index + 2] = number >>> 8; this[index + 3] = number; return index + 4; }
     writeInt32LE(value, offset = 0) { return this.writeUInt32LE(value, offset); }
     writeInt32BE(value, offset = 0) { return this.writeUInt32BE(value, offset); }
+    readFloatLE(offset = 0) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat32(Number(offset), true); }
+    readFloatBE(offset = 0) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat32(Number(offset), false); }
+    readDoubleLE(offset = 0) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat64(Number(offset), true); }
+    readDoubleBE(offset = 0) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat64(Number(offset), false); }
+    writeFloatLE(value, offset = 0) { const index = Number(offset); new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat32(index, Number(value), true); return index + 4; }
+    writeFloatBE(value, offset = 0) { const index = Number(offset); new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat32(index, Number(value), false); return index + 4; }
+    writeDoubleLE(value, offset = 0) { const index = Number(offset); new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat64(index, Number(value), true); return index + 8; }
+    writeDoubleBE(value, offset = 0) { const index = Number(offset); new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat64(index, Number(value), false); return index + 8; }
+    swap16() { if (this.length % 2) throw new RangeError('Buffer size must be a multiple of 16-bits'); for (let index = 0; index < this.length; index += 2) [this[index], this[index + 1]] = [this[index + 1], this[index]]; return this; }
+    swap32() { if (this.length % 4) throw new RangeError('Buffer size must be a multiple of 32-bits'); for (let index = 0; index < this.length; index += 4) { [this[index], this[index + 3]] = [this[index + 3], this[index]]; [this[index + 1], this[index + 2]] = [this[index + 2], this[index + 1]]; } return this; }
+    swap64() { if (this.length % 8) throw new RangeError('Buffer size must be a multiple of 64-bits'); for (let index = 0; index < this.length; index += 8) for (let offset = 0; offset < 4; offset++) [this[index + offset], this[index + 7 - offset]] = [this[index + 7 - offset], this[index + offset]]; return this; }
   };
   Buffer.poolSize = 8192;
   for (const name of Object.getOwnPropertyNames(Buffer)) {
@@ -215,10 +226,81 @@
     if (a.length !== b.length) throw new RangeError('input buffers must have the same length');
     let difference = 0; for (let index = 0; index < a.length; index++) difference |= a[index] ^ b[index]; return difference === 0;
   };
+  const pbkdf2Sync = (password, salt, iterations, keylen, digest) => Buffer.from(
+    __thaw_crypto_pbkdf2_hex(
+      normalizeHashAlgorithm(digest),
+      Buffer.from(password).toString('hex'),
+      Buffer.from(salt).toString('hex'),
+      Number(iterations),
+      Number(keylen)
+    ),
+    'hex'
+  );
+  const scryptSync = (password, salt, keylen, options = {}) => Buffer.from(
+    __thaw_crypto_scrypt_hex(
+      Buffer.from(password).toString('hex'),
+      Buffer.from(salt).toString('hex'),
+      Number(keylen),
+      Number(options.N === undefined ? 16384 : options.N),
+      Number(options.r === undefined ? 8 : options.r),
+      Number(options.p === undefined ? 1 : options.p)
+    ),
+    'hex'
+  );
+  const scrypt = (password, salt, keylen, options, callback) => {
+    if (typeof options === 'function') { callback = options; options = {}; }
+    if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+    queueMicrotask(() => {
+      try { callback(null, scryptSync(password, salt, keylen, options)); }
+      catch (error) { callback(error); }
+    });
+  };
+  class Cipheriv {
+    constructor(algorithm, key, iv, decrypt) {
+      this.algorithm = String(algorithm).toLowerCase();
+      this.key = Buffer.from(key);
+      this.iv = Buffer.from(iv);
+      this.decrypt = decrypt;
+      this.pending = Buffer.alloc(0);
+      this.finished = false;
+    }
+    update(value, inputEncoding, outputEncoding) {
+      if (this.finished) throw new Error('Trying to add data in unsupported state');
+      this.pending = Buffer.concat([this.pending, Buffer.from(value, inputEncoding)]);
+      const length = this.decrypt
+        ? Math.max(0, Math.floor((this.pending.length - 1) / 16) * 16)
+        : Math.floor(this.pending.length / 16) * 16;
+      if (!length) return outputEncoding === undefined ? Buffer.alloc(0) : '';
+      const input = this.pending.subarray(0, length);
+      this.pending = Buffer.from(this.pending.subarray(length));
+      const output = Buffer.from(__thaw_crypto_cipher_hex(
+        this.algorithm, this.key.toString('hex'), this.iv.toString('hex'),
+        input.toString('hex'), this.decrypt, false
+      ), 'hex');
+      this.iv = Buffer.from((this.decrypt ? input : output).subarray(length - 16, length));
+      return outputEncoding === undefined ? output : output.toString(outputEncoding);
+    }
+    final(outputEncoding) {
+      if (this.finished) throw new Error('Invalid state');
+      this.finished = true;
+      const value = Buffer.from(__thaw_crypto_cipher_hex(
+        this.algorithm,
+        this.key.toString('hex'),
+        this.iv.toString('hex'),
+        this.pending.toString('hex'),
+        this.decrypt,
+        true
+      ), 'hex');
+      return outputEncoding === undefined ? value : value.toString(outputEncoding);
+    }
+  }
+  const createCipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, false);
+  const createDecipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, true);
   const cryptoModule = {
     createHash: algorithm => new Hash(algorithm),
     createHmac: (algorithm, key) => new Hmac(algorithm, key),
-    Hash, Hmac, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
+    createCipheriv, createDecipheriv, Cipheriv,
+    Hash, Hmac, pbkdf2Sync, scrypt, scryptSync, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
     timingSafeEqual, getHashes: () => ['sha256', 'sha512']
   };
   const subtle = {
