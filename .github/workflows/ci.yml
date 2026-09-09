@@ -63,6 +63,7 @@ jobs:
           find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
           cargo run -p thaw-cli -- node-compat tests/node-compat.json
           find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
+          cargo clean
           cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
           cargo test -p thaw-registry -- --test-threads=1
           cargo test -p thaw-llvm -- --test-threads=1
