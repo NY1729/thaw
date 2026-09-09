@@ -256,6 +256,18 @@ fn generator_placeholder(ty: &HirType) -> Option<HirExpr> {
         HirType::Bool => HirExpr::Lit(HirLit::Bool(false)),
         HirType::Str => HirExpr::Lit(HirLit::Str(String::new())),
         HirType::Array(_) => HirExpr::ArrayLit(Vec::new()),
+        HirType::Tuple(elements) => HirExpr::ArrayLit(
+            elements
+                .iter()
+                .map(generator_placeholder)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        HirType::Object(fields) => HirExpr::ObjectLit(
+            fields
+                .iter()
+                .map(|(name, ty)| Some((name.clone(), generator_placeholder(ty)?)))
+                .collect::<Option<Vec<_>>>()?,
+        ),
         HirType::Optional(value) => HirExpr::OptionalNone(value.as_ref().clone()),
         HirType::Nullable(value) => HirExpr::NullableNone(value.as_ref().clone()),
         HirType::Nullish(value) => HirExpr::NullishUndefined(value.as_ref().clone()),
