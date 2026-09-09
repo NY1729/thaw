@@ -77,6 +77,9 @@ jobs:
           cargo test -p thaw-cli registry_add_runs_a_real_hono_route_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_runs_a_real_fastify_route_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_runs_a_real_express_route_when_enabled -- --nocapture
+          cargo test -p thaw-cli registry_add_builds_a_multi_package_project_when_enabled -- --nocapture
+          cargo test -p thaw-cli registry_add_builds_and_runs_date_fns_root_when_enabled -- --nocapture
+          cargo test -p thaw-cli registry_add_infers_a_real_commander_action_callback_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_processes_a_real_hono_sharp_image_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_runs_real_safe_buffer_string_conversions_when_enabled -- --nocapture
       - name: Test Socket.IO client and server

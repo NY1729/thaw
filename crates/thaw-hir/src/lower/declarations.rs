@@ -295,7 +295,9 @@ fn lower_class_constructor(
         .body
         .iter()
         .find_map(|member| match member {
-            ClassMember::Constructor(constructor) => Some(constructor),
+            ClassMember::Constructor(constructor) if constructor.body.is_some() => {
+                Some(constructor)
+            }
             _ => None,
         });
     let source_params = constructor
