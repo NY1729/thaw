@@ -376,6 +376,16 @@
       "source": "function* inner(): Generator<number, void, number> { const received: number = yield 1; yield received * 2; } function* outer(): Generator<number, void, number> { yield* inner(); } function main(): void { const iterator = outer(); console.log(iterator.next().value); console.log(iterator.next(9).value); console.log(iterator.next().done); }"
     },
     {
+      "name": "generator delegation forwards throw",
+      "expect": "matched",
+      "source": "function* inner(): Generator<number> { try { yield 1; } catch (error) { console.log(error); yield 2; } } function* outer(): Generator<number> { yield* inner(); yield 3; } function main(): void { const iterator = outer(); console.log(iterator.next().value); console.log(iterator.throw('boom').value); console.log(iterator.next().value); console.log(iterator.next().done); }"
+    },
+    {
+      "name": "generator delegation forwards return",
+      "expect": "matched",
+      "source": "let progress: number = 0; function* inner(): Generator<number> { try { yield 1; } finally { progress += 1; } } function* outer(): Generator<number> { try { yield* inner(); yield 99; } finally { progress += 100; } } function main(): void { const iterator = outer(); console.log(iterator.next().value, progress); const stopped = iterator.return(9); console.log(stopped.value, stopped.done, progress); console.log(iterator.next().done, progress); }"
+    },
+    {
       "name": "generator next results",
       "expect": "matched",
       "source": "function* values(): Generator<number> { yield 4; yield 7; } function main(): void { const iterator = values(); const first = iterator.next(); const second = iterator.next(); const end = iterator.next(); console.log(first.value, first.done); console.log(second.value, second.done); console.log(end.value, end.done); }"
