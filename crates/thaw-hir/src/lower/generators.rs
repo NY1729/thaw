@@ -9,6 +9,13 @@ enum GeneratorTerm {
 struct GeneratorBlock {
     statements: Vec<HirStmt>,
     term: GeneratorTerm,
+    handler: Option<GeneratorHandler>,
+}
+
+#[derive(Clone)]
+struct GeneratorHandler {
+    binding: String,
+    entry: usize,
 }
 
 struct GeneratorStateMachine<'a> {
@@ -26,9 +33,18 @@ impl<'a> GeneratorStateMachine<'a> {
         }
     }
 
-    fn block(&mut self, statements: Vec<HirStmt>, term: GeneratorTerm) -> usize {
+    fn block(
+        &mut self,
+        statements: Vec<HirStmt>,
+        term: GeneratorTerm,
+        handler: Option<GeneratorHandler>,
+    ) -> usize {
         let id = self.blocks.len();
-        self.blocks.push(GeneratorBlock { statements, term });
+        self.blocks.push(GeneratorBlock {
+            statements,
+            term,
+            handler,
+        });
         id
     }
 
@@ -38,10 +54,17 @@ impl<'a> GeneratorStateMachine<'a> {
         continuation: usize,
         break_target: Option<usize>,
         continue_target: Option<usize>,
+        handler: Option<GeneratorHandler>,
     ) -> Option<usize> {
         let mut next = continuation;
         for statement in statements.iter().rev() {
-            next = self.statement(statement, next, break_target, continue_target)?;
+            next = self.statement(
+                statement,
+                next,
+                break_target,
+                continue_target,
+                handler.clone(),
+            )?;
         }
         Some(next)
     }
@@ -52,6 +75,7 @@ impl<'a> GeneratorStateMachine<'a> {
         continuation: usize,
         break_target: Option<usize>,
         continue_target: Option<usize>,
+        handler: Option<GeneratorHandler>,
     ) -> Option<usize> {
         match statement {
             HirStmt::Let(name, ty, value) => {
@@ -66,22 +90,40 @@ impl<'a> GeneratorStateMachine<'a> {
                         Box::new(value.clone()),
                     ))],
                     GeneratorTerm::Next(continuation),
+                    handler,
                 ))
             }
             HirStmt::If(condition, then_body, else_body) => {
-                let then_entry =
-                    self.sequence(then_body, continuation, break_target, continue_target)?;
-                let else_entry =
-                    self.sequence(else_body, continuation, break_target, continue_target)?;
+                let then_entry = self.sequence(
+                    then_body,
+                    continuation,
+                    break_target,
+                    continue_target,
+                    handler.clone(),
+                )?;
+                let else_entry = self.sequence(
+                    else_body,
+                    continuation,
+                    break_target,
+                    continue_target,
+                    handler.clone(),
+                )?;
                 Some(self.block(
                     Vec::new(),
                     GeneratorTerm::Branch(condition.clone(), then_entry, else_entry),
+                    handler,
                 ))
             }
             HirStmt::While(condition, body) => {
-                let condition_id = self.block(Vec::new(), GeneratorTerm::Done);
-                let body_entry =
-                    self.sequence(body, condition_id, Some(continuation), Some(condition_id))?;
+                let condition_id =
+                    self.block(Vec::new(), GeneratorTerm::Done, handler.clone());
+                let body_entry = self.sequence(
+                    body,
+                    condition_id,
+                    Some(continuation),
+                    Some(condition_id),
+                    handler.clone(),
+                )?;
                 self.blocks[condition_id].term =
                     GeneratorTerm::Branch(condition.clone(), body_entry, continuation);
                 Some(condition_id)
@@ -89,20 +131,48 @@ impl<'a> GeneratorStateMachine<'a> {
             HirStmt::Break => Some(self.block(
                 Vec::new(),
                 GeneratorTerm::Next(break_target?),
+                handler,
             )),
             HirStmt::Continue => Some(self.block(
                 Vec::new(),
                 GeneratorTerm::Next(continue_target?),
+                handler,
             )),
-            HirStmt::Return(_) => Some(self.block(Vec::new(), GeneratorTerm::Done)),
-            HirStmt::Try(..) | HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_) => None,
+            HirStmt::Return(_) => Some(self.block(Vec::new(), GeneratorTerm::Done, handler)),
+            HirStmt::Try(try_body, catch_name, catch_body) => {
+                self.locals.push(HirStmt::Let(
+                    catch_name.clone(),
+                    HirType::Str,
+                    HirExpr::Lit(HirLit::Str(String::new())),
+                ));
+                let catch_entry = self.sequence(
+                    catch_body,
+                    continuation,
+                    break_target,
+                    continue_target,
+                    handler.clone(),
+                )?;
+                self.sequence(
+                    try_body,
+                    continuation,
+                    break_target,
+                    continue_target,
+                    Some(GeneratorHandler {
+                        binding: catch_name.clone(),
+                        entry: catch_entry,
+                    }),
+                )
+            }
+            HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_) => None,
             other if generator_emits_value(other, self.values) => Some(self.block(
                 Vec::new(),
                 GeneratorTerm::Yield(other.clone(), continuation),
+                handler,
             )),
             other => Some(self.block(
                 vec![other.clone()],
                 GeneratorTerm::Next(continuation),
+                handler,
             )),
         }
     }
@@ -143,8 +213,8 @@ fn lower_generator_state_machine(
     state: &str,
 ) -> Option<(usize, Vec<HirStmt>, Vec<HirStmt>)> {
     let mut machine = GeneratorStateMachine::new(values);
-    let done = machine.block(Vec::new(), GeneratorTerm::Done);
-    let entry = machine.sequence(statements, done, None, None)?;
+    let done = machine.block(Vec::new(), GeneratorTerm::Done, None);
+    let entry = machine.sequence(statements, done, None, None, None)?;
     let mut dispatch = Vec::with_capacity(machine.blocks.len());
     for (id, block) in machine.blocks.into_iter().enumerate() {
         let mut selected = block.statements;
@@ -173,6 +243,21 @@ fn lower_generator_state_machine(
                 )));
                 selected.push(HirStmt::Return(Some(HirExpr::Var(values.into()))));
             }
+        }
+        if let Some(handler) = block.handler {
+            let caught = format!("__thaw_generator_caught_{id}");
+            selected = vec![HirStmt::Try(
+                selected,
+                caught.clone(),
+                vec![
+                    HirStmt::Expr(HirExpr::Assign(
+                        handler.binding,
+                        Box::new(HirExpr::Var(caught)),
+                    )),
+                    generator_set_state(state, handler.entry),
+                    HirStmt::Continue,
+                ],
+            )];
         }
         dispatch.push(HirStmt::If(
             HirExpr::BinOp(
