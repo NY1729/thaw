@@ -73,7 +73,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\nfalse\n4\n\"10,20,30\"\n"
+        "true\nfalse\n4\n10,20,30\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -495,7 +495,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"root:root:root\"\n"
+        "root:root:root\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -651,7 +651,7 @@ async function main(): Promise<void> {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"held\"\nboom\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "held\nboom\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -761,7 +761,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "200\n200\n200\n\"fallback\"\n"
+        "200\n200\n200\nfallback\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

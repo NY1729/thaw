@@ -281,7 +281,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"real-undefined\"\n\"null\"\n\"other:5\"\n"
+        "real-undefined\nnull\nother:5\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -359,7 +359,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"real-undefined\"\n\"other:\\\"hi\\\"\"\n"
+        "real-undefined\nother:\"hi\"\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -797,8 +797,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"thing:gadget\"\n\"renamed:widget\"\n"
+        "thing:gadget\nrenamed:widget\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
-

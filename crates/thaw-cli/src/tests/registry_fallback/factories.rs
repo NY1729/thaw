@@ -132,7 +132,7 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"H:3\"\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "H:3\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -698,4 +698,3 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nhi Alice\n");
     let _ = std::fs::remove_dir_all(dir);
 }
-
