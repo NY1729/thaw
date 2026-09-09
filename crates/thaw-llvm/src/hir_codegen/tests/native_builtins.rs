@@ -1687,6 +1687,31 @@ fn suspends_generator_control_flow_between_yields() {
 }
 
 #[test]
+fn for_of_consumes_generators_one_yield_at_a_time() {
+    let source = r#"
+        let progress: number = 0;
+        function* values(): Generator<number> {
+            progress += 1;
+            yield 1;
+            progress += 10;
+            yield 2;
+            progress += 100;
+        }
+        function main(): void {
+            for (const value of values()) {
+                console.log(value, progress);
+                break;
+            }
+            console.log(progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_for_of_interleaving"),
+        "1 1\n1\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {
