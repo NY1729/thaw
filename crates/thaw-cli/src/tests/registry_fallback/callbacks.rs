@@ -303,6 +303,49 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn fallback_functions_can_return_callables_that_return_live_js_values() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-callable-js-value-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("callable-value-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeLoader(): (id: string) => JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeLoader: function() { return function(id) { return { basename: function(value) { return value.split('/').pop(); } }; }; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeLoader } from "callable-value-kit";
+function main(): void {
+    const load = makeLoader();
+    const module = load("path");
+    console.log(module.basename("/tmp/value.txt"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "value.txt\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// An *optional* callback parameter on an ordinary top-level Fallback
 /// function, called with it omitted -- real example: lodash's
 /// `filter(collection: string | null | undefined, predicate?:
@@ -722,4 +765,3 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
-

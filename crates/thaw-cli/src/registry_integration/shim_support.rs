@@ -8,8 +8,34 @@ type ClassConstructorRewrite = (
     String,
     Vec<(usize, String, Vec<thaw_hir::HirType>)>,
 );
-/// `(class, method, helper, argument_count, has_callback, parameter_types)`.
-type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::HirType>);
+/// `(class, method, helper, argument_count, has_callback, parameter_types,
+/// return_instance_class)`.
+type ClassMethodRewrite = (
+    String,
+    String,
+    String,
+    usize,
+    bool,
+    Vec<thaw_hir::HirType>,
+    Option<String>,
+);
+#[cfg(test)]
+type TestClassMethodRewrite = (
+    String,
+    String,
+    String,
+    usize,
+    bool,
+    Vec<thaw_hir::HirType>,
+);
+type GeneratedClassMethod = (
+    String,
+    String,
+    usize,
+    bool,
+    Vec<thaw_hir::HirType>,
+    Option<String>,
+);
 enum ClassMethodContext {
     CallbackInstance(String, usize, usize, String),
     LiteralArgument(String, usize, String),
@@ -240,6 +266,7 @@ fn generate_napi_class_property_setter(
     property: &str,
     ty: &thaw_bridge::DtsType,
     is_static: bool,
+    napi: bool,
     shim: &mut String,
 ) -> Option<(String, thaw_hir::HirType)> {
     let thaw_bridge::DtsType::Native(ty) = ty else {
@@ -253,7 +280,11 @@ fn generate_napi_class_property_setter(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let symbol = format!("__thaw_typed_napi_{encoded}");
+    let symbol = format!(
+        "__thaw_typed_{}_{}",
+        if napi { "napi" } else { "js" },
+        encoded
+    );
     shim.push_str(&format!(
         "declare function {symbol}({}value: {rendered}): {rendered};\n",
         if is_static { "" } else { "receiver: JsValue, " }
@@ -296,6 +327,11 @@ fn generate_napi_class_method_overloads(
         napi,
         &mut Vec::new(),
     )
+    .into_iter()
+    .map(|(method, symbol, arity, callback, params, _)| {
+        (method, symbol, arity, callback, params)
+    })
+    .collect()
 }
 
 fn generate_napi_class_method_overloads_with_callback_instances(
@@ -305,7 +341,7 @@ fn generate_napi_class_method_overloads_with_callback_instances(
     shim: &mut String,
     napi: bool,
     method_contexts: &mut Vec<ClassMethodContext>,
-) -> Vec<(String, String, usize, bool, Vec<thaw_hir::HirType>)> {
+) -> Vec<GeneratedClassMethod> {
     let mut generated = Vec::new();
     let mut method_names = std::collections::HashSet::new();
     for method in &class.methods {
@@ -328,7 +364,10 @@ fn generate_napi_class_method_overloads_with_callback_instances(
             })
             .collect::<Vec<_>>();
         for (overload_index, overload) in overloads.into_iter().enumerate() {
-            let return_type = match &overload.ret {
+            let return_type = if overload.return_instance_class.is_some() {
+                Some("JsValue".to_string())
+            } else {
+                match &overload.ret {
                 thaw_bridge::DtsType::Native(return_type) => {
                     if *return_type == thaw_hir::HirType::Void {
                         Some("Json".to_string())
@@ -338,6 +377,7 @@ fn generate_napi_class_method_overloads_with_callback_instances(
                 }
                 thaw_bridge::DtsType::Unsupported(_) if !napi => Some("JsValue".to_string()),
                 thaw_bridge::DtsType::Unsupported(_) => None,
+                }
             };
             let Some(return_type) = return_type else {
                 continue;
@@ -481,6 +521,7 @@ fn generate_napi_class_method_overloads_with_callback_instances(
                     argument_count,
                     has_callback,
                     included_params.into_iter().map(|(_, ty)| ty).collect(),
+                    overload.return_instance_class.clone(),
                 ));
             }
         }

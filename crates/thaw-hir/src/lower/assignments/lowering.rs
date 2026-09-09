@@ -316,6 +316,43 @@ impl<'a> FnLowerer<'a> {
         }
         let rhs = self.lower_expr(&assign.right)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
+        if let Target::DynamicProperty(object, key) = &target {
+            if assign.op != AssignOp::Assign {
+                return Err("dynamic properties currently support simple `=` assignment only".into());
+            }
+            let object_name = format!("__thaw_dynamic_assign_object_{}", self.next_binding);
+            self.next_binding += 1;
+            let key_name = format!("__thaw_dynamic_assign_key_{}", self.next_binding);
+            self.next_binding += 1;
+            let value_name = format!("__thaw_dynamic_assign_value_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(object_name.clone(), HirType::JsValue);
+            self.scope.insert(key_name.clone(), HirType::Str);
+            self.scope.insert(value_name.clone(), rhs_type.clone());
+            let encoded = self.coerce_to_declared(
+                &HirType::Json,
+                HirExpr::Var(value_name.clone()),
+            )?;
+            let result = HirExpr::Block(vec![
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
+                    vec![
+                        HirExpr::Var(object_name.clone()),
+                        HirExpr::Var(key_name.clone()),
+                        encoded,
+                    ],
+                )),
+                HirStmt::Return(Some(HirExpr::Var(value_name.clone()))),
+            ]);
+            return self.wrap_call_argument_bindings(
+                result,
+                &[
+                    (object_name, HirType::JsValue, object.clone()),
+                    (key_name, HirType::Str, key.as_ref().clone()),
+                    (value_name, rhs_type, rhs),
+                ],
+            );
+        }
         let assigned_variable = match &target {
             Target::Var(name) => Some(name.clone()),
             _ => None,
@@ -400,6 +437,7 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var(index_name)),
                     )
                 }
+                Target::DynamicProperty(_, _) => unreachable!(),
             };
         }
 
@@ -541,6 +579,16 @@ impl<'a> FnLowerer<'a> {
                     ],
                 )
             } else {
+                let rhs = if self.infer_expr_type(&current)? == HirType::F64
+                    && matches!(
+                        self.infer_expr_type(&rhs)?,
+                        HirType::Json | HirType::JsValue
+                    )
+                {
+                    self.coerce_primitive_to_number(rhs)?
+                } else {
+                    rhs
+                };
                 HirExpr::BinOp(op, Box::new(current), Box::new(rhs))
             }
         } else {
@@ -577,6 +625,7 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(&HirType::F64, index, "JSON array index")?;
                 self.coerce_to_declared(&HirType::Json, value)?
             }
+            Target::DynamicProperty(_, _) => unreachable!(),
             Target::Prop(_, other, field) => {
                 return Err(format!(
                     "cannot assign to field `{field}` on value of type {other:?}"

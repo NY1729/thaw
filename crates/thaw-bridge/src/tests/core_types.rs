@@ -1,4 +1,21 @@
 use super::*;
+
+#[test]
+fn classifies_promise_results_without_treating_them_as_direct_ffi_values() {
+    let functions = parse_dts(
+        "export declare function delayed(value: string): Promise<string>;",
+    )
+    .unwrap();
+    assert_eq!(
+        functions[0].ret,
+        DtsType::Native(HirType::Promise(Box::new(HirType::Str)))
+    );
+    assert!(matches!(
+        classify(&functions[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
 #[test]
 fn fallback_shim_retains_callable_return_values() {
     let functions =

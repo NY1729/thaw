@@ -67,6 +67,16 @@ fn accepts_an_abi_compatible_object_prefix() {
 }
 
 #[test]
+fn reports_a_missing_required_object_property() {
+    let module = thaw_parser::parse_typescript(
+        "type User = { name: string; age: number }; function main(): void { const user: User = { name: 'A' }; }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert_eq!(error, "object literal is missing required property `age`");
+}
+
+#[test]
 fn validates_satisfies_without_widening_the_expression() {
     let program = lower(
         r#"
@@ -302,6 +312,212 @@ fn validates_contextually_specialized_generic_callbacks() {
         "{error}"
     );
     assert!(error.contains("does not satisfy constraint F64"), "{error}");
+}
+
+#[test]
+fn infers_generic_function_types_from_contextual_callbacks() {
+    lower(
+        r#"
+        function transform<T, U>(value: T, callback: (value: T) => U): U {
+            return callback(value);
+        }
+        function main(): void {
+            const result: string = transform(
+                21,
+                value => String(value * 2),
+            );
+            console.log(result);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn dispatches_local_function_overloads_by_argument_type() {
+    lower(
+        r#"
+        function __thawmod0_label(value: number): string;
+        function __thawmod0_label(value: string): string;
+        function __thawmod0_label(value: number | string): string {
+            return typeof value === "number" ? "n:" + String(value) : "s:" + value;
+        }
+        function main(): void {
+            console.log(__thawmod0_label(4), __thawmod0_label("x"));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn specializes_generic_keyof_indexed_accesses() {
+    lower(
+        r#"
+        function read<T, K extends keyof T>(value: T, key: K): T[K] {
+            return value[key];
+        }
+        function main(): void {
+            const user = { name: "Alice", age: 21 };
+            console.log(read(user, "name"), read(user, "age"));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn preserves_union_narrowing_after_an_early_return() {
+    lower(
+        r#"
+        type Value = { text: string } | { count: number };
+        function show(value: Value): string {
+            if ("text" in value && typeof value.text === "string") {
+                return value.text;
+            }
+            return String(value.count);
+        }
+        function main(): void {
+            console.log(show({ text: "ok" }), show({ count: 42 }));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn narrows_unions_with_user_defined_type_predicates() {
+    lower(
+        r#"
+        type Value = string | number;
+        function isString(value: Value): value is string {
+            return typeof value === "string";
+        }
+        function show(value: Value): string {
+            return isString(value) ? value.toUpperCase() : String(value * 2);
+        }
+        function main(): void {
+            console.log(show("ok"), show(21));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn specializes_generic_type_predicates() {
+    lower(
+        r#"
+        function present<T>(value: T | undefined): value is T {
+            return value !== undefined;
+        }
+        function show(value: string | undefined): string {
+            return present(value) ? value.toUpperCase() : "none";
+        }
+        function main(): void {
+            console.log(show("ok"), show(undefined));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn accepts_omitted_optional_tuple_elements() {
+    lower(
+        r#"
+        function show(value: [string, number?]): string {
+            const [name, count = 0] = value;
+            return name + ":" + String(count);
+        }
+        function main(): void {
+            console.log(show(["a"]), show(["b", 2]));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn lowers_homogeneous_rest_tuples_to_arrays() {
+    lower(
+        r#"
+        function total(values: [number, ...number[]]): number {
+            let sum: number = 0;
+            for (const value of values) sum += value;
+            return sum;
+        }
+        function main(): void {
+            console.log(total([1, 2, 3]));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn lowers_heterogeneous_rest_tuples_to_json_arrays() {
+    let program = lower(
+        r#"
+        function total(value: [string, ...number[]]): string {
+            let sum: number = 0;
+            for (let index: number = 1; index < value.length; index++) sum += value[index];
+            return value[0] + ":" + String(sum);
+        }
+        function main(): void { console.log(total(["n", 1, 2, 3])); }
+        "#,
+    );
+    assert_eq!(
+        program.functions[0].params[0].ty,
+        HirType::Array(Box::new(HirType::Json))
+    );
+}
+
+#[test]
+fn accepts_template_strings_array_for_tagged_templates() {
+    lower(
+        r#"function tag(parts: TemplateStringsArray, value: number): string {
+            return parts[0] + String(value) + parts[1];
+        }
+        function main(): void { console.log(tag`value=${21}!`); }"#,
+    );
+}
+
+#[test]
+fn reports_generator_functions_as_an_explicit_boundary() {
+    let module = thaw_parser::parse_typescript(
+        "function* values(): Generator<number> { yield 1; } function main(): void {}",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("generator function `values` is not supported yet"));
+}
+
+#[test]
+fn preserves_union_narrowing_after_assertion_calls() {
+    lower(
+        r#"
+        type Value = string | number;
+        function assertString(value: Value): asserts value is string {
+            if (typeof value !== "string") throw new Error("not string");
+        }
+        function upper(value: Value): string {
+            assertString(value);
+            return value.toUpperCase();
+        }
+        function main(): void {
+            console.log(upper("ok"));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn narrows_unknown_values_with_typeof() {
+    lower(
+        r#"
+        function show(value: unknown): string {
+            if (typeof value === "string") return value.toUpperCase();
+            if (typeof value === "number") return String(value * 2);
+            return "other";
+        }
+        function main(): void {
+            console.log(show("ok"), show(21), show(false));
+        }
+        "#,
+    );
 }
 
 #[test]
@@ -877,12 +1093,12 @@ fn validates_generic_interface_defaults_and_constraints() {
 #[test]
 fn validates_generic_interface_inherited_field_collisions() {
     let module = thaw_parser::parse_typescript(
-        "interface Base<T> { value: T } interface Child<T> extends Base<T> { value: T } function bad(value: Child<number>): void {}",
+        "interface Base<T> { value: T } interface Child<T> extends Base<T> { value: string } function bad(value: Child<number>): void {}",
     )
     .unwrap();
     assert!(lower_module(&module)
         .unwrap_err()
-        .contains("collides with an inherited field"));
+        .contains("incompatible type"));
 }
 
 #[test]
@@ -1245,4 +1461,74 @@ fn weak_map_accepts_object_keys_but_rejects_primitive_keys() {
     .unwrap();
     let error = lower_module(&module).unwrap_err();
     assert!(error.contains("WeakMap/WeakSet keys must be"), "{error}");
+}
+
+#[test]
+fn never_calls_terminate_the_enclosing_return_path() {
+    let program = lower(
+        r#"function fail(message: string): never { throw new Error(message); }
+        function value(flag: boolean): string {
+            if (flag) return "ok";
+            return fail("bad");
+        }
+        function main(): void { console.log(value(true)); }"#,
+    );
+    let body = &program.functions[1].body;
+    assert!(matches!(body[1], HirStmt::Expr(HirExpr::Call(_, _))));
+    assert!(matches!(body[2], HirStmt::Throw(_)));
+}
+
+#[test]
+fn explicit_this_parameters_are_forwarded_by_function_call() {
+    let program = lower(
+        r#"function label(this: { prefix: string }, value: number): string {
+            return this.prefix + String(value);
+        }
+        function main(): void {
+            const context = { prefix: "item-" };
+            console.log(label.call(context, 42));
+        }"#,
+    );
+    assert_eq!(program.functions[0].params[0].name, "__thaw_this");
+    let HirStmt::Expr(HirExpr::Call(_, arguments)) = &program.functions[1].body[1] else {
+        panic!("expected console call");
+    };
+    assert!(matches!(arguments[0], HirExpr::Call(_, ref values) if values.len() == 2));
+
+    let bound = lower(
+        r#"function label(this: { prefix: string }, value: number): string {
+            return this.prefix + String(value);
+        }
+        function main(): void {
+            const bound = label.bind({ prefix: "item-" });
+            console.log(bound(42));
+        }"#,
+    );
+    assert!(matches!(
+        bound.functions[1].body[0],
+        HirStmt::Let(_, HirType::Function(ref params, _), _) if params == &[HirType::F64]
+    ));
+}
+
+#[test]
+fn merges_compatible_interface_declarations() {
+    lower(
+        r#"interface User { name: string }
+        interface User { age: number }
+        function main(): void {
+            const user: User = { name: "A", age: 1 };
+            console.log(user.name, user.age);
+        }"#,
+    );
+}
+
+#[test]
+fn accepts_undefined_for_an_optional_callable_annotation() {
+    lower(
+        r#"type Handler = ((value: number) => number) | undefined;
+        function main(): void {
+            let handler: Handler = undefined;
+            console.log(handler?.(20) ?? 42);
+        }"#,
+    );
 }

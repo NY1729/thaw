@@ -1,10 +1,19 @@
   globalThis.global = globalThis;
+  globalThis.__thaw_typeof_dynamic_value = value => typeof value;
   const timers = new Map();
   const normalizeDelay = value => {
     const number = Number(value);
     if (!Number.isFinite(number) || number < 0) return 0;
     return Math.min(Math.trunc(number), 2147483647);
   };
+  const timerHandle = id => ({
+    ref() { const timer = timers.get(id); if (timer) timer.refed = true; return this; },
+    unref() { const timer = timers.get(id); if (timer) timer.refed = false; return this; },
+    hasRef() { const timer = timers.get(id); return Boolean(timer && timer.refed); },
+    refresh() { const timer = timers.get(id); if (timer) timer.due = Date.now() + timer.milliseconds; return this; },
+    close() { timers.delete(id); },
+    [Symbol.toPrimitive]() { return id; }
+  });
   const schedule = (callback, delay, repeat, args, refed = true) => {
     if (typeof callback !== 'function') {
       throw new TypeError('timer callback must be a function');
@@ -13,7 +22,7 @@
     const milliseconds = normalizeDelay(delay);
     timers.set(id, { callback, args, repeat, milliseconds, refed,
                      due: Date.now() + milliseconds });
-    return id;
+    return timerHandle(id);
   };
   globalThis.setTimeout = (callback, delay = 0, ...args) =>
     schedule(callback, delay, false, args);
@@ -124,8 +133,6 @@
   const hostInfo = typeof globalThis.__thaw_os_info === 'function'
     ? JSON.parse(globalThis.__thaw_os_info()) : {};
   const processStart = Date.now();
-  let processCwd = typeof globalThis.process.cwd === 'function'
-    ? globalThis.process.cwd() : '/';
   const processListeners = new Map();
   const processOn = (event, listener, once = false) => {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
@@ -200,11 +207,8 @@
     stdin: globalThis.process.stdin || processStream(0, () => {}),
     stdout: globalThis.process.stdout || processStream(1, globalThis.__thaw_console_stdout),
     stderr: globalThis.process.stderr || processStream(2, globalThis.__thaw_console_stderr),
-    cwd: () => processCwd,
-    chdir: directory => {
-      const value = String(directory);
-      processCwd = value.charAt(0) === '/' ? value : processCwd.replace(/\/$/, '') + '/' + value;
-    },
+    cwd: () => globalThis.__thaw_process_cwd(),
+    chdir: directory => globalThis.__thaw_process_chdir(String(directory)),
     nextTick,
     uptime: () => (Date.now() - processStart) / 1000,
     hrtime,

@@ -722,6 +722,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "error property receiver")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_js_handle_to_string" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("JsValue string conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::JsValue, argument, "String receiver")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_error_is_instance" => {
                         let [value, class_name] = args.as_slice() else {
                             return Err("error instanceof check expects two operands".into());
@@ -736,6 +743,15 @@ impl<'a> FnLowerer<'a> {
                         };
                         if !matches!(self.infer_expr_type(value)?, HirType::Object(_)) {
                             return Err(format!("{name} expects an object operand"));
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_detach_promise" | "__thaw_detach_rejection" => {
+                        let [promise] = args.as_slice() else {
+                            return Err("detach Promise expects one operand".into());
+                        };
+                        if !matches!(self.infer_expr_type(promise)?, HirType::Promise(_)) {
+                            return Err("detach Promise expects a Promise operand".into());
                         }
                         return Ok(HirType::Void);
                     }
@@ -1144,6 +1160,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "JSON null check operand")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_is_undefined" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON undefined check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "JSON undefined check operand")?;
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_json_typeof" => return Ok(HirType::Str),
                     "__thaw_json_object_is"
                     | "__thaw_json_object_is_number"
                     | "__thaw_json_object_is_string"
@@ -1332,10 +1356,13 @@ impl<'a> FnLowerer<'a> {
                     "callDynamicValue" => return Ok(HirType::Json),
                     "callNativeAddonValue" => return Ok(HirType::Json),
                     "callDynamicValueHandle" => return Ok(HirType::JsValue),
+                    "resolveDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValueWithValue" => return Ok(HirType::Json),
                     "releaseDynamicValue" => return Ok(HirType::Bool),
                     "getDynamicProperty" => return Ok(HirType::JsValue),
-                    "setDynamicProperty" => return Ok(HirType::Bool),
+                    "setDynamicProperty" | "setDynamicPropertyJson" => {
+                        return Ok(HirType::Bool)
+                    }
                     "callDynamicMethod" => return Ok(HirType::Json),
                     // Sibling of `callDynamicMethod` for a method whose
                     // own result is itself a `JsValue` rather than plain

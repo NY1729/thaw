@@ -6,6 +6,7 @@ enum Target {
     Prop(HirExpr, HirType, Symbol),
     Dictionary(HirExpr, Box<HirExpr>, HirType),
     JsonIndex(HirExpr, Box<HirExpr>),
+    DynamicProperty(HirExpr, Box<HirExpr>),
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +45,10 @@ fn target_to_read_expr(target: &Target) -> Result<HirExpr, String> {
         Target::JsonIndex(object, index) => {
             HirExpr::JsonIndex(Box::new(object.clone()), index.clone())
         }
+        Target::DynamicProperty(object, key) => HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicProperty".into())),
+            vec![object.clone(), key.as_ref().clone()],
+        ),
     })
 }
 
@@ -60,6 +65,10 @@ fn build_assign(target: Target, value: HirExpr) -> HirExpr {
         Target::JsonIndex(object, index) => {
             HirExpr::JsonIndexSet(Box::new(object), index, Box::new(value))
         }
+        Target::DynamicProperty(object, key) => HirExpr::Call(
+            Box::new(HirExpr::Var("setDynamicProperty".into())),
+            vec![object, *key, value],
+        ),
     }
 }
 
@@ -527,26 +536,33 @@ fn inject_finally_before_exits(
 /// belonging to this loop, but stop at nested loops whose `continue`s target
 /// the nested loop instead.
 fn inject_for_update_before_continue(stmts: Vec<HirStmt>, update: &HirExpr) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, &HirStmt::Expr(update.clone()))
+    inject_before_target_continue(stmts, 0, &[HirStmt::Expr(update.clone())])
+}
+
+fn inject_for_advance_before_continue(
+    stmts: Vec<HirStmt>,
+    advance: &[HirStmt],
+) -> Vec<HirStmt> {
+    inject_before_target_continue(stmts, 0, advance)
 }
 
 fn inject_before_target_continue(
     stmts: Vec<HirStmt>,
     nested_depth: usize,
-    injected: &HirStmt,
+    injected: &[HirStmt],
 ) -> Vec<HirStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
         match stmt {
             HirStmt::Continue => {
                 if nested_depth == 0 {
-                    out.push(injected.clone());
+                    out.extend_from_slice(injected);
                 }
                 out.push(HirStmt::Continue);
             }
             HirStmt::ContinueDepth(depth) => {
                 if depth == nested_depth {
-                    out.push(injected.clone());
+                    out.extend_from_slice(injected);
                 }
                 out.push(HirStmt::ContinueDepth(depth));
             }
@@ -574,7 +590,7 @@ fn inject_before_target_continue(
 /// loop with a condition guard at the tail. Source-level `continue` also has
 /// to execute that guard before starting the next iteration.
 fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, guard: &HirStmt) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, guard)
+    inject_before_target_continue(stmts, 0, std::slice::from_ref(guard))
 }
 
 /// Rewrites breaks that target a source switch into an assignment selecting

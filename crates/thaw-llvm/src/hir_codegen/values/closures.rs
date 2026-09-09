@@ -34,12 +34,26 @@ impl<'ctx> HirCompiler<'ctx> {
             {
                 continue;
             }
-            let cell = self.allocate_arena_cell(ty, &capture.name)?;
-            let value = self
-                .builder
+            let promotion_scope = self
+                .loop_promotion_scopes
+                .iter()
+                .find(|(_, variables)| variables.contains(&capture.name))
+                .map(|(preheader, _)| *preheader);
+            let cell = if promotion_scope.is_none() && !self.loop_promotion_scopes.is_empty() {
+                self.build_arena_cell(&self.builder, ty, &capture.name)?
+            } else {
+                self.allocate_arena_cell(ty, &capture.name)?
+            };
+            let promotion_builder = promotion_scope.map(|preheader| {
+                    let builder = self.context.create_builder();
+                    builder.position_before(&preheader.get_terminator().unwrap());
+                    builder
+                });
+            let builder = promotion_builder.as_ref().unwrap_or(&self.builder);
+            let value = builder
                 .build_load(ty, variable_cell, "captured_stack_value")
                 .map_err(|error| error.to_string())?;
-            self.builder
+            builder
                 .build_store(cell, value)
                 .map_err(|error| error.to_string())?;
             self.variables.insert(capture.name.clone(), (cell, ty));

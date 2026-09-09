@@ -221,7 +221,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "callDynamicMethodHandleRaw"
                         | "registerNativeCallback"
                         | "getDynamicProperty"
-                        | "callDynamicValueHandle" => return Some(HirType::JsValue),
+                        | "callDynamicValueHandle"
+                        | "resolveDynamicValue" => return Some(HirType::JsValue),
                         "readDynamicValue"
                         | "callDynamicMethod"
                         | "callDynamicValueMixed"
@@ -229,7 +230,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "callDynamicValue"
                         | "callDynamicValueWithValue" => return Some(HirType::Json),
                         "loadNativeAddon" | "loadNativeAddonEmbedded" | "loadNativeSharedLibrary" | "loadNativeSharedLibraryEmbedded" | "loadScript"
-                        | "releaseDynamicValue" | "setDynamicProperty" => {
+                        | "releaseDynamicValue"
+                        | "setDynamicProperty"
+                        | "setDynamicPropertyJson" => {
                             return Some(HirType::Bool)
                         }
                         "callNativeAddon" | "callNativeAddonWithCallback" | "callNativeAddonValue" => {

@@ -22,6 +22,11 @@ impl<'ctx> HirCompiler<'ctx> {
         {
             return self.compile_typed_napi_setter(signature, args);
         }
+        if signature.backend == DynamicBackend::QuickJs
+            && signature.symbol.starts_with("$setter$")
+        {
+            return self.compile_typed_quickjs_setter(signature, args);
+        }
         if (signature.backend == DynamicBackend::Napi || signature.backend == DynamicBackend::QuickJs)
             && (signature.symbol.starts_with("$method$")
                 || signature.symbol.starts_with("$methodvoid$")
@@ -989,7 +994,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.module
                         .get_function("thaw_js_call_handle_handle_result")
                         .unwrap(),
-                    &[callable.into(), args_json.into()],
+                    &[
+                        callable.into(),
+                        args_json.into(),
+                        self.context.bool_type().const_int(1, false).into(),
+                    ],
                     "typed_dynamic_callable_result",
                 )
                 .map_err(|error| error.to_string())?

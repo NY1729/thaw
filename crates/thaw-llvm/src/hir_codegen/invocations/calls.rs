@@ -127,6 +127,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("error property access returned no value".into());
             }
+            "__thaw_js_handle_to_string" => {
+                let [value] = args else {
+                    return Err("JsValue string conversion expects one operand".into());
+                };
+                let value = self.compile_expr(value)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_js_handle_to_string")
+                            .unwrap(),
+                        &[value.into()],
+                        "js_value_to_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("JsValue string conversion returned no value".into());
+            }
             "__thaw_error_is_instance" => {
                 let [value, class_name] = args else {
                     return Err(format!("{name} expects two operands"));
@@ -154,6 +173,31 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(self.pending_exception_object().as_pointer_value(), value)
                     .map_err(|error| error.to_string())?;
                 return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_detach_promise" | "__thaw_detach_rejection" => {
+                let [promise] = args else {
+                    return Err("detach Promise expects one operand".into());
+                };
+                let promise = self.compile_expr(promise)?;
+                let pending = if name == "__thaw_detach_rejection" {
+                    self.pending_rejection()
+                } else {
+                    self.pending_exception()
+                };
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_promise_detach").unwrap(),
+                        &[
+                            promise.into(),
+                            pending.as_pointer_value().into(),
+                        ],
+                        "detach_promise",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_promise_detach returned no value".into());
             }
             "__thaw_date_set_full_year"
             | "__thaw_date_set_month"

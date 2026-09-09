@@ -140,9 +140,9 @@ impl<'a> FnLowerer<'a> {
             }
             _ => return Err("Promise callback is not a function value".into()),
         };
-        if params != parameter_types {
+        if params.len() > parameter_types.len() || params != parameter_types[..params.len()] {
             return Err(format!(
-                "Promise callback has parameters {params:?}, expected {parameter_types:?}"
+                "Promise callback has parameters {params:?}, expected a prefix of {parameter_types:?}"
             ));
         }
         if let Some(expected) = expected_return {

@@ -268,6 +268,16 @@ fn promise_void_continuations_run_and_settle() {
 }
 
 #[test]
+fn sync_main_drains_ready_native_promise_continuations() {
+    let source = r#"
+        function main(): void {
+            Promise.resolve().then((): void => console.log("done"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "sync_main_promise_microtask"), "done\n");
+}
+
+#[test]
 fn promise_then_transforms_all_native_value_shapes() {
     let source = r#"
         interface Item { value: number; }

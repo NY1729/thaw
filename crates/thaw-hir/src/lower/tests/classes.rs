@@ -542,6 +542,27 @@ fn specializes_explicit_generic_class_methods_once_per_type_tuple() {
 }
 
 #[test]
+fn specializes_generic_class_returns_from_generic_methods_after_method_inference() {
+    lower(
+        r#"
+        class Box<T> {
+            value: T;
+            constructor(value: T) { this.value = value; }
+            map<U>(fn: (value: T) => U): Box<U> {
+                return new Box<U>(fn(this.value));
+            }
+        }
+        function main(): void {
+            const value: string = new Box<number>(21)
+                .map<string>((item: number): string => String(item * 2))
+                .value;
+            console.log(value);
+        }
+        "#,
+    );
+}
+
+#[test]
 fn infers_generic_class_methods_from_instance_member_types() {
     let program = lower(
         r#"
@@ -575,6 +596,29 @@ fn infers_generic_class_methods_from_instance_member_types() {
             })
             .count(),
         1
+    );
+}
+
+#[test]
+fn specializes_generic_methods_through_interface_typed_aliases() {
+    lower(
+        r#"
+        interface Mapper {
+            map<T, U>(value: T, fn: (value: T) => U): U;
+        }
+        class DirectMapper implements Mapper {
+            map<T, U>(value: T, fn: (value: T) => U): U {
+                return fn(value);
+            }
+        }
+        function main(): void {
+            const mapper: Mapper = new DirectMapper();
+            console.log(mapper.map(
+                21,
+                value => String(value * 2),
+            ));
+        }
+        "#,
     );
 }
 
@@ -1129,6 +1173,32 @@ fn validates_native_class_implements_against_inherited_layout() {
         .functions
         .iter()
         .any(|function| function.name == "__thaw_class_Value_constructor"));
+}
+
+#[test]
+fn validates_native_class_implements_methods_without_adding_layout_fields() {
+    let program = lower(
+        r#"interface Named { name(): string; }
+        class User implements Named {
+            private value: string;
+            constructor(value: string) { this.value = value; }
+            name(): string { return this.value; }
+        }
+        function main(): void {
+            const user: Named = new User("Alice");
+            console.log(user.name());
+        }"#,
+    );
+    let HirType::Object(fields) = &program
+        .functions
+        .iter()
+        .find(|function| function.name == "__thaw_class_User_constructor")
+        .expect("User constructor")
+        .ret
+    else {
+        panic!("class constructor should return an object");
+    };
+    assert!(!fields.iter().any(|(name, _)| name == "name"));
 }
 
 #[test]

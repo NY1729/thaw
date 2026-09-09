@@ -4,6 +4,11 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        if let HirExpr::Var(name) = &value {
+            if self.native_class_aliases.get(name) == Some(declared) {
+                return Ok(value);
+            }
+        }
         // The symmetric case to the `HirType::Json` branch just below --
         // a dynamic method call with no `JsValue` hint (`lower_dynamic_
         // value_method_call`'s own default) always comes back `Json`-
@@ -67,6 +72,53 @@ impl<'a> FnLowerer<'a> {
         {
             if actual_fields.starts_with(declared_fields) {
                 return Ok(value);
+            }
+            if let Some(class) = class_name_from_type(&HirType::Object(actual_fields.clone())) {
+                let compatible = declared_fields.iter().all(|(name, expected)| {
+                    if actual_fields
+                        .iter()
+                        .any(|(actual_name, actual)| actual_name == name && actual == expected)
+                    {
+                        return true;
+                    }
+                    let symbol = class_method_symbol(class, name);
+                    if *expected == HirType::Dynamic
+                        && self.signatures.keys().any(|candidate| {
+                            candidate == &symbol
+                                || candidate.starts_with(&format!("{symbol}__thaw_"))
+                        })
+                    {
+                        return true;
+                    }
+                    let Some(signature) = self.signatures.get(&symbol) else {
+                        return false;
+                    };
+                    let params = signature.params.get(1..).unwrap_or_default();
+                    let fixed = if signature.native_rest.is_some() {
+                        &params[..params.len().saturating_sub(1)]
+                    } else {
+                        params
+                    };
+                    match expected {
+                        HirType::Dynamic if !signature.generic_type_params.is_empty() => true,
+                        HirType::Function(expected_params, result) => {
+                            fixed == expected_params && &signature.ret == result.as_ref()
+                        }
+                        HirType::CallableFunction(expected_params, _, expected_rest, result) => {
+                            fixed.len() == expected_params.len()
+                                && fixed.iter().zip(expected_params).all(|(actual, expected)| {
+                                    matches!(expected, HirType::Optional(inner) if inner.as_ref() == actual)
+                                        || expected == actual
+                                })
+                                && signature.native_rest.as_ref() == expected_rest.as_deref()
+                                && &signature.ret == result.as_ref()
+                        }
+                        _ => false,
+                    }
+                });
+                if compatible {
+                    return Ok(value);
+                }
             }
         }
         if *declared == HirType::Json {
@@ -151,6 +203,56 @@ impl<'a> FnLowerer<'a> {
                     sentinel,
                     &[(temp, HirType::Undefined, value)],
                 );
+            }
+            if let HirType::Map(key, element) = &actual {
+                if !json_convertible_native_type(key) || !json_convertible_native_type(element) {
+                    return Err(format!(
+                        "Map<{key:?}, {element:?}> cannot cross a dynamic boundary"
+                    ));
+                }
+                let entries_type = HirType::Array(Box::new(HirType::Tuple(vec![
+                    key.as_ref().clone(),
+                    element.as_ref().clone(),
+                ])));
+                let entries = HirExpr::TypedClosure(
+                    entries_type.clone(),
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_map_snapshot_entries".into())),
+                        vec![value],
+                    )),
+                );
+                let entries = self.wrap_native_value_as_json(entries, entries_type)?;
+                return Ok(HirExpr::JsonObjectLit(
+                    vec![("__thaw_map_entries__".into(), entries)],
+                    HirType::Json,
+                ));
+            }
+            if let HirType::Set(element) = &actual {
+                if !json_convertible_native_type(element) {
+                    return Err(format!(
+                        "Set<{element:?}> cannot cross a dynamic boundary"
+                    ));
+                }
+                let values_type = HirType::Array(element.clone());
+                let values = HirExpr::TypedClosure(
+                    values_type.clone(),
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_map_snapshot_keys".into())),
+                        vec![value],
+                    )),
+                );
+                let values = self.wrap_native_value_as_json(values, values_type)?;
+                return Ok(HirExpr::JsonObjectLit(
+                    vec![("__thaw_set_values__".into(), values)],
+                    HirType::Json,
+                ));
+            }
+            if actual == regex_object_type() {
+                let pattern = self.wrap_native_value_as_json(value, actual)?;
+                return Ok(HirExpr::JsonObjectLit(
+                    vec![("__thaw_regexp__".into(), pattern)],
+                    HirType::Json,
+                ));
             }
             if json_convertible_native_type(&actual) {
                 return self.wrap_native_value_as_json(value, actual);
@@ -313,16 +415,22 @@ impl<'a> FnLowerer<'a> {
             return Ok(HirExpr::ArrayLit(values));
         }
         if let (HirType::Tuple(expected), HirExpr::ArrayLit(values)) = (declared, &value) {
-            if expected.len() != values.len() {
+            let required = expected
+                .iter()
+                .take_while(|ty| !matches!(ty, HirType::Optional(_)))
+                .count();
+            if values.len() < required || values.len() > expected.len() {
                 return Err(format!(
-                    "tuple literal has {} element(s), expected {}",
+                    "tuple literal has {} element(s), expected {required}..={}",
                     values.len(),
                     expected.len()
                 ));
             }
             let values = expected
                 .iter()
-                .zip(values)
+                .zip(values.iter().cloned().chain(std::iter::repeat(HirExpr::Lit(
+                    HirLit::Undefined,
+                ))))
                 .enumerate()
                 .map(|(index, (expected, value))| {
                     self.coerce_to_declared(expected, value.clone())
@@ -353,7 +461,9 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|(name, expected_ty)| {
                 let Some((_, field_value)) = lit_fields.iter().find(|(n, _)| n == name) else {
-                    return Ok((name.clone(), omitted_parameter_value(expected_ty)?));
+                    let value = omitted_parameter_value(expected_ty)
+                        .map_err(|_| format!("object literal is missing required property `{name}`"))?;
+                    return Ok((name.clone(), value));
                 };
                 let field_value = self
                     .coerce_to_declared(expected_ty, field_value.clone())

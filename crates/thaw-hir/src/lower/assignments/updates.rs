@@ -233,6 +233,9 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var(index_name)),
                 )
             }
+            Target::DynamicProperty(_, _) => {
+                return Err("dynamic property updates are not supported yet".into())
+            }
         };
         let old_name = format!("__thaw_update_old_{}", self.next_binding);
         self.next_binding += 1;

@@ -3,6 +3,78 @@ fn collect_native_classes<'a>(
     interfaces: &mut HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Result<Vec<&'a ClassDecl>, String> {
+    fn method_type(
+        class: &str,
+        method: &ClassMethod,
+        interfaces: &HashMap<Symbol, HirType>,
+        generic_interfaces: &GenericInterfaces,
+    ) -> Result<HirType, String> {
+        if method.function.type_params.is_some() {
+            return Ok(HirType::Dynamic);
+        }
+        let substitution = HashMap::new();
+        let mut params = method
+            .function
+            .params
+            .iter()
+            .map(|param| {
+                lower_param(
+                    &param.pat,
+                    interfaces,
+                    generic_interfaces,
+                    false,
+                    &substitution,
+                )
+                .map(|param| param.ty)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let optional = method
+            .function
+            .params
+            .iter()
+            .map(|param| {
+                matches!(&param.pat, Pat::Ident(binding) if binding.id.optional)
+                    || matches!(param.pat, Pat::Assign(_))
+            })
+            .collect::<Vec<_>>();
+        for (param, optional) in params.iter_mut().zip(&optional) {
+            if *optional {
+                *param = optional_parameter_type(param.clone());
+            }
+        }
+        let rest = if method
+            .function
+            .params
+            .last()
+            .is_some_and(|param| matches!(param.pat, Pat::Rest(_)))
+        {
+            let HirType::Array(element) = params.pop().expect("rest parameter has a type") else {
+                return Err("method rest parameter needs an array type annotation".into());
+            };
+            Some(element)
+        } else {
+            None
+        };
+        let result = Box::new(lower_fn_return_type(
+            method.function.is_async,
+            &method.function.return_type,
+            class,
+            interfaces,
+            generic_interfaces,
+            &substitution,
+        )?);
+        Ok(if rest.is_some() || optional.iter().any(|value| *value) {
+            HirType::CallableFunction(
+                params,
+                optional_parameter_mask(&optional[..optional.len() - usize::from(rest.is_some())]),
+                rest,
+                result,
+            )
+        } else {
+            HirType::Function(params, result)
+        })
+    }
+
     fn resolve_layout(
         name: &str,
         declarations: &HashMap<Symbol, &ClassDecl>,
@@ -229,16 +301,42 @@ fn collect_native_classes<'a>(
                 ));
             };
             for (field, required_type) in &required_fields {
-                let actual_type = fields
+                let field_type = fields
                     .iter()
-                    .find_map(|(candidate, ty)| (candidate == field).then_some(ty))
-                    .ok_or_else(|| {
-                        format!(
+                    .find_map(|(candidate, ty)| (candidate == field).then_some(ty.clone()));
+                let mut implemented_method = None;
+                let mut owner = Some(*declaration);
+                while let Some(candidate) = owner {
+                    implemented_method = candidate.class.body.iter().find_map(|member| {
+                        let ClassMember::Method(method) = member else {
+                            return None;
+                        };
+                        (!method.is_static
+                            && method.kind == MethodKind::Method
+                            && class_property_name(&method.key).ok().as_deref() == Some(field))
+                        .then(|| method_type(name, method, interfaces, generic_interfaces))
+                    });
+                    if implemented_method.is_some() {
+                        break;
+                    }
+                    owner = candidate
+                        .class
+                        .super_class
+                        .as_deref()
+                        .and_then(Expr::as_ident)
+                        .and_then(|parent| declarations.get(parent.sym.as_ref()).copied());
+                }
+                let actual_type = match (field_type, implemented_method) {
+                    (Some(ty), _) => ty,
+                    (None, Some(ty)) => ty?,
+                    (None, None) => {
+                        return Err(format!(
                             "class `{name}` is missing field `{field}` required by `{}`",
                             target.sym
-                        )
-                    })?;
-                if actual_type != required_type {
+                        ))
+                    }
+                };
+                if &actual_type != required_type {
                     return Err(format!(
                         "class `{name}` field `{field}` has type {actual_type:?}, but `{}` requires {required_type:?}",
                         target.sym
@@ -265,9 +363,7 @@ fn collect_native_classes<'a>(
             ));
         }
         if declaration.class.type_params.is_some() {
-            return Err(format!(
-                "class `{name}` currently requires a non-generic class"
-            ));
+            continue;
         }
         if !declaration.class.is_abstract
             && declaration.class.body.iter().any(|member| match member {

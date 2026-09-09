@@ -777,10 +777,11 @@ fn napi_export_args() -> [&'static str; 2] {
     ]
 }
 
-fn quickjs_callback_export_args() -> [&'static str; 2] {
+fn quickjs_callback_export_args() -> [&'static str; 3] {
     [
         "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
         "-Wl,--export-dynamic-symbol=thaw_promise_state",
+        "-Wl,--export-dynamic-symbol=thaw_promise_mark_handled",
     ]
 }
 
@@ -837,6 +838,7 @@ fn quickjs_callbacks_export_only_their_runtime_poll_symbols() {
         [
             "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
             "-Wl,--export-dynamic-symbol=thaw_promise_state",
+            "-Wl,--export-dynamic-symbol=thaw_promise_mark_handled",
         ]
     );
 }
@@ -1149,6 +1151,11 @@ fn store_prepared_staticlib(
         staticlib_variant(no_default_features, features)
     );
     let destination = prepared_staticlib_path(package, no_default_features, features)?;
+    let cached = prepared_staticlib_cache_path(package, no_default_features, features)?;
+    if cached.is_file() {
+        std::fs::remove_file(&cached)
+            .map_err(|error| format!("failed to replace `{}`: {error}", cached.display()))?;
+    }
     if destination.is_file() {
         std::fs::remove_file(&destination).map_err(|error| {
             format!("failed to replace `{}`: {error}", destination.display())

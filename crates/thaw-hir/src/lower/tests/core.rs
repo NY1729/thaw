@@ -29,6 +29,20 @@ fn lowers_typed_function_with_binary_op() {
 }
 
 #[test]
+fn keeps_dynamic_call_results_live_when_used_as_member_receivers() {
+    lower(
+        r#"
+        declare function loader(): JsValue;
+        function main(): void {
+            const load: JsValue = loader();
+            const module = load("example");
+            module.run();
+        }
+        "#,
+    );
+}
+
+#[test]
 fn lowers_top_level_bindings_and_exposes_them_to_functions() {
     let program = lower(
         r#"
@@ -87,6 +101,19 @@ fn rejects_direct_forward_references_between_top_level_bindings() {
     .unwrap();
     let error = lower_module(&module).unwrap_err();
     assert!(error.contains("unknown variable `base`"), "{error}");
+}
+
+#[test]
+fn callback_initializers_can_capture_the_binding_being_initialized() {
+    lower(
+        r#"
+            declare function schedule(callback: () => void): Json;
+            declare function cancel(handle: Json): void;
+            function main(): void {
+                const handle = schedule((): void => cancel(handle));
+            }
+        "#,
+    );
 }
 
 #[test]
@@ -591,12 +618,12 @@ fn lowers_load_script_and_call_dynamic() {
 fn rejects_extends_field_name_collision() {
     let module = thaw_parser::parse_typescript(
         r#"interface A { x: number; }
-        interface B extends A { x: number; }
+        interface B extends A { x: string; }
         function main(): void {}"#,
     )
     .unwrap();
     let err = lower_module(&module).unwrap_err();
-    assert!(err.contains("collides"), "unexpected error: {err}");
+    assert!(err.contains("incompatible"), "unexpected error: {err}");
 }
 
 #[test]

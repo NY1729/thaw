@@ -8,7 +8,15 @@ impl<'ctx> HirCompiler<'ctx> {
         let (main_fn, entry) = self.new_c_main();
         let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
+        let quickjs_failure = self
+            .builder
+            .build_alloca(self.context.i32_type(), "quickjs_event_loop_status")
+            .unwrap();
+        self.builder
+            .build_store(quickjs_failure, self.context.i32_type().const_zero())
+            .unwrap();
         self.call_module_init_if_present(cleanup);
+        self.configure_unhandled_rejection_reporter();
         let completion = user_main.and_then(|user_main| {
             self.builder
                 .build_call(user_main, &[], "call_thaw_user_main")
@@ -50,18 +58,11 @@ impl<'ctx> HirCompiler<'ctx> {
             if self.uses_quickjs {
                 self.builder
                     .build_call(
-                        self.module.get_function("thaw_js_run_event_loop").unwrap(),
-                        &[],
-                        "drain_quickjs_for_async_main",
-                    )
-                    .unwrap();
-                self.builder
-                    .build_call(
                         self.module
-                            .get_function("thaw_runtime_run_until_resolved")
+                            .get_function("thaw_js_run_until_native_resolved")
                             .unwrap(),
                         &[completion.into()],
-                        "resume_async_main_after_quickjs",
+                        "interleave_quickjs_for_async_main",
                     )
                     .unwrap();
             }
@@ -102,14 +103,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap();
         }
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_runtime_run_until_idle")
+                    .unwrap(),
+                &[],
+                "drain_native_microtasks",
+            )
+            .unwrap();
         if self.uses_quickjs {
-            self.builder
+            let status = self
+                .builder
                 .build_call(
                     self.module.get_function("thaw_js_run_event_loop").unwrap(),
                     &[],
                     "run_quickjs_event_loop",
                 )
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
                 .unwrap();
+            self.builder.build_store(quickjs_failure, status).unwrap();
         }
         if self.module.get_function("createServer").is_some() {
             self.builder
@@ -131,13 +146,37 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap();
             if self.uses_quickjs {
-                self.builder
+                let status = self
+                    .builder
                     .build_call(
                         self.module.get_function("thaw_js_run_event_loop").unwrap(),
                         &[],
                         "run_quickjs_after_napi",
                     )
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_int_value();
+                let previous = self
+                    .builder
+                    .build_load(self.context.i32_type(), quickjs_failure, "previous_quickjs_status")
+                    .unwrap()
+                    .into_int_value();
+                let has_status = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        status,
+                        status.get_type().const_zero(),
+                        "has_quickjs_status",
+                    )
                     .unwrap();
+                let combined = self
+                    .builder
+                    .build_select(has_status, status, previous, "combined_quickjs_status")
+                    .unwrap();
+                self.builder.build_store(quickjs_failure, combined).unwrap();
             }
             self.builder
                 .build_call(
@@ -149,7 +188,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         self.builder.build_unconditional_branch(cleanup).unwrap();
         self.builder.position_at_end(cleanup);
-        self.finish_c_main();
+        self.finish_c_main(Some(quickjs_failure));
     }
 
     /// Calls `__thaw_module_init` before user code, if the program defines
@@ -350,6 +389,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
         self.call_module_init_if_present(cleanup);
+        self.configure_unhandled_rejection_reporter();
         let handler_ptr = handler_fn.as_global_value().as_pointer_value();
         self.builder
             .build_call(
@@ -365,7 +405,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_unconditional_branch(cleanup)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(cleanup);
-        self.finish_c_main();
+        self.finish_c_main(None);
         Ok(())
     }
 
@@ -377,8 +417,277 @@ impl<'ctx> HirCompiler<'ctx> {
         (main_fn, entry)
     }
 
-    fn finish_c_main(&mut self) {
+    fn configure_unhandled_rejection_reporter(&self) {
+        let reporter = if self.uses_quickjs_handles {
+            self.module
+                .get_function("thaw_js_emit_unhandled_rejection")
+                .unwrap()
+                .as_global_value()
+                .as_pointer_value()
+        } else {
+            self.context.ptr_type(AddressSpace::default()).const_null()
+        };
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_promise_set_unhandled_reporter")
+                    .unwrap(),
+                &[reporter.into()],
+                "configure_unhandled_rejection_reporter",
+            )
+            .unwrap();
+        let handled_reporter = if self.uses_quickjs_handles {
+            self.module
+                .get_function("thaw_js_emit_rejection_handled")
+                .unwrap()
+                .as_global_value()
+                .as_pointer_value()
+        } else {
+            self.context.ptr_type(AddressSpace::default()).const_null()
+        };
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_promise_set_rejection_handled_reporter")
+                    .unwrap(),
+                &[handled_reporter.into()],
+                "configure_rejection_handled_reporter",
+            )
+            .unwrap();
+    }
+
+    fn finish_c_main(&mut self, quickjs_failure: Option<PointerValue<'ctx>>) {
         let i32_type = self.context.i32_type();
+        let pending = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                self.pending_exception().as_pointer_value(),
+                "process_pending_exception",
+            )
+            .unwrap()
+            .into_pointer_value();
+        let has_exception = self
+            .builder
+            .build_is_not_null(pending, "process_exception_failed")
+            .unwrap();
+        let (exception_failure, reported) = if self.uses_quickjs_handles {
+            self.builder
+                .build_store(
+                    self.pending_exception().as_pointer_value(),
+                    pending.get_type().const_null(),
+                )
+                .unwrap();
+            let handled = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_js_emit_uncaught").unwrap(),
+                    &[pending.into()],
+                    "emit_process_uncaught_exception",
+                )
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_int_value();
+            let handled = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    handled,
+                    handled.get_type().const_zero(),
+                    "process_exception_handled",
+                )
+                .unwrap();
+            let handler_exception = self
+                .builder
+                .build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    self.pending_exception().as_pointer_value(),
+                    "process_handler_exception",
+                )
+                .unwrap()
+                .into_pointer_value();
+            let handler_failed = self
+                .builder
+                .build_is_not_null(handler_exception, "process_handler_failed")
+                .unwrap();
+            let original_unhandled = self
+                .builder
+                .build_and(
+                    has_exception,
+                    self.builder.build_not(handled, "process_exception_unhandled").unwrap(),
+                    "process_original_exception_unhandled",
+                )
+                .unwrap();
+            let failure = self
+                .builder
+                .build_or(
+                    original_unhandled,
+                    handler_failed,
+                    "process_exception_failed_unhandled",
+                )
+                .unwrap();
+            let original_report = self
+                .builder
+                .build_select(
+                    original_unhandled,
+                    pending,
+                    pending.get_type().const_null(),
+                    "original_uncaught_exception",
+                )
+                .unwrap()
+                .into_pointer_value();
+            let reported = self
+                .builder
+                .build_select(
+                    handler_failed,
+                    handler_exception,
+                    original_report,
+                    "reported_uncaught_exception",
+                )
+                .unwrap()
+                .into_pointer_value();
+            (failure, reported)
+        } else {
+            (has_exception, pending)
+        };
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_runtime_report_uncaught")
+                    .unwrap(),
+                &[reported.into()],
+                "report_uncaught_exception",
+            )
+            .unwrap();
+        let rejection = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                self.pending_rejection().as_pointer_value(),
+                "process_pending_rejection",
+            )
+            .unwrap()
+            .into_pointer_value();
+        let has_rejection = self
+            .builder
+            .build_is_not_null(rejection, "process_rejection_failed")
+            .unwrap();
+        let (rejection_failure, reported_rejection) = if self.uses_quickjs_handles {
+            let handled = self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_js_emit_unhandled_rejection")
+                        .unwrap(),
+                    &[rejection.into()],
+                    "emit_process_unhandled_rejection",
+                )
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_int_value();
+            let handled = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    handled,
+                    handled.get_type().const_zero(),
+                    "process_rejection_handled",
+                )
+                .unwrap();
+            let unhandled = self
+                .builder
+                .build_not(handled, "process_rejection_unhandled")
+                .unwrap();
+            let failure = self
+                .builder
+                .build_and(
+                    has_rejection,
+                    unhandled,
+                    "process_rejection_failed_unhandled",
+                )
+                .unwrap();
+            let reported = self
+                .builder
+                .build_select(
+                    handled,
+                    rejection.get_type().const_null(),
+                    rejection,
+                    "reported_unhandled_rejection",
+                )
+                .unwrap()
+                .into_pointer_value();
+            (failure, reported)
+        } else {
+            (has_rejection, rejection)
+        };
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_runtime_report_uncaught")
+                    .unwrap(),
+                &[reported_rejection.into()],
+                "report_unhandled_rejection",
+            )
+            .unwrap();
+        let rejection_reporter = if self.uses_quickjs_handles {
+            self.module
+                .get_function("thaw_js_emit_unhandled_rejection")
+                .unwrap()
+                .as_global_value()
+                .as_pointer_value()
+        } else {
+            self.context.ptr_type(AddressSpace::default()).const_null()
+        };
+        let stored_rejection_failure = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_promise_drain_unhandled")
+                    .unwrap(),
+                &[rejection_reporter.into()],
+                "drain_stored_unhandled_rejections",
+            )
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+        let stored_rejection_failure = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                stored_rejection_failure,
+                stored_rejection_failure.get_type().const_zero(),
+                "stored_rejection_failed",
+            )
+            .unwrap();
+        let checkpoint_rejection_failure = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_promise_take_unhandled_failure")
+                    .unwrap(),
+                &[],
+                "take_checkpoint_rejection_failure",
+            )
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+        let checkpoint_rejection_failure = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                checkpoint_rejection_failure,
+                checkpoint_rejection_failure.get_type().const_zero(),
+                "checkpoint_rejection_failed",
+            )
+            .unwrap();
         if self.uses_quickjs_handles {
             self.builder
                 .build_call(
@@ -390,28 +699,6 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap();
         }
-        let pending = self
-            .builder
-            .build_load(
-                self.context.ptr_type(AddressSpace::default()),
-                self.pending_exception().as_pointer_value(),
-                "process_pending_exception",
-            )
-            .unwrap()
-            .into_pointer_value();
-        let exception_failure = self
-            .builder
-            .build_is_not_null(pending, "process_exception_failed")
-            .unwrap();
-        self.builder
-            .build_call(
-                self.module
-                    .get_function("thaw_runtime_report_uncaught")
-                    .unwrap(),
-                &[pending.into()],
-                "report_uncaught_exception",
-            )
-            .unwrap();
         let http_failure = if self.module.get_function("createServer").is_some() {
             let status = self
                 .builder
@@ -438,11 +725,39 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             self.context.bool_type().const_zero()
         };
+        let quickjs_status = quickjs_failure.map_or_else(
+            || i32_type.const_zero(),
+            |failure| {
+                self
+                    .builder
+                    .build_load(i32_type, failure, "quickjs_event_loop_status")
+                    .unwrap()
+                    .into_int_value()
+            },
+        );
         let process_failure = self
             .builder
-            .build_or(exception_failure, http_failure, "process_failed")
+            .build_or(exception_failure, rejection_failure, "direct_script_failed")
+            .and_then(|direct_failure| {
+                self.builder.build_or(
+                    direct_failure,
+                    stored_rejection_failure,
+                    "exit_script_failed",
+                )
+            })
+            .and_then(|exit_failure| {
+                self.builder.build_or(
+                    exit_failure,
+                    checkpoint_rejection_failure,
+                    "script_failed",
+                )
+            })
+            .and_then(|script_failure| {
+                self.builder
+                    .build_or(script_failure, http_failure, "process_failed")
+            })
             .unwrap();
-        if self.uses_napi {
+        let process_failure = if self.uses_napi {
             let fatal_status = self
                 .builder
                 .build_call(
@@ -466,20 +781,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     "napi_fatal",
                 )
                 .unwrap();
-            let failed = self
+            self
                 .builder
                 .build_or(fatal, process_failure, "napi_process_failed")
-                .unwrap();
-            let status = self
-                .builder
-                .build_int_z_extend(failed, i32_type, "process_exit_status")
-                .unwrap();
-            self.builder.build_return(Some(&status)).unwrap();
-            return;
-        }
+                .unwrap()
+        } else {
+            process_failure
+        };
+        let failure_status = self
+            .builder
+            .build_int_z_extend(process_failure, i32_type, "failure_exit_status")
+            .unwrap();
         let status = self
             .builder
-            .build_int_z_extend(process_failure, i32_type, "process_exit_status")
+            .build_select(
+                process_failure,
+                failure_status,
+                quickjs_status,
+                "process_exit_status",
+            )
             .unwrap();
         self.builder.build_return(Some(&status)).unwrap();
     }

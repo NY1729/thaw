@@ -83,8 +83,27 @@ fn console_methods_remain_callable_when_detached() {
 #[test]
 fn standalone_event_loop_runs_pending_timers() {
     assert_eq!(load("globalThis.loopValue = 0; setTimeout(() => { loopValue = 42; }, 0); function readLoopValue() { return loopValue; }"), 1);
-    thaw_js_run_event_loop();
+    assert_eq!(thaw_js_run_event_loop(), 0);
     assert_eq!(call("readLoopValue", "[]"), "42");
+}
+
+#[test]
+fn timer_exceptions_reach_the_process_event_surface() {
+    assert_eq!(
+        load("globalThis.timerError = ''; process.once('uncaughtException', error => { timerError = error.message; }); setTimeout(() => { throw new Error('timer boom'); }, 0);"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(eval_json("timerError"), Ok(Some("\"timer boom\"".into())));
+}
+
+#[test]
+fn unhandled_timer_exception_fails_the_event_loop() {
+    assert_eq!(
+        load("setTimeout(() => { throw new Error('timer fatal'); }, 0);"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 1);
 }
 
 #[test]
@@ -248,7 +267,7 @@ fn process_exposes_time_cwd_and_event_helpers() {
     assert_eq!(
             load(
                 "function processHelpers() {\n\
-                   const original = process.cwd(); process.chdir('/tmp/app'); const changed = process.cwd(); process.chdir(original);\n\
+                   const original = process.cwd(); process.chdir('/tmp'); const changed = process.cwd(); process.chdir(original);\n\
                    const warnings = []; const removed = () => warnings.push('removed');\n\
                    process.on('warning', removed); process.off('warning', removed);\n\
                    process.once('warning', warning => warnings.push(warning.name + ':' + warning.code + ':' + warning.message));\n\
@@ -262,7 +281,7 @@ fn process_exposes_time_cwd_and_event_helpers() {
         );
     assert_eq!(
         call("processHelpers", "[]"),
-        r#"["/tmp/app",true,"ThawWarning:THAW001:careful",0,true,2,true,true,true,0,0,"thaw",0,1,2,"function"]"#
+        r#"["/tmp",true,"ThawWarning:THAW001:careful",0,true,2,true,true,true,0,0,"thaw",0,1,2,"function"]"#
     );
 }
 
@@ -610,15 +629,16 @@ fn buffer_supports_encodings_views_search_and_numeric_access() {
                    const allocated = Buffer.alloc(5, 'xy'); allocated.write('Z', 2);\n\
                    const numeric = Buffer.alloc(4); numeric.writeUInt16LE(0x1234, 0); numeric.writeUInt16BE(0x5678, 2);\n\
                    const numeric32 = Buffer.alloc(8); numeric32.writeInt32BE(-123456, 0); numeric32.writeUInt32LE(0xfedcba98, 4);\n\
+                   const floating = Buffer.alloc(16); floating.writeFloatLE(1.5, 0); floating.writeDoubleBE(-2.25, 4);\n\
                    const joined = Buffer.concat([base64, Buffer.from('!')]);\n\
-                   return [Buffer.isBuffer(utf8), Buffer.isEncoding('base64url'), Buffer.byteLength('雪'), utf8.toString(), hex.toString('base64url'), joined.toString(), allocated.toString(), allocated.indexOf('y'), allocated.lastIndexOf('x'), allocated.includes('Z'), numeric.readUInt16LE(0), numeric.readUInt16BE(2), numeric32.readInt32BE(0), numeric32.readUInt32LE(4), Buffer.compare(Buffer.from('a'), Buffer.from('b')), Buffer.from(utf8.toJSON()).equals(utf8), shared.buffer === utf8.buffer, Object.keys(Buffer).includes('from'), Buffer.from([0xff]).readInt8(), Buffer.from([0xff, 0xfe]).readInt16BE()];\n\
+                   return [Buffer.isBuffer(utf8), Buffer.isEncoding('base64url'), Buffer.byteLength('雪'), utf8.toString(), hex.toString('base64url'), joined.toString(), allocated.toString(), allocated.indexOf('y'), allocated.lastIndexOf('x'), allocated.includes('Z'), numeric.readUInt16LE(0), numeric.readUInt16BE(2), numeric32.readInt32BE(0), numeric32.readUInt32LE(4), floating.readFloatLE(0), floating.readDoubleBE(4), Buffer.from([0, 1, 2, 3]).swap16().toString('hex'), Buffer.compare(Buffer.from('a'), Buffer.from('b')), Buffer.from(utf8.toJSON()).equals(utf8), shared.buffer === utf8.buffer, Object.keys(Buffer).includes('from'), Buffer.from([0xff]).readInt8(), Buffer.from([0xff, 0xfe]).readInt16BE()];\n\
                  }"
             ),
             1
         );
     assert_eq!(
         call("buffers", "[]"),
-        r#"[true,true,3,"雪Ab","AP8Q","hi!","xyZyx",1,4,true,4660,22136,-123456,4275878552,-1,true,true,true,-1,-2]"#
+        r#"[true,true,3,"雪Ab","AP8Q","hi!","xyZyx",1,4,true,4660,22136,-123456,4275878552,1.5,-2.25,"01000302",-1,true,true,true,-1,-2]"#
     );
 }
 
@@ -1031,6 +1051,29 @@ fn crypto_hash_hmac_random_and_webcrypto_are_available() {
 }
 
 #[test]
+fn crypto_scrypt_sync_matches_node() {
+    assert_eq!(
+        load(
+            "function scryptVector() { return __thaw_crypto_module.scryptSync('password', 'salt', 8, { N: 16 }).toString('hex'); }"
+        ),
+        1
+    );
+    assert_eq!(call("scryptVector", "[]"), r#""f876178f94837d87""#);
+}
+
+#[test]
+fn crypto_aes_256_cbc_round_trips() {
+    assert_eq!(
+        load(
+            "function cipherRoundTrip() { const key = Buffer.alloc(32, 1), iv = Buffer.alloc(16, 2), cipher = __thaw_crypto_module.createCipheriv('aes-256-cbc', key, iv), encrypted = Buffer.concat([cipher.update('hello'), cipher.final()]), decipher = __thaw_crypto_module.createDecipheriv('aes-256-cbc', key, iv); return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString(); } function cipherStreaming() { const cipher = __thaw_crypto_module.createCipheriv('aes-256-cbc', Buffer.alloc(32), Buffer.alloc(16)), first = cipher.update('abcdefghijklmnopqrstuvwxyz012345'), last = cipher.final(); return [first.length, last.length, first.length + last.length]; }"
+        ),
+        1
+    );
+    assert_eq!(call("cipherRoundTrip", "[]"), r#""hello""#);
+    assert_eq!(call("cipherStreaming", "[]"), "[32,16,48]");
+}
+
+#[test]
 fn retains_and_calls_a_callable_javascript_value() {
     assert_eq!(
             load("globalThis.times = factor => value => Promise.resolve(value * factor); globalThis.twice = times(2);"),
@@ -1046,6 +1089,30 @@ fn retains_and_calls_a_callable_javascript_value() {
         unsafe { CStr::from_ptr(result.value) }.to_str().unwrap(),
         "42"
     );
+}
+
+#[test]
+fn reuses_a_handle_for_the_same_javascript_object() {
+    assert_eq!(
+        load("globalThis.sharedIdentity = {}; globalThis.returnSharedIdentity = () => sharedIdentity;"),
+        1
+    );
+    let value = CString::new("sharedIdentity").unwrap();
+    let function = CString::new("returnSharedIdentity").unwrap();
+    let original = thaw_js_get_global(value.as_ptr());
+    let callable = thaw_js_get_global(function.as_ptr());
+    let arguments = CString::new("[]").unwrap();
+    let returned = thaw_js_call_handle_handle_result(callable, arguments.as_ptr(), true);
+    assert!(returned.error.is_null());
+    assert_eq!(returned.value, original);
+    assert_eq!(thaw_js_release_handle(original), 1);
+    let text = thaw_js_handle_to_string(returned.value);
+    assert_eq!(
+        unsafe { CStr::from_ptr(text) }.to_str().unwrap(),
+        "[object Object]"
+    );
+    assert_eq!(thaw_js_release_handle(returned.value), 1);
+    assert_eq!(thaw_js_release_handle(returned.value), 0);
 }
 
 #[test]
@@ -1104,6 +1171,19 @@ fn result_abi_separates_success_from_javascript_exceptions() {
     assert!(failed.value.is_null());
     let error = unsafe { CStr::from_ptr(failed.error) }.to_string_lossy();
     assert!(error.contains("kaboom"), "{error}");
+}
+
+#[test]
+fn result_abi_preserves_javascript_error_names() {
+    assert_eq!(
+        load("function fail() { const error = new Error('no'); error.name = 'AssertionError'; throw error; }"),
+        1
+    );
+    let name = CString::new("fail").unwrap();
+    let args = CString::new("[]").unwrap();
+    let failed = thaw_js_call_result(name.as_ptr(), args.as_ptr());
+    let error = unsafe { CStr::from_ptr(failed.error) }.to_string_lossy();
+    assert!(error.starts_with("\u{1}AssertionError\u{1}"), "{error:?}");
 }
 
 #[test]
@@ -1178,4 +1258,37 @@ fn shared_json_reviver_reconstructs_node_buffers() {
         1
     );
     assert_eq!(call("reviveBuffer", "[]"), r#""0102ff""#);
+}
+
+#[test]
+fn shared_json_reviver_reconstructs_maps_and_sets() {
+    assert_eq!(
+        load(
+            "function reviveCollections() { const value = JSON.parse('{\"map\":{\"__thaw_map_entries__\":[[\"a\",1]]},\"set\":{\"__thaw_set_values__\":[2,3]}}', __thaw_json_date_reviver); return [value.map instanceof Map, value.map.get('a'), value.set instanceof Set, value.set.has(3)]; }"
+        ),
+        1
+    );
+    assert_eq!(call("reviveCollections", "[]"), "[true,1,true,true]");
+}
+
+#[test]
+fn shared_json_reviver_reconstructs_regular_expressions() {
+    assert_eq!(
+        load(
+            "function reviveRegExp() { const value = JSON.parse('{\"__thaw_regexp__\":{\"source\":\"a+\",\"flags\":\"gi\",\"lastIndex\":2}}', __thaw_json_date_reviver); return [value instanceof RegExp, value.source, value.flags, value.lastIndex]; }"
+        ),
+        1
+    );
+    assert_eq!(call("reviveRegExp", "[]"), "[true,\"a+\",\"gi\",2]");
+}
+
+#[test]
+fn shared_json_reviver_reconstructs_native_errors() {
+    assert_eq!(
+        load(
+            "function reviveError() { const value = JSON.parse('\\\"\\\\u0001TypeError\\\\u0001bad\\\"', __thaw_json_date_reviver); return [value instanceof Error, value.name, value.message]; }"
+        ),
+        1
+    );
+    assert_eq!(call("reviveError", "[]"), "[true,\"TypeError\",\"bad\"]");
 }
