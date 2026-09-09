@@ -1442,6 +1442,74 @@ fn compiles_regex_exec() {
 }
 
 #[test]
+fn compiles_regex_exec_named_groups() {
+    let source = r#"
+        function main(): void {
+            const match = /(?<word>[a-z]+)-(?<count>\d+)/.exec("item-42");
+            console.log(match?.groups?.word, match?.groups?.count);
+            const partial = /(?<left>a)|(?<right>b)/.exec("a");
+            console.log(partial?.groups?.left, partial?.groups?.right);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_exec_named_groups"),
+        "item 42\na undefined\n"
+    );
+}
+
+#[test]
+fn compiles_signed_bigint_arithmetic() {
+    let source = r#"
+        function main(): void {
+            const left: bigint = 9007199254740993n;
+            const right: bigint = 7n;
+            console.log(String(left + right));
+            console.log(typeof left, left > right);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "signed_bigint_arithmetic"),
+        "9007199254741000\nbigint true\n"
+    );
+}
+
+#[test]
+fn compiles_symbol_keyed_properties() {
+    let source = r#"
+        function main(): void {
+            const key: symbol = Symbol("value");
+            const other: symbol = Symbol("value");
+            const record = { [key]: 42 };
+            console.log(record[key], String(key), key === other, typeof key);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "symbol_keyed_properties"),
+        "42 Symbol(value) false symbol\n"
+    );
+}
+
+#[test]
+fn compiles_direct_generator_iteration() {
+    let source = r#"
+        function* values(): Generator<number> {
+            yield 1;
+            yield 2;
+            yield 3;
+        }
+        function main(): void {
+            let sum: number = 0;
+            for (const value of values()) sum += value;
+            console.log(sum);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "direct_generator_iteration"),
+        "6\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {

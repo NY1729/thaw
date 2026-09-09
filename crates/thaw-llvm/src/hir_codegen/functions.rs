@@ -19,7 +19,9 @@ impl<'ctx> HirCompiler<'ctx> {
             // Strings and arrays are both represented as a single opaque
             // pointer at the LLVM level; what they point to differs (a
             // C string vs. a [len][elements...] buffer).
-            HirType::Str => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            HirType::Str | HirType::Symbol => {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
             HirType::Array(elem) => {
                 self.basic_type(elem)?;
                 Ok(self.context.ptr_type(AddressSpace::default()).into())

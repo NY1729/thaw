@@ -324,12 +324,20 @@ impl<'a> FnLowerer<'a> {
     fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
             HirType::Str => Ok(value),
+            HirType::Symbol => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_symbol_key".to_string())),
+                vec![value],
+            )),
             HirType::Bool => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
                 vec![value],
             )),
             HirType::F64 => Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
+                vec![value],
+            )),
+            HirType::I64 => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_i64_to_string".to_string())),
                 vec![value],
             )),
             HirType::Json => Ok(HirExpr::JsonAsString(Box::new(value))),
@@ -596,6 +604,11 @@ impl<'a> FnLowerer<'a> {
         rhs: HirExpr,
         op: BinOp,
     ) -> Result<HirExpr, String> {
+        if self.infer_expr_type(&lhs)? == HirType::I64
+            && self.infer_expr_type(&rhs)? == HirType::I64
+        {
+            return Ok(HirExpr::BinOp(op, Box::new(lhs), Box::new(rhs)));
+        }
         if self.infer_expr_type(&lhs)? == HirType::Str
             && self.infer_expr_type(&rhs)? == HirType::Str
         {

@@ -104,6 +104,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn expr_hir_type(&self, expr: &HirExpr) -> Option<HirType> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Some(HirType::F64),
+            HirExpr::Lit(HirLit::I64(_)) => Some(HirType::I64),
             HirExpr::Lit(HirLit::Str(_)) => Some(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined) => Some(HirType::Undefined),
@@ -199,6 +200,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_stringify_keys_string_space"
                         | "fetch"
                         | "__thaw_string_concat" => return Some(HirType::Str),
+                        "__thaw_i64_to_string" => return Some(HirType::Str),
+                        "__thaw_symbol_new" => return Some(HirType::Symbol),
+                        "__thaw_symbol_to_string" => return Some(HirType::Str),
+                        "__thaw_symbol_key" => return Some(HirType::Str),
                         "__thaw_string_length"
                         | "__thaw_string_to_number"
                         | "__thaw_bool_to_number"
@@ -392,6 +397,33 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 _ => Err("strict equality operands have incompatible LLVM layouts".into()),
             };
+        }
+
+        if self.expr_hir_type(lhs) == Some(HirType::I64)
+            && self.expr_hir_type(rhs) == Some(HirType::I64)
+        {
+            let lhs = lhs_value.into_int_value();
+            let rhs = rhs_value.into_int_value();
+            return match op {
+                BinOp::Add => self.builder.build_int_add(lhs, rhs, "bigint_add"),
+                BinOp::Sub => self.builder.build_int_sub(lhs, rhs, "bigint_sub"),
+                BinOp::Mul => self.builder.build_int_mul(lhs, rhs, "bigint_mul"),
+                BinOp::Div => self.builder.build_int_signed_div(lhs, rhs, "bigint_div"),
+                BinOp::Mod => self.builder.build_int_signed_rem(lhs, rhs, "bigint_mod"),
+                BinOp::BitOr => self.builder.build_or(lhs, rhs, "bigint_or"),
+                BinOp::BitXor => self.builder.build_xor(lhs, rhs, "bigint_xor"),
+                BinOp::BitAnd => self.builder.build_and(lhs, rhs, "bigint_and"),
+                BinOp::LShift => self.builder.build_left_shift(lhs, rhs, "bigint_lshift"),
+                BinOp::RShift => self.builder.build_right_shift(lhs, rhs, true, "bigint_rshift"),
+                BinOp::Lt => self.builder.build_int_compare(IntPredicate::SLT, lhs, rhs, "bigint_lt"),
+                BinOp::Gt => self.builder.build_int_compare(IntPredicate::SGT, lhs, rhs, "bigint_gt"),
+                BinOp::LtEq => self.builder.build_int_compare(IntPredicate::SLE, lhs, rhs, "bigint_le"),
+                BinOp::GtEq => self.builder.build_int_compare(IntPredicate::SGE, lhs, rhs, "bigint_ge"),
+                BinOp::Exp => return Err("bigint exponentiation is not implemented".into()),
+                BinOp::ZeroFillRShift | BinOp::EqEqEq => unreachable!(),
+            }
+            .map(Into::into)
+            .map_err(|error| error.to_string());
         }
 
         let lhs_val = lhs_value.into_float_value();

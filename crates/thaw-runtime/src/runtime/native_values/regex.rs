@@ -1,6 +1,8 @@
 thread_local! {
     static REGEX_CACHE: RefCell<std::collections::HashMap<(String, String), regex::Regex>> =
         RefCell::new(std::collections::HashMap::new());
+    static REGEX_GROUPS: RefCell<std::collections::HashMap<usize, Box<serde_json::Value>>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// Compiles (or reuses a cached compilation of) the regex named by `source`
@@ -350,10 +352,22 @@ pub unsafe extern "C" fn thaw_regex_exec(
     else {
         return std::ptr::null_mut();
     };
-    let Some(matches) = with_compiled_regex(&source, &flags, |regex| {
-        regex
-            .captures_at(&value, byte_start)
-            .map(|captures| capture_strings_from(&captures))
+    let Some((matches, groups)) = with_compiled_regex(&source, &flags, |regex| {
+        regex.captures_at(&value, byte_start).map(|captures| {
+            let groups = regex
+                .capture_names()
+                .flatten()
+                .filter_map(|name| {
+                    captures.name(name).map(|capture| {
+                        (
+                            name.to_string(),
+                            serde_json::Value::String(capture.as_str().to_string()),
+                        )
+                    })
+                })
+                .collect();
+            (capture_strings_from(&captures), serde_json::Value::Object(groups))
+        })
     })
     .flatten() else {
         return std::ptr::null_mut();
@@ -361,7 +375,35 @@ pub unsafe extern "C" fn thaw_regex_exec(
     if matches.is_empty() {
         return std::ptr::null_mut();
     }
-    arena_string_array(matches)
+    let result = arena_string_array(matches);
+    if !result.is_null() {
+        REGEX_GROUPS.with(|stored| {
+            stored.borrow_mut().insert(result as usize, Box::new(groups));
+        });
+    }
+    result
+}
+
+#[no_mangle]
+/// Returns the named capture object associated with a successful
+/// `thaw_regex_exec` result, or null for an unrelated array.
+///
+/// # Safety
+/// `matches` must be null or an array handle returned by Thaw.
+pub unsafe extern "C" fn thaw_regex_exec_groups(matches: *const u8) -> *mut serde_json::Value {
+    if matches.is_null() {
+        return std::ptr::null_mut();
+    }
+    let matches = unsafe { matches.cast::<*const u8>().read_unaligned() };
+    if matches.is_null() {
+        return std::ptr::null_mut();
+    }
+    REGEX_GROUPS.with(|stored| {
+        stored
+            .borrow_mut()
+            .get_mut(&(matches as usize))
+            .map_or(std::ptr::null_mut(), |groups| groups.as_mut())
+    })
 }
 
 #[no_mangle]

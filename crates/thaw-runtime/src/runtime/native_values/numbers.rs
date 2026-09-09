@@ -611,3 +611,7 @@ mod radix_string_tests {
         }
     }
 }
+#[no_mangle]
+pub extern "C" fn thaw_i64_to_string(value: i64) -> *const c_char {
+    arena_c_string(&value.to_string()).map_or(std::ptr::null(), |value| value.cast())
+}

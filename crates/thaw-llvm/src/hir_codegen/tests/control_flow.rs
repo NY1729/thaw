@@ -223,6 +223,22 @@ fn compiles_throw_new_error_constructors() {
 }
 
 #[test]
+fn error_options_preserve_cause() {
+    let source = r#"
+        function main(): void {
+            const cause = new TypeError("root");
+            const error = new Error("outer", { cause });
+            console.log(error.name, error.message);
+            console.log(error.cause.name, error.cause.message);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "error_cause"),
+        "Error outer\nTypeError root\n"
+    );
+}
+
+#[test]
 fn caught_errors_expose_message_name_and_instanceof() {
     let source = r#"
         function main(): void {

@@ -1973,6 +1973,7 @@ dependencies = [
  "regex",
  "rustls",
  "ryu",
+ "serde_json",
  "thaw-arena",
  "webpki-roots",
 ]
