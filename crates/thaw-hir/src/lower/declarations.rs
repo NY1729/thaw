@@ -1148,32 +1148,49 @@ fn lower_fn_decl(
         debug_assert!(params.is_empty());
         let generated = generated.as_ref().clone();
         let values = "__thaw_generator_values".to_string();
-        let initialized = "__thaw_generator_initialized".to_string();
         lowerer.scope.insert(values.clone(), generated.clone());
-        lowerer.scope.insert(initialized.clone(), HirType::Bool);
         lowerer.generator_yields = Some((values.clone(), element.as_ref().clone()));
         body.push(HirStmt::Let(
             values.clone(),
             generated.clone(),
             HirExpr::ArrayLit(Vec::new()),
         ));
-        body.push(HirStmt::Let(
-            initialized.clone(),
-            HirType::Bool,
-            HirExpr::Lit(HirLit::Bool(false)),
-        ));
-        let mut generator_body = vec![
-            HirStmt::If(
-                HirExpr::Var(initialized.clone()),
-                vec![HirStmt::Return(Some(HirExpr::Var(values.clone())))],
-                Vec::new(),
-            ),
-            HirStmt::Expr(HirExpr::Assign(
-                initialized,
-                Box::new(HirExpr::Lit(HirLit::Bool(true))),
-            )),
-        ];
-        generator_body.extend(lowerer.lower_stmts(&body_block.stmts)?);
+        let lowered_generator_body = lowerer.lower_stmts(&body_block.stmts)?;
+        let mut generator_body = Vec::new();
+        let state = "__thaw_generator_state".to_string();
+        if let Some((entry, locals, state_machine)) =
+            lower_generator_state_machine(&lowered_generator_body, &values, &state)
+        {
+            lowerer.scope.insert(state.clone(), HirType::F64);
+            body.extend(locals);
+            body.push(HirStmt::Let(
+                state.clone(),
+                HirType::F64,
+                HirExpr::Lit(HirLit::F64(entry as f64)),
+            ));
+            generator_body = state_machine;
+        } else {
+            let initialized = "__thaw_generator_initialized".to_string();
+            lowerer.scope.insert(initialized.clone(), HirType::Bool);
+            body.push(HirStmt::Let(
+                initialized.clone(),
+                HirType::Bool,
+                HirExpr::Lit(HirLit::Bool(false)),
+            ));
+            generator_body.extend([
+                HirStmt::If(
+                    HirExpr::Var(initialized.clone()),
+                    vec![HirStmt::Return(Some(HirExpr::Var(values.clone())))],
+                    Vec::new(),
+                ),
+                HirStmt::Expr(HirExpr::Assign(
+                    initialized,
+                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                )),
+            ]);
+            generator_body.extend(lowered_generator_body);
+            generator_body.push(HirStmt::Return(Some(HirExpr::Var(values.clone()))));
+        }
         generator_body.push(HirStmt::Return(Some(HirExpr::Var(values))));
         let generator_body = HirExpr::Block(generator_body);
         let mut referenced = BTreeSet::new();

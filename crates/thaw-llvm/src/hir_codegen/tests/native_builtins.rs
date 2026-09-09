@@ -1593,6 +1593,79 @@ fn defers_generator_body_until_first_consumption() {
 }
 
 #[test]
+fn suspends_direct_generator_between_yields() {
+    let source = r#"
+        let progress: number = 0;
+        function* values(): Generator<number> {
+            progress += 1;
+            yield 4;
+            progress += 10;
+            yield 7;
+            progress += 100;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(progress);
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "suspended_direct_generator"),
+        "0\n4 1\n7 11\ntrue 111\n"
+    );
+}
+
+#[test]
+fn preserves_generator_locals_between_yields() {
+    let source = r#"
+        let initialized: number = 0;
+        function* values(): Generator<number> {
+            let value: number = (initialized += 1);
+            yield value;
+            value += 2;
+            yield value;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(initialized);
+            console.log(iterator.next().value, initialized);
+            console.log(iterator.next().value, initialized);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_local_state"),
+        "0\n1 1\n3 1\n"
+    );
+}
+
+#[test]
+fn suspends_generator_control_flow_between_yields() {
+    let source = r#"
+        let progress: number = 0;
+        function* values(): Generator<number> {
+            let i: number = 0;
+            while (i < 3) {
+                progress += 1;
+                if (i !== 1) yield i;
+                i += 1;
+            }
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "suspended_generator_control_flow"),
+        "0 1\n2 3\ntrue 3\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {

@@ -366,6 +366,21 @@
       "source": "let started: number = 0; function* values(): Generator<number> { started += 1; yield 4; } function main(): void { const iterator = values(); console.log(started); console.log(iterator.next().value); console.log(started); }"
     },
     {
+      "name": "generator suspension points",
+      "expect": "matched",
+      "source": "let progress: number = 0; function* values(): Generator<number> { progress += 1; yield 4; progress += 10; yield 7; progress += 100; } function main(): void { const iterator = values(); console.log(progress); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().done, progress); }"
+    },
+    {
+      "name": "generator local suspension state",
+      "expect": "matched",
+      "source": "let initialized: number = 0; function* values(): Generator<number> { let value: number = (initialized += 1); yield value; value += 2; yield value; } function main(): void { const iterator = values(); console.log(initialized); console.log(iterator.next().value, initialized); console.log(iterator.next().value, initialized); }"
+    },
+    {
+      "name": "generator control-flow suspension",
+      "expect": "matched",
+      "source": "let progress: number = 0; function* values(): Generator<number> { let i: number = 0; while (i < 3) { progress += 1; if (i !== 1) yield i; i += 1; } } function main(): void { const iterator = values(); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().done, progress); }"
+    },
+    {
       "name": "private class field",
       "expect": "matched",
       "source": "class Counter { #value: number = 0; increment(): number { this.#value++; return this.#value; } } function main(): void { const counter = new Counter(); console.log(counter.increment(), counter.increment()); }"
