@@ -1898,6 +1898,34 @@ fn generator_next_assigns_a_value_after_the_suspended_yield() {
 }
 
 #[test]
+fn generator_next_assigns_to_members_indexes_and_patterns() {
+    let source = r#"
+        type Pair = { left: number; right: number };
+        function* values(): Generator<number, void, Pair> {
+            const holder = { value: { left: 0, right: 0 } };
+            const items: Pair[] = [{ left: 0, right: 0 }];
+            let left: number = 0;
+            let right: number = 0;
+            holder.value = yield 1;
+            items[0] = yield 2;
+            ({ left, right } = yield 3);
+            console.log(holder.value.left, items[0].right, left + right);
+        }
+        function main(): void {
+            const iterator = values();
+            iterator.next();
+            iterator.next({ left: 4, right: 40 });
+            iterator.next({ left: 50, right: 5 });
+            iterator.next({ left: 6, right: 7 });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_resume_assignment_targets"),
+        "4 5 13\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;

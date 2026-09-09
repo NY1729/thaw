@@ -256,6 +256,80 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    fn lower_generator_resume_assignment(
+        &mut self,
+        target: &AssignTarget,
+        value: HirExpr,
+    ) -> Result<Vec<HirStmt>, String> {
+        if let AssignTarget::Pat(pattern) = target {
+            let pattern = match pattern {
+                swc_ecma_ast::AssignTargetPat::Array(pattern) => Pat::Array(pattern.clone()),
+                swc_ecma_ast::AssignTargetPat::Object(pattern) => Pat::Object(pattern.clone()),
+                swc_ecma_ast::AssignTargetPat::Invalid(_) => {
+                    return Err("invalid generator destructuring assignment target".into())
+                }
+            };
+            let ty = self.infer_expr_type(&value)?;
+            let temporary = format!("__thaw_generator_resume_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(temporary.clone(), ty.clone());
+            let mut statements = vec![HirStmt::Let(
+                temporary.clone(),
+                ty.clone(),
+                value,
+            )];
+            self.lower_assignment_pattern(
+                &pattern,
+                HirExpr::Var(temporary),
+                &ty,
+                &mut statements,
+            )?;
+            return Ok(statements);
+        }
+
+        let target = self.lower_assign_target(target)?;
+        if let Target::Var(name) = &target {
+            if self.immutable_bindings.contains(name) {
+                return Err(format!("cannot assign to constant `{name}`"));
+            }
+        }
+        let value = match &target {
+            Target::Var(name) => match self.scope.get(name).cloned() {
+                Some(ty) => self.coerce_to_declared(&ty, value)?,
+                None => value,
+            },
+            Target::Prop(_, HirType::Object(fields), field) => {
+                let ty = fields
+                    .iter()
+                    .find(|(name, _)| name == field)
+                    .map(|(_, ty)| ty.clone())
+                    .ok_or_else(|| format!("object has no field `{field}`"))?;
+                self.coerce_to_declared(&ty, value)?
+            }
+            Target::Index(array, index) => {
+                self.expect_type(&HirType::F64, index, "array index")?;
+                let HirType::Array(element) = self.infer_expr_type(array)? else {
+                    return Err("index assignment target is not an array".into());
+                };
+                self.coerce_to_declared(&element, value)?
+            }
+            Target::Dictionary(_, _, element) => self.coerce_to_declared(element, value)?,
+            Target::JsonIndex(_, index) => {
+                self.expect_type(&HirType::F64, index, "JSON array index")?;
+                self.coerce_to_declared(&HirType::Json, value)?
+            }
+            Target::DynamicProperty(_, _) => {
+                return Err("dynamic generator resume targets are not supported".into())
+            }
+            Target::Prop(_, other, field) => {
+                return Err(format!(
+                    "cannot assign to field `{field}` on value of type {other:?}"
+                ))
+            }
+        };
+        Ok(vec![HirStmt::Expr(build_assign(target, value))])
+    }
+
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         match stmt {
             // Empty statements have no runtime effect. `debugger` only has an
@@ -331,7 +405,15 @@ impl<'a> FnLowerer<'a> {
                 Ok(vec![HirStmt::Return(value)])
             }
             Stmt::Expr(expr_stmt) => {
-                if let Expr::Assign(assign) = expr_stmt.expr.as_ref() {
+                let assignment = match expr_stmt.expr.as_ref() {
+                    Expr::Assign(assign) => Some(assign),
+                    Expr::Paren(paren) => match paren.expr.as_ref() {
+                        Expr::Assign(assign) => Some(assign),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(assign) = assignment {
                     if assign.op == AssignOp::Assign {
                         if let Expr::Yield(yield_expr) = assign.right.as_ref() {
                     let Some((values, element, input, _, _, _)) =
@@ -339,33 +421,16 @@ impl<'a> FnLowerer<'a> {
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
-                    let AssignTarget::Simple(SimpleAssignTarget::Ident(binding)) = &assign.left
-                    else {
-                        return Err("a `yield` result currently requires a variable target".into());
-                    };
-                    let target = self.resolve_binding(binding.id.sym.as_ref());
-                    if self.immutable_bindings.contains(&target) {
-                        return Err(format!("cannot assign to constant `{target}`"));
-                    }
-                    let target_type = self
-                        .scope
-                        .get(&target)
-                        .cloned()
-                        .ok_or_else(|| format!("unknown assignment target `{target}`"))?;
                             let (emission, delegated) = self.lower_generator_yield_emission(
                                 yield_expr, &values, &element, &input,
                             )?;
-                            let resumed = self.coerce_to_declared(
-                                &target_type,
-                                delegated
-                                    .map(|(value, _)| value)
-                                    .unwrap_or_else(|| HirExpr::Var(input)),
-                            )?;
+                            let resumed = delegated
+                                .map(|(value, _)| value)
+                                .unwrap_or_else(|| HirExpr::Var(input));
                             let mut statements = emission;
-                            statements.push(HirStmt::Expr(HirExpr::Assign(
-                                target,
-                                Box::new(resumed),
-                            )));
+                            statements.extend(
+                                self.lower_generator_resume_assignment(&assign.left, resumed)?,
+                            );
                             return Ok(statements);
                     }
                     }
