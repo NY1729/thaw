@@ -1552,6 +1552,27 @@ fn compiles_generator_yield_delegate() {
 }
 
 #[test]
+fn suspends_generator_delegation_until_its_batch_is_consumed() {
+    let source = r#"
+        let progress: number = 0;
+        function* values(): Generator<number> {
+            yield* [1, 2];
+            progress += 10;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "suspended_generator_delegation"),
+        "1 0\n2 0\ntrue 10\n"
+    );
+}
+
+#[test]
 fn compiles_generator_next_results() {
     let source = r#"
         function* values(): Generator<number> { yield 4; yield 7; }
