@@ -64,7 +64,7 @@ struct FnLowerer<'a> {
     /// place a callback's *unannotated* return is still known to need to
     /// stay a live `JsValue`.
     expected_arrow_return_hint: Option<HirType>,
-    generator_yields: Option<(Symbol, HirType, Symbol, HirType)>,
+    generator_yields: Option<(Symbol, HirType, Symbol, HirType, Symbol, HirType)>,
     generator_finalizers: HashMap<Symbol, Vec<HirStmt>>,
 }
 

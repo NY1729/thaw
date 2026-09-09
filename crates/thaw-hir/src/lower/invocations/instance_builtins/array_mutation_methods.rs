@@ -16,7 +16,9 @@ impl<'a> FnLowerer<'a> {
                             "`.return()` requires a generator, got {receiver_type:?}"
                         ));
                     };
-                    let [HirType::I64, HirType::Str, input_type] = params.as_slice() else {
+                    let [HirType::I64, HirType::Str, input_type, return_channel @ HirType::Array(_)] =
+                        params.as_slice()
+                    else {
                         return Err(format!(
                             "`.return()` requires a generator, got {receiver_type:?}"
                         ));
@@ -29,6 +31,10 @@ impl<'a> FnLowerer<'a> {
                     let input = generator_placeholder(input_type).ok_or_else(|| {
                         format!("generator input type {input_type:?} has no default value")
                     })?;
+                    let completion = HirExpr::TypedClosure(
+                        return_channel.clone(),
+                        Box::new(HirExpr::ArrayLit(Vec::new())),
+                    );
                     let element = element.as_ref().clone();
                     let value = match call.args.first() {
                         Some(argument) => HirExpr::OptionalSome(
@@ -61,6 +67,7 @@ impl<'a> FnLowerer<'a> {
                                         HirExpr::Lit(HirLit::I64(1)),
                                         HirExpr::Lit(HirLit::Str(String::new())),
                                         input,
+                                        completion,
                                     ],
                                 )),
                                 HirStmt::Return(Some(HirExpr::ObjectLit(vec![
@@ -81,12 +88,18 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     };
-                    let [HirType::I64, HirType::Str, input_type] = params.as_slice() else {
+                    let [HirType::I64, HirType::Str, input_type, return_channel @ HirType::Array(_)] =
+                        params.as_slice()
+                    else {
                         return Err(format!(
                             "`.{}` requires a generator, got {receiver_type:?}",
                             property.sym
                         ));
                     };
+                    let completion = HirExpr::TypedClosure(
+                        return_channel.clone(),
+                        Box::new(HirExpr::ArrayLit(Vec::new())),
+                    );
                     if !matches!(result.as_ref(), HirType::Array(_)) {
                         return Err(format!(
                             "`.{}` requires a generator, got {receiver_type:?}",
@@ -109,6 +122,7 @@ impl<'a> FnLowerer<'a> {
                                     "generator input type {input_type:?} has no default value"
                                 )
                             })?,
+                            completion,
                         ]
                     } else {
                         if call.args.len() > 1
@@ -131,6 +145,7 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Lit(HirLit::I64(0)),
                             HirExpr::Lit(HirLit::Str(String::new())),
                             input,
+                            completion,
                         ]
                     };
                     let result = result.as_ref().clone();

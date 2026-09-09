@@ -1,3 +1,5 @@
+type GeneratorYieldEmission = (Vec<HirStmt>, Option<(HirExpr, HirType)>);
+
 impl<'a> FnLowerer<'a> {
     fn collect_pattern_bindings(pattern: &Pat, names: &mut Vec<String>) {
         match pattern {
@@ -85,7 +87,7 @@ impl<'a> FnLowerer<'a> {
         yield_expr: &swc_ecma_ast::YieldExpr,
         values: &str,
         element: &HirType,
-    ) -> Result<Vec<HirStmt>, String> {
+    ) -> Result<GeneratorYieldEmission, String> {
         let value = yield_expr
             .arg
             .as_ref()
@@ -95,20 +97,25 @@ impl<'a> FnLowerer<'a> {
             let value = self.lower_expr(value)?;
             let value_type = self.infer_expr_type(&value)?;
             if value_type == array_type {
-                return Ok(vec![HirStmt::Expr(HirExpr::Assign(
-                    values.into(),
-                    Box::new(HirExpr::ArrayConcat(
-                        vec![HirExpr::Var(values.into()), value],
-                        element.clone(),
-                    )),
-                ))]);
+                return Ok((
+                    vec![HirStmt::Expr(HirExpr::Assign(
+                        values.into(),
+                        Box::new(HirExpr::ArrayConcat(
+                            vec![HirExpr::Var(values.into()), value],
+                            element.clone(),
+                        )),
+                    ))],
+                    Some((HirExpr::Lit(HirLit::Undefined), HirType::Undefined)),
+                ));
             }
             let HirType::Function(params, result) = &value_type else {
                 return Err(format!(
                     "`yield*` requires an array or generator, got {value_type:?}"
                 ));
             };
-            let [HirType::I64, HirType::Str, input_type] = params.as_slice() else {
+            let [HirType::I64, HirType::Str, input_type, return_channel @ HirType::Array(return_type)] =
+                params.as_slice()
+            else {
                 return Err(format!("`yield*` requires a generator, got {value_type:?}"));
             };
             if result.as_ref() != &array_type {
@@ -124,11 +131,38 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             let chunk = format!("__thaw_yield_delegate_chunk_{}", self.next_binding);
             self.next_binding += 1;
+            let completion = format!("__thaw_yield_delegate_return_{}", self.next_binding);
+            self.next_binding += 1;
             let producer_array = HirType::Array(Box::new(value_type.clone()));
             self.scope.insert(producer.clone(), producer_array.clone());
             self.scope.insert(chunk.clone(), array_type.clone());
-            return Ok(vec![
+            self.scope
+                .insert(completion.clone(), return_channel.clone());
+            let fallback = generator_placeholder(return_type).ok_or_else(|| {
+                format!("generator return type {return_type:?} has no default value")
+            })?;
+            let completed = HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::Gt,
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                        completion.clone(),
+                    )))),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                )),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                    vec![HirExpr::Var(completion.clone())],
+                )),
+                Box::new(fallback),
+                return_type.as_ref().clone(),
+            );
+            return Ok((vec![
                 HirStmt::Let(producer.clone(), producer_array, HirExpr::ArrayLit(vec![value])),
+                HirStmt::Let(
+                    completion.clone(),
+                    return_channel.clone(),
+                    HirExpr::ArrayLit(Vec::new()),
+                ),
                 HirStmt::While(
                     HirExpr::Lit(HirLit::Bool(true)),
                     vec![
@@ -139,12 +173,13 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::TypedIndex(
                                     Box::new(HirExpr::Var(producer)),
                                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                                    value_type,
+                                    value_type.clone(),
                                 )),
                                 vec![
                                     HirExpr::Lit(HirLit::I64(0)),
                                     HirExpr::Lit(HirLit::Str(String::new())),
                                     input,
+                                    HirExpr::Var(completion),
                                 ],
                             ),
                         ),
@@ -175,14 +210,17 @@ impl<'a> FnLowerer<'a> {
                         )),
                     ],
                 ),
-            ]);
+            ], Some((completed, return_type.as_ref().clone()))));
         }
         let value = self.lower_expr_with_expected_type(value, Some(element))?;
         let value = self.coerce_to_declared(element, value)?;
-        Ok(vec![HirStmt::Expr(HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_array_push".into())),
-            vec![HirExpr::Var(values.into()), value],
-        ))])
+        Ok((
+            vec![HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                vec![HirExpr::Var(values.into()), value],
+            ))],
+            None,
+        ))
     }
 
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
@@ -192,10 +230,18 @@ impl<'a> FnLowerer<'a> {
             // native Thaw executable therefore treats it as a no-op.
             Stmt::Empty(_) | Stmt::Debugger(_) => Ok(Vec::new()),
             Stmt::Return(ret) => {
-                if let Some((values, _, _, _)) = self.generator_yields.clone() {
+                if let Some((values, _, _, _, returns, return_type)) =
+                    self.generator_yields.clone()
+                {
                     let mut statements = Vec::new();
                     if let Some(value) = &ret.arg {
-                        statements.push(HirStmt::Expr(self.lower_expr(value)?));
+                        let value =
+                            self.lower_expr_with_expected_type(value, Some(&return_type))?;
+                        let value = self.coerce_to_declared(&return_type, value)?;
+                        statements.push(HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_push".into())),
+                            vec![HirExpr::Var(returns), value],
+                        )));
                     }
                     statements.push(HirStmt::Return(Some(HirExpr::Var(values))));
                     return Ok(statements);
@@ -255,7 +301,7 @@ impl<'a> FnLowerer<'a> {
                 if let Expr::Assign(assign) = expr_stmt.expr.as_ref() {
                     if assign.op == AssignOp::Assign {
                         if let Expr::Yield(yield_expr) = assign.right.as_ref() {
-                    let Some((values, element, input, _)) =
+                    let Some((values, element, input, _, _, _)) =
                         self.generator_yields.clone()
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
@@ -273,18 +319,16 @@ impl<'a> FnLowerer<'a> {
                         .get(&target)
                         .cloned()
                         .ok_or_else(|| format!("unknown assignment target `{target}`"))?;
-                            let emission = self.lower_generator_yield_emission(
+                            let (emission, delegated) = self.lower_generator_yield_emission(
                                 yield_expr,
                                 &values,
                                 &element,
                             )?;
                             let resumed = self.coerce_to_declared(
                                 &target_type,
-                                if yield_expr.delegate {
-                                    HirExpr::Lit(HirLit::Undefined)
-                                } else {
-                                    HirExpr::Var(input)
-                                },
+                                delegated
+                                    .map(|(value, _)| value)
+                                    .unwrap_or_else(|| HirExpr::Var(input)),
                             )?;
                             let mut statements = emission;
                             statements.push(HirStmt::Expr(HirExpr::Assign(
@@ -296,14 +340,12 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if let Expr::Yield(yield_expr) = expr_stmt.expr.as_ref() {
-                    let Some((values, element, _, _)) = self.generator_yields.clone() else {
+                    let Some((values, element, _, _, _, _)) = self.generator_yields.clone() else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
-                    return self.lower_generator_yield_emission(
-                        yield_expr,
-                        &values,
-                        &element,
-                    );
+                    return self
+                        .lower_generator_yield_emission(yield_expr, &values, &element)
+                        .map(|(statements, _)| statements);
                 }
                 let discarded_dynamic_call = |expr: &Expr| {
                     matches!(
@@ -583,7 +625,7 @@ impl<'a> FnLowerer<'a> {
                     let mut values_type = self.infer_expr_type(&values)?;
                     let mut generator_producer = None;
                     if let HirType::Function(params, result) = &values_type {
-                        if params.len() == 3
+                        if params.len() == 4
                             && params[0] == HirType::I64
                             && params[1] == HirType::Str
                             && matches!(result.as_ref(), HirType::Array(_))
@@ -841,6 +883,10 @@ impl<'a> FnLowerer<'a> {
                                                 params[2]
                                             )
                                         })?,
+                                        HirExpr::TypedClosure(
+                                            params[3].clone(),
+                                            Box::new(HirExpr::ArrayLit(Vec::new())),
+                                        ),
                                     ],
                                 )),
                             )),
