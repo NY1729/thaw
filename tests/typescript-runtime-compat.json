@@ -391,6 +391,11 @@
       "source": "function* values(): Generator<number, void, number> { const first: number = yield 1; const second: number = yield first + 1; yield second + 1; } function main(): void { const iterator = values(); console.log(iterator.next().value); console.log(iterator.next(10).value); console.log(iterator.next(20).value); console.log(iterator.next().done); }"
     },
     {
+      "name": "generator next assignment",
+      "expect": "matched",
+      "source": "function* values(): Generator<number, void, number> { let received: number = 0; received = yield 2; yield received * 3; } function main(): void { const iterator = values(); console.log(iterator.next().value); console.log(iterator.next(7).value); console.log(iterator.next().done); }"
+    },
+    {
       "name": "generator deferred start",
       "expect": "matched",
       "source": "let started: number = 0; function* values(): Generator<number> { started += 1; yield 4; } function main(): void { const iterator = values(); console.log(started); console.log(iterator.next().value); console.log(started); }"
