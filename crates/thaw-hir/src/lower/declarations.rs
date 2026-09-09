@@ -836,7 +836,14 @@ fn lower_class_methods(
                 .or_default()
                 .push("__thaw_this".into());
         }
-        let mut lowered_body = lowerer.lower_stmts(&body.stmts)?;
+        let mut lowered_body = Vec::new();
+        lower_function_statements(
+            &mut lowerer,
+            &body.stmts,
+            &signature.ret,
+            method.function.is_generator,
+            &mut lowered_body,
+        )?;
         if method.kind == MethodKind::Setter {
             lowered_body.push(HirStmt::Return(Some(HirExpr::Var(
                 params.last().expect("setter value parameter").name.clone(),
@@ -886,12 +893,20 @@ fn lower_class_methods(
                     .or_default()
                     .push(parameter.name.clone());
             }
+            let mut unbound_body = Vec::new();
+            lower_function_statements(
+                &mut unbound,
+                &body.stmts,
+                &unbound_signature.ret,
+                method.function.is_generator,
+                &mut unbound_body,
+            )?;
             functions.push(HirFunction {
                 name: unbound_symbol,
                 params: unbound_params,
                 ret: unbound_signature.ret.clone(),
                 is_async: unbound_signature.is_async,
-                body: unbound.lower_stmts(&body.stmts)?,
+                body: unbound_body,
             });
         }
         let patterns = method
@@ -1138,8 +1153,37 @@ fn lower_fn_decl(
             )?;
         }
     }
-    if func.is_generator {
-        let HirType::Function(params, generated) = &declared_ret else {
+    lower_function_statements(
+        &mut lowerer,
+        &body_block.stmts,
+        &declared_ret,
+        func.is_generator,
+        &mut body,
+    )?;
+    let ret = if declared_ret == HirType::Dynamic {
+        lowerer.infer_return_type(&body)?
+    } else {
+        declared_ret
+    };
+
+    Ok(HirFunction {
+        name,
+        params,
+        ret,
+        is_async: func.is_async,
+        body,
+    })
+}
+
+fn lower_function_statements(
+    lowerer: &mut FnLowerer<'_>,
+    statements: &[Stmt],
+    declared_ret: &HirType,
+    is_generator: bool,
+    body: &mut Vec<HirStmt>,
+) -> Result<(), String> {
+    if is_generator {
+        let HirType::Function(params, generated) = declared_ret else {
             unreachable!("generator signatures lower to lazy functions");
         };
         let HirType::Array(element) = generated.as_ref() else {
@@ -1155,7 +1199,7 @@ fn lower_fn_decl(
             generated.clone(),
             HirExpr::ArrayLit(Vec::new()),
         ));
-        let lowered_generator_body = lowerer.lower_stmts(&body_block.stmts)?;
+        let lowered_generator_body = lowerer.lower_stmts(statements)?;
         let mut generator_body = Vec::new();
         let state = "__thaw_generator_state".to_string();
         if let Some((entry, locals, state_machine)) =
@@ -1212,21 +1256,9 @@ fn lower_fn_decl(
             Box::new(generator_body),
         ))));
     } else {
-        body.extend(lowerer.lower_stmts(&body_block.stmts)?);
+        body.extend(lowerer.lower_stmts(statements)?);
     }
-    let ret = if declared_ret == HirType::Dynamic {
-        lowerer.infer_return_type(&body)?
-    } else {
-        declared_ret
-    };
-
-    Ok(HirFunction {
-        name,
-        params,
-        ret,
-        is_async: func.is_async,
-        body,
-    })
+    Ok(())
 }
 
 fn seed_global_scope(
