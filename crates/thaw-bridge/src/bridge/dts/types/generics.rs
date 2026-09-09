@@ -636,7 +636,7 @@ fn resolve_ts_type_with_substitution(
                 generic_interfaces,
                 in_progress,
             ) {
-                DtsType::Native(ret) => ret,
+                DtsType::Native(ret) => normalize_callback_return(ret),
                 DtsType::Unsupported(_) if ts_type_includes_void(&function.type_ann.type_ann) => {
                     HirType::Void
                 }

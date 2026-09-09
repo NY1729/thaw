@@ -1139,19 +1139,61 @@ fn lower_fn_decl(
         }
     }
     if func.is_generator {
-        let HirType::Array(element) = &declared_ret else {
-            unreachable!("generator signatures lower to arrays");
+        let HirType::Function(params, generated) = &declared_ret else {
+            unreachable!("generator signatures lower to lazy functions");
         };
+        let HirType::Array(element) = generated.as_ref() else {
+            unreachable!("generator functions lazily return arrays");
+        };
+        debug_assert!(params.is_empty());
+        let generated = generated.as_ref().clone();
         let values = "__thaw_generator_values".to_string();
-        lowerer.scope.insert(values.clone(), declared_ret.clone());
+        let initialized = "__thaw_generator_initialized".to_string();
+        lowerer.scope.insert(values.clone(), generated.clone());
+        lowerer.scope.insert(initialized.clone(), HirType::Bool);
         lowerer.generator_yields = Some((values.clone(), element.as_ref().clone()));
         body.push(HirStmt::Let(
             values.clone(),
-            declared_ret.clone(),
+            generated.clone(),
             HirExpr::ArrayLit(Vec::new()),
         ));
-        body.extend(lowerer.lower_stmts(&body_block.stmts)?);
-        body.push(HirStmt::Return(Some(HirExpr::Var(values))));
+        body.push(HirStmt::Let(
+            initialized.clone(),
+            HirType::Bool,
+            HirExpr::Lit(HirLit::Bool(false)),
+        ));
+        let mut generator_body = vec![
+            HirStmt::If(
+                HirExpr::Var(initialized.clone()),
+                vec![HirStmt::Return(Some(HirExpr::Var(values.clone())))],
+                Vec::new(),
+            ),
+            HirStmt::Expr(HirExpr::Assign(
+                initialized,
+                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+            )),
+        ];
+        generator_body.extend(lowerer.lower_stmts(&body_block.stmts)?);
+        generator_body.push(HirStmt::Return(Some(HirExpr::Var(values))));
+        let generator_body = HirExpr::Block(generator_body);
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&generator_body, &mut referenced);
+        let captures = referenced
+            .into_iter()
+            .filter_map(|name| {
+                lowerer
+                    .scope
+                    .get(&name)
+                    .cloned()
+                    .map(|ty| HirParam { name, ty })
+            })
+            .collect();
+        body.push(HirStmt::Return(Some(HirExpr::Lambda(
+            captures,
+            Vec::new(),
+            generated,
+            Box::new(generator_body),
+        ))));
     } else {
         body.extend(lowerer.lower_stmts(&body_block.stmts)?);
     }
@@ -1220,13 +1262,18 @@ fn lower_generator_return_type(
         .as_ref()
         .and_then(|parameters| parameters.params.first())
         .ok_or_else(|| format!("generator function `{fn_name}` needs a yield type"))?;
-    Ok(HirType::Array(Box::new(resolve_ts_type_with_substitution(
-        yielded,
-        type_substitution,
-        interfaces,
-        generic_interfaces,
-        &mut Vec::new(),
-    )?)))
+    Ok(HirType::Function(
+        Vec::new(),
+        Box::new(HirType::Array(Box::new(
+            resolve_ts_type_with_substitution(
+                yielded,
+                type_substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            )?,
+        ))),
+    ))
 }
 
 /// Computes a function's *unwrapped* return type: `async function`s must be

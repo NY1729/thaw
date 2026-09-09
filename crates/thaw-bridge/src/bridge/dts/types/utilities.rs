@@ -261,6 +261,21 @@ fn ts_type_includes_void(ty: &TsType) -> bool {
     }
 }
 
+fn normalize_callback_return(ty: HirType) -> HirType {
+    match ty {
+        HirType::Union(members)
+            if !members.is_empty()
+                && members.iter().all(|member| {
+                matches!(member, HirType::Void)
+                    || matches!(member, HirType::Promise(value) if **value == HirType::Void)
+                }) =>
+        {
+            HirType::Void
+        }
+        other => other,
+    }
+}
+
 fn classify_native_union(
     union: &swc_ecma_ast::TsUnionType,
     mut classify: impl FnMut(&TsType) -> DtsType,

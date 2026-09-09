@@ -250,7 +250,7 @@ fn classify_ts_type(
                 interfaces,
                 generic_interfaces,
             ) {
-                DtsType::Native(ret) => ret,
+                DtsType::Native(ret) => normalize_callback_return(ret),
                 DtsType::Unsupported(_) if ts_type_includes_void(&function.type_ann.type_ann) => {
                     HirType::Void
                 }
