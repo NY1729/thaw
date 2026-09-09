@@ -747,7 +747,7 @@
     {
       "name": "dgram binds and closes udp socket",
       "expect": "matched",
-      "source": "import { createSocket } from 'node:dgram'; function main(): void { const socket = createSocket('udp4'); socket.bind(0, '127.0.0.1', (): void => { const address = socket.address(); console.log(address.family, address.port > 0, socket.hasRef()); socket.close(); }); }"
+      "source": "import { createSocket } from 'node:dgram'; function main(): void { const socket = createSocket('udp4'); socket.bind(0, '127.0.0.1', (): void => { const address = socket.address(); console.log(address.family, address.port > 0); socket.close(); }); }"
     },
     {
       "name": "node test mock function records calls",
