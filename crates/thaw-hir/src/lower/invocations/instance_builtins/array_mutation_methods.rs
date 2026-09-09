@@ -5,6 +5,66 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+                if property.sym == *"return" {
+                    if call.args.len() > 1 || call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("generator `.return()` accepts at most one value".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Function(params, generated) = &receiver_type else {
+                        return Err(format!(
+                            "`.return()` requires a generator, got {receiver_type:?}"
+                        ));
+                    };
+                    if params != &[HirType::I64] {
+                        return Err(format!(
+                            "`.return()` requires a generator, got {receiver_type:?}"
+                        ));
+                    }
+                    let HirType::Array(element) = generated.as_ref() else {
+                        return Err(format!(
+                            "`.return()` requires a generator, got {receiver_type:?}"
+                        ));
+                    };
+                    let element = element.as_ref().clone();
+                    let value = match call.args.first() {
+                        Some(argument) => HirExpr::OptionalSome(
+                            Box::new(self.lower_expr_with_expected_type(
+                                &argument.expr,
+                                Some(&element),
+                            )?),
+                            element.clone(),
+                        ),
+                        None => HirExpr::OptionalNone(element.clone()),
+                    };
+                    let result_type = HirType::Object(vec![
+                        ("value".into(), HirType::Optional(Box::new(element))),
+                        ("done".into(), HirType::Bool),
+                    ]);
+                    let producer = format!("__thaw_generator_return_{}", self.next_binding);
+                    self.next_binding += 1;
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            Vec::new(),
+                            vec![HirParam {
+                                name: producer.clone(),
+                                ty: receiver_type,
+                            }],
+                            result_type,
+                            Box::new(HirExpr::Block(vec![
+                                HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var(producer)),
+                                    vec![HirExpr::Lit(HirLit::I64(1))],
+                                )),
+                                HirStmt::Return(Some(HirExpr::ObjectLit(vec![
+                                    ("value".into(), value),
+                                    ("done".into(), HirExpr::Lit(HirLit::Bool(true))),
+                                ]))),
+                            ])),
+                        )),
+                        vec![receiver],
+                    ));
+                }
                 if property.sym == *"next" {
                     if !call.args.is_empty() {
                         return Err("generator `.next()` does not accept arguments yet".into());
@@ -12,9 +72,14 @@ impl<'a> FnLowerer<'a> {
                     let mut receiver = self.lower_expr(&member.obj)?;
                     let mut receiver_type = self.infer_expr_type(&receiver)?;
                     if let HirType::Function(params, result) = &receiver_type {
-                        if params.is_empty() && matches!(result.as_ref(), HirType::Array(_)) {
+                        if params == &[HirType::I64]
+                            && matches!(result.as_ref(), HirType::Array(_))
+                        {
                             let result = result.as_ref().clone();
-                            receiver = HirExpr::Call(Box::new(receiver), Vec::new());
+                            receiver = HirExpr::Call(
+                                Box::new(receiver),
+                                vec![HirExpr::Lit(HirLit::I64(0))],
+                            );
                             receiver_type = result;
                         }
                     }

@@ -190,6 +190,15 @@ fn lower_generator_state_machine(
         vec![
             HirStmt::If(
                 HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(HirExpr::Var(state.into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                ),
+                vec![HirStmt::Return(Some(HirExpr::Var(values.into())))],
+                Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
                     BinOp::Gt,
                     Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(values.into())))),
                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),

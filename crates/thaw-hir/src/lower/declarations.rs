@@ -1189,9 +1189,10 @@ fn lower_function_statements(
         let HirType::Array(element) = generated.as_ref() else {
             unreachable!("generator functions lazily return arrays");
         };
-        debug_assert!(params.is_empty());
+        debug_assert_eq!(params, &[HirType::I64]);
         let generated = generated.as_ref().clone();
         let values = "__thaw_generator_values".to_string();
+        let control = "__thaw_generator_control".to_string();
         lowerer.scope.insert(values.clone(), generated.clone());
         lowerer.generator_yields = Some((values.clone(), element.as_ref().clone()));
         body.push(HirStmt::Let(
@@ -1213,6 +1214,15 @@ fn lower_function_statements(
                 HirExpr::Lit(HirLit::F64(entry as f64)),
             ));
             generator_body = state_machine;
+            generator_body.insert(
+                0,
+                generator_cancel_guard(
+                    &control,
+                    &values,
+                    &state,
+                    HirExpr::Lit(HirLit::F64(-1.0)),
+                ),
+            );
         } else {
             let initialized = "__thaw_generator_initialized".to_string();
             lowerer.scope.insert(initialized.clone(), HirType::Bool);
@@ -1222,6 +1232,12 @@ fn lower_function_statements(
                 HirExpr::Lit(HirLit::Bool(false)),
             ));
             generator_body.extend([
+                generator_cancel_guard(
+                    &control,
+                    &values,
+                    &initialized,
+                    HirExpr::Lit(HirLit::Bool(true)),
+                ),
                 HirStmt::If(
                     HirExpr::Var(initialized.clone()),
                     vec![HirStmt::Return(Some(HirExpr::Var(values.clone())))],
@@ -1241,6 +1257,7 @@ fn lower_function_statements(
         collect_referenced_bindings(&generator_body, &mut referenced);
         let captures = referenced
             .into_iter()
+            .filter(|name| name != &control)
             .filter_map(|name| {
                 lowerer
                     .scope
@@ -1251,7 +1268,10 @@ fn lower_function_statements(
             .collect();
         body.push(HirStmt::Return(Some(HirExpr::Lambda(
             captures,
-            Vec::new(),
+            vec![HirParam {
+                name: control,
+                ty: HirType::I64,
+            }],
             generated,
             Box::new(generator_body),
         ))));
@@ -1259,6 +1279,32 @@ fn lower_function_statements(
         body.extend(lowerer.lower_stmts(statements)?);
     }
     Ok(())
+}
+
+fn generator_cancel_guard(
+    control: &str,
+    values: &str,
+    completion: &str,
+    completed: HirExpr,
+) -> HirStmt {
+    let mut body = vec![HirStmt::Expr(HirExpr::Assign(
+        values.into(),
+        Box::new(HirExpr::ArrayLit(Vec::new())),
+    ))];
+    body.push(HirStmt::Expr(HirExpr::Assign(
+        completion.into(),
+        Box::new(completed),
+    )));
+    body.push(HirStmt::Return(Some(HirExpr::Var(values.into()))));
+    HirStmt::If(
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::Var(control.into())),
+            Box::new(HirExpr::Lit(HirLit::I64(1))),
+        ),
+        body,
+        Vec::new(),
+    )
 }
 
 fn seed_global_scope(
@@ -1312,7 +1358,7 @@ fn lower_generator_return_type(
         .and_then(|parameters| parameters.params.first())
         .ok_or_else(|| format!("generator function `{fn_name}` needs a yield type"))?;
     Ok(HirType::Function(
-        Vec::new(),
+        vec![HirType::I64],
         Box::new(HirType::Array(Box::new(
             resolve_ts_type_with_substitution(
                 yielded,
