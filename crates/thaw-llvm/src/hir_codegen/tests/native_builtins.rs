@@ -1678,6 +1678,35 @@ fn generator_return_runs_finally_without_resuming_the_body() {
 }
 
 #[test]
+fn generator_throw_resumes_through_catch_and_finally() {
+    let source = r#"
+        let progress: number = 0;
+        function* values(): Generator<number> {
+            try {
+                yield 1;
+            } catch (error) {
+                console.log(error);
+                yield 2;
+            } finally {
+                progress += 100;
+            }
+        }
+        function main(): void {
+            const iterator = values();
+            const first = iterator.next();
+            console.log(first.value, first.done);
+            const caught = iterator.throw("boom");
+            console.log(caught.value, caught.done, progress);
+            console.log(iterator.next().done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_throw"),
+        "1 false\nboom\n2 false 0\ntrue 100\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;

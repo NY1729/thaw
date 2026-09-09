@@ -1189,10 +1189,11 @@ fn lower_function_statements(
         let HirType::Array(element) = generated.as_ref() else {
             unreachable!("generator functions lazily return arrays");
         };
-        debug_assert_eq!(params, &[HirType::I64]);
+        debug_assert_eq!(params, &[HirType::I64, HirType::Str]);
         let generated = generated.as_ref().clone();
         let values = "__thaw_generator_values".to_string();
         let control = "__thaw_generator_control".to_string();
+        let error = "__thaw_generator_error".to_string();
         lowerer.scope.insert(values.clone(), generated.clone());
         lowerer.generator_yields = Some((values.clone(), element.as_ref().clone()));
         body.push(HirStmt::Let(
@@ -1210,6 +1211,7 @@ fn lower_function_statements(
                 &values,
                 &state,
                 &control,
+                &error,
             )
         {
             lowerer.scope.insert(state.clone(), HirType::F64);
@@ -1265,10 +1267,16 @@ fn lower_function_statements(
             .collect();
         body.push(HirStmt::Return(Some(HirExpr::Lambda(
             captures,
-            vec![HirParam {
-                name: control,
-                ty: HirType::I64,
-            }],
+            vec![
+                HirParam {
+                    name: control,
+                    ty: HirType::I64,
+                },
+                HirParam {
+                    name: error,
+                    ty: HirType::Str,
+                },
+            ],
             generated,
             Box::new(generator_body),
         ))));
@@ -1355,7 +1363,7 @@ fn lower_generator_return_type(
         .and_then(|parameters| parameters.params.first())
         .ok_or_else(|| format!("generator function `{fn_name}` needs a yield type"))?;
     Ok(HirType::Function(
-        vec![HirType::I64],
+        vec![HirType::I64, HirType::Str],
         Box::new(HirType::Array(Box::new(
             resolve_ts_type_with_substitution(
                 yielded,

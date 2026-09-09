@@ -16,7 +16,7 @@ impl<'a> FnLowerer<'a> {
                             "`.return()` requires a generator, got {receiver_type:?}"
                         ));
                     };
-                    if params != &[HirType::I64] {
+                    if params != &[HirType::I64, HirType::Str] {
                         return Err(format!(
                             "`.return()` requires a generator, got {receiver_type:?}"
                         ));
@@ -54,7 +54,10 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Block(vec![
                                 HirStmt::Expr(HirExpr::Call(
                                     Box::new(HirExpr::Var(producer)),
-                                    vec![HirExpr::Lit(HirLit::I64(1))],
+                                    vec![
+                                        HirExpr::Lit(HirLit::I64(1)),
+                                        HirExpr::Lit(HirLit::Str(String::new())),
+                                    ],
                                 )),
                                 HirStmt::Return(Some(HirExpr::ObjectLit(vec![
                                     ("value".into(), value),
@@ -65,20 +68,38 @@ impl<'a> FnLowerer<'a> {
                         vec![receiver],
                     ));
                 }
-                if property.sym == *"next" {
-                    if !call.args.is_empty() {
-                        return Err("generator `.next()` does not accept arguments yet".into());
-                    }
+                if matches!(property.sym.as_ref(), "next" | "throw") {
+                    let resume = if property.sym == *"throw" {
+                        let [argument] = call.args.as_slice() else {
+                            return Err("generator `.throw()` expects exactly one value".into());
+                        };
+                        if argument.spread.is_some() {
+                            return Err("generator `.throw()` does not accept a spread value".into());
+                        }
+                        let value = self.lower_expr(&argument.expr)?;
+                        vec![
+                            HirExpr::Lit(HirLit::I64(2)),
+                            self.coerce_primitive_to_string(value)?,
+                        ]
+                    } else {
+                        if !call.args.is_empty() {
+                            return Err("generator `.next()` does not accept arguments yet".into());
+                        }
+                        vec![
+                            HirExpr::Lit(HirLit::I64(0)),
+                            HirExpr::Lit(HirLit::Str(String::new())),
+                        ]
+                    };
                     let mut receiver = self.lower_expr(&member.obj)?;
                     let mut receiver_type = self.infer_expr_type(&receiver)?;
                     if let HirType::Function(params, result) = &receiver_type {
-                        if params == &[HirType::I64]
+                        if params == &[HirType::I64, HirType::Str]
                             && matches!(result.as_ref(), HirType::Array(_))
                         {
                             let result = result.as_ref().clone();
                             receiver = HirExpr::Call(
                                 Box::new(receiver),
-                                vec![HirExpr::Lit(HirLit::I64(0))],
+                                resume,
                             );
                             receiver_type = result;
                         }
