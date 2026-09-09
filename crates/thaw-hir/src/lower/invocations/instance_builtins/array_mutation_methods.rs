@@ -16,16 +16,19 @@ impl<'a> FnLowerer<'a> {
                             "`.return()` requires a generator, got {receiver_type:?}"
                         ));
                     };
-                    if params != &[HirType::I64, HirType::Str] {
+                    let [HirType::I64, HirType::Str, input_type] = params.as_slice() else {
                         return Err(format!(
                             "`.return()` requires a generator, got {receiver_type:?}"
                         ));
-                    }
+                    };
                     let HirType::Array(element) = generated.as_ref() else {
                         return Err(format!(
                             "`.return()` requires a generator, got {receiver_type:?}"
                         ));
                     };
+                    let input = generator_placeholder(input_type).ok_or_else(|| {
+                        format!("generator input type {input_type:?} has no default value")
+                    })?;
                     let element = element.as_ref().clone();
                     let value = match call.args.first() {
                         Some(argument) => HirExpr::OptionalSome(
@@ -57,6 +60,7 @@ impl<'a> FnLowerer<'a> {
                                     vec![
                                         HirExpr::Lit(HirLit::I64(1)),
                                         HirExpr::Lit(HirLit::Str(String::new())),
+                                        input,
                                     ],
                                 )),
                                 HirStmt::Return(Some(HirExpr::ObjectLit(vec![
@@ -69,6 +73,26 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if matches!(property.sym.as_ref(), "next" | "throw") {
+                    let mut receiver = self.lower_expr(&member.obj)?;
+                    let mut receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Function(params, result) = &receiver_type else {
+                        return Err(format!(
+                            "`.{}` requires a generator, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    };
+                    let [HirType::I64, HirType::Str, input_type] = params.as_slice() else {
+                        return Err(format!(
+                            "`.{}` requires a generator, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    };
+                    if !matches!(result.as_ref(), HirType::Array(_)) {
+                        return Err(format!(
+                            "`.{}` requires a generator, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    }
                     let resume = if property.sym == *"throw" {
                         let [argument] = call.args.as_slice() else {
                             return Err("generator `.throw()` expects exactly one value".into());
@@ -80,30 +104,38 @@ impl<'a> FnLowerer<'a> {
                         vec![
                             HirExpr::Lit(HirLit::I64(2)),
                             self.coerce_primitive_to_string(value)?,
+                            generator_placeholder(input_type).ok_or_else(|| {
+                                format!(
+                                    "generator input type {input_type:?} has no default value"
+                                )
+                            })?,
                         ]
                     } else {
-                        if !call.args.is_empty() {
-                            return Err("generator `.next()` does not accept arguments yet".into());
+                        if call.args.len() > 1
+                            || call.args.iter().any(|argument| argument.spread.is_some())
+                        {
+                            return Err("generator `.next()` accepts at most one value".into());
                         }
+                        let input = match call.args.first() {
+                            Some(argument) => self.lower_expr_with_expected_type(
+                                &argument.expr,
+                                Some(input_type),
+                            )?,
+                            None => generator_placeholder(input_type).ok_or_else(|| {
+                                format!(
+                                    "generator input type {input_type:?} has no default value"
+                                )
+                            })?,
+                        };
                         vec![
                             HirExpr::Lit(HirLit::I64(0)),
                             HirExpr::Lit(HirLit::Str(String::new())),
+                            input,
                         ]
                     };
-                    let mut receiver = self.lower_expr(&member.obj)?;
-                    let mut receiver_type = self.infer_expr_type(&receiver)?;
-                    if let HirType::Function(params, result) = &receiver_type {
-                        if params == &[HirType::I64, HirType::Str]
-                            && matches!(result.as_ref(), HirType::Array(_))
-                        {
-                            let result = result.as_ref().clone();
-                            receiver = HirExpr::Call(
-                                Box::new(receiver),
-                                resume,
-                            );
-                            receiver_type = result;
-                        }
-                    }
+                    let result = result.as_ref().clone();
+                    receiver = HirExpr::Call(Box::new(receiver), resume);
+                    receiver_type = result;
                     let HirType::Array(element) = &receiver_type else {
                         return Err(format!(
                             "`.next()` requires a generator, got {receiver_type:?}"
