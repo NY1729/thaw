@@ -1618,6 +1618,38 @@ fn generator_return_stops_future_execution() {
 }
 
 #[test]
+fn generator_try_catch_finally_survives_suspension() {
+    let source = r#"
+        let progress: number = 0;
+        function* values(): Generator<number> {
+            try {
+                yield 1;
+                progress += 1;
+                throw new Error("boom");
+            } catch (error) {
+                console.log(error);
+                progress += 10;
+                yield 2;
+            } finally {
+                progress += 100;
+            }
+            yield 3;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().value, progress);
+            console.log(iterator.next().done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_try_catch_finally"),
+        "1 0\nboom\n2 11\n3 111\ntrue 111\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;

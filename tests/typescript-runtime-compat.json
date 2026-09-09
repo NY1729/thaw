@@ -371,6 +371,11 @@
       "source": "let progress: number = 0; function* values(): Generator<number> { progress += 1; yield 4; progress += 10; yield 7; } function main(): void { const iterator = values(); console.log(iterator.next().value, progress); const stopped = iterator.return(99); console.log(stopped.value, stopped.done, progress); console.log(iterator.next().done, progress); console.log(iterator.next().done, progress); }"
     },
     {
+      "name": "generator try catch finally suspension",
+      "expect": "matched",
+      "source": "let progress: number = 0; function* values(): Generator<number> { try { yield 1; progress += 1; throw new Error('boom'); } catch (error) { console.log(error); progress += 10; yield 2; } finally { progress += 100; } yield 3; } function main(): void { const iterator = values(); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().done, progress); }"
+    },
+    {
       "name": "generator deferred start",
       "expect": "matched",
       "source": "let started: number = 0; function* values(): Generator<number> { started += 1; yield 4; } function main(): void { const iterator = values(); console.log(started); console.log(iterator.next().value); console.log(started); }"
