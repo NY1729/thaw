@@ -1593,6 +1593,31 @@ fn compiles_generator_next_results() {
 }
 
 #[test]
+fn generator_return_stops_future_execution() {
+    let source = r#"
+        let progress: number = 0;
+        function* values(): Generator<number> {
+            progress += 1;
+            yield 4;
+            progress += 10;
+            yield 7;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value, progress);
+            const stopped = iterator.return(99);
+            console.log(stopped.value, stopped.done, progress);
+            console.log(iterator.next().done, progress);
+            console.log(iterator.next().done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_return"),
+        "4 1\n99 true 1\ntrue 1\ntrue 1\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;
