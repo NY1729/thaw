@@ -103,12 +103,20 @@ impl<'a> FnLowerer<'a> {
                     let completion_name =
                         format!("__thaw_generator_completion_{}", self.next_binding);
                     self.next_binding += 1;
-                    if !matches!(result.as_ref(), HirType::Array(_)) {
-                        return Err(format!(
-                            "`.{}` requires a generator, got {receiver_type:?}",
-                            property.sym
-                        ));
-                    }
+                    let (generated_type, async_generator) = match result.as_ref() {
+                        HirType::Array(_) => (result.as_ref().clone(), false),
+                        HirType::Promise(generated)
+                            if matches!(generated.as_ref(), HirType::Array(_)) =>
+                        {
+                            (generated.as_ref().clone(), true)
+                        }
+                        _ => {
+                            return Err(format!(
+                                "`.{}` requires a generator, got {receiver_type:?}",
+                                property.sym
+                            ))
+                        }
+                    };
                     let resume = if property.sym == *"throw" {
                         let [argument] = call.args.as_slice() else {
                             return Err("generator `.throw()` expects exactly one value".into());
@@ -151,8 +159,6 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(completion_name.clone()),
                         ]
                     };
-                    let result = result.as_ref().clone();
-                    let generated_type = result;
                     let HirType::Array(element) = &generated_type else {
                         return Err(format!(
                             "`.next()` requires a generator, got {generated_type:?}"
@@ -240,6 +246,48 @@ impl<'a> FnLowerer<'a> {
                         ("value".into(), yielded),
                         ("done".into(), HirExpr::Lit(HirLit::Bool(false))),
                     ]);
+                    let mapper = HirExpr::Lambda(
+                        vec![HirParam {
+                            name: completion_name.clone(),
+                            ty: return_channel.clone(),
+                        }],
+                        vec![HirParam {
+                            name: array_name,
+                            ty: generated_type.clone(),
+                        }],
+                        result_type.clone(),
+                        Box::new(HirExpr::Block(vec![HirStmt::If(
+                            empty,
+                            vec![HirStmt::If(
+                                no_completion,
+                                vec![HirStmt::Return(Some(done_without_value))],
+                                vec![HirStmt::Return(Some(done_with_value))],
+                            )],
+                            vec![HirStmt::Return(Some(next))],
+                        )])),
+                    );
+                    let producer_call = HirExpr::Call(
+                        Box::new(HirExpr::Var(producer_name.clone())),
+                        resume,
+                    );
+                    let (wrapper_result, wrapper_body) = if async_generator {
+                        (
+                            HirType::Promise(Box::new(result_type.clone())),
+                            HirExpr::PromiseThen(
+                                Box::new(producer_call),
+                                Box::new(mapper),
+                                generated_type,
+                                result_type,
+                                false,
+                                false,
+                            ),
+                        )
+                    } else {
+                        (
+                            result_type,
+                            HirExpr::Call(Box::new(mapper), vec![producer_call]),
+                        )
+                    };
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Lambda(
                             Vec::new(),
@@ -253,26 +301,8 @@ impl<'a> FnLowerer<'a> {
                                     ty: return_channel.clone(),
                                 },
                             ],
-                            result_type,
-                            Box::new(HirExpr::Block(vec![
-                                HirStmt::Let(
-                                    array_name,
-                                    generated_type,
-                                    HirExpr::Call(
-                                        Box::new(HirExpr::Var(producer_name)),
-                                        resume,
-                                    ),
-                                ),
-                                HirStmt::If(
-                                    empty,
-                                    vec![HirStmt::If(
-                                        no_completion,
-                                        vec![HirStmt::Return(Some(done_without_value))],
-                                        vec![HirStmt::Return(Some(done_with_value))],
-                                    )],
-                                    vec![HirStmt::Return(Some(next))],
-                                ),
-                            ])),
+                            wrapper_result,
+                            Box::new(wrapper_body),
                         )),
                         vec![
                             receiver,

@@ -1926,6 +1926,27 @@ fn generator_next_assigns_to_members_indexes_and_patterns() {
 }
 
 #[test]
+fn async_generator_next_returns_promised_iterator_results() {
+    let source = r#"
+        async function* values(): AsyncGenerator<number, string> {
+            yield 4;
+            return "done";
+        }
+        async function main(): Promise<void> {
+            const iterator = values();
+            const first = await iterator.next();
+            const end = await iterator.next();
+            console.log(first.value, first.done);
+            console.log(end.value, end.done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_next"),
+        "4 false\ndone true\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;
