@@ -450,6 +450,7 @@ impl<'a> FnLowerer<'a> {
                         self.expression_array_element_discriminants(&for_of.right);
                     let mut values = self.lower_expr(&for_of.right)?;
                     let mut values_type = self.infer_expr_type(&values)?;
+                    let mut generator_producer = None;
                     if let HirType::Function(params, result) = &values_type {
                         if params.is_empty() && matches!(result.as_ref(), HirType::Array(_)) {
                             let result = result.as_ref().clone();
@@ -459,73 +460,10 @@ impl<'a> FnLowerer<'a> {
                                 self.next_binding
                             );
                             self.next_binding += 1;
-                            let output =
-                                format!("__thaw_generator_output_{}", self.next_binding);
-                            self.next_binding += 1;
-                            let batch = format!("__thaw_generator_batch_{}", self.next_binding);
-                            self.next_binding += 1;
-                            values = HirExpr::Call(
-                                Box::new(HirExpr::Lambda(
-                                    Vec::new(),
-                                    vec![HirParam {
-                                        name: producer.clone(),
-                                        ty: producer_type,
-                                    }],
-                                    result.clone(),
-                                    Box::new(HirExpr::Block(vec![
-                                        HirStmt::Let(
-                                            output.clone(),
-                                            result.clone(),
-                                            HirExpr::ArrayLit(Vec::new()),
-                                        ),
-                                        HirStmt::Let(
-                                            batch.clone(),
-                                            result.clone(),
-                                            HirExpr::ArrayLit(Vec::new()),
-                                        ),
-                                        HirStmt::While(
-                                            HirExpr::Lit(HirLit::Bool(true)),
-                                            vec![
-                                                HirStmt::Expr(HirExpr::Assign(
-                                                    batch.clone(),
-                                                    Box::new(HirExpr::Call(
-                                                        Box::new(HirExpr::Var(producer)),
-                                                        Vec::new(),
-                                                    )),
-                                                )),
-                                                HirStmt::If(
-                                                    HirExpr::BinOp(
-                                                        BinOp::EqEqEq,
-                                                        Box::new(HirExpr::ArrayLen(Box::new(
-                                                            HirExpr::Var(batch.clone()),
-                                                        ))),
-                                                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                                                    ),
-                                                    vec![HirStmt::Break],
-                                                    Vec::new(),
-                                                ),
-                                                HirStmt::Expr(HirExpr::Call(
-                                                    Box::new(HirExpr::Var(
-                                                        "__thaw_array_push".into(),
-                                                    )),
-                                                    vec![
-                                                        HirExpr::Var(output.clone()),
-                                                        HirExpr::Call(
-                                                            Box::new(HirExpr::Var(
-                                                                "__thaw_array_shift".into(),
-                                                            )),
-                                                            vec![HirExpr::Var(batch.clone())],
-                                                        ),
-                                                    ],
-                                                )),
-                                            ],
-                                        ),
-                                        HirStmt::Return(Some(HirExpr::Var(output))),
-                                    ])),
-                                )),
-                                vec![values],
-                            );
+                            self.scope.insert(producer.clone(), producer_type.clone());
+                            generator_producer = Some((producer, producer_type, values));
                             values_type = result;
+                            values = HirExpr::ArrayLit(Vec::new());
                         }
                     }
                     if values_type == HirType::Str {
@@ -589,7 +527,12 @@ impl<'a> FnLowerer<'a> {
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
                     let item_value = || {
-                        let indexed = if json_array {
+                        let indexed = if generator_producer.is_some() {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                                vec![HirExpr::Var(values_name.clone())],
+                            )
+                        } else if json_array {
                             HirExpr::JsonIndex(
                                 Box::new(HirExpr::Var(values_name.clone())),
                                 Box::new(HirExpr::Var(index_name.clone())),
@@ -744,45 +687,96 @@ impl<'a> FnLowerer<'a> {
                             return Err("`using` bindings in `for...of` are not supported".into())
                         }
                     };
-                    let mut body = item_stmts;
+                    let mut body = Vec::new();
+                    if let Some((producer, _, _)) = &generator_producer {
+                        body.extend([
+                            HirStmt::Expr(HirExpr::Assign(
+                                values_name.clone(),
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var(producer.clone())),
+                                    Vec::new(),
+                                )),
+                            )),
+                            HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                                        values_name.clone(),
+                                    )))),
+                                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                ),
+                                vec![HirStmt::Break],
+                                Vec::new(),
+                            ),
+                        ]);
+                    }
+                    body.extend(item_stmts);
                     body.extend(self.lower_loop_body(&for_of.body)?);
-                    let update = HirExpr::Assign(
-                        index_name.clone(),
-                        Box::new(HirExpr::BinOp(
-                            BinOp::Add,
-                            Box::new(HirExpr::Var(index_name.clone())),
-                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                        )),
-                    );
-                    body = inject_for_update_before_continue(body, &update);
-                    body.push(HirStmt::Expr(update));
-                    Ok(vec![
-                        HirStmt::Let(
-                            values_name.clone(),
-                            values_type,
-                            values,
-                        ),
-                        HirStmt::Let(
+                    if generator_producer.is_none() {
+                        let update = HirExpr::Assign(
                             index_name.clone(),
+                            Box::new(HirExpr::BinOp(
+                                BinOp::Add,
+                                Box::new(HirExpr::Var(index_name.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                            )),
+                        );
+                        body = inject_for_update_before_continue(body, &update);
+                        body.push(HirStmt::Expr(update));
+                    }
+                    let condition = if generator_producer.is_some() {
+                        HirExpr::Lit(HirLit::Bool(true))
+                    } else {
+                        HirExpr::BinOp(
+                            BinOp::Lt,
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            Box::new(if json_array {
+                                HirExpr::JsonAsNumber(Box::new(HirExpr::JsonGet(
+                                    Box::new(HirExpr::Var(values_name.clone())),
+                                    "length".into(),
+                                )))
+                            } else {
+                                HirExpr::ArrayLen(Box::new(HirExpr::Var(values_name.clone())))
+                            }),
+                        )
+                    };
+                    let mut statements = vec![
+                        HirStmt::Let(values_name, values_type, values),
+                        HirStmt::Let(
+                            index_name,
                             HirType::F64,
                             HirExpr::Lit(HirLit::F64(0.0)),
                         ),
-                        HirStmt::While(
-                            HirExpr::BinOp(
-                                BinOp::Lt,
-                                Box::new(HirExpr::Var(index_name)),
-                                Box::new(if json_array {
-                                    HirExpr::JsonAsNumber(Box::new(HirExpr::JsonGet(
-                                        Box::new(HirExpr::Var(values_name)),
-                                        "length".into(),
-                                    )))
-                                } else {
-                                    HirExpr::ArrayLen(Box::new(HirExpr::Var(values_name)))
-                                }),
-                            ),
-                            body,
-                        ),
-                    ])
+                        HirStmt::While(condition, body),
+                    ];
+                    let Some((producer, producer_type, init)) = generator_producer else {
+                        return Ok(statements);
+                    };
+                    statements.push(HirStmt::Return(None));
+                    let lambda_body = HirExpr::Block(statements);
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&lambda_body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|name| {
+                            saved_scope
+                                .get(&name)
+                                .cloned()
+                                .map(|ty| HirParam { name, ty })
+                        })
+                        .collect();
+                    Ok(vec![HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            vec![HirParam {
+                                name: producer,
+                                ty: producer_type,
+                            }],
+                            HirType::Void,
+                            Box::new(lambda_body),
+                        )),
+                        vec![init],
+                    ))])
                 })();
                 self.bindings = saved;
                 self.scope = saved_scope;
