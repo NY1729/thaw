@@ -712,6 +712,12 @@ impl GenericClassUseCollector<'_> {
 }
 
 impl Visit for GenericClassUseCollector<'_> {
+    fn visit_class_decl(&mut self, declaration: &swc_ecma_ast::ClassDecl) {
+        if declaration.class.type_params.is_none() {
+            declaration.visit_children_with(self);
+        }
+    }
+
     fn visit_class_method(&mut self, method: &swc_ecma_ast::ClassMethod) {
         if method.function.type_params.is_none() {
             method.visit_children_with(self);
