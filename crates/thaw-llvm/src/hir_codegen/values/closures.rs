@@ -142,6 +142,8 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         self.frame_async_functions
             .insert(name.clone(), resolved.clone());
+        self.async_lambda_captures
+            .insert(name.clone(), captures.to_vec());
         self.declare_function(&lifted)
             .map_err(|error| format!("async lambda `{name}`: {error}"))?;
 
@@ -175,7 +177,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let environment = adapter.get_first_param().unwrap().into_pointer_value();
         let i64_type = self.context.i64_type();
         let mut arguments = Vec::with_capacity(captures.len() + params.len());
-        for (index, capture) in captures.iter().enumerate() {
+        for (index, _) in captures.iter().enumerate() {
             let offset = i64_type.const_int(CLOSURE_CAPTURE_BASE + index as u64 * 8, false);
             let capture_slot = unsafe {
                 self.builder
@@ -196,12 +198,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?
                 .into_pointer_value();
-            arguments.push(
-                self.builder
-                    .build_load(self.basic_type(&capture.ty)?, cell, "async_capture_value")
-                    .map_err(|error| error.to_string())?
-                    .into(),
-            );
+            arguments.push(cell.into());
         }
         arguments.extend(
             adapter

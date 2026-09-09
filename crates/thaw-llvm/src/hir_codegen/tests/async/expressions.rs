@@ -479,3 +479,19 @@ fn frame_split_async_function_preserves_arguments_across_await() {
     assert!(ir.contains("frame_b"));
     assert_eq!(compile_and_run(source, "async_arguments"), "42\n");
 }
+
+#[test]
+fn frame_split_async_lambda_preserves_captured_variable_identity() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let count: number = 0;
+            const advance = async (): Promise<number> => {
+                await Promise.resolve();
+                count += 1;
+                return count;
+            };
+            console.log(await advance(), await advance(), count);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_capture_identity"), "1 2 2\n");
+}
