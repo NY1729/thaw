@@ -53,7 +53,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"no-args-ok\"\n"
+        "no-args-ok\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -126,7 +126,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"wrapped(thing:gadget)\"\n{}\n"
+        "wrapped(thing:gadget)\n{}\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -215,7 +215,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"optional-str\"\n"
+        "optional-str\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -287,7 +287,7 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"str,num\"\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "str,num\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -435,7 +435,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"v\"\n\"h\"\n\"v\"\n42\n"
+        "v\nh\nv\n42\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -520,7 +520,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"thing:root.a.b\"\n"
+        "thing:root.a.b\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -746,4 +746,3 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
-

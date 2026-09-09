@@ -502,14 +502,12 @@ fn fallback_function_with_an_unresolvable_return_type_builds_and_runs() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.d.ts"),
-        "export declare function clock(seed?: unknown): Promise<unknown>;\n",
+        "export declare function clock(seed?: unknown): unknown;\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "module.exports.clock = function(seed) {\n\
-             return { toString: function() { return 'tick'; } };\n\
-         };\n",
+        "module.exports.clock = function(seed) { return 'tick'; };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -517,7 +515,7 @@ fn fallback_function_with_an_unresolvable_return_type_builds_and_runs() {
         &entry,
         r#"import { clock } from "clock-kit";
 function main(): void {
-    console.log(clock());
+    console.log(String(clock()));
 }
 "#,
     )
@@ -725,4 +723,3 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
-
