@@ -1729,6 +1729,27 @@ fn generator_next_passes_a_value_into_the_suspended_yield() {
 }
 
 #[test]
+fn generator_next_assigns_a_value_after_the_suspended_yield() {
+    let source = r#"
+        function* values(): Generator<number, void, number> {
+            let received: number = 0;
+            received = yield 2;
+            yield received * 3;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value);
+            console.log(iterator.next(7).value);
+            console.log(iterator.next().done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_next_assignment"),
+        "2\n21\ntrue\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;
