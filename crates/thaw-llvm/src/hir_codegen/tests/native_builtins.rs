@@ -1707,6 +1707,28 @@ fn generator_throw_resumes_through_catch_and_finally() {
 }
 
 #[test]
+fn generator_next_passes_a_value_into_the_suspended_yield() {
+    let source = r#"
+        function* values(): Generator<number, void, number> {
+            const first: number = yield 1;
+            const second: number = yield first + 1;
+            yield second + 1;
+        }
+        function main(): void {
+            const iterator = values();
+            console.log(iterator.next().value);
+            console.log(iterator.next(10).value);
+            console.log(iterator.next(20).value);
+            console.log(iterator.next().done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_next_value"),
+        "1\n11\n21\ntrue\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;

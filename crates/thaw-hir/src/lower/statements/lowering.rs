@@ -87,7 +87,7 @@ impl<'a> FnLowerer<'a> {
             // native Thaw executable therefore treats it as a no-op.
             Stmt::Empty(_) | Stmt::Debugger(_) => Ok(Vec::new()),
             Stmt::Return(ret) => {
-                if let Some((values, _)) = self.generator_yields.clone() {
+                if let Some((values, _, _, _)) = self.generator_yields.clone() {
                     let mut statements = Vec::new();
                     if let Some(value) = &ret.arg {
                         statements.push(HirStmt::Expr(self.lower_expr(value)?));
@@ -148,7 +148,7 @@ impl<'a> FnLowerer<'a> {
             }
             Stmt::Expr(expr_stmt) => {
                 if let Expr::Yield(yield_expr) = expr_stmt.expr.as_ref() {
-                    let Some((values, element)) = self.generator_yields.clone() else {
+                    let Some((values, element, _, _)) = self.generator_yields.clone() else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
                     let value = yield_expr
@@ -452,7 +452,9 @@ impl<'a> FnLowerer<'a> {
                     let mut values_type = self.infer_expr_type(&values)?;
                     let mut generator_producer = None;
                     if let HirType::Function(params, result) = &values_type {
-                        if params == &[HirType::I64, HirType::Str]
+                        if params.len() == 3
+                            && params[0] == HirType::I64
+                            && params[1] == HirType::Str
                             && matches!(result.as_ref(), HirType::Array(_))
                         {
                             let result = result.as_ref().clone();
@@ -690,7 +692,10 @@ impl<'a> FnLowerer<'a> {
                         }
                     };
                     let mut body = Vec::new();
-                    if let Some((producer, _, _)) = &generator_producer {
+                    if let Some((producer, producer_type, _)) = &generator_producer {
+                        let HirType::Function(params, _) = producer_type else {
+                            unreachable!("generator producer type was checked above");
+                        };
                         body.extend([
                             HirStmt::Expr(HirExpr::Assign(
                                 values_name.clone(),
@@ -699,6 +704,12 @@ impl<'a> FnLowerer<'a> {
                                     vec![
                                         HirExpr::Lit(HirLit::I64(0)),
                                         HirExpr::Lit(HirLit::Str(String::new())),
+                                        generator_placeholder(&params[2]).ok_or_else(|| {
+                                            format!(
+                                                "generator input type {:?} has no default value",
+                                                params[2]
+                                            )
+                                        })?,
                                     ],
                                 )),
                             )),
