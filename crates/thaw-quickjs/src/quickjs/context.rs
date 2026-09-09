@@ -20,6 +20,17 @@ fn ensure_context() {
                         .expect("failed to serialize host environment"),
                     )
                     .expect("failed to install host environment");
+                let arguments = std::env::args().collect::<Vec<_>>();
+                let mut node_arguments = Vec::with_capacity(arguments.len() + 1);
+                node_arguments.push(arguments.first().cloned().unwrap_or_default());
+                node_arguments.extend(arguments);
+                ctx.globals()
+                    .set(
+                        "__thaw_host_argv_json",
+                        serde_json::to_string(&node_arguments)
+                            .expect("failed to serialize host arguments"),
+                    )
+                    .expect("failed to install host arguments");
                 install_napi_bridge(&ctx).expect("failed to install N-API bridge");
                 let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
                 install_shared_environment_functions(&ctx, shared_env)
