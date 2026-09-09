@@ -324,6 +324,8 @@ include!("lower/metadata.rs");
 
 include!("lower/interfaces.rs");
 
+include!("lower/generators.rs");
+
 include!("lower/declarations.rs");
 
 include!("lower/type_resolution.rs");

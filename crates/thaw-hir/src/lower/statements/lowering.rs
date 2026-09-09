@@ -453,7 +453,78 @@ impl<'a> FnLowerer<'a> {
                     if let HirType::Function(params, result) = &values_type {
                         if params.is_empty() && matches!(result.as_ref(), HirType::Array(_)) {
                             let result = result.as_ref().clone();
-                            values = HirExpr::Call(Box::new(values), Vec::new());
+                            let producer_type = values_type.clone();
+                            let producer = format!(
+                                "__thaw_generator_producer_{}",
+                                self.next_binding
+                            );
+                            self.next_binding += 1;
+                            let output =
+                                format!("__thaw_generator_output_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let batch = format!("__thaw_generator_batch_{}", self.next_binding);
+                            self.next_binding += 1;
+                            values = HirExpr::Call(
+                                Box::new(HirExpr::Lambda(
+                                    Vec::new(),
+                                    vec![HirParam {
+                                        name: producer.clone(),
+                                        ty: producer_type,
+                                    }],
+                                    result.clone(),
+                                    Box::new(HirExpr::Block(vec![
+                                        HirStmt::Let(
+                                            output.clone(),
+                                            result.clone(),
+                                            HirExpr::ArrayLit(Vec::new()),
+                                        ),
+                                        HirStmt::Let(
+                                            batch.clone(),
+                                            result.clone(),
+                                            HirExpr::ArrayLit(Vec::new()),
+                                        ),
+                                        HirStmt::While(
+                                            HirExpr::Lit(HirLit::Bool(true)),
+                                            vec![
+                                                HirStmt::Expr(HirExpr::Assign(
+                                                    batch.clone(),
+                                                    Box::new(HirExpr::Call(
+                                                        Box::new(HirExpr::Var(producer)),
+                                                        Vec::new(),
+                                                    )),
+                                                )),
+                                                HirStmt::If(
+                                                    HirExpr::BinOp(
+                                                        BinOp::EqEqEq,
+                                                        Box::new(HirExpr::ArrayLen(Box::new(
+                                                            HirExpr::Var(batch.clone()),
+                                                        ))),
+                                                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                                    ),
+                                                    vec![HirStmt::Break],
+                                                    Vec::new(),
+                                                ),
+                                                HirStmt::Expr(HirExpr::Call(
+                                                    Box::new(HirExpr::Var(
+                                                        "__thaw_array_push".into(),
+                                                    )),
+                                                    vec![
+                                                        HirExpr::Var(output.clone()),
+                                                        HirExpr::Call(
+                                                            Box::new(HirExpr::Var(
+                                                                "__thaw_array_shift".into(),
+                                                            )),
+                                                            vec![HirExpr::Var(batch.clone())],
+                                                        ),
+                                                    ],
+                                                )),
+                                            ],
+                                        ),
+                                        HirStmt::Return(Some(HirExpr::Var(output))),
+                                    ])),
+                                )),
+                                vec![values],
+                            );
                             values_type = result;
                         }
                     }
