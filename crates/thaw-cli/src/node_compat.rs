@@ -33,13 +33,29 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
         let source = case["source"]
             .as_str()
             .ok_or_else(|| format!("case `{name}` is missing `source`"))?;
+        let arguments = case
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .map(|arguments| {
+                arguments
+                    .iter()
+                    .map(|argument| {
+                        argument
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| format!("case `{name}` has a non-string argument"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let case_dir = root.join(index.to_string());
         std::fs::create_dir_all(&case_dir).map_err(|error| error.to_string())?;
         let node_source = case_dir.join("main.mts");
         std::fs::write(&node_source, format!("{source}\nawait main();\n"))
             .map_err(|error| error.to_string())?;
         let node = command_output_with_timeout(
-            Command::new("node").arg(&node_source),
+            Command::new("node").arg(&node_source).args(&arguments),
             EXECUTION_TIMEOUT,
         )
             .map_err(|error| format!("failed to run Node.js: {error}"))?;
@@ -71,7 +87,10 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
             true,
         );
         let outcome = build.and_then(|_| {
-            command_output_with_timeout(&mut Command::new(&output), EXECUTION_TIMEOUT)
+            command_output_with_timeout(
+                Command::new(&output).args(&arguments),
+                EXECUTION_TIMEOUT,
+            )
         });
         let thaw_exit_code = outcome
             .as_ref()
