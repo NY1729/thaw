@@ -87,6 +87,14 @@ impl<'a> FnLowerer<'a> {
             // native Thaw executable therefore treats it as a no-op.
             Stmt::Empty(_) | Stmt::Debugger(_) => Ok(Vec::new()),
             Stmt::Return(ret) => {
+                if let Some((values, _)) = self.generator_yields.clone() {
+                    let mut statements = Vec::new();
+                    if let Some(value) = &ret.arg {
+                        statements.push(HirStmt::Expr(self.lower_expr(value)?));
+                    }
+                    statements.push(HirStmt::Return(Some(HirExpr::Var(values))));
+                    return Ok(statements);
+                }
                 if let Some(arg) = &ret.arg {
                     if self.expression_never_returns(arg) {
                         let call = self.lower_expr(arg)?;
@@ -139,6 +147,33 @@ impl<'a> FnLowerer<'a> {
                 Ok(vec![HirStmt::Return(value)])
             }
             Stmt::Expr(expr_stmt) => {
+                if let Expr::Yield(yield_expr) = expr_stmt.expr.as_ref() {
+                    let Some((values, element)) = self.generator_yields.clone() else {
+                        return Err("`yield` is only valid inside a generator function".into());
+                    };
+                    let value = yield_expr
+                        .arg
+                        .as_ref()
+                        .ok_or("generator `yield` requires a value")?;
+                    if yield_expr.delegate {
+                        let array_type = HirType::Array(Box::new(element.clone()));
+                        let value = self.lower_expr_with_expected_type(value, Some(&array_type))?;
+                        let value = self.coerce_to_declared(&array_type, value)?;
+                        return Ok(vec![HirStmt::Expr(HirExpr::Assign(
+                            values.clone(),
+                            Box::new(HirExpr::ArrayConcat(
+                                vec![HirExpr::Var(values), value],
+                                element,
+                            )),
+                        ))]);
+                    }
+                    let value = self.lower_expr_with_expected_type(value, Some(&element))?;
+                    let value = self.coerce_to_declared(&element, value)?;
+                    return Ok(vec![HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![HirExpr::Var(values), value],
+                    ))]);
+                }
                 let discarded_dynamic_call = |expr: &Expr| {
                     matches!(
                         expr,

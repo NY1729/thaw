@@ -1510,6 +1510,48 @@ fn compiles_direct_generator_iteration() {
 }
 
 #[test]
+fn compiles_generator_control_flow_and_early_return() {
+    let source = r#"
+        function* values(limit: number): Generator<number> {
+            for (let value: number = 0; value < limit; value++) {
+                if (value === 3) return;
+                if (value % 2 === 0) yield value;
+            }
+            yield 99;
+        }
+        function main(): void {
+            let total: number = 0;
+            for (const value of values(6)) total += value;
+            console.log(total);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_control_flow_and_early_return"),
+        "2\n"
+    );
+}
+
+#[test]
+fn compiles_generator_yield_delegate() {
+    let source = r#"
+        function* values(): Generator<number> {
+            yield 1;
+            yield* [2, 3];
+            yield 4;
+        }
+        function main(): void {
+            let total: number = 0;
+            for (const value of values()) total += value;
+            console.log(total);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_yield_delegate"),
+        "10\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {
