@@ -142,6 +142,24 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
         } else if hir_type == Some(HirType::JsValue) {
             self.compile_console_js_value(value.into_int_value(), newline, descriptor)?;
+        } else if hir_type == Some(HirType::Symbol) {
+            let rendered = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_symbol_to_string").unwrap(),
+                    &[value.into()],
+                    "console_symbol",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("symbol conversion returned no value")?;
+            self.compile_console_text(
+                rendered.into_pointer_value(),
+                newline,
+                "console_symbol",
+                descriptor,
+            )?;
         } else if hir_type == Some(HirType::Undefined) {
             let undefined = self
                 .builder

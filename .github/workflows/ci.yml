@@ -26,6 +26,7 @@ jobs:
     env:
       THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
       LLVM_SYS_220_PREFIX: /opt/llvm-22
+      CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"

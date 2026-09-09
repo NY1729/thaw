@@ -342,8 +342,7 @@
     },
     {
       "name": "generator iteration",
-      "expect": "unsupported",
-      "detailContains": "generator function `__thawmod0_values` is not supported yet",
+      "expect": "matched",
       "source": "function* values(): Generator<number> { yield 1; yield 2; yield 3; } function main(): void { let sum: number = 0; for (const value of values()) sum += value; console.log(sum); }"
     },
     {
@@ -383,14 +382,12 @@
     },
     {
       "name": "bigint arithmetic",
-      "expect": "unsupported",
-      "detailContains": "unsupported type keyword TsBigIntKeyword",
+      "expect": "matched",
       "source": "function main(): void { const left: bigint = 9007199254740993n; const right: bigint = 7n; console.log(String(left + right)); }"
     },
     {
       "name": "symbol keyed property",
-      "expect": "unsupported",
-      "detailContains": "unsupported type keyword TsSymbolKeyword",
+      "expect": "matched",
       "source": "function main(): void { const key: symbol = Symbol('value'); const record = { [key]: 42 }; console.log(record[key], String(key)); }"
     },
     {
@@ -400,8 +397,7 @@
     },
     {
       "name": "regular expression named capture",
-      "expect": "unsupported",
-      "detailContains": "unsupported optional array member",
+      "expect": "matched",
       "source": "function main(): void { const match = /(?<word>[a-z]+)-(?<count>\\d+)/.exec('item-42'); console.log(match?.groups?.word, match?.groups?.count); }"
     },
     {
@@ -486,8 +482,7 @@
     },
     {
       "name": "error cause option",
-      "expect": "unsupported",
-      "detailContains": "`new Error()` expects zero or one message argument",
+      "expect": "matched",
       "source": "function main(): void { const cause = new Error('root'); const error = new Error('outer', { cause }); console.log(error.message, error.cause.message); }"
     }
   ]

@@ -106,9 +106,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl))) => {
                 let name = fn_decl.ident.sym.to_string();
                 let func = &fn_decl.function;
-                if func.is_generator {
-                    return Err(format!("generator function `{name}` is not supported yet"));
-                }
                 let is_extern = func.body.is_none();
                 if is_extern && func.is_async {
                     return Err(format!("ambient function `{name}` cannot be async"));
@@ -247,7 +244,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()),
                     Some(TsType::TsTypePredicate(predicate)) if predicate.asserts
                 );
-                let ret = if assertion_function {
+                let ret = if func.is_generator {
+                    lower_generator_return_type(
+                        &func.return_type,
+                        &name,
+                        &interfaces,
+                        &generic_interfaces,
+                        &type_substitution,
+                    )?
+                } else if assertion_function {
                     HirType::Void
                 } else if func.return_type.is_none() && !is_extern {
                     HirType::Dynamic

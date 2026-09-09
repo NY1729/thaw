@@ -476,13 +476,18 @@ fn accepts_template_strings_array_for_tagged_templates() {
 }
 
 #[test]
-fn reports_generator_functions_as_an_explicit_boundary() {
+fn lowers_direct_generator_yields_to_an_iterable_array() {
     let module = thaw_parser::parse_typescript(
         "function* values(): Generator<number> { yield 1; } function main(): void {}",
     )
     .unwrap();
-    let error = lower_module(&module).unwrap_err();
-    assert!(error.contains("generator function `values` is not supported yet"));
+    let program = lower_module(&module).unwrap();
+    let values = program
+        .functions
+        .iter()
+        .find(|function| function.name == "values")
+        .unwrap();
+    assert_eq!(values.ret, HirType::Array(Box::new(HirType::F64)));
 }
 
 #[test]

@@ -108,7 +108,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date string conversion returned no value".into());
             }
-            "__thaw_error_message" | "__thaw_error_name" | "__thaw_error_to_string" => {
+            "__thaw_error_message"
+            | "__thaw_error_name"
+            | "__thaw_error_cause"
+            | "__thaw_error_to_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
                 };
@@ -126,6 +129,41 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("error property access returned no value".into());
+            }
+            "__thaw_i64_to_string" => {
+                let [value] = args else {
+                    return Err("bigint string conversion expects one operand".into());
+                };
+                let value = self.compile_expr(value)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_i64_to_string").unwrap(),
+                        &[value.into()],
+                        "bigint_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("bigint string conversion returned no value".into());
+            }
+            "__thaw_symbol_new" | "__thaw_symbol_to_string" | "__thaw_symbol_key" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let value = self.compile_expr(value)?;
+                let runtime = name.trim_start_matches("__thaw_");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&format!("thaw_{runtime}")).unwrap(),
+                        &[value.into()],
+                        "symbol_call",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("symbol call returned no value".into());
             }
             "__thaw_js_handle_to_string" => {
                 let [value] = args else {
