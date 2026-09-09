@@ -70,10 +70,13 @@ jobs:
           cargo test -p thaw-cli -- --test-threads=1
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
-      - name: Test Hono, sharp, and Buffer packages
+      - name: Test real web applications and packages
         env:
           THAW_RUN_NPM_INTEGRATION: "1"
         run: |
+          cargo test -p thaw-cli registry_add_runs_a_real_hono_route_when_enabled -- --nocapture
+          cargo test -p thaw-cli registry_add_runs_a_real_fastify_route_when_enabled -- --nocapture
+          cargo test -p thaw-cli registry_add_runs_a_real_express_route_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_processes_a_real_hono_sharp_image_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_runs_real_safe_buffer_string_conversions_when_enabled -- --nocapture
       - name: Test Socket.IO client and server
@@ -93,3 +96,45 @@ jobs:
           name: acceptance-metrics
           path: target/acceptance/*.json
           if-no-files-found: ignore
+
+  runtime-comparison:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            llvm_asset: LLVM-22.1.8-Linux-X64.tar.xz
+            llvm_sha256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+            architecture: x64
+          - runner: ubuntu-24.04-arm
+            llvm_asset: LLVM-22.1.8-Linux-ARM64.tar.xz
+            llvm_sha256: 805efad2bb91cb4967fa569e0881d10c0f69c04461cf671cccbae19f547acc34
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      LLVM_SYS_220_PREFIX: /opt/llvm-22
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev time
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: ${{ matrix.llvm_asset }}
+          LLVM_SHA256: ${{ matrix.llvm_sha256 }}
+        run: |
+          curl -L "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET" -o /tmp/llvm.tar.xz
+          echo "$LLVM_SHA256  /tmp/llvm.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/llvm-22
+          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
+          echo /opt/llvm-22/bin >> "$GITHUB_PATH"
+          echo LD_LIBRARY_PATH=/opt/llvm-22/lib >> "$GITHUB_ENV"
+      - uses: oven-sh/setup-bun@v2
+      - name: Compare Node, Bun, and Thaw
+        run: |
+          cargo build --release -p thaw-cli
+          benchmarks/runtime/run.sh target/release/thaw "runtime-${{ matrix.architecture }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.architecture }}
+          path: runtime-${{ matrix.architecture }}.json
