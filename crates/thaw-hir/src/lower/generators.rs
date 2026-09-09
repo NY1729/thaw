@@ -201,12 +201,20 @@ impl<'a> GeneratorStateMachine<'a> {
                 )
             }
             HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_) => None,
-            other if generator_emits_value(other, self.values) => Some(self.block(
-                Vec::new(),
-                GeneratorTerm::Yield(other.clone(), continuation),
-                handler,
-                cancel_target,
-            )),
+            other if generator_emits_value(other, self.values) => {
+                let resume = self.block(
+                    Vec::new(),
+                    GeneratorTerm::Next(continuation),
+                    handler.clone(),
+                    cancel_target,
+                );
+                Some(self.block(
+                    Vec::new(),
+                    GeneratorTerm::Yield(other.clone(), resume),
+                    handler,
+                    cancel_target,
+                ))
+            }
             other => Some(self.block(
                 vec![other.clone()],
                 GeneratorTerm::Next(continuation),
@@ -252,6 +260,7 @@ fn lower_generator_state_machine(
     values: &str,
     state: &str,
     control: &str,
+    error: &str,
 ) -> Option<(usize, Vec<HirStmt>, Vec<HirStmt>)> {
     let mut machine = GeneratorStateMachine::new(values, finalizers);
     let done = machine.block(Vec::new(), GeneratorTerm::Done, None, 0);
@@ -288,7 +297,7 @@ fn lower_generator_state_machine(
         }
         selected.insert(
             0,
-            generator_cancel_transition(control, values, state, cancel_target),
+            generator_control_transition(control, error, values, state, cancel_target),
         );
         if let Some(handler) = block.handler {
             let caught = format!("__thaw_generator_caught_{id}");
@@ -357,13 +366,14 @@ fn lower_generator_state_machine(
     ))
 }
 
-fn generator_cancel_transition(
+fn generator_control_transition(
     control: &str,
+    error: &str,
     values: &str,
     state: &str,
     cancel_target: usize,
 ) -> HirStmt {
-    HirStmt::If(
+    let cancel = HirStmt::If(
         HirExpr::BinOp(
             BinOp::EqEqEq,
             Box::new(HirExpr::Var(control.into())),
@@ -382,6 +392,21 @@ fn generator_cancel_transition(
             HirStmt::Continue,
         ],
         Vec::new(),
+    );
+    HirStmt::If(
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::Var(control.into())),
+            Box::new(HirExpr::Lit(HirLit::I64(2))),
+        ),
+        vec![
+            HirStmt::Expr(HirExpr::Assign(
+                control.into(),
+                Box::new(HirExpr::Lit(HirLit::I64(0))),
+            )),
+            HirStmt::Throw(HirExpr::Var(error.into())),
+        ],
+        vec![cancel],
     )
 }
 
