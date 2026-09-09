@@ -1712,6 +1712,26 @@ fn for_of_consumes_generators_one_yield_at_a_time() {
 }
 
 #[test]
+fn compiles_class_generator_methods() {
+    let source = r#"
+        class Range {
+            start: number;
+            constructor(start: number) { this.start = start; }
+            *values(): Generator<number> {
+                yield this.start;
+                yield this.start + 1;
+            }
+        }
+        function main(): void {
+            let total: number = 0;
+            for (const value of new Range(4).values()) total += value;
+            console.log(total);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_generator_method"), "9\n");
+}
+
+#[test]
 fn compiles_regex_exec_last_index_state() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {

@@ -55,14 +55,24 @@ fn collect_native_classes<'a>(
         } else {
             None
         };
-        let result = Box::new(lower_fn_return_type(
-            method.function.is_async,
-            &method.function.return_type,
-            class,
-            interfaces,
-            generic_interfaces,
-            &substitution,
-        )?);
+        let result = Box::new(if method.function.is_generator {
+            lower_generator_return_type(
+                &method.function.return_type,
+                class,
+                interfaces,
+                generic_interfaces,
+                &substitution,
+            )?
+        } else {
+            lower_fn_return_type(
+                method.function.is_async,
+                &method.function.return_type,
+                class,
+                interfaces,
+                generic_interfaces,
+                &substitution,
+            )?
+        });
         Ok(if rest.is_some() || optional.iter().any(|value| *value) {
             HirType::CallableFunction(
                 params,
