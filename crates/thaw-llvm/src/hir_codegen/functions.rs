@@ -261,10 +261,23 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn declare_function(&mut self, func: &HirFunction) -> Result<FunctionValue<'ctx>, String> {
+        let capture_count = self
+            .async_lambda_captures
+            .get(&func.name)
+            .map_or(0, Vec::len);
         let param_types = func
             .params
             .iter()
-            .map(|p| self.basic_type(&p.ty).map(BasicMetadataTypeEnum::from))
+            .enumerate()
+            .map(|(index, p)| {
+                if index < capture_count {
+                    Ok(BasicMetadataTypeEnum::from(
+                        self.context.ptr_type(AddressSpace::default()),
+                    ))
+                } else {
+                    self.basic_type(&p.ty).map(BasicMetadataTypeEnum::from)
+                }
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let frame_split = self.frame_await_plan(func)?.is_some();

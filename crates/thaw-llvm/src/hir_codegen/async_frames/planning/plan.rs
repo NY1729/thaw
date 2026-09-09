@@ -714,9 +714,20 @@ impl<'ctx> HirCompiler<'ctx> {
             self.basic_type(&func.ret)
                 .map_err(|e| format!("async frame result: {e}"))?;
         }
+        let captures = self
+            .async_lambda_captures
+            .get(&func.name)
+            .map(|captures| {
+                captures
+                    .iter()
+                    .map(|capture| (capture.name.clone(), capture.ty.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let mut locals = func
             .params
             .iter()
+            .skip(captures.len())
             .map(|param| {
                 self.basic_type(&param.ty)
                     .map_err(|e| format!("async frame parameter `{}`: {e}", param.name))?;
@@ -740,6 +751,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         Ok(Some(FrameAsyncPlan {
             segments,
+            captures,
             locals,
             ret: func.ret.clone(),
             guarded_rethrow_handlers,

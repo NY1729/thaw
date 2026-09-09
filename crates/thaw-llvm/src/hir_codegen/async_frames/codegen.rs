@@ -81,7 +81,24 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(waiting_slot, ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
         self.bind_async_frame_locals(frame, plan)?;
-        for (param_value, param) in ramp.get_param_iter().zip(&func.params) {
+        for (index, (param_value, param)) in ramp.get_param_iter().zip(&func.params).enumerate() {
+            if index < plan.captures.len() {
+                let capture_slot = self.async_frame_field(
+                    frame,
+                    self.async_captures_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                    &format!("capture_{}", param.name),
+                )?;
+                self.builder
+                    .build_store(capture_slot, param_value)
+                    .map_err(|e| e.to_string())?;
+                self.variables.insert(
+                    param.name.clone(),
+                    (param_value.into_pointer_value(), self.basic_type(&param.ty)?),
+                );
+                self.variable_hir_types
+                    .insert(param.name.clone(), param.ty.clone());
+                continue;
+            }
             let (slot, _) = self.variables.get(&param.name).copied().ok_or_else(|| {
                 format!("missing async frame parameter slot for `{}`", param.name)
             })?;
@@ -311,6 +328,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.arena_variables.clear();
             self.catch_stack.clear();
             self.seed_global_variables();
+            self.bind_async_frame_captures(resume_frame, plan)?;
             self.bind_async_frame_locals(resume_frame, plan)?;
             self.emit_async_segment(
                 &segments[index + 1],
@@ -593,6 +611,30 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    fn bind_async_frame_captures(
+        &mut self,
+        frame: PointerValue<'ctx>,
+        plan: &FrameAsyncPlan,
+    ) -> Result<(), String> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        for (index, (name, ty)) in plan.captures.iter().enumerate() {
+            let slot = self.async_frame_field(
+                frame,
+                self.async_captures_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                &format!("capture_{name}"),
+            )?;
+            let cell = self
+                .builder
+                .build_load(ptr_ty, slot, &format!("capture_{name}_cell"))
+                .map_err(|e| e.to_string())?
+                .into_pointer_value();
+            self.variables
+                .insert(name.clone(), (cell, self.basic_type(ty)?));
+            self.variable_hir_types.insert(name.clone(), ty.clone());
+        }
+        Ok(())
+    }
+
     fn compile_async_segment_block(
         &mut self,
         stmts: &[HirStmt],
@@ -859,6 +901,10 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn async_locals_offset(&self, plan: &FrameAsyncPlan) -> u64 {
+        self.async_captures_offset(plan) + ASYNC_SLOT_BYTES * plan.captures.len() as u64
+    }
+
+    fn async_captures_offset(&self, plan: &FrameAsyncPlan) -> u64 {
         ASYNC_FRAME_BYTES
             + if plan.ret == HirType::Void {
                 0

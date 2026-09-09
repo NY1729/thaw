@@ -1224,9 +1224,7 @@ fn lower_function_statements(
             HirExpr::ArrayLit(Vec::new()),
         ));
         let lowered_generator_body = lowerer.lower_stmts(statements)?;
-        if async_generator && lowered_generator_body.iter().any(stmt_contains_await) {
-            return Err("async generators containing `await` are not supported yet".into());
-        }
+        let generator_suspends = lowered_generator_body.iter().any(stmt_contains_await);
         let mut generator_body = Vec::new();
         let state = "__thaw_generator_state".to_string();
         if let Some((entry, locals, state_machine)) =
@@ -1310,7 +1308,12 @@ fn lower_function_statements(
                     ty: params[3].clone(),
                 },
             ];
-        let (producer_return, generator_body) = if async_generator {
+        let (producer_return, generator_body) = if async_generator && generator_suspends {
+            (
+                HirType::Promise(Box::new(generated.clone())),
+                generator_body,
+            )
+        } else if async_generator {
             let mut inner_captures = captures.clone();
             inner_captures.extend(producer_params.clone());
             let inner = HirExpr::Lambda(

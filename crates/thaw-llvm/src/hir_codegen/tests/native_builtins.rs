@@ -1947,6 +1947,33 @@ fn async_generator_next_returns_promised_iterator_results() {
 }
 
 #[test]
+fn async_generator_suspends_at_await_between_yields() {
+    let source = r#"
+        let progress: number = 0;
+        async function* values(): AsyncGenerator<number> {
+            const first = await Promise.resolve(4);
+            progress += 1;
+            yield first;
+            await Promise.resolve();
+            progress += 10;
+            yield 5;
+        }
+        async function main(): Promise<void> {
+            const iterator = values();
+            const first = await iterator.next();
+            console.log(first.value, first.done, progress);
+            const second = await iterator.next();
+            console.log(second.value, second.done, progress);
+            console.log((await iterator.next()).done);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_await"),
+        "4 false 1\n5 false 11\ntrue\n"
+    );
+}
+
+#[test]
 fn defers_generator_body_until_first_consumption() {
     let source = r#"
         let started: number = 0;

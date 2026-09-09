@@ -769,7 +769,7 @@ impl<'a> FnLowerer<'a> {
                 ArrowFunctionBody::Expr(expr) => {
                     let expression = if let Some(expected) = expected_return {
                         let expression = self.lower_expr_with_expected_type(expr, Some(expected))?;
-                        if expected == &HirType::Void {
+                        if matches!(expected, HirType::Void | HirType::JsValue) {
                             expression
                         } else {
                             self.coerce_to_declared(expected, expression)?

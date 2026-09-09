@@ -170,6 +170,7 @@ struct AsyncRejectionHandler {
 
 struct FrameAsyncPlan {
     segments: Vec<AsyncSegment>,
+    captures: Vec<(String, HirType)>,
     locals: Vec<(String, HirType)>,
     ret: HirType,
     guarded_rethrow_handlers: HashMap<String, AsyncRejectionHandler>,
@@ -203,6 +204,7 @@ pub struct HirCompiler<'ctx> {
     /// legacy synchronous V1 ABI. Seeded to a fixed point before declarations
     /// so callers and callees agree on the LLVM signature.
     frame_async_functions: HashMap<String, HirType>,
+    async_lambda_captures: HashMap<String, Vec<HirParam>>,
     promise_returning_functions: HashSet<String>,
     active_async_completion: Option<PointerValue<'ctx>>,
     next_lambda: usize,
@@ -237,6 +239,7 @@ impl<'ctx> HirCompiler<'ctx> {
             loop_stack: Vec::new(),
             loop_promotion_scopes: Vec::new(),
             frame_async_functions: HashMap::new(),
+            async_lambda_captures: HashMap::new(),
             promise_returning_functions: HashSet::new(),
             active_async_completion: None,
             next_lambda: 0,

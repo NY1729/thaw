@@ -431,6 +431,16 @@
       "source": "async function* values(): AsyncGenerator<number, string> { yield 4; return 'done'; } async function main(): Promise<void> { const iterator = values(); const first = await iterator.next(); const end = await iterator.next(); console.log(first.value, first.done); console.log(end.value, end.done); }"
     },
     {
+      "name": "async generator await suspension",
+      "expect": "matched",
+      "source": "let progress: number = 0; async function* values(): AsyncGenerator<number> { const first = await Promise.resolve(4); progress += 1; yield first; await Promise.resolve(); progress += 10; yield 5; } async function main(): Promise<void> { const iterator = values(); const first = await iterator.next(); console.log(first.value, first.done, progress); const second = await iterator.next(); console.log(second.value, second.done, progress); console.log((await iterator.next()).done); }"
+    },
+    {
+      "name": "async closure capture identity",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> { let count: number = 0; const advance = async (): Promise<number> => { await Promise.resolve(); count += 1; return count; }; console.log(await advance(), await advance(), count); }"
+    },
+    {
       "name": "generator deferred start",
       "expect": "matched",
       "source": "let started: number = 0; function* values(): Generator<number> { started += 1; yield 4; } function main(): void { const iterator = values(); console.log(started); console.log(iterator.next().value); console.log(started); }"
