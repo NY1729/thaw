@@ -73,19 +73,18 @@ jobs:
       - name: Test real web applications and packages
         env:
           THAW_RUN_NPM_INTEGRATION: "1"
+        # The whole `THAW_RUN_NPM_INTEGRATION` package-interop suite, run
+        # serially (the parallel run has known contention). Every gated
+        # test in it is named `registry_add_*_when_enabled`; run them as
+        # one step so a real interop or package regression can't hide
+        # behind a hand-maintained allowlist that only ever named a
+        # handful. `--skip postgres` leaves the one pg test for the
+        # PostgreSQL step below (it needs `THAW_POSTGRES_URL`). The
+        # native `node:http` conformance test is gated on the same flag
+        # and needs `node`, which this runner has.
         run: |
-          cargo test -p thaw-cli registry_add_runs_a_real_hono_route_when_enabled -- --nocapture
-          cargo test -p thaw-cli registry_add_runs_a_real_fastify_route_when_enabled -- --nocapture
-          cargo test -p thaw-cli registry_add_runs_a_real_express_route_when_enabled -- --nocapture
-          cargo test -p thaw-cli registry_add_builds_a_multi_package_project_when_enabled -- --nocapture
-          cargo test -p thaw-cli registry_add_builds_and_runs_date_fns_root_when_enabled -- --nocapture
-          cargo test -p thaw-cli registry_add_infers_a_real_commander_action_callback_when_enabled -- --nocapture
-          cargo test -p thaw-cli registry_add_processes_a_real_hono_sharp_image_when_enabled -- --nocapture
-          cargo test -p thaw-cli registry_add_runs_real_safe_buffer_string_conversions_when_enabled -- --nocapture
-      - name: Test Socket.IO client and server
-        env:
-          THAW_RUN_NPM_INTEGRATION: "1"
-        run: cargo test -p thaw-cli registry_add_runs_real_socket_io_client_ack_and_disconnect_when_enabled -- --nocapture
+          cargo test -p thaw-cli registry_add -- --test-threads=1 --nocapture --skip postgres
+          cargo test -p thaw-cli node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --nocapture
       - name: Test Hono, Prisma, and PostgreSQL
         env:
           THAW_POSTGRES_URL: postgresql://postgres:password@127.0.0.1:5432/app
