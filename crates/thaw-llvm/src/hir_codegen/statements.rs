@@ -85,7 +85,37 @@ impl<'ctx> HirCompiler<'ctx> {
             HirStmt::Let(name, ty, expr) => {
                 let val = self.compile_expr(expr)?;
                 let llvm_ty = self.basic_type(ty)?;
-                let slot = self.allocate_variable_cell(llvm_ty, name)?;
+                // A `Let` for a name that's already bound to an async-frame
+                // slot (`bind_async_frame_locals` sets this up before a
+                // segment's own statements run -- see `async_frames/
+                // codegen.rs`) must store into that *same* slot rather than
+                // allocating a fresh one: this exact statement is the
+                // declaration inside a loop's body, re-executed on every
+                // iteration/resume, and the whole point of frame-backing it
+                // is for its storage to survive the suspend/resume boundary
+                // between iterations. Allocating a new ordinary stack cell
+                // here instead (as this code used to do unconditionally)
+                // silently rebinds `self.variables[name]` away from the
+                // frame slot to one hoisted into the *current* physical
+                // function's entry block -- valid only for that one
+                // invocation of `resume`, not across the separate
+                // invocation the next loop iteration's resume causes. Any
+                // closure that captured `name` between this point and the
+                // next iteration (real example: the closure `&&`/`||`
+                // desugars into, `wrap_call_argument_bindings`) ends up
+                // holding a dangling pointer into a stack frame that's
+                // already gone, reading garbage on the next iteration --
+                // silently wrong values, or a crash, depending on what
+                // happens to occupy that stack slot afterward.
+                let existing_frame_cell = self
+                    .variables
+                    .get(name)
+                    .filter(|(cell, _)| self.async_frame_cells.contains(cell))
+                    .map(|(cell, _)| *cell);
+                let slot = match existing_frame_cell {
+                    Some(cell) => cell,
+                    None => self.allocate_variable_cell(llvm_ty, name)?,
+                };
                 self.builder
                     .build_store(slot, val)
                     .map_err(|e| e.to_string())?;

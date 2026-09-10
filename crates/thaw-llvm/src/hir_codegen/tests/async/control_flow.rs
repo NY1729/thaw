@@ -101,6 +101,55 @@ fn frame_split_supports_await_inside_while_loop() {
     assert_eq!(compile_and_run(source, "await_while_loop"), "3\n3\n");
 }
 
+/// Baseline coverage for a local declared *inside* an async `while`
+/// loop's body (re-declared every iteration, unlike a local declared
+/// before the loop) and captured by the closure `&&`/`||` desugar into
+/// (`lower_logical_expr`/`wrap_call_argument_bindings`). This exact
+/// shape, but with the awaited value coming from a real npm package's
+/// dynamic/QuickJS-backed call (Hono's `app.request(...)`/`response.
+/// text()`) rather than a plain recursive `async` helper as here,
+/// segfaulted or silently misevaluated on the loop's second and later
+/// iterations -- see `registry_add_runs_a_real_hono_route_repeatedly_
+/// through_a_while_loop_when_enabled` in `thaw-cli`'s `applications.rs`
+/// for the actual reproducing regression test and root-cause writeup;
+/// this plain-`sleep`-based version alone was confirmed to pass
+/// identically with or without that fix, so it's kept only as ordinary
+/// baseline coverage for the pattern, not as a reproduction of the bug
+/// itself.
+///
+/// Fixed (see the real-Hono test for the confirmed root cause) by
+/// having `HirStmt::Let` reuse an existing async-frame cell (just
+/// `build_store` into it) instead of always allocating a fresh one,
+/// whenever the name being declared is already bound to one.
+#[test]
+fn frame_split_supports_compound_condition_over_a_string_declared_inside_an_async_while_loop() {
+    let source = r#"
+        async function fetchName(n: number): Promise<string> {
+            await sleep(1);
+            return "ok" + n;
+        }
+
+        async function main(): Promise<void> {
+            let count: number = 0;
+            let stable: boolean = true;
+            while (stable && count < 5) {
+                const name: string = await fetchName(count);
+                if (name !== "ok" + count) {
+                    stable = false;
+                } else {
+                    count = count + 1;
+                }
+            }
+            console.log(count);
+            console.log(stable);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "compound_condition_string_in_while"),
+        "5\ntrue\n"
+    );
+}
+
 #[test]
 fn frame_split_supports_await_and_continue_in_do_while_loop() {
     let source = r#"
