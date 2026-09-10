@@ -281,7 +281,39 @@ fn extract_const_call_signature_decls<'a>(
             };
             let annotation = binding.type_ann.as_ref()?;
             let name = binding.id.sym.to_string();
-            match annotation.type_ann.as_ref() {
+            // `A & { ... }` (`debug`: `debug.Debug & { debug: ...;
+            // default: ... }`): a callable interface intersected with a
+            // plain property bag. Use the callable member's signatures.
+            let type_ann = match annotation.type_ann.as_ref() {
+                TsType::TsUnionOrIntersectionType(
+                    TsUnionOrIntersectionType::TsIntersectionType(intersection),
+                ) => intersection
+                    .types
+                    .iter()
+                    .map(Box::as_ref)
+                    .find(|member| {
+                        let TsType::TsTypeRef(ty_ref) = member else {
+                            return matches!(
+                                member,
+                                TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(_))
+                            );
+                        };
+                        let iface_name = match &ty_ref.type_name {
+                            TsEntityName::Ident(ident) => ident.sym.to_string(),
+                            TsEntityName::TsQualifiedName(qualified) => {
+                                qualified.right.sym.to_string()
+                            }
+                        };
+                        interfaces.get(iface_name.as_str()).is_some_and(|iface| {
+                            iface.body.body.iter().any(|member| {
+                                matches!(member, TsTypeElement::TsCallSignatureDecl(_))
+                            })
+                        })
+                    })
+                    .unwrap_or(annotation.type_ann.as_ref()),
+                other => other,
+            };
+            match type_ann {
                 TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
                     Some(vec![(name, CallableConstSignature::Direct(function))])
                 }
