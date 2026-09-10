@@ -36,7 +36,7 @@ impl<'a> FnLowerer<'a> {
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
                 if let Expr::Yield(yield_expr) = init {
-                    let Some((values, element, input, input_type, _, _)) =
+                    let Some((values, element, input, input_type, returns, _)) =
                         self.generator_yields.clone()
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
@@ -46,6 +46,7 @@ impl<'a> FnLowerer<'a> {
                         &values,
                         &element,
                         &input,
+                        &returns,
                     )?;
                     let declared = binding
                         .type_ann

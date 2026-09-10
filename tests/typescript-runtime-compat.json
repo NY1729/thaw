@@ -356,6 +356,41 @@
       "source": "function* values(): Generator<number> { yield 1; yield* [2, 3]; yield 4; } function main(): void { let sum: number = 0; for (const value of values()) sum += value; console.log(sum); }"
     },
     {
+      "name": "generator delegation to string iterable",
+      "expect": "matched",
+      "source": "function* values(): Generator<string> { yield '['; yield* 'ab'; yield ']'; } function main(): void { let result: string = ''; for (const value of values()) result += value; console.log(result); }"
+    },
+    {
+      "name": "generator delegation to custom iterable",
+      "expect": "matched",
+      "source": "class Values { *[Symbol.iterator](): Generator<number> { yield 2; yield 3; } } function* values(): Generator<number> { const iterable = new Values(); yield 1; yield* iterable; yield 4; } function main(): void { let total: number = 0; for (const value of values()) total += value; console.log(total); }"
+    },
+    {
+      "name": "for of consumes custom iterable",
+      "expect": "matched",
+      "source": "class Values { *[Symbol.iterator](): Generator<number> { yield 2; yield 3; } } function main(): void { const iterable = new Values(); let total: number = 0; for (const value of iterable) total += value; console.log(total); }"
+    },
+    {
+      "name": "generator delegation to object iterable",
+      "expect": "matched",
+      "source": "function* inner(): Generator<number> { yield 2; yield 3; } function main(): void { const iterable = { [Symbol.iterator]: function(): Generator<number> { return inner(); } }; const outer = function* (): Generator<number> { yield 1; yield* iterable; yield 4; }; let total: number = 0; for (const value of outer()) total += value; console.log(total); }"
+    },
+    {
+      "name": "for of consumes object iterable",
+      "expect": "matched",
+      "source": "function* inner(): Generator<number> { yield 2; yield 3; } function main(): void { const iterable = { [Symbol.iterator]: function(): Generator<number> { return inner(); } }; let total: number = 0; for (const value of iterable) total += value; console.log(total); }"
+    },
+    {
+      "name": "for of consumes next object iterator",
+      "expect": "matched",
+      "source": "function main(): void { let current: number = 0; const iterator = { next: function(): { value: number; done: boolean } { current += 1; return current <= 3 ? { value: current, done: false } : { value: 0, done: true }; } }; const iterable = { [Symbol.iterator]: function(): { next: () => { value: number; done: boolean } } { return iterator; } }; let total: number = 0; for (const value of iterable) total += value; console.log(total); }"
+    },
+    {
+      "name": "generator delegates to next object iterator",
+      "expect": "matched",
+      "source": "function main(): void { let current: number = 0; const iterator = { next: function(): { value: number; done: boolean } { current += 1; return current <= 2 ? { value: current, done: false } : { value: 0, done: true }; } }; const iterable = { [Symbol.iterator]: function(): { next: () => { value: number; done: boolean } } { return iterator; } }; const values = function* (): Generator<number> { yield 0; yield* iterable; yield 3; }; let total: number = 0; for (const value of values()) total += value; console.log(total); }"
+    },
+    {
       "name": "generator delegation suspension",
       "expect": "matched",
       "source": "let progress: number = 0; function* values(): Generator<number> { yield* [1, 2]; progress += 10; } function main(): void { const iterator = values(); console.log(iterator.next().value, progress); console.log(iterator.next().value, progress); console.log(iterator.next().done, progress); }"
@@ -472,8 +507,7 @@
     },
     {
       "name": "generator rejects reentrant next",
-      "expect": "unsupported",
-      "detailContains": "unsupported type reference",
+      "expect": "matched",
       "source": "function main(): void { let iterator: Generator<number> = (function* (): Generator<number> { yield 0; })(); const values = function* (): Generator<number> { try { iterator.next(); } catch (error) { console.log('caught'); } yield 1; }; iterator = values(); console.log(iterator.next().value); }"
     },
     {
@@ -755,6 +789,21 @@
       "name": "generator finally return overrides requested return",
       "expect": "matched",
       "source": "function* values(): Generator<number, number> { try { yield 1; } finally { return 7; } } function main(): void { const iterator = values(); console.log(iterator.next().value); const stopped = iterator.return(9); console.log(stopped.value, stopped.done); }"
+    },
+    {
+      "name": "for of break calls iterator return",
+      "expect": "matched",
+      "source": "function main(): void { let closed: boolean = false; let current: number = 0; const iterator = { next: function(): { value: number; done: boolean } { current += 1; return { value: current, done: false }; }, return: function(): { value: number; done: boolean } { closed = true; return { value: 0, done: true }; } }; const iterable = { [Symbol.iterator]: function(): { next: () => { value: number; done: boolean }; return: () => { value: number; done: boolean } } { return iterator; } }; for (const value of iterable) { console.log(value); break; } console.log(closed); }"
+    },
+    {
+      "name": "yield delegate forwards iterator throw",
+      "expect": "matched",
+      "source": "function main(): void { let current: number = 0; const iterator = { next: function(): { value: number; done: boolean } { current += 1; return current === 1 ? { value: 1, done: false } : { value: 0, done: true }; }, throw: function(error: string): { value: number; done: boolean } { console.log(error); return { value: 2, done: false }; } }; const iterable = { [Symbol.iterator]: function(): { next: () => { value: number; done: boolean }; throw: (error: string) => { value: number; done: boolean } } { return iterator; } }; const values = function* (): Generator<number> { yield* iterable; }; const valuesIterator = values(); console.log(valuesIterator.next().value); console.log(valuesIterator.throw('boom').value); console.log(valuesIterator.next().done); }"
+    },
+    {
+      "name": "yield delegate forwards iterator return",
+      "expect": "matched",
+      "source": "function main(): void { let closed: boolean = false; const iterator = { next: function(): { value: number; done: boolean } { return { value: 1, done: false }; }, return: function(): { value: number; done: boolean } { closed = true; return { value: 0, done: true }; } }; const iterable = { [Symbol.iterator]: function(): { next: () => { value: number; done: boolean }; return: () => { value: number; done: boolean } } { return iterator; } }; const values = function* (): Generator<number> { yield* iterable; }; const valuesIterator = values(); console.log(valuesIterator.next().value); const stopped = valuesIterator.return(9); console.log(stopped.value, stopped.done, closed); }"
     }
   ]
 }
