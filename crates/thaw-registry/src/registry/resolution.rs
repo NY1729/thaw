@@ -271,9 +271,15 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         }
         // `IncomingMessage` deliberately has no `on(...)` member (real
         // Node's `IncomingMessage` is an EventEmitter, but thaw-std's
-        // backing `#[repr(C)] struct IncomingMessage` only ever has
-        // `method`/`url` -- there's no closure field or dispatch for it
-        // at all, so declaring it here would be a pure type-level lie).
+        // backing `#[repr(C)] struct IncomingMessage` only carries plain
+        // fields -- there's no closure field or dispatch for it at all,
+        // so declaring it here would be a pure type-level lie). `body`
+        // is thaw's own convenience field (real Node exposes the request
+        // body only as a stream): it holds the fully-read request body
+        // as a string, populated before the handler runs. `statusCode`
+        // is kept only for backwards compatibility with existing
+        // structural annotations; it's meaningless on a server request
+        // and always 0.
         // Also fixes a real, confirmed crash: a method-shorthand member
         // (`on(event, callback): T`) mixed into an interface otherwise
         // made of plain fields broke thaw-hir/thaw-llvm's classification
@@ -287,7 +293,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         // removing the one dead, never-backed member here was enough to
         // unblock this callback shape.
         "http" => {
-            "export interface IncomingMessage { method: string; url: string; statusCode: number; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; on: (event: string, callback: () => void) => boolean; __onError: (event: string, callback: (error: { message: string; code: string; syscall: string; address: string; port: number }) => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => void): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => void): Server;\nexport declare const get: JsValue;\nexport declare const request: JsValue;\n"
+            "export interface IncomingMessage { method: string; url: string; statusCode: number; body: string; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; on: (event: string, callback: () => void) => boolean; __onError: (event: string, callback: (error: { message: string; code: string; syscall: string; address: string; port: number }) => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => void): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => void): Server;\nexport declare const get: JsValue;\nexport declare const request: JsValue;\n"
         }
         "https" => {
             "export declare function request(argsArray: any): any;\nexport declare function get(argsArray: any): any;\nexport declare function createServer(argsArray: any): any;\nexport declare const ClientRequest: any;\nexport declare const IncomingMessage: any;\nexport declare const ServerResponse: any;\nexport declare const Server: any;\nexport declare const globalAgent: any;\n"
