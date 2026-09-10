@@ -1048,70 +1048,52 @@ impl<'a> FnLowerer<'a> {
                             return Err("`using` bindings in `for...of` are not supported".into())
                         }
                     };
-                    let mut body = Vec::new();
-                    if let Some((producer, producer_type, _, async_generator)) = &generator_producer {
+                    let resume_generator = |control| -> Result<HirExpr, String> {
+                        let Some((producer, producer_type, _, async_generator)) =
+                            &generator_producer
+                        else {
+                            return Err("missing generator producer".into());
+                        };
                         let HirType::Function(params, _) = producer_type else {
                             unreachable!("generator producer type was checked above");
                         };
+                        let call = HirExpr::Call(
+                            Box::new(HirExpr::Var(producer.clone())),
+                            vec![
+                                HirExpr::Lit(HirLit::I64(control)),
+                                HirExpr::Lit(HirLit::Str(String::new())),
+                                generator_placeholder(&params[2]).ok_or_else(|| {
+                                    format!(
+                                        "generator input type {:?} has no default value",
+                                        params[2]
+                                    )
+                                })?,
+                                HirExpr::TypedClosure(
+                                    params[3].clone(),
+                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                ),
+                                HirExpr::TypedClosure(
+                                    params[4].clone(),
+                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                ),
+                                HirExpr::TypedClosure(
+                                    params[5].clone(),
+                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                ),
+                            ],
+                        );
+                        Ok(if *async_generator {
+                            HirExpr::AwaitPromise(Box::new(call), values_type.clone())
+                        } else {
+                            call
+                        })
+                    };
+                    let mut body = Vec::new();
+                    if generator_producer.is_some() {
                         body.extend([
                             HirStmt::Expr(HirExpr::Assign(
                                 values_name.clone(),
-                                Box::new(if *async_generator {
-                                    HirExpr::AwaitPromise(
-                                        Box::new(HirExpr::Call(
-                                            Box::new(HirExpr::Var(producer.clone())),
-                                            vec![
-                                                HirExpr::Lit(HirLit::I64(0)),
-                                                HirExpr::Lit(HirLit::Str(String::new())),
-                                                generator_placeholder(&params[2]).ok_or_else(|| {
-                                                    format!(
-                                                        "generator input type {:?} has no default value",
-                                                        params[2]
-                                                    )
-                                                })?,
-                                                HirExpr::TypedClosure(
-                                                    params[3].clone(),
-                                                    Box::new(HirExpr::ArrayLit(Vec::new())),
-                                                ),
-                                                HirExpr::TypedClosure(
-                                                    params[4].clone(),
-                                                    Box::new(HirExpr::ArrayLit(Vec::new())),
-                                                ),
-                                                HirExpr::TypedClosure(
-                                                    params[5].clone(),
-                                                    Box::new(HirExpr::ArrayLit(Vec::new())),
-                                                ),
-                                            ],
-                                        )),
-                                        values_type.clone(),
-                                    )
-                                } else {
-                                    HirExpr::Call(
-                                    Box::new(HirExpr::Var(producer.clone())),
-                                    vec![
-                                        HirExpr::Lit(HirLit::I64(0)),
-                                        HirExpr::Lit(HirLit::Str(String::new())),
-                                        generator_placeholder(&params[2]).ok_or_else(|| {
-                                            format!(
-                                                "generator input type {:?} has no default value",
-                                                params[2]
-                                            )
-                                        })?,
-                                        HirExpr::TypedClosure(
-                                            params[3].clone(),
-                                            Box::new(HirExpr::ArrayLit(Vec::new())),
-                                        ),
-                                        HirExpr::TypedClosure(
-                                            params[4].clone(),
-                                            Box::new(HirExpr::ArrayLit(Vec::new())),
-                                        ),
-                                        HirExpr::TypedClosure(
-                                            params[5].clone(),
-                                            Box::new(HirExpr::ArrayLit(Vec::new())),
-                                        ),
-                                    ],
-                                    )
-                                }),
+                                Box::new(resume_generator(0)?),
                             )),
                             HirStmt::If(
                                 HirExpr::BinOp(
@@ -1156,15 +1138,33 @@ impl<'a> FnLowerer<'a> {
                             }),
                         )
                     };
+                    let loop_stmt = HirStmt::While(condition, body);
+                    let loop_stmt = if generator_producer.is_some() {
+                        let close = HirStmt::Expr(resume_generator(1)?);
+                        let exception = self.bind_local(
+                            "__thaw_for_of_exception",
+                            HirType::Str,
+                        );
+                        HirStmt::Try(
+                            inject_finally_before_exits(vec![loop_stmt], std::slice::from_ref(&close), false),
+                            exception.clone(),
+                            vec![close.clone(), HirStmt::Throw(HirExpr::Var(exception))],
+                        )
+                    } else {
+                        loop_stmt
+                    };
                     let mut statements = vec![
-                        HirStmt::Let(values_name, values_type, values),
+                        HirStmt::Let(values_name, values_type.clone(), values),
                         HirStmt::Let(
                             index_name,
                             HirType::F64,
                             HirExpr::Lit(HirLit::F64(0.0)),
                         ),
-                        HirStmt::While(condition, body),
+                        loop_stmt,
                     ];
+                    if generator_producer.is_some() {
+                        statements.push(HirStmt::Expr(resume_generator(1)?));
+                    }
                     let Some((producer, producer_type, init, _)) = generator_producer else {
                         return Ok(statements);
                     };

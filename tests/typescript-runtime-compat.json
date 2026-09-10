@@ -466,6 +466,27 @@
       "source": "let progress: number = 0; async function* values(): AsyncGenerator<number> { const first = await Promise.resolve(4); progress += 1; yield first; await Promise.resolve(); progress += 10; yield 5; } async function main(): Promise<void> { const iterator = values(); const first = await iterator.next(); console.log(first.value, first.done, progress); const second = await iterator.next(); console.log(second.value, second.done, progress); console.log((await iterator.next()).done); }"
     },
     {
+      "name": "async generator queues concurrent next calls",
+      "expect": "matched",
+      "source": "async function* values(): AsyncGenerator<number> { yield 1; await Promise.resolve(); yield 2; return 3; } async function main(): Promise<void> { const iterator = values(); const first = iterator.next(); const second = iterator.next(); const third = iterator.next(); const results = await Promise.all([first, second, third]); for (const result of results) console.log(result.value, result.done); }"
+    },
+    {
+      "name": "generator rejects reentrant next",
+      "expect": "unsupported",
+      "detailContains": "unsupported type reference",
+      "source": "function main(): void { let iterator: Generator<number> = (function* (): Generator<number> { yield 0; })(); const values = function* (): Generator<number> { try { iterator.next(); } catch (error) { console.log('caught'); } yield 1; }; iterator = values(); console.log(iterator.next().value); }"
+    },
+    {
+      "name": "for of break closes generator",
+      "expect": "matched",
+      "source": "let closed: boolean = false; function* values(): Generator<number> { try { yield 1; yield 2; } finally { closed = true; } } function main(): void { for (const value of values()) { console.log(value); break; } console.log(closed); }"
+    },
+    {
+      "name": "for of throw closes generator",
+      "expect": "matched",
+      "source": "let closed: boolean = false; function* values(): Generator<number> { try { yield 1; yield 2; } finally { closed = true; } } function main(): void { try { for (const value of values()) { console.log(value); throw 'stop'; } } catch (error) { console.log(error); } console.log(closed); }"
+    },
+    {
       "name": "async closure capture identity",
       "expect": "matched",
       "source": "async function main(): Promise<void> { let count: number = 0; const advance = async (): Promise<number> => { await Promise.resolve(); count += 1; return count; }; console.log(await advance(), await advance(), count); }"
