@@ -160,6 +160,16 @@ Landed so far:
 - `a.equals(b)` -- `thaw_bytes_equals`, byte-for-byte equality, `Bytes`
   receiver only (a plain `number[]` errors -- use `===` / a loop).
 - `Buffer.concat`'s optional `totalLength` (truncate / zero-pad).
+- Numeric accessors: `readUInt8` / `readUInt16LE` / `readUInt16BE` /
+  `readUInt32LE` / `readUInt32BE`, the signed `readInt*` mirror,
+  `readFloatLE` / `readFloatBE` / `readDoubleLE` / `readDoubleBE`, and
+  every `write*` counterpart. `bytes_numeric_accessor` (thaw-hir
+  `dispatch.rs`) decodes the method name into `(width, signed, float,
+  big-endian, write)`; `thaw_bytes_read` / `thaw_bytes_write` do the
+  work over the native layout, dispatched by a `(width, kind, le)`
+  triple. Writes mutate the buffer in place and return `offset +
+  width`. An out-of-range offset reads `0` / is a write no-op -- thaw
+  can't throw a `RangeError` across this boundary.
 - The binding-wrapper (`wrap_call_argument_bindings`) now types its
   lambda return with `infer_expr_type_inner`, so a `Bytes`-typed call
   whose args needed hoisting (`buf.slice(i, j)`, `Buffer.from(someVar)`)
@@ -167,10 +177,9 @@ Landed so far:
 
 Still speculative -- add when real code needs them, not before:
 `buf.indexOf(sub)` (the number form already works via `Array.indexOf`;
-this is string / sub-buffer search), `buf.copy(...)`, and the numeric
-accessors (`readUInt8` / `readUInt16LE` / `readUInt32BE` /
-`readBigUInt64BE` / `readInt*` / the `write*` mirror). Each is a small
-builtin over the native layout.
+this is string / sub-buffer search), `buf.copy(...)`, the
+`readBigUInt64*` / `readBigInt64*` pair (thaw has no `BigInt`), and
+`readUIntLE(offset, byteLength)` / `readUIntBE`'s variable width.
 
 ## Where to hook (file map)
 

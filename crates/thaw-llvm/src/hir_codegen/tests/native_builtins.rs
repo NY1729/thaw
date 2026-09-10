@@ -3014,3 +3014,34 @@ fn byte_buffer_from_and_to_string() {
         "6\nhéllo\n68c3a96c6c6f\naMOpbGxv\nhello\nhi\n3 0 0\n00ff41\n00ff2c03\n255\n8 00ff4100ff2c035a\nff4100\n035a\n6 2\n00ff4100ff\n00ff410000\ntrue false\n795\n"
     );
 }
+
+#[test]
+fn byte_buffer_numeric_accessors() {
+    let source = r#"
+        function main(): void {
+            const buf: Buffer = Buffer.alloc(8);
+            // Endianness and width.
+            buf.writeUInt16BE(0x1234, 0);
+            buf.writeUInt16LE(0x1234, 2);
+            buf.writeUInt32BE(0xdeadbeef, 4);
+            console.log(buf.toString("hex"));
+            console.log(buf.readUInt16BE(0) + " " + buf.readUInt16LE(2));
+            console.log(buf.readUInt32BE(4));
+            // A write returns the next offset.
+            const next: number = buf.writeUInt8(0x7f, 0);
+            console.log(next + " " + buf.readUInt8(0));
+            // Signed wrap-around.
+            buf.writeInt8(-2, 1);
+            console.log(buf.readInt8(1) + " " + buf.readUInt8(1));
+            // Out of range: read is 0, write is a no-op past the end.
+            console.log(buf.readUInt32BE(6));
+            // Float round-trip.
+            buf.writeFloatLE(1.5, 0);
+            console.log(buf.readFloatLE(0));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "byte_buffer_numeric_accessors"),
+        "12343412deadbeef\n4660 4660\n3735928559\n1 127\n-2 254\n0\n1.5\n"
+    );
+}
