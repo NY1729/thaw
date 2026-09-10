@@ -635,6 +635,87 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `pluralize` -- a callable default export that also has methods
+/// (`pluralize.singular`, `pluralize.isPlural`), plus an optional numeric
+/// second argument.
+#[test]
+fn registry_add_runs_real_pluralize_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-pluralize-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "pluralize@8.0.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import pluralize from "pluralize";
+function main(): void {
+    console.log(pluralize("cat"));
+    console.log(pluralize("cat", 1));
+    console.log(pluralize("cat", 3));
+    console.log(pluralize.singular("boxes"));
+    console.log(pluralize.isPlural("dogs"));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "cats\ncat\ncats\nbox\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `deepmerge` -- a recursive object merge crossing the dynamic bridge
+/// and coming back as `Json`.
+#[test]
+fn registry_add_runs_real_deepmerge_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-deepmerge-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "deepmerge@4.3.1").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import deepmerge from "deepmerge";
+function main(): void {
+    const merged: Json = deepmerge(
+        JSON.parse("{\"a\":1,\"b\":{\"x\":1}}"),
+        JSON.parse("{\"b\":{\"y\":2},\"c\":3}")
+    );
+    console.log(JSON.stringify(merged));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "{\"a\":1,\"b\":{\"x\":1,\"y\":2},\"c\":3}\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `qs`, `clsx`, and `slugify` -- object/array-shaped arguments and
 /// options bags through the dynamic bridge, and query-string round trips.
 #[test]
