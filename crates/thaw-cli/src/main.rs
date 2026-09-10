@@ -8,7 +8,7 @@ mod module_graph;
 include!("compat.rs");
 include!("node_compat.rs");
 
-const USAGE: &str = "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
+const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -76,11 +76,47 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some(input) if is_script_path(input) => match run_file(input, &args[2..]) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        },
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(1);
         }
     }
+}
+
+fn is_script_path(path: &str) -> bool {
+    matches!(
+        Path::new(path).extension().and_then(|value| value.to_str()),
+        Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
+    )
+}
+
+fn run_file(input: &str, args: &[String]) -> Result<i32, String> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let output = std::env::temp_dir().join(format!("thaw-run-{}-{nonce}", std::process::id()));
+    run_file_at(input, args, &output)
+}
+
+fn run_file_at(input: &str, args: &[String], output: &Path) -> Result<i32, String> {
+    let result =
+        run_build(&[input.into(), "-o".into(), output.display().to_string()]).and_then(|_| {
+            Command::new(output)
+                .args(args)
+                .status()
+                .map(|status| status.code().unwrap_or(1))
+                .map_err(|error| format!("failed to run `{}`: {error}", output.display()))
+        });
+    let _ = std::fs::remove_file(output);
+    result
 }
 
 fn run_install(args: &[String]) -> Result<(), String> {
