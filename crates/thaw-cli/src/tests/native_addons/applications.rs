@@ -556,6 +556,283 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Short soak test: Hono's own `app.request(...)` (in-process, no real
+/// listener -- matching `registry_add_runs_a_real_hono_route_when_
+/// enabled`'s own convention) called repeatedly (a fixed count, not a
+/// wall-clock window -- see below) checking for stability (no crash,
+/// no wrong response) under sustained load rather than just a single
+/// request.
+///
+/// Deliberately a `for` loop with a plain counter, not a `while` loop
+/// with a `Date.now()`-based deadline or a compound `&&`/`||`
+/// condition: found, while writing this test, that a `while` loop
+/// combining a boolean flag with `Date.now()` in its condition (`while
+/// (stable && Date.now() < deadline)`) segfaults after the first
+/// iteration, and a *separate* bug makes an `if (a !== x || b !== y)`
+/// condition inside such a loop misevaluate even when `a`/`b` print as
+/// correct individually -- both reproduced independent of Hono with a
+/// minimal synthetic script. Neither is fixed here (out of scope for a
+/// test-writing task); flagged to the user as a real, separate finding.
+/// The `for`-loop/sequential-`if` shape used here is confirmed not to
+/// hit either.
+#[test]
+fn registry_add_runs_hono_continuously_for_a_short_window_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-hono-soak-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "hono@4.13.7").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Hono } from "hono";
+async function main(): Promise<void> {
+    const app = new Hono();
+    app.get("/", (c) => c.text("Hello Thaw"));
+    let count = 0;
+    for (let i = 0; i < 500; i++) {
+        const response = await app.request("/");
+        const body: string = await response.text();
+        if (Number(response.status) !== 200) {
+            console.log("bad status at " + i);
+            break;
+        }
+        if (body !== "Hello Thaw") {
+            console.log("bad body at " + i);
+            break;
+        }
+        count++;
+    }
+    console.log("stable:" + count);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["hono".into()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    // The program's own fixed-count `for` loop bounds its runtime -- no
+    // external timeout wrapper needed, matching every other
+    // process-runs-to-completion test in this file.
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "hono soak run did not exit cleanly: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let count: usize = stdout
+        .trim()
+        .strip_prefix("stable:")
+        .unwrap_or_else(|| panic!("hono soak run reported an unstable response: {stdout}"))
+        .parse()
+        .unwrap();
+    assert_eq!(count, 500, "expected all 500 requests to succeed");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Short soak test: a real, listening Fastify server hit with
+/// sequential HTTP requests over a fixed wall-clock window, then
+/// cleanly shut down -- checks the compiled binary stays alive and
+/// correct under sustained load, not just for one request.
+#[test]
+fn registry_add_runs_fastify_continuously_for_a_short_window_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-fastify-soak-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "fastify@5.6.2").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import fastify from "fastify";
+async function main(): Promise<void> {
+    const app = fastify();
+    app.get("/ping", async () => ({ ok: true }));
+    await app.listen({ host: "127.0.0.1", port: Number(process.env.PORT) });
+    process.on("SIGTERM", (): void => { app.close(); });
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["fastify".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (0..500)
+        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("compiled Fastify server did not start");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut count = 0usize;
+    while Instant::now() < deadline {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "request {count} failed: {}",
+            String::from_utf8_lossy(&response)
+        );
+        assert!(child.try_wait().unwrap().is_none(), "Fastify server died during the soak run");
+        count += 1;
+    }
+    assert!(count > 5, "expected several requests in the 3s window, only got {count}");
+    assert!(Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let status = (0..500)
+        .find_map(|_| {
+            let status = child.try_wait().unwrap();
+            if status.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            status
+        })
+        .unwrap_or_else(|| {
+            child.kill().unwrap();
+            child.wait().unwrap()
+        });
+    assert!(status.success(), "Fastify server did not shut down cleanly after the soak run");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Short soak test: a real, listening Express server hit with
+/// sequential HTTP requests over a fixed wall-clock window, then
+/// cleanly shut down -- same shape as the Fastify soak test above.
+#[test]
+fn registry_add_runs_express_continuously_for_a_short_window_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-express-soak-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "express@5.1.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import express from "express";
+async function main(): Promise<void> {
+    const app = express();
+    app.get("/ping", (request, response) => {
+        response.json({ ok: true });
+    });
+    const server: JsValue = app.listen(Number(process.env.PORT), "127.0.0.1");
+    process.on("SIGTERM", (): void => { server.close(); });
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["express".into()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (0..500)
+        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("compiled Express server did not start");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut count = 0usize;
+    while Instant::now() < deadline {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "request {count} failed: {}",
+            String::from_utf8_lossy(&response)
+        );
+        assert!(child.try_wait().unwrap().is_none(), "Express server died during the soak run");
+        count += 1;
+    }
+    assert!(count > 5, "expected several requests in the 3s window, only got {count}");
+    assert!(Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let status = (0..500)
+        .find_map(|_| {
+            let status = child.try_wait().unwrap();
+            if status.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            status
+        })
+        .unwrap_or_else(|| {
+            child.kill().unwrap();
+            child.wait().unwrap()
+        });
+    assert!(status.success(), "Express server did not shut down cleanly after the soak run");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_add_processes_a_real_hono_sharp_image_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
