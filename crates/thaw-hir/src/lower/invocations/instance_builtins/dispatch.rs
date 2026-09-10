@@ -57,8 +57,8 @@ impl<'a> FnLowerer<'a> {
                 | "push"
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
                 | "next" | "return" | "throw"
-                | "includes" | "startsWith" | "endsWith" | "equals" | "toString" | "valueOf"
-                | "getTime"
+                | "includes" | "startsWith" | "endsWith" | "equals" | "copy" | "toString"
+                | "valueOf" | "getTime"
                 | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate" | "getDay"
                 | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds" | "getUTCFullYear"
                 | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours" | "getUTCMinutes"
@@ -116,6 +116,7 @@ impl<'a> FnLowerer<'a> {
             }
             "toJSON" | "toDateString" | "toTimeString" | "toUTCString" | "toString"
             | "valueOf" | "equals" => self.lower_native_conversion_method(member, property, call),
+            "copy" => self.lower_native_bytes_copy(member, call),
             other if Self::bytes_numeric_accessor(other).is_some() => {
                 self.lower_native_bytes_accessor(member, property, call)
             }

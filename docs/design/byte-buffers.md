@@ -175,11 +175,18 @@ Landed so far:
   whose args needed hoisting (`buf.slice(i, j)`, `Buffer.from(someVar)`)
   keeps its byte-buffer identity for a chained `.toString`.
 
+- `source.copy(target, targetStart?, sourceStart?, sourceEnd?)` --
+  `thaw_bytes_copy`, blits into an existing `Bytes` target in place,
+  returns the count copied. Offsets clamp to their buffers.
+
 Still speculative -- add when real code needs them, not before:
 `buf.indexOf(sub)` (the number form already works via `Array.indexOf`;
-this is string / sub-buffer search), `buf.copy(...)`, the
-`readBigUInt64*` / `readBigInt64*` pair (thaw has no `BigInt`), and
-`readUIntLE(offset, byteLength)` / `readUIntBE`'s variable width.
+this is string / sub-buffer search -- needs surgery in the shared
+`indexOf` lowering), the `readBigUInt64*` / `readBigInt64*` pair (thaw
+has no `BigInt`), and `readUIntLE(offset, byteLength)` / `readUIntBE`'s
+variable width. `request.on("data")` chunks stay lossy strings --
+`request.bodyBytes()` is the binary path and covers the whole body at
+once.
 
 ## Where to hook (file map)
 

@@ -329,6 +329,57 @@ pub unsafe extern "C" fn thaw_bytes_write(
 }
 
 #[no_mangle]
+/// `source.copy(target, targetStart, sourceStart, sourceEnd)` -- blits
+/// bytes into `target` in place, returning the count copied. Offsets are
+/// clamped to their buffers; a `sourceEnd` of `-1` means "the source
+/// length". `source` is read as a value; `target`'s `f64` slots are
+/// written directly.
+///
+/// # Safety
+///
+/// `source` must be null or a Thaw `f64`-slot array; `target` must be
+/// null or a writable one.
+pub unsafe extern "C" fn thaw_bytes_copy(
+    source: *const u8,
+    target: *mut u8,
+    target_start: f64,
+    source_start: f64,
+    source_end: f64,
+) -> f64 {
+    let src = unsafe { read_byte_array(source) }.unwrap_or_default();
+    let Some(target_len) = (unsafe { native_array_length(target) }) else {
+        return 0.0;
+    };
+    let clamp = |value: f64, hi: usize| -> usize {
+        if value.is_finite() && value >= 0.0 {
+            (value as usize).min(hi)
+        } else {
+            0
+        }
+    };
+    let target_start = clamp(target_start, target_len);
+    let source_start = clamp(source_start, src.len());
+    let source_end = if source_end.is_finite() && source_end >= 0.0 {
+        (source_end as usize).min(src.len())
+    } else {
+        src.len()
+    };
+    if source_end <= source_start {
+        return 0.0;
+    }
+    let count = (source_end - source_start).min(target_len - target_start);
+    for index in 0..count {
+        unsafe {
+            target
+                .add(8 + (target_start + index) * 8)
+                .cast::<f64>()
+                .write_unaligned(f64::from(src[source_start + index]));
+        }
+    }
+    count as f64
+}
+
+#[no_mangle]
 /// `Buffer.byteLength(string, encoding)` -- the number of bytes the
 /// string occupies in `encoding` (null defaults to `utf8`): the UTF-8
 /// byte length, `len / 2` for `hex`, the decoded length for `base64`,

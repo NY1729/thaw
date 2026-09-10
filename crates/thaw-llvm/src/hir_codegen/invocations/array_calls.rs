@@ -29,6 +29,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_equals"
                 | "__thaw_bytes_read"
                 | "__thaw_bytes_write"
+                | "__thaw_bytes_copy"
                 | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
         );
@@ -182,6 +183,30 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map(Into::into)
                     .map_err(|error| error.to_string());
+            }
+            "__thaw_bytes_copy" => {
+                let [source, target, rest @ ..] = args else {
+                    return Err("Buffer.copy expects a source, a target and offsets".into());
+                };
+                let source = self.compile_expr(source)?.into_pointer_value();
+                let source = self.compile_array_data(source)?;
+                let target = self.compile_expr(target)?.into_pointer_value();
+                let target = self.compile_array_data(target)?;
+                let mut call_args = vec![source.into(), target.into()];
+                for argument in rest {
+                    call_args.push(self.compile_expr(argument)?.into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_copy").unwrap(),
+                        &call_args,
+                        "bytes_copy",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Buffer.copy returned no value".to_string());
             }
             "__thaw_bytes_read" | "__thaw_bytes_write" => {
                 let (runtime, label) = if name == "__thaw_bytes_write" {
