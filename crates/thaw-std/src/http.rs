@@ -802,10 +802,15 @@ fn client_hung_up(connection: &ConnectionState) -> bool {
 }
 
 /// The client vanished mid-response: close the socket (releasing its
-/// descriptor) and stop watching it now. The `ConnectionState` box is
-/// kept until the in-flight handler next touches it (it still holds a
-/// `*mut ConnectionState`), at which point `bail_if_client_gone` frees
-/// the rest.
+/// descriptor) and stop watching it now. If an in-flight handler is
+/// parked (a suspended `async` handler, or a streaming response between
+/// chunks) it won't return to `res.*` for who knows how long, so tear
+/// the connection down straight away too -- `finish_connection` frees
+/// the `ConnectionState` (and any large buffered request body it holds)
+/// and husk-defers the `RequestContext` the parked handler still
+/// references; that handler's eventual `res.*` calls then no-op via
+/// `abandoned`. A synchronous handler is still on the stack and about to
+/// hit `bail_if_client_gone` itself, so its box is left for that.
 fn mark_client_gone(connection: &mut ConnectionState) {
     connection.client_gone = true;
     if let Some(stream) = connection.stream.take() {
@@ -816,6 +821,9 @@ fn mark_client_gone(connection: &mut ConnectionState) {
     if connection.watcher != 0 {
         unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
         connection.watcher = 0;
+    }
+    if connection.awaiting_handler || (connection.streaming && !connection.response_ended) {
+        finish_connection(connection);
     }
 }
 
