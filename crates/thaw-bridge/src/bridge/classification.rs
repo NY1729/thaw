@@ -194,6 +194,7 @@ fn render_ts_type(ty: &HirType) -> String {
             format!("{{ [key: string]: {} }}", render_ts_type(element))
         }
         HirType::JsValue => "JsValue".to_string(),
+        HirType::Bytes => "Uint8Array".to_string(),
         HirType::Array(elem) => format!("{}[]", render_ts_type(elem)),
         HirType::Tuple(elements) => format!(
             "[{}]",

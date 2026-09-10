@@ -688,6 +688,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         HirType::Function(_, _) => Some("function"),
         HirType::CallableFunction(..) => Some("function"),
         HirType::Array(_)
+        | HirType::Bytes
         | HirType::Tuple(_)
         | HirType::Object(_)
         | HirType::Json
