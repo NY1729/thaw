@@ -184,6 +184,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             (object, property),
             ("Array", "of" | "from" | "isArray")
+                | ("Buffer", "from" | "alloc")
                 | ("Map", "groupBy")
                 | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
                 | ("JSON", "stringify")
@@ -202,6 +203,48 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+                    if object.sym == *"Buffer" {
+                        if property.sym == *"alloc" {
+                            let (arguments, bindings) =
+                                self.lower_native_spread_values(&call.args, "Buffer.alloc")?;
+                            let [size] = arguments.as_slice() else {
+                                return Err("`Buffer.alloc` expects a size".into());
+                            };
+                            let size = self.coerce_primitive_to_number(size.clone())?;
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_bytes_alloc".to_string())),
+                                    vec![size],
+                                ),
+                                &bindings,
+                            );
+                        }
+                        // `Buffer.from(value, encoding?)`. A string decodes
+                        // per `encoding` (default `utf8`); a `number[]` /
+                        // byte buffer is already the bytes -- pass it
+                        // straight through (it erases to the same array).
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Buffer.from")?;
+                        let source = arguments
+                            .first()
+                            .ok_or("`Buffer.from` expects a value")?
+                            .clone();
+                        let source_type = self.infer_expr_type(&source)?;
+                        if matches!(&source_type, HirType::Array(elem) if **elem == HirType::F64) {
+                            return self.wrap_call_argument_bindings(source, &bindings);
+                        }
+                        let encoding = match arguments.get(1) {
+                            Some(argument) => argument.clone(),
+                            None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
+                        };
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),
+                                vec![source, encoding],
+                            ),
+                            &bindings,
+                        );
+                    }
                     if object.sym == *"JSON" && property.sym == *"stringify" {
                         let (arguments, mut bindings) =
                             self.lower_native_spread_values(&call.args, "JSON.stringify")?;

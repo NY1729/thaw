@@ -102,6 +102,20 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"toString" {
                     let receiver = self.lower_expr(&member.obj)?;
+                    // A byte buffer decodes (`buf.toString("hex")`, default
+                    // `utf8`) instead of comma-joining like a plain number
+                    // array. `infer_expr_type` normalizes `Bytes` away, so
+                    // ask for the un-normalized receiver type.
+                    if self.infer_expr_type_inner(&receiver)? == HirType::Bytes {
+                        let encoding = match call.args.first() {
+                            Some(argument) => self.lower_expr(&argument.expr)?,
+                            None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
+                        };
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_bytes_to_string".to_string())),
+                            vec![receiver, encoding],
+                        ));
+                    }
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if receiver_type == HirType::F64 && !call.args.is_empty() {
                         let (arguments, spread_bindings) =

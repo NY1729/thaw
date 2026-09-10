@@ -21,6 +21,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_array_pop"
                 | "__thaw_array_shift"
                 | "__thaw_array_splice"
+                | "__thaw_bytes_to_string"
+                | "__thaw_bytes_from_string"
+                | "__thaw_bytes_alloc"
         );
         if !typed_array_call && !generic_array_call {
             return None;
@@ -61,6 +64,64 @@ impl<'ctx> HirCompiler<'ctx> {
                     args,
                     "String(object[])",
                 )
+            }
+            "__thaw_bytes_to_string" => {
+                let [buffer, encoding] = args else {
+                    return Err("bytes toString expects a buffer and an encoding".into());
+                };
+                let handle = self.compile_expr(buffer)?.into_pointer_value();
+                let data = self.compile_array_data(handle)?;
+                let encoding = self.compile_expr(encoding)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_to_string").unwrap(),
+                        &[data.into(), encoding.into()],
+                        "bytes_to_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("bytes toString returned no value".to_string());
+            }
+            "__thaw_bytes_from_string" => {
+                let [text, encoding] = args else {
+                    return Err("Buffer.from expects a string and an encoding".into());
+                };
+                let text = self.compile_expr(text)?;
+                let encoding = self.compile_expr(encoding)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_from_string").unwrap(),
+                        &[text.into(), encoding.into()],
+                        "bytes_from_string",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Buffer.from returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_alloc" => {
+                let [size] = args else {
+                    return Err("Buffer.alloc expects one operand".into());
+                };
+                let size = self.compile_expr(size)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_alloc").unwrap(),
+                        &[size.into()],
+                        "bytes_alloc",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Buffer.alloc returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
             }
             "__thaw_number_array_join"
             | "__thaw_string_array_join"
