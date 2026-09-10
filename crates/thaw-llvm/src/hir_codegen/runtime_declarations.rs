@@ -680,20 +680,30 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[f64_type.into()], false),
             Some(Linkage::External),
         );
-        // `Buffer.from(number[])` clamps each element to a byte;
-        // `Buffer.concat(list)` flattens an array of byte buffers. Both
-        // take a raw `[len][elem...]` buffer and return a fresh one.
-        for name in ["thaw_bytes_from_array", "thaw_bytes_concat"] {
-            self.module.add_function(
-                name,
-                i8_ptr.fn_type(&[i8_ptr.into()], false),
-                Some(Linkage::External),
-            );
-        }
+        // `Buffer.from(number[])` clamps each element to a byte; takes a
+        // raw `[len][elem...]` buffer and returns a fresh one.
+        self.module.add_function(
+            "thaw_bytes_from_array",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        // `Buffer.concat(list, totalLength)` -- outer `[len][elem...]`
+        // buffer + a length (`-1` for "no limit") to a fresh buffer.
+        self.module.add_function(
+            "thaw_bytes_concat",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
         // `Buffer.byteLength(str, enc)` -- two string pointers to a count.
         self.module.add_function(
             "thaw_bytes_byte_length",
             f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        // `a.equals(b)` -- two raw `[len][elem...]` buffers to an i8 bool.
+        self.module.add_function(
+            "thaw_bytes_equals",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

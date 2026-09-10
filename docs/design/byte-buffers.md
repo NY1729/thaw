@@ -110,10 +110,10 @@ body is still better served by `bodyHex()` (2 chars/byte) until a packed
 - thaw-llvm: decls + `compile_array_call` dispatch (wrap/unwrap the
   array handle).
 - Follow-up landed: `Buffer.from(number[])` byte-clamping copy
-  (`thaw_bytes_from_array`); `Buffer.concat(list)` 1-arg
-  (`thaw_bytes_concat`).
-- Not done: `Buffer.concat`'s optional `totalLength`, real
-  `node:buffer` `.d.ts` signatures.
+  (`thaw_bytes_from_array`); `Buffer.concat(list, totalLength?)`
+  (`thaw_bytes_concat`, `totalLength` truncates / zero-pads, `-1` for
+  "sum of parts").
+- Not done: real `node:buffer` `.d.ts` signatures.
 
 ### Phase 3 -- thaw-std produces/consumes Bytes ✅
 
@@ -157,16 +157,20 @@ Landed so far:
   a view (thaw arrays aren't views); it errors on a non-array receiver.
 - `Buffer.byteLength(str, enc?)` -- `thaw_bytes_byte_length`, the
   encoded byte count (`utf8` default) for a `Content-Length`.
+- `a.equals(b)` -- `thaw_bytes_equals`, byte-for-byte equality, `Bytes`
+  receiver only (a plain `number[]` errors -- use `===` / a loop).
+- `Buffer.concat`'s optional `totalLength` (truncate / zero-pad).
 - The binding-wrapper (`wrap_call_argument_bindings`) now types its
   lambda return with `infer_expr_type_inner`, so a `Bytes`-typed call
   whose args needed hoisting (`buf.slice(i, j)`, `Buffer.from(someVar)`)
   keeps its byte-buffer identity for a chained `.toString`.
 
 Still speculative -- add when real code needs them, not before:
-`buf.equals(other)`, `buf.indexOf(...)`, `buf.copy(...)`,
-`Buffer.concat`'s `totalLength`, and the numeric accessors (`readUInt8`
-/ `readUInt16LE` / `readUInt32BE` / `readBigUInt64BE` / the `write*`
-mirror). Each is a small builtin over the native layout.
+`buf.indexOf(sub)` (the number form already works via `Array.indexOf`;
+this is string / sub-buffer search), `buf.copy(...)`, and the numeric
+accessors (`readUInt8` / `readUInt16LE` / `readUInt32BE` /
+`readBigUInt64BE` / `readInt*` / the `write*` mirror). Each is a small
+builtin over the native layout.
 
 ## Where to hook (file map)
 

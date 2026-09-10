@@ -13,7 +13,8 @@ impl<'a> FnLowerer<'a> {
                 | "push"
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
                 | "next" | "return" | "throw"
-                | "includes" | "startsWith" | "endsWith" | "toString" | "valueOf" | "getTime"
+                | "includes" | "startsWith" | "endsWith" | "equals" | "toString" | "valueOf"
+                | "getTime"
                 | "setTime" | "toISOString" | "getFullYear" | "getMonth" | "getDate" | "getDay"
                 | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds" | "getUTCFullYear"
                 | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours" | "getUTCMinutes"
@@ -70,7 +71,7 @@ impl<'a> FnLowerer<'a> {
                 self.lower_native_map_set_method(member, property, call)
             }
             "toJSON" | "toDateString" | "toTimeString" | "toUTCString" | "toString"
-            | "valueOf" => self.lower_native_conversion_method(member, property, call),
+            | "valueOf" | "equals" => self.lower_native_conversion_method(member, property, call),
             _ => unreachable!("native instance builtin dispatch was checked before lowering"),
         }
     }

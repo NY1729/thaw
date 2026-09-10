@@ -229,14 +229,24 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         if property.sym == *"concat" {
-                            // `Buffer.concat(list)` -- flatten an array of
-                            // byte buffers into one. (`totalLength` isn't
-                            // supported yet; add it when real code needs
-                            // the truncate/zero-pad behaviour.)
+                            // `Buffer.concat(list, totalLength?)` -- flatten
+                            // an array of byte buffers into one. A given
+                            // `totalLength` truncates / zero-pads the
+                            // result; omitted, it's the sum of the parts
+                            // (passed to the runtime as `-1`).
                             let (arguments, bindings) =
                                 self.lower_native_spread_values(&call.args, "Buffer.concat")?;
-                            let [list] = arguments.as_slice() else {
-                                return Err("`Buffer.concat` expects a single list argument".into());
+                            let (list, total) = match arguments.as_slice() {
+                                [list] => (list, HirExpr::Lit(HirLit::F64(-1.0))),
+                                [list, total] => {
+                                    (list, self.coerce_primitive_to_number(total.clone())?)
+                                }
+                                _ => {
+                                    return Err(
+                                        "`Buffer.concat` expects a list and an optional totalLength"
+                                            .into(),
+                                    )
+                                }
                             };
                             let list_type = self.infer_expr_type(list)?;
                             if !matches!(&list_type, HirType::Array(element)
@@ -250,7 +260,7 @@ impl<'a> FnLowerer<'a> {
                             return self.wrap_call_argument_bindings(
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_bytes_concat".to_string())),
-                                    vec![list.clone()],
+                                    vec![list.clone(), total],
                                 ),
                                 &bindings,
                             );
