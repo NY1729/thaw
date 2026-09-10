@@ -165,6 +165,16 @@ impl<'a> FnLowerer<'a> {
             );
             lhs_type = HirType::Json;
         }
+        // `x && rhs` where `x: T | null` (`| undefined`): result is
+        // `rhs | null` -- `null` when `x` is absent, otherwise `rhs`
+        // (evaluated with `x` narrowed to `T`, as the caller already
+        // lowered it). A present-but-falsy payload (`""`, `0`) is folded
+        // into the absent case.
+        if is_and {
+            if let HirType::Nullable(_) | HirType::Optional(_) | HirType::Nullish(_) = &lhs_type {
+                return self.lower_nullish_and(lhs, lhs_type, rhs, rhs_type);
+            }
+        }
         if lhs_type != rhs_type && lhs_type != HirType::Json {
             return Err(format!(
                 "logical operands have incompatible types {lhs_type:?} and {rhs_type:?}"
@@ -189,6 +199,45 @@ impl<'a> FnLowerer<'a> {
             condition,
             vec![HirStmt::Return(Some(then_value))],
             vec![HirStmt::Return(Some(else_value))],
+        )]);
+        self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
+    /// `x && rhs` for an `Optional`/`Nullable`/`Nullish` `x`: an IIFE
+    /// that returns `rhs` (wrapped in `x`'s absent-form kind, payload =
+    /// `rhs`'s type) when `x` is present-and-truthy, and the absent form
+    /// otherwise.
+    fn lower_nullish_and(
+        &mut self,
+        lhs: HirExpr,
+        lhs_type: HirType,
+        rhs: HirExpr,
+        rhs_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let name = format!("__thaw_nullish_and_left_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), lhs_type.clone());
+        let left = HirExpr::Var(name.clone());
+        let condition = self.truthiness_expr(left, &lhs_type)?;
+        let rhs = Box::new(rhs);
+        let (present, none) = match &lhs_type {
+            HirType::Optional(_) => (
+                HirExpr::OptionalSome(rhs, rhs_type.clone()),
+                HirExpr::OptionalNone(rhs_type),
+            ),
+            HirType::Nullable(_) => (
+                HirExpr::NullableSome(rhs, rhs_type.clone()),
+                HirExpr::NullableNone(rhs_type),
+            ),
+            _ => (
+                HirExpr::NullishSome(rhs, rhs_type.clone()),
+                HirExpr::NullishNull(rhs_type),
+            ),
+        };
+        let result = HirExpr::Block(vec![HirStmt::If(
+            condition,
+            vec![HirStmt::Return(Some(present))],
+            vec![HirStmt::Return(Some(none))],
         )]);
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
