@@ -3042,10 +3042,15 @@ fn byte_buffer_numeric_accessors() {
             const dst: Buffer = Buffer.alloc(4);
             const n: number = Buffer.from([10, 20, 30, 40, 50]).copy(dst, 1, 2);
             console.log(n + " " + dst.toString("hex"));
+            // Subsequence search: string and sub-buffer needles.
+            const hay: Buffer = Buffer.from("GET / HTTP/1.1\r\n\r\nbody");
+            console.log(hay.indexOf("\r\n\r\n") + " " + hay.indexOf("nope"));
+            console.log(hay.indexOf(Buffer.from([32, 47, 32])));
+            console.log(hay.includes("HTTP") + " " + hay.lastIndexOf("\r\n"));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_numeric_accessors"),
-        "12343412deadbeef\n4660 4660\n3735928559\n1 127\n-2 254\n0\n1.5\n3 001e2832\n"
+        "12343412deadbeef\n4660 4660\n3735928559\n1 127\n-2 254\n0\n1.5\n3 001e2832\n14 -1\n3\ntrue 16\n"
     );
 }

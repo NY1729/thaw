@@ -30,6 +30,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_read"
                 | "__thaw_bytes_write"
                 | "__thaw_bytes_copy"
+                | "__thaw_bytes_index_of"
                 | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
         );
@@ -184,29 +185,37 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
-            "__thaw_bytes_copy" => {
-                let [source, target, rest @ ..] = args else {
-                    return Err("Buffer.copy expects a source, a target and offsets".into());
+            "__thaw_bytes_copy" | "__thaw_bytes_index_of" => {
+                let (runtime, label, tail) = if name == "__thaw_bytes_index_of" {
+                    ("thaw_bytes_index_of", "bytes_index_of", 2)
+                } else {
+                    ("thaw_bytes_copy", "bytes_copy", 3)
                 };
-                let source = self.compile_expr(source)?.into_pointer_value();
-                let source = self.compile_array_data(source)?;
-                let target = self.compile_expr(target)?.into_pointer_value();
-                let target = self.compile_array_data(target)?;
-                let mut call_args = vec![source.into(), target.into()];
+                let [first, second, rest @ ..] = args else {
+                    return Err(format!("`{name}` expects two buffers and offsets"));
+                };
+                if rest.len() != tail {
+                    return Err(format!("`{name}` got the wrong number of operands"));
+                }
+                let first = self.compile_expr(first)?.into_pointer_value();
+                let first = self.compile_array_data(first)?;
+                let second = self.compile_expr(second)?.into_pointer_value();
+                let second = self.compile_array_data(second)?;
+                let mut call_args = vec![first.into(), second.into()];
                 for argument in rest {
                     call_args.push(self.compile_expr(argument)?.into());
                 }
                 return self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_bytes_copy").unwrap(),
+                        self.module.get_function(runtime).unwrap(),
                         &call_args,
-                        "bytes_copy",
+                        label,
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("Buffer.copy returned no value".to_string());
+                    .ok_or_else(|| format!("`{name}` returned no value"));
             }
             "__thaw_bytes_read" | "__thaw_bytes_write" => {
                 let (runtime, label) = if name == "__thaw_bytes_write" {

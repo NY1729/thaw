@@ -108,4 +108,61 @@ impl<'a> FnLowerer<'a> {
         );
         self.wrap_call_argument_bindings(result, &bindings)
     }
+
+    /// `buf.indexOf` / `includes` / `lastIndexOf` with a string or
+    /// sub-buffer needle -- a byte-subsequence search. The needle is
+    /// normalised to a byte buffer (a string decodes as `utf8`, a number
+    /// becomes a one-byte buffer), then `__thaw_bytes_index_of` scans
+    /// `haystack` from `from` (`last` = 1 reverses). `includes` is that
+    /// index `>= 0`. An empty needle matches at the clamped `from`, like
+    /// Node. A negative `from` clamps to 0 (Node's from-the-end offset
+    /// isn't modelled).
+    fn lower_native_bytes_search(
+        &mut self,
+        receiver: HirExpr,
+        method: &str,
+        arguments: Vec<HirExpr>,
+        spread_bindings: Vec<(Symbol, HirType, HirExpr)>,
+    ) -> Result<HirExpr, String> {
+        let needle = arguments[0].clone();
+        let needle_type = self.infer_expr_type(&needle)?;
+        let needle_bytes = match &needle_type {
+            HirType::Str => HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),
+                vec![needle, HirExpr::Lit(HirLit::Str("utf8".to_string()))],
+            ),
+            HirType::F64 => HirExpr::ArrayLit(vec![needle]),
+            HirType::Array(inner) if **inner == HirType::F64 => needle,
+            other => {
+                return Err(format!(
+                    "`Buffer.prototype.{method}` needle must be a string, a byte buffer, or a number (got {other:?})"
+                ))
+            }
+        };
+        let last = method == "lastIndexOf";
+        let from = match arguments.get(1) {
+            Some(value) => self.coerce_primitive_to_number(value.clone())?,
+            None if last => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+            None => HirExpr::Lit(HirLit::F64(0.0)),
+        };
+        let index = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_index_of".to_string())),
+            vec![
+                receiver,
+                needle_bytes,
+                from,
+                HirExpr::Lit(HirLit::F64(if last { 1.0 } else { 0.0 })),
+            ],
+        );
+        let result = if method == "includes" {
+            HirExpr::BinOp(
+                BinOp::GtEq,
+                Box::new(index),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            )
+        } else {
+            index
+        };
+        self.wrap_call_argument_bindings(result, &spread_bindings)
+    }
 }

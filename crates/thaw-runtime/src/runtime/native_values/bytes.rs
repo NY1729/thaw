@@ -380,6 +380,67 @@ pub unsafe extern "C" fn thaw_bytes_copy(
 }
 
 #[no_mangle]
+/// `buf.indexOf(needle, from)` / `lastIndexOf` -- a byte-subsequence
+/// search. `needle` is already a byte buffer (thaw-hir decodes a string
+/// / wraps a number first). Returns the first (or last, `last != 0`)
+/// index at or after `from`, or `-1`. An empty needle returns `from`
+/// clamped into the haystack (Node's rule). A negative / non-finite
+/// `from` clamps to 0 for a forward search, to the last start for a
+/// reverse one.
+///
+/// # Safety
+///
+/// `haystack` / `needle` must be null or Thaw `f64`-slot arrays.
+pub unsafe extern "C" fn thaw_bytes_index_of(
+    haystack: *const u8,
+    needle: *const u8,
+    from: f64,
+    last: f64,
+) -> f64 {
+    let hay = unsafe { read_byte_array(haystack) }.unwrap_or_default();
+    let nee = unsafe { read_byte_array(needle) }.unwrap_or_default();
+    let clamp_from = |hi: usize| -> usize {
+        if from.is_finite() && from >= 0.0 {
+            (from as usize).min(hi)
+        } else if from.is_finite() {
+            0
+        } else {
+            hi
+        }
+    };
+    if nee.is_empty() {
+        return clamp_from(hay.len()) as f64;
+    }
+    if nee.len() > hay.len() {
+        return -1.0;
+    }
+    let last_start = hay.len() - nee.len();
+    if last != 0.0 {
+        let start = clamp_from(last_start).min(last_start);
+        for index in (0..=start).rev() {
+            if hay[index..index + nee.len()] == nee[..] {
+                return index as f64;
+            }
+        }
+        return -1.0;
+    }
+    let start = if from.is_finite() && from >= 0.0 {
+        from as usize
+    } else {
+        0
+    };
+    if start > last_start {
+        return -1.0;
+    }
+    for index in start..=last_start {
+        if hay[index..index + nee.len()] == nee[..] {
+            return index as f64;
+        }
+    }
+    -1.0
+}
+
+#[no_mangle]
 /// `Buffer.byteLength(string, encoding)` -- the number of bytes the
 /// string occupies in `encoding` (null defaults to `utf8`): the UTF-8
 /// byte length, `len / 2` for `hex`, the decoded length for `base64`,

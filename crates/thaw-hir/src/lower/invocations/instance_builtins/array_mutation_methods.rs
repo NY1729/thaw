@@ -994,6 +994,25 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     let mut receiver = self.lower_expr(&member.obj)?;
+                    // `buf.indexOf` / `includes` / `lastIndexOf` on a byte
+                    // buffer with a string or sub-buffer needle is a
+                    // *subsequence* search, not the element search a plain
+                    // array does. (A numeric needle stays on the array
+                    // path -- it's already an element match.)
+                    if matches!(property.sym.as_ref(), "indexOf" | "includes" | "lastIndexOf")
+                        && self.infer_expr_type_inner(&receiver)? == HirType::Bytes
+                        && !matches!(
+                            self.infer_expr_type(&arguments[0])?,
+                            HirType::F64
+                        )
+                    {
+                        return self.lower_native_bytes_search(
+                            receiver,
+                            property.sym.as_ref(),
+                            arguments,
+                            spread_bindings,
+                        );
+                    }
                     let mut receiver_type = self.infer_expr_type(&receiver)?;
                     if matches!(property.sym.as_ref(), "startsWith" | "endsWith")
                         && matches!(receiver_type, HirType::Json | HirType::JsValue)
