@@ -2,13 +2,25 @@
 
 ## Status
 
-Not started. `request.bodyHex()` (commit `34e38005`) is the current
-stopgap for the one concrete need (a byte-exact HTTP request body):
-the raw bytes as a lowercase hex string the handler decodes itself.
+**Interim landed:** `Buffer` / `Uint8Array` in an annotation position
+now resolves to `HirType::Array(F64)` -- a plain `number[]` -- so
+`const b: Uint8Array = ...` indexes, `.length`s, iterates, and
+interchanges with `number[]` instead of erroring. This is *not* the
+distinct type below; `buf.toString("utf8")` comma-joins like an array.
 
-`new Uint8Array([...])` today lowers through the dynamic host
-(`constructDynamicValue`, a QuickJS `JsValue`) -- correct but untyped
-and slow, and thaw-std native code can't produce or consume one.
+`request.bodyHex()` (commit `34e38005`) is the stopgap for a byte-exact
+HTTP request body: the raw bytes as a lowercase hex string the handler
+decodes itself. `new Uint8Array([...])` still lowers through the dynamic
+host (`constructDynamicValue`, a QuickJS `JsValue`).
+
+**Blocker for the real type:** thaw has no HIR type-normalization pass
+between lowering and codegen -- a `HirType` recorded in a `HirStmt::Let`
+/ function signature / `ArrayAlloc` flows straight to codegen. A
+distinct `HirType::Bytes` that shares `Array(F64)`'s layout would need
+either ~60 `HirType::Array` codegen sites to grow a `| HirType::Bytes`
+arm, or a new recursive erase-markers walk over the whole `HirProgram`
+(the `HirExpr` visitor doesn't exist yet either). Phase 1 below assumes
+that walk gets written first.
 
 ## Goal
 
