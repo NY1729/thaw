@@ -32,9 +32,20 @@ impl<'a> FnLowerer<'a> {
                         | (HirType::JsValue, HirType::Json)
                 )
         };
+        // A callback parameter declared to return `void` accepts a function
+        // value of any return type, including `Promise<T>` -- the caller has
+        // stated it discards whatever comes back, so an `async` handler
+        // passed where a `=> void` callback is declared (e.g. `createServer`'s
+        // handler, which may legitimately be written either plain or `async`)
+        // is compatible. This mirrors TypeScript's own contextual typing of
+        // void-returning callback types (what lets `async` callbacks pass to
+        // `Array.prototype.forEach` etc.).
+        let return_compatible = |expected_ret: &HirType, ret: &HirType| {
+            expected_ret == ret || *expected_ret == HirType::Void
+        };
         let callable_compatible = match (expected, &actual) {
             (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {
-                expected_ret == ret
+                return_compatible(expected_ret, ret)
                     && expected_params.len() == params.len()
                     && expected_params
                         .iter()
@@ -45,7 +56,7 @@ impl<'a> FnLowerer<'a> {
                 HirType::CallableFunction(fixed, _, rest, expected_ret),
                 HirType::Function(params, ret),
             ) => {
-                expected_ret == ret
+                return_compatible(expected_ret, ret)
                     && params.len() >= fixed.len()
                     && fixed
                         .iter()
