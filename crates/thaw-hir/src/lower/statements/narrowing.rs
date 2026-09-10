@@ -443,31 +443,38 @@ impl<'a> FnLowerer<'a> {
             BinaryOp::EqEqEq | BinaryOp::EqEq => false,
             _ => return None,
         };
-        let typeof_ident = match (binary.left.as_ref(), binary.right.as_ref()) {
+        let typeof_ident_and_lit = match (binary.left.as_ref(), binary.right.as_ref()) {
             (Expr::Unary(unary), Expr::Lit(Lit::Str(value)))
-                if unary.op == UnaryOp::TypeOf && value.value == *"undefined" =>
+            | (Expr::Lit(Lit::Str(value)), Expr::Unary(unary))
+                if unary.op == UnaryOp::TypeOf =>
             {
                 match unary.arg.as_ref() {
-                    Expr::Ident(ident) => Some(ident),
-                    _ => None,
-                }
-            }
-            (Expr::Lit(Lit::Str(value)), Expr::Unary(unary))
-                if unary.op == UnaryOp::TypeOf && value.value == *"undefined" =>
-            {
-                match unary.arg.as_ref() {
-                    Expr::Ident(ident) => Some(ident),
+                    Expr::Ident(ident) => Some((ident, value)),
                     _ => None,
                 }
             }
             _ => None,
         };
-        if let Some(ident) = typeof_ident {
+        if let Some((ident, type_lit)) = typeof_ident_and_lit {
             let name = self.resolve_binding(ident.sym.as_ref());
-            let HirType::Optional(payload) = self.scope.get(&name)? else {
-                return None;
+            let (payload, absence_kind) = match self.scope.get(&name)? {
+                HirType::Optional(payload) => (payload.as_ref().clone(), 0u8),
+                HirType::Nullable(payload) => (payload.as_ref().clone(), 1),
+                HirType::Nullish(payload) => (payload.as_ref().clone(), 2),
+                _ => return None,
             };
-            return Some((name, payload.as_ref().clone(), present_when_true, 0));
+            // `typeof x === "undefined"` -- x is *absent* when the test
+            // holds (only meaningful for the `undefined`-carrying kinds).
+            if type_lit.value == *"undefined" && absence_kind != 1 {
+                return Some((name, payload, present_when_true, absence_kind));
+            }
+            // `typeof x === "<payload's own type>"` -- x is *present*
+            // when the test holds (inverting `present_when_true`, which
+            // was computed for the `=== undefined` sense).
+            if native_typeof_name(&payload).is_some_and(|kind| type_lit.value == *kind) {
+                return Some((name, payload, !present_when_true, absence_kind));
+            }
+            return None;
         }
         let (ident, nullable) = match (binary.left.as_ref(), binary.right.as_ref()) {
             (Expr::Ident(value), Expr::Ident(undefined)) if undefined.sym == *"undefined" => {
