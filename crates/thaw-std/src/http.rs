@@ -663,16 +663,24 @@ fn normalize_status(status_code: f64) -> u16 {
 /// doesn't consume, so it can't lose bytes a client did send.
 fn client_hung_up(connection: &ConnectionState) -> bool {
     let mut probe = [0_u8; 1];
-    matches!(connection.stream.peek(&mut probe), Ok(0))
+    match &connection.stream {
+        Some(stream) => matches!(stream.peek(&mut probe), Ok(0)),
+        None => true,
+    }
 }
 
-/// The client vanished mid-response: shut the socket and stop watching it
-/// now. The `ConnectionState` itself is kept until the in-flight handler
-/// next touches it (it still holds a `*mut ConnectionState`), at which
-/// point `bail_if_client_gone` tears it down.
+/// The client vanished mid-response: close the socket (releasing its
+/// descriptor) and stop watching it now. The `ConnectionState` box is
+/// kept until the in-flight handler next touches it (it still holds a
+/// `*mut ConnectionState`), at which point `bail_if_client_gone` frees
+/// the rest.
 fn mark_client_gone(connection: &mut ConnectionState) {
     connection.client_gone = true;
-    let _ = connection.stream.shutdown(Shutdown::Both);
+    if let Some(stream) = connection.stream.take() {
+        let _ = stream.shutdown(Shutdown::Both);
+        // `stream` drops here -- the fd is closed straight away rather
+        // than lingering until the handler completes.
+    }
     if connection.watcher != 0 {
         unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
         connection.watcher = 0;
@@ -851,7 +859,10 @@ static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 static UNHANDLED_SERVER_ERROR: AtomicBool = AtomicBool::new(false);
 
 struct ConnectionState {
-    stream: TcpStream,
+    /// `None` only after `mark_client_gone` took the socket to close its
+    /// descriptor early. Every request/response-path use is past a
+    /// `client_gone` check by then, so `socket()` is `Some` for them.
+    stream: Option<TcpStream>,
     server: *const ServerState,
     request: Vec<u8>,
     response: Vec<u8>,
@@ -902,6 +913,13 @@ struct ConnectionState {
     /// `response.write`/`end` tears the connection down instead of
     /// rendering / streaming into a dead socket.
     client_gone: bool,
+}
+
+impl ConnectionState {
+    /// The live socket. Only `None` after `mark_client_gone`.
+    fn socket(&mut self) -> Option<&mut TcpStream> {
+        self.stream.as_mut()
+    }
 }
 
 /// Live `ConnectionState` box addresses, so `thaw_http_run_servers` can
@@ -1130,7 +1148,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         return;
     }
     let connection = Box::into_raw(Box::new(ConnectionState {
-        stream,
+        stream: Some(stream),
         server,
         request: Vec::new(),
         response: Vec::new(),
@@ -1149,7 +1167,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
-            (*connection).stream.as_raw_fd(),
+            (*connection).stream.as_ref().unwrap().as_raw_fd(),
             THAW_FD_READABLE,
             connection_ready,
             connection.cast(),
@@ -1324,7 +1342,11 @@ fn read_request(connection: &mut ConnectionState) -> bool {
             finish_connection(connection);
             return false;
         }
-        match connection.stream.read(&mut chunk) {
+        let Some(socket) = connection.socket() else {
+            finish_connection(connection);
+            return false;
+        };
+        match socket.read(&mut chunk) {
             Ok(0) => {
                 finish_connection(connection);
                 return false;
@@ -1380,10 +1402,11 @@ enum FlushResult {
 
 fn write_response(connection: &mut ConnectionState) -> FlushResult {
     while connection.written < connection.response.len() {
-        match connection
-            .stream
-            .write(&connection.response[connection.written..])
-        {
+        let Some(stream) = connection.stream.as_mut() else {
+            finish_connection(connection);
+            return FlushResult::Closed;
+        };
+        match stream.write(&connection.response[connection.written..]) {
             Ok(0) => {
                 finish_connection(connection);
                 return FlushResult::Closed;
@@ -1479,9 +1502,14 @@ fn drain_pending_context_frees() {
 /// connection was torn down (so `connection` is now freed).
 fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
     unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
+    connection.watcher = 0;
+    let Some(fd) = connection.stream.as_ref().map(TcpStream::as_raw_fd) else {
+        finish_connection(connection);
+        return false;
+    };
     connection.watcher = unsafe {
         thaw_runtime_watch_fd(
-            connection.stream.as_raw_fd(),
+            fd,
             interests,
             connection_ready,
             (connection as *mut ConnectionState).cast(),
