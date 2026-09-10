@@ -328,6 +328,12 @@ struct IncomingMessage {
     /// sequence; this is the escape hatch for a binary body, mirroring
     /// `response.endEncoded(content, "hex")` on the way out.
     body_hex: *const NativeClosure,
+    /// `request.bodyBytes()` -- the raw request body as a native byte
+    /// array (`HirType::Bytes`, physically an `Array(F64)` handle). The
+    /// first-class counterpart to `bodyHex()`: the handler gets the bytes
+    /// directly, indexes / iterates / slices them, and hands them back
+    /// through `response.endBytes(...)` without an encode/decode detour.
+    body_bytes: *const NativeClosure,
 }
 
 #[repr(C)]
@@ -337,6 +343,13 @@ struct ServerResponse {
     end: *const NativeClosure,
     write: *const NativeClosure,
     end_encoded: *const NativeClosure,
+    /// `response.write(bytes)` / `response.end(bytes)` for a native byte
+    /// array (`HirType::Bytes`). Same streaming / buffering path as the
+    /// string closures -- the only difference is the argument is decoded
+    /// from an `Array(F64)` handle instead of a NUL-terminated C string,
+    /// so an arbitrary byte sequence survives.
+    write_bytes: *const NativeClosure,
+    end_bytes: *const NativeClosure,
 }
 
 /// Everything one in-flight request/response needs that must outlive a
@@ -380,6 +393,9 @@ struct RequestContext {
     end_encoded: NativeClosure,
     request_on: NativeClosure,
     request_body_hex: NativeClosure,
+    request_body_bytes: NativeClosure,
+    write_bytes: NativeClosure,
+    end_bytes: NativeClosure,
     /// The raw request body, kept so `bodyHex()` can hex-encode it. Owns
     /// what `_body` decoded from.
     _raw_body: Vec<u8>,
@@ -427,6 +443,8 @@ impl RequestContext {
                 end: std::ptr::null(),
                 write: std::ptr::null(),
                 end_encoded: std::ptr::null(),
+                write_bytes: std::ptr::null(),
+                end_bytes: std::ptr::null(),
             },
             request: IncomingMessage {
                 method: std::ptr::null(),
@@ -435,6 +453,7 @@ impl RequestContext {
                 body: std::ptr::null(),
                 on: std::ptr::null(),
                 body_hex: std::ptr::null(),
+                body_bytes: std::ptr::null(),
             },
             request_on: NativeClosure {
                 code: request_add_listener as *const c_void,
@@ -442,6 +461,18 @@ impl RequestContext {
             },
             request_body_hex: NativeClosure {
                 code: request_body_hex as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            request_body_bytes: NativeClosure {
+                code: request_body_bytes as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            write_bytes: NativeClosure {
+                code: response_write_bytes as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            end_bytes: NativeClosure {
+                code: response_end_bytes as *const c_void,
                 context: std::ptr::null_mut(),
             },
             _raw_body: body.to_vec(),
@@ -485,12 +516,18 @@ impl RequestContext {
         context.end_encoded.context = context_ptr.cast();
         context.request_on.context = context_ptr.cast();
         context.request_body_hex.context = context_ptr.cast();
+        context.request_body_bytes.context = context_ptr.cast();
+        context.write_bytes.context = context_ptr.cast();
+        context.end_bytes.context = context_ptr.cast();
         context.response.set_header = &context.set_header;
         context.response.end = &context.end;
         context.response.write = &context.write;
         context.response.end_encoded = &context.end_encoded;
+        context.response.write_bytes = &context.write_bytes;
+        context.response.end_bytes = &context.end_bytes;
         context.request.on = &context.request_on;
         context.request.body_hex = &context.request_body_hex;
+        context.request.body_bytes = &context.request_body_bytes;
         context
     }
 }
@@ -513,6 +550,102 @@ unsafe extern "C" fn request_body_hex(environment: *const c_void) -> *const c_ch
         ._body_hex
         .as_ref()
         .map_or(std::ptr::null(), |value| value.as_ptr())
+}
+
+/// Number of bytes each element occupies in the native `Array(F64)`
+/// payload, and the size of the leading `i64` length header -- the layout
+/// `thaw-llvm`'s `compile_array_wrap` / element access and `thaw-std`'s
+/// `json.rs` number-array bridge both assume.
+const NATIVE_ARRAY_HEADER: usize = 8;
+const NATIVE_ARRAY_ELEMENT: usize = 8;
+
+/// Reads a `HirType::Bytes` argument (a one-word handle onto a native
+/// `[len: i64][f64 * len]` buffer, exactly what `Buffer.from` / a byte
+/// literal produce) back into raw bytes. Each element is truncated toward
+/// zero and taken mod 256, matching `Buffer`'s own `ToUint8` coercion.
+/// A null handle or null buffer (a failed allocation upstream) reads as
+/// empty rather than faulting across the FFI boundary.
+unsafe fn native_bytes_to_vec(handle: *const u8) -> Vec<u8> {
+    if handle.is_null() {
+        return Vec::new();
+    }
+    let buffer = (handle as *const *const u8).read();
+    if buffer.is_null() {
+        return Vec::new();
+    }
+    let length = (buffer as *const i64).read().max(0) as usize;
+    (0..length)
+        .map(|index| {
+            let value =
+                (buffer.add(NATIVE_ARRAY_HEADER + index * NATIVE_ARRAY_ELEMENT) as *const f64)
+                    .read();
+            (value as i64 & 0xff) as u8
+        })
+        .collect()
+}
+
+/// Builds a native `HirType::Bytes` value from raw bytes: the
+/// `[len: i64][f64 * len]` payload, then the one-word handle onto it that
+/// every `Array`/`Bytes` value is (see `compile_array_wrap` /
+/// `json.rs::wrap_array_handle`). Arena-allocated, so it lives as long as
+/// every other heap value the handler sees. Returns null only if an
+/// allocation fails.
+fn native_bytes_from_slice(bytes: &[u8]) -> *mut u8 {
+    let payload = thaw_arena::thaw_arena_alloc(
+        NATIVE_ARRAY_HEADER + bytes.len() * NATIVE_ARRAY_ELEMENT,
+        NATIVE_ARRAY_ELEMENT,
+    );
+    if payload.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        (payload as *mut i64).write(bytes.len() as i64);
+        for (index, &byte) in bytes.iter().enumerate() {
+            (payload.add(NATIVE_ARRAY_HEADER + index * NATIVE_ARRAY_ELEMENT) as *mut f64)
+                .write(f64::from(byte));
+        }
+    }
+    let handle = thaw_arena::thaw_arena_alloc(NATIVE_ARRAY_HEADER, NATIVE_ARRAY_ELEMENT);
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { (handle as *mut *mut u8).write(payload) };
+    handle
+}
+
+/// `request.bodyBytes()` -- the raw request body as a first-class native
+/// byte array (`HirType::Bytes`). The lossless, directly-usable
+/// counterpart to `bodyHex()`: no hex round-trip, the handler indexes and
+/// iterates the bytes as-is. A fresh handle per call (cheap: bodies here
+/// are bounded by `MAX_REQUEST_BODY`), so a handler is free to mutate one
+/// without disturbing another read.
+unsafe extern "C" fn request_body_bytes(environment: *const c_void) -> *mut u8 {
+    let context = request_context(environment);
+    native_bytes_from_slice(&context._raw_body)
+}
+
+/// `response.write(bytes)` for a `HirType::Bytes` argument -- identical to
+/// the string `response.write`, only the payload is decoded from a native
+/// byte array so an arbitrary byte sequence goes out verbatim.
+unsafe extern "C" fn response_write_bytes(environment: *const c_void, chunk: *const u8) -> bool {
+    let context = request_context(environment);
+    let bytes = native_bytes_to_vec(chunk);
+    if stream_should_engage(context) {
+        stream_write(context, &bytes);
+    } else {
+        context.state.body.extend(bytes);
+    }
+    true
+}
+
+/// `response.end(bytes)` for a `HirType::Bytes` argument -- the byte-exact
+/// counterpart to `response.end(string)` / `response.endEncoded(hex,
+/// "hex")`.
+unsafe extern "C" fn response_end_bytes(environment: *const c_void, chunk: *const u8) -> bool {
+    let context = request_context(environment);
+    let bytes = native_bytes_to_vec(chunk);
+    stream_or_buffer_end(context, bytes);
+    true
 }
 
 /// `request.on("data" | "end", callback)`. Registers the callback; the

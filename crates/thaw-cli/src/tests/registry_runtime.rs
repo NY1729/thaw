@@ -1313,6 +1313,103 @@ function main(): void {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `request.bodyBytes()` hands the handler the raw request body as a
+/// first-class `Buffer` (`HirType::Bytes`): it indexes, iterates, and
+/// takes `.length` of the bytes with no hex detour, then hands them back
+/// through `response.endBytes(...)` byte-for-byte. A `00 ff 41 80` body
+/// (NUL, a non-UTF-8 lead byte, 'A', a bare continuation byte) survives
+/// the round trip exactly, and the handler-computed length / checksum
+/// prove the individual byte values arrived intact.
+#[test]
+fn node_http_round_trips_a_binary_body_as_first_class_bytes() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-body-bytes-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+function main(): void {
+    const server = createServer((request, response): void => {
+        const bytes: Uint8Array = request.bodyBytes();
+        let sum: number = 0;
+        for (const value of bytes) {
+            sum = sum + value;
+        }
+        response.setHeader("Content-Type", "application/octet-stream");
+        response.setHeader("X-Byte-Length", "" + bytes.length);
+        response.setHeader("X-Byte-Sum", "" + sum);
+        response.endBytes(bytes);
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut keep = (0..500)
+        .find_map(|_| TcpStream::connect(("127.0.0.1", port)).ok().or_else(|| {
+            std::thread::sleep(Duration::from_millis(10));
+            None
+        }))
+        .expect("server did not start");
+    keep.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    keep.write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n\x00\xff\x41\x80")
+        .unwrap();
+
+    // Read the whole response: head, then exactly Content-Length raw bytes.
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 256];
+    let header_end = loop {
+        if let Some(index) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            break index + 4;
+        }
+        let length = keep.read(&mut chunk).unwrap();
+        assert!(length > 0, "connection closed before headers completed");
+        buffer.extend_from_slice(&chunk[..length]);
+    };
+    let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+    let header = |name: &str| {
+        head.lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
+            })
+            .unwrap_or_else(|| panic!("response had no {name} header:\n{head}"))
+    };
+    // The handler saw four bytes and summed them: 0 + 255 + 65 + 128 = 448.
+    assert_eq!(header("X-Byte-Length"), "4");
+    assert_eq!(header("X-Byte-Sum"), "448");
+    let content_length: usize = header("Content-Length").parse().unwrap();
+    while buffer.len() < header_end + content_length {
+        let length = keep.read(&mut chunk).unwrap();
+        assert!(length > 0, "connection closed before body completed");
+        buffer.extend_from_slice(&chunk[..length]);
+    }
+    // `endBytes` sent the body back verbatim -- every byte, NUL included.
+    assert_eq!(
+        &buffer[header_end..header_end + content_length],
+        b"\x00\xff\x41\x80"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The native server reads a request body (`Content-Length` or
 /// `Transfer-Encoding: chunked`) before invoking the handler and exposes
 /// it as `request.body`. Consuming it also means a body-carrying request
