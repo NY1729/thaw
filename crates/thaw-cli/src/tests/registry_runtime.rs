@@ -1079,6 +1079,160 @@ function main(): void {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `request.on("data", ...)` / `request.on("end", ...)` -- the streaming
+/// body-reading shape most Node handlers actually use -- replays the
+/// already-buffered body: `data` fires once with the whole body (never
+/// for an empty one), `end` once after, regardless of the order the two
+/// listeners were registered in. `request.method`/`.url` still resolve
+/// correctly with the `on` member present.
+#[test]
+fn node_http_replays_the_request_body_through_on_data_and_on_end() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-req-on-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+function main(): void {
+    const server = createServer((request, response): void => {
+        let chunks = "";
+        let dataCalls = 0;
+        // `end` registered before `data` on purpose: delivery must still
+        // fire `data` first, so `chunks` is populated when `end` runs.
+        request.on("end", (): void => {
+            response.setHeader("Content-Type", "text/plain");
+            response.end(
+                request.method + " " + request.url
+                    + " data=" + String(dataCalls)
+                    + " [" + chunks + "]"
+            );
+        });
+        request.on("data", (chunk: string): void => {
+            dataCalls = dataCalls + 1;
+            chunks = chunks + chunk;
+        });
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(
+        (0..500)
+            .find_map(|_| TcpStream::connect(("127.0.0.1", port)).ok().or_else(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }))
+            .expect("server did not start"),
+    );
+
+    let mut keep = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    keep.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let send = |stream: &mut TcpStream, raw: &[u8]| {
+        stream.write_all(raw).unwrap();
+        read_one_response_body_any(stream)
+    };
+
+    // Fixed-length body: one `data` chunk, then `end`.
+    assert_eq!(
+        send(
+            &mut keep,
+            b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nalpha"
+        ),
+        "POST /a data=1 [alpha]"
+    );
+    // Chunked body: still replayed as a single `data` chunk.
+    assert_eq!(
+        send(
+            &mut keep,
+            b"POST /b HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n\
+              4\r\nbeta\r\n5\r\n-body\r\n0\r\n\r\n"
+        ),
+        "POST /b data=1 [beta-body]"
+    );
+    // Empty body: `data` never fires, `end` still does.
+    assert_eq!(
+        send(&mut keep, b"GET /c HTTP/1.1\r\nHost: x\r\n\r\n"),
+        "GET /c data=0 []"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same `request.on(...)` replay from inside an `async` handler that
+/// registers its listeners before its first `await`. This also exercises
+/// `hir_type_as_ts_type` over `IncomingMessage`'s function-typed `on`
+/// member -- an async handler round-trips the request object's type
+/// through it, which previously hit "cannot express inferred generic
+/// class type".
+#[test]
+fn node_http_replays_the_request_body_to_an_async_handler() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-req-on-async-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+async function main(): Promise<void> {
+    const server = createServer(async (request, response): Promise<void> => {
+        let body = "";
+        request.on("data", (chunk: string): void => { body = body + chunk; });
+        request.on("end", (): void => {
+            response.end("async " + request.method + " " + request.url + " [" + body + "]");
+        });
+        await new Promise<void>((resolve): void => { setTimeout(resolve, 5); });
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut keep = (0..500)
+        .find_map(|_| TcpStream::connect(("127.0.0.1", port)).ok().or_else(|| {
+            std::thread::sleep(Duration::from_millis(10));
+            None
+        }))
+        .expect("server did not start");
+    keep.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    keep.write_all(b"POST /async HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\n\r\npayload")
+        .unwrap();
+    assert_eq!(read_one_response_body_any(&mut keep), "async POST /async [payload]");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The native server reads a request body (`Content-Length` or
 /// `Transfer-Encoding: chunked`) before invoking the handler and exposes
 /// it as `request.body`. Consuming it also means a body-carrying request
