@@ -212,18 +212,20 @@ pub unsafe extern "C" fn thaw_bytes_byte_length(
 }
 
 #[no_mangle]
-/// `Buffer.concat(list)` -- flattens an array of byte buffers into one
-/// fresh byte array, in order. A null / unreadable entry contributes
-/// nothing (rather than faulting). `list` is the raw outer
-/// `[len][elem...]` buffer; each element slot holds an inner array
+/// `Buffer.concat(list, totalLength)` -- flattens an array of byte
+/// buffers into one fresh byte array, in order. A null / unreadable
+/// entry contributes nothing (rather than faulting). `list` is the raw
+/// outer `[len][elem...]` buffer; each element slot holds an inner array
 /// *handle* (one word onto the inner `[len][elem...]` buffer), the same
-/// nesting every `T[][]` uses.
+/// nesting every `T[][]` uses. A non-negative `total` truncates or
+/// zero-pads the result to exactly that many bytes (Node's optional
+/// `totalLength`); a negative `total` means "no limit".
 ///
 /// # Safety
 ///
 /// `list` must point to a Thaw array whose element slots are array
 /// handles onto `f64`-slot byte buffers.
-pub unsafe extern "C" fn thaw_bytes_concat(list: *const u8) -> *mut u8 {
+pub unsafe extern "C" fn thaw_bytes_concat(list: *const u8, total: f64) -> *mut u8 {
     let Some(count) = (unsafe { native_array_length(list) }) else {
         return std::ptr::null_mut();
     };
@@ -238,7 +240,25 @@ pub unsafe extern "C" fn thaw_bytes_concat(list: *const u8) -> *mut u8 {
             result.extend(bytes);
         }
     }
+    if total.is_finite() && total >= 0.0 {
+        result.resize(total as usize, 0);
+    }
     unsafe { write_byte_array(&result) }
+}
+
+#[no_mangle]
+/// `a.equals(b)` -- byte-for-byte equality of two byte buffers. Both
+/// pointers are raw `[len][elem...]` buffers (codegen unwraps the
+/// handles). A null / unreadable side compares equal only to another
+/// empty one.
+///
+/// # Safety
+///
+/// `a` / `b` must be null or point to Thaw arrays of `f64` element slots.
+pub unsafe extern "C" fn thaw_bytes_equals(a: *const u8, b: *const u8) -> bool {
+    let left = unsafe { read_byte_array(a) }.unwrap_or_default();
+    let right = unsafe { read_byte_array(b) }.unwrap_or_default();
+    left == right
 }
 
 #[no_mangle]

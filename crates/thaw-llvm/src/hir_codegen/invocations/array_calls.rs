@@ -26,6 +26,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_from_string"
                 | "__thaw_bytes_from_array"
                 | "__thaw_bytes_concat"
+                | "__thaw_bytes_equals"
                 | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
         );
@@ -108,30 +109,77 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
             }
-            "__thaw_bytes_from_array" | "__thaw_bytes_concat" => {
-                let (runtime, label) = if name == "__thaw_bytes_concat" {
-                    ("thaw_bytes_concat", "bytes_concat")
-                } else {
-                    ("thaw_bytes_from_array", "bytes_from_array")
-                };
+            "__thaw_bytes_from_array" => {
                 let [source] = args else {
-                    return Err(format!("`{name}` expects one operand"));
+                    return Err("`__thaw_bytes_from_array` expects one operand".into());
                 };
                 let handle = self.compile_expr(source)?.into_pointer_value();
                 let data = self.compile_array_data(handle)?;
                 let result = self
                     .builder
                     .build_call(
-                        self.module.get_function(runtime).unwrap(),
+                        self.module.get_function("thaw_bytes_from_array").unwrap(),
                         &[data.into()],
-                        label,
+                        "bytes_from_array",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or_else(|| format!("`{name}` returned no value"))?
+                    .ok_or("`__thaw_bytes_from_array` returned no value".to_string())?
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_concat" => {
+                let [list, total] = args else {
+                    return Err("Buffer.concat expects a list and a totalLength".into());
+                };
+                let handle = self.compile_expr(list)?.into_pointer_value();
+                let data = self.compile_array_data(handle)?;
+                let total = self.compile_expr(total)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_concat").unwrap(),
+                        &[data.into(), total.into()],
+                        "bytes_concat",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Buffer.concat returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_equals" => {
+                let [left, right] = args else {
+                    return Err("Buffer equals expects two operands".into());
+                };
+                let left = self.compile_expr(left)?.into_pointer_value();
+                let left = self.compile_array_data(left)?;
+                let right = self.compile_expr(right)?.into_pointer_value();
+                let right = self.compile_array_data(right)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_equals").unwrap(),
+                        &[left.into(), right.into()],
+                        "bytes_equals",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Buffer equals returned no value".to_string())?;
+                // The runtime returns an i8; thaw `Bool` is i1.
+                return self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        result.into_int_value(),
+                        self.context.i8_type().const_zero(),
+                        "bytes_equals_bool",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
             }
             "__thaw_bytes_byte_length" => {
                 let [text, encoding] = args else {

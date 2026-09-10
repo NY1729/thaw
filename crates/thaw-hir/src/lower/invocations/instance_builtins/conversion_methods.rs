@@ -100,6 +100,30 @@ impl<'a> FnLowerer<'a> {
                         vec![timestamp],
                     ));
                 }
+                if property.sym == *"equals" {
+                    // `a.equals(b)` -- byte-for-byte equality, Buffer only
+                    // (a plain array uses `===` / a loop). Both sides are
+                    // read as raw byte arrays in the runtime.
+                    let receiver = self.lower_expr(&member.obj)?;
+                    if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
+                        return Err(
+                            "`.equals()` is only supported on a Buffer / Uint8Array".into(),
+                        );
+                    }
+                    let [argument] = call.args.as_slice() else {
+                        return Err("`Buffer.prototype.equals` expects exactly one argument".into());
+                    };
+                    let other = self.lower_expr(&argument.expr)?;
+                    self.expect_type(
+                        &HirType::Array(Box::new(HirType::F64)),
+                        &other,
+                        "`.equals()` argument",
+                    )?;
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_bytes_equals".to_string())),
+                        vec![receiver, other],
+                    ));
+                }
                 if property.sym == *"toString" {
                     let receiver = self.lower_expr(&member.obj)?;
                     // A byte buffer decodes (`buf.toString("hex")`, default
