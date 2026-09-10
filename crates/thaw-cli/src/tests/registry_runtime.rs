@@ -1017,19 +1017,29 @@ function main(): void {
 
     // 3. A client that hangs up while a genuinely `async` handler is
     //    still awaiting must not crash the server or wedge the event
-    //    loop; the descriptor is released once that handler completes.
+    //    loop -- and its descriptor is released *right away*, not only
+    //    once the (still-running) handler finishes 400ms later.
     for _ in 0..20 {
         let mut aborter = TcpStream::connect(("127.0.0.1", port)).unwrap();
         aborter
             .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
         // Vanish well before the handler's 400ms delay elapses.
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(5));
         drop(aborter);
     }
-    // Wait past the slow handler's delay so the aborted requests finish
-    // server-side and release their descriptors.
-    std::thread::sleep(Duration::from_millis(900));
+    // Still ~300ms before any of those handlers can call response.end():
+    // the server has already noticed the hangups and dropped the sockets.
+    std::thread::sleep(Duration::from_millis(120));
+    assert_eq!(ok_request("/mid-abort-check"), "ok:/mid-abort-check");
+    let mid_abort_fds = fd_count();
+    assert!(
+        mid_abort_fds <= baseline_fds + 8,
+        "fd count is {mid_abort_fds} (baseline {baseline_fds}) while 20 aborted \
+         handlers are still running -- their sockets weren't released promptly"
+    );
+    // And it stays flat after the handlers actually complete.
+    std::thread::sleep(Duration::from_millis(600));
     assert_eq!(ok_request("/after-aborts"), "ok:/after-aborts");
     let after_aborts_fds = fd_count();
     assert!(
