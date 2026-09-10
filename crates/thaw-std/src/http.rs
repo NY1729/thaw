@@ -317,6 +317,11 @@ struct IncomingMessage {
     /// before the handler runs, so this is complete by the time the
     /// handler sees it. Empty for a bodyless request.
     body: *const c_char,
+    /// `request.on("data", cb)` / `request.on("end", cb)`. Registers a
+    /// listener; the already-buffered body is replayed to it once the
+    /// synchronous part of the handler returns (see
+    /// `deliver_request_body_events`).
+    on: *const NativeClosure,
 }
 
 #[repr(C)]
@@ -367,6 +372,17 @@ struct RequestContext {
     write: NativeClosure,
     end: NativeClosure,
     end_encoded: NativeClosure,
+    request_on: NativeClosure,
+    /// `request.on("data", cb)` callbacks, in registration order. Each is
+    /// a raw closure pointer (`*const c_void` as `usize`), replayed once
+    /// with the whole body by `deliver_request_body_events`.
+    request_data_listeners: Vec<usize>,
+    /// `request.on("end", cb)` callbacks, fired after the `data` ones.
+    request_end_listeners: Vec<usize>,
+    /// Set once `deliver_request_body_events` has run, so a listener
+    /// registered late (after an `await`) doesn't get a second replay and
+    /// a re-entrant `on(...)` during delivery is a no-op.
+    body_events_delivered: bool,
     // Backing storage the `IncomingMessage` pointers borrow from; never
     // read through directly (hence the underscores), just kept alive.
     _method: CString,
@@ -403,7 +419,15 @@ impl RequestContext {
                 url: std::ptr::null(),
                 status_code: 0.0,
                 body: std::ptr::null(),
+                on: std::ptr::null(),
             },
+            request_on: NativeClosure {
+                code: request_add_listener as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            request_data_listeners: Vec::new(),
+            request_end_listeners: Vec::new(),
+            body_events_delivered: false,
             set_header: NativeClosure {
                 code: response_set_header as *const c_void,
                 context: std::ptr::null_mut(),
@@ -438,11 +462,76 @@ impl RequestContext {
         context.write.context = context_ptr.cast();
         context.end.context = context_ptr.cast();
         context.end_encoded.context = context_ptr.cast();
+        context.request_on.context = context_ptr.cast();
         context.response.set_header = &context.set_header;
         context.response.end = &context.end;
         context.response.write = &context.write;
         context.response.end_encoded = &context.end_encoded;
+        context.request.on = &context.request_on;
         context
+    }
+}
+
+/// `request.on("data" | "end", callback)`. Registers the callback; the
+/// already-buffered body is replayed to every listener by
+/// `deliver_request_body_events` once the synchronous part of the handler
+/// returns. Any other event name is accepted and ignored (Node's
+/// `IncomingMessage` emits `aborted`/`close`/`error` too, none of which
+/// this buffered model produces).
+unsafe extern "C" fn request_add_listener(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+) -> bool {
+    if callback.is_null() {
+        return false;
+    }
+    let context = request_context(environment);
+    match string_from_ptr(event).as_str() {
+        "data" => context.request_data_listeners.push(callback as usize),
+        "end" => context.request_end_listeners.push(callback as usize),
+        _ => {}
+    }
+    true
+}
+
+/// Replays the fully-read request body to every `request.on("data", ...)`
+/// listener as a single string chunk (skipped when the body is empty,
+/// matching Node -- which never emits `data` for a bodyless request),
+/// then fires every `request.on("end", ...)` listener. Idempotent: runs
+/// at most once per request, right after the synchronous part of the
+/// handler returns, so a handler that registers listeners at the top
+/// (before any `await`) sees them fire regardless of registration order.
+fn deliver_request_body_events(context: &mut RequestContext) {
+    if context.body_events_delivered {
+        return;
+    }
+    context.body_events_delivered = true;
+    if context.request_data_listeners.is_empty() && context.request_end_listeners.is_empty() {
+        return;
+    }
+    let data_listeners = std::mem::take(&mut context.request_data_listeners);
+    let end_listeners = std::mem::take(&mut context.request_end_listeners);
+    let body = context._body.clone();
+    if !context._body.as_bytes().is_empty() {
+        for callback in data_listeners {
+            let callback = callback as *const c_void;
+            unsafe {
+                type Callback = unsafe extern "C" fn(*const c_void, *const c_char);
+                let code = *(callback as *const *const c_void);
+                let callback_fn: Callback = std::mem::transmute(code);
+                callback_fn(callback, body.as_ptr());
+            }
+        }
+    }
+    for callback in end_listeners {
+        let callback = callback as *const c_void;
+        unsafe {
+            type Callback = unsafe extern "C" fn(*const c_void);
+            let code = *(callback as *const *const c_void);
+            let callback_fn: Callback = std::mem::transmute(code);
+            callback_fn(callback);
+        }
     }
 }
 
@@ -767,6 +856,11 @@ fn run_server_callback(
         let callback_fn: Callback = std::mem::transmute(code);
         callback_fn(callback, request_ptr, response_ptr);
     }
+    // Replay the buffered body to any `request.on("data"/"end", ...)`
+    // listener the handler registered synchronously. An `end` listener
+    // that finishes the response (`res.end(...)` from inside it) is the
+    // whole point, so this runs before the `ended` check below.
+    deliver_request_body_events(&mut context);
     if context.state.ended || connection.is_null() {
         CallbackOutcome::Ready(ResponseSpec {
             status: normalize_status(context.response.status_code),
