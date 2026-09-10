@@ -340,7 +340,7 @@ fn extract_const_call_signature_decls<'a>(
                         TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
                     };
                     if let Some(iface) = interfaces.get(iface_name.as_str()) {
-                        let signatures = iface
+                        let mut signatures = iface
                             .body
                             .body
                             .iter()
@@ -351,7 +351,37 @@ fn extract_const_call_signature_decls<'a>(
                                 _ => None,
                             })
                             .collect::<Vec<_>>();
+                        // A callable interface's own function-typed
+                        // *property* signatures are callable members of
+                        // the value too (`debug`'s `createDebug.enable(ns)`
+                        // / `.enabled(ns)` config API on top of its
+                        // `(ns): Debugger` call signature). Emit each under
+                        // its property name so it becomes a package-level
+                        // Fallback function reachable via the value's
+                        // member-access path -- only when the interface is
+                        // actually callable, so an ordinary property-bag
+                        // interface is unaffected.
                         if !signatures.is_empty() {
+                            for member in &iface.body.body {
+                                if let TsTypeElement::TsPropertySignature(property) = member {
+                                    let Some(annotation) = &property.type_ann else {
+                                        continue;
+                                    };
+                                    let TsType::TsFnOrConstructorType(
+                                        TsFnOrConstructorType::TsFnType(function),
+                                    ) = annotation.type_ann.as_ref()
+                                    else {
+                                        continue;
+                                    };
+                                    let Expr::Ident(key) = property.key.as_ref() else {
+                                        continue;
+                                    };
+                                    signatures.push((
+                                        key.sym.to_string(),
+                                        CallableConstSignature::Direct(function),
+                                    ));
+                                }
+                            }
                             return Some(signatures);
                         }
                     }
