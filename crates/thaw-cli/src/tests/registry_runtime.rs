@@ -908,6 +908,14 @@ function main(): void {
             response.end("slow-done");
             return;
         }
+        if (request.url === "/stream") {
+            response.write("chunk1;");
+            await delay(200);
+            response.write("chunk2;");
+            await delay(200);
+            response.end("chunk3");
+            return;
+        }
         response.end("ok:" + request.url);
     });
     server.listen(Number(process.env.PORT));
@@ -1027,6 +1035,33 @@ function main(): void {
     assert!(
         after_aborts_fds <= baseline_fds + 8,
         "fd count grew from {baseline_fds} to {after_aborts_fds} after 20 mid-handler aborts"
+    );
+
+    // 4. A client that hangs up after the first chunk of a *streaming*
+    //    response: the handler keeps producing chunks for a while, but
+    //    the server must notice the hangup (not spin), stay responsive
+    //    to other clients throughout, and recover the descriptor.
+    for _ in 0..15 {
+        let mut aborter = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        aborter
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        aborter
+            .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut sink = [0_u8; 64];
+        let _ = aborter.read(&mut sink); // first chunk (or headers)
+        drop(aborter);
+        // The server stays responsive while the abandoned handler is
+        // still notionally running its delays.
+        assert_eq!(ok_request("/mid-stream-check"), "ok:/mid-stream-check");
+    }
+    std::thread::sleep(Duration::from_millis(700));
+    assert_eq!(ok_request("/after-stream-aborts"), "ok:/after-stream-aborts");
+    let after_stream_fds = fd_count();
+    assert!(
+        after_stream_fds <= baseline_fds + 8,
+        "fd count grew from {baseline_fds} to {after_stream_fds} after 15 mid-stream aborts"
     );
 
     child.kill().unwrap();
