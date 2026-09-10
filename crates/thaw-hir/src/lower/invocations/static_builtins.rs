@@ -184,7 +184,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             (object, property),
             ("Array", "of" | "from" | "isArray")
-                | ("Buffer", "from" | "alloc")
+                | ("Buffer", "from" | "alloc" | "concat")
                 | ("Map", "groupBy")
                 | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
                 | ("JSON", "stringify")
@@ -204,6 +204,33 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                     if object.sym == *"Buffer" {
+                        if property.sym == *"concat" {
+                            // `Buffer.concat(list)` -- flatten an array of
+                            // byte buffers into one. (`totalLength` isn't
+                            // supported yet; add it when real code needs
+                            // the truncate/zero-pad behaviour.)
+                            let (arguments, bindings) =
+                                self.lower_native_spread_values(&call.args, "Buffer.concat")?;
+                            let [list] = arguments.as_slice() else {
+                                return Err("`Buffer.concat` expects a single list argument".into());
+                            };
+                            let list_type = self.infer_expr_type(list)?;
+                            if !matches!(&list_type, HirType::Array(element)
+                                if matches!(element.as_ref(),
+                                    HirType::Array(inner) if **inner == HirType::F64))
+                            {
+                                return Err(format!(
+                                    "`Buffer.concat` expects an array of byte buffers, got {list_type:?}"
+                                ));
+                            }
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_bytes_concat".to_string())),
+                                    vec![list.clone()],
+                                ),
+                                &bindings,
+                            );
+                        }
                         if property.sym == *"alloc" {
                             let (arguments, bindings) =
                                 self.lower_native_spread_values(&call.args, "Buffer.alloc")?;
@@ -221,8 +248,10 @@ impl<'a> FnLowerer<'a> {
                         }
                         // `Buffer.from(value, encoding?)`. A string decodes
                         // per `encoding` (default `utf8`); a `number[]` /
-                        // byte buffer is already the bytes -- pass it
-                        // straight through (it erases to the same array).
+                        // byte buffer copies through `__thaw_bytes_from_array`,
+                        // which clamps each element to a byte (`300` -> `44`,
+                        // `-1` -> `255`) and detaches the copy from the
+                        // source array -- both `Buffer.from(array)` semantics.
                         let (arguments, bindings) =
                             self.lower_native_spread_values(&call.args, "Buffer.from")?;
                         let source = arguments
@@ -231,7 +260,13 @@ impl<'a> FnLowerer<'a> {
                             .clone();
                         let source_type = self.infer_expr_type(&source)?;
                         if matches!(&source_type, HirType::Array(elem) if **elem == HirType::F64) {
-                            return self.wrap_call_argument_bindings(source, &bindings);
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_bytes_from_array".to_string())),
+                                    vec![source],
+                                ),
+                                &bindings,
+                            );
                         }
                         let encoding = match arguments.get(1) {
                             Some(argument) => argument.clone(),

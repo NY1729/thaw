@@ -23,6 +23,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_array_splice"
                 | "__thaw_bytes_to_string"
                 | "__thaw_bytes_from_string"
+                | "__thaw_bytes_from_array"
+                | "__thaw_bytes_concat"
                 | "__thaw_bytes_alloc"
         );
         if !typed_array_call && !generic_array_call {
@@ -101,6 +103,31 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("Buffer.from returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_from_array" | "__thaw_bytes_concat" => {
+                let (runtime, label) = if name == "__thaw_bytes_concat" {
+                    ("thaw_bytes_concat", "bytes_concat")
+                } else {
+                    ("thaw_bytes_from_array", "bytes_from_array")
+                };
+                let [source] = args else {
+                    return Err(format!("`{name}` expects one operand"));
+                };
+                let handle = self.compile_expr(source)?.into_pointer_value();
+                let data = self.compile_array_data(handle)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(runtime).unwrap(),
+                        &[data.into()],
+                        label,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("`{name}` returned no value"))?
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
             }

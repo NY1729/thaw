@@ -483,7 +483,8 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_object_array_to_string"
                     | "__thaw_object_to_string"
                     | "__thaw_bytes_to_string" => return Ok(HirType::Str),
-                    "__thaw_bytes_from_string" | "__thaw_bytes_alloc" => {
+                    "__thaw_bytes_from_string" | "__thaw_bytes_alloc"
+                    | "__thaw_bytes_from_array" | "__thaw_bytes_concat" => {
                         // `Bytes`, not `Array(F64)`, so a chained
                         // `Buffer.from(...).toString("hex")` decodes.
                         // `infer_expr_type` normalizes it away for every

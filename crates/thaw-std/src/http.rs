@@ -576,9 +576,9 @@ unsafe fn native_bytes_to_vec(handle: *const u8) -> Vec<u8> {
     let length = (buffer as *const i64).read().max(0) as usize;
     (0..length)
         .map(|index| {
-            let value =
-                (buffer.add(NATIVE_ARRAY_HEADER + index * NATIVE_ARRAY_ELEMENT) as *const f64)
-                    .read();
+            let value = (buffer.add(NATIVE_ARRAY_HEADER + index * NATIVE_ARRAY_ELEMENT)
+                as *const f64)
+                .read();
             (value as i64 & 0xff) as u8
         })
         .collect()
