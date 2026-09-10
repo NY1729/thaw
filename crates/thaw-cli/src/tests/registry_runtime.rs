@@ -1233,6 +1233,79 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `request.bodyHex()` returns the request body's raw bytes as a hex
+/// string -- the escape hatch for a body that `request.body` /
+/// `on("data")` would mangle, since a thaw string is NUL-terminated. A
+/// four-byte body `00 ff 41 80` (NUL, non-UTF-8) round-trips exactly.
+#[test]
+fn node_http_exposes_the_raw_request_body_as_hex() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-body-hex-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+function main(): void {
+    const server = createServer((request, response): void => {
+        const hex: string = request.bodyHex();
+        response.setHeader("Content-Type", "text/plain");
+        response.end(
+            request.method + " " + request.url
+                + " hex=" + hex
+                + " body=[" + request.body + "]"
+        );
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut keep = (0..500)
+        .find_map(|_| TcpStream::connect(("127.0.0.1", port)).ok().or_else(|| {
+            std::thread::sleep(Duration::from_millis(10));
+            None
+        }))
+        .expect("server did not start");
+    keep.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    // 00 ff 41 80: NUL, a non-UTF-8 lead byte, 'A', a bare continuation
+    // byte. `request.body` sees a truncated / U+FFFD-mangled version;
+    // `bodyHex()` sees all four bytes.
+    keep.write_all(b"POST /raw HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n\x00\xff\x41\x80")
+        .unwrap();
+    // `body`: NUL and each invalid byte become U+FFFD.
+    assert_eq!(
+        read_one_response_body_any(&mut keep),
+        "POST /raw hex=00ff4180 body=[\u{fffd}\u{fffd}A\u{fffd}]"
+    );
+    // A bodyless request: empty hex, empty body.
+    assert_eq!(
+        {
+            keep.write_all(b"GET /none HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            read_one_response_body_any(&mut keep)
+        },
+        "GET /none hex= body=[]"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The native server reads a request body (`Content-Length` or
 /// `Transfer-Encoding: chunked`) before invoking the handler and exposes
 /// it as `request.body`. Consuming it also means a body-carrying request

@@ -322,6 +322,12 @@ struct IncomingMessage {
     /// synchronous part of the handler returns (see
     /// `deliver_request_body_events`).
     on: *const NativeClosure,
+    /// `request.bodyHex()` -- the raw request body as a lowercase hex
+    /// string, computed on call. thaw strings are NUL-terminated, so
+    /// `body` (and the `on("data")` chunk) can't carry an arbitrary byte
+    /// sequence; this is the escape hatch for a binary body, mirroring
+    /// `response.endEncoded(content, "hex")` on the way out.
+    body_hex: *const NativeClosure,
 }
 
 #[repr(C)]
@@ -373,6 +379,14 @@ struct RequestContext {
     end: NativeClosure,
     end_encoded: NativeClosure,
     request_on: NativeClosure,
+    request_body_hex: NativeClosure,
+    /// The raw request body, kept so `bodyHex()` can hex-encode it. Owns
+    /// what `_body` decoded from.
+    _raw_body: Vec<u8>,
+    /// `bodyHex()`'s result, computed and stored on the first call so the
+    /// returned pointer stays valid for the rest of the request without
+    /// paying the 2x-body memory for a handler that never asks.
+    _body_hex: Option<CString>,
     /// `request.on("data", cb)` callbacks, in registration order. Each is
     /// a raw closure pointer (`*const c_void` as `usize`), replayed once
     /// with the whole body by `deliver_request_body_events`.
@@ -420,11 +434,18 @@ impl RequestContext {
                 status_code: 0.0,
                 body: std::ptr::null(),
                 on: std::ptr::null(),
+                body_hex: std::ptr::null(),
             },
             request_on: NativeClosure {
                 code: request_add_listener as *const c_void,
                 context: std::ptr::null_mut(),
             },
+            request_body_hex: NativeClosure {
+                code: request_body_hex as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            _raw_body: body.to_vec(),
+            _body_hex: None,
             request_data_listeners: Vec::new(),
             request_end_listeners: Vec::new(),
             body_events_delivered: false,
@@ -463,13 +484,35 @@ impl RequestContext {
         context.end.context = context_ptr.cast();
         context.end_encoded.context = context_ptr.cast();
         context.request_on.context = context_ptr.cast();
+        context.request_body_hex.context = context_ptr.cast();
         context.response.set_header = &context.set_header;
         context.response.end = &context.end;
         context.response.write = &context.write;
         context.response.end_encoded = &context.end_encoded;
         context.request.on = &context.request_on;
+        context.request.body_hex = &context.request_body_hex;
         context
     }
+}
+
+/// `request.bodyHex()` -- the raw request body as a lowercase hex string,
+/// the lossless counterpart to the lossy `request.body` / `on("data")`
+/// string. Empty for a bodyless request. Computed once and cached on the
+/// context so the pointer outlives the call.
+unsafe extern "C" fn request_body_hex(environment: *const c_void) -> *const c_char {
+    let context = request_context(environment);
+    if context._body_hex.is_none() {
+        let mut hex = String::with_capacity(context._raw_body.len() * 2);
+        for byte in &context._raw_body {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        context._body_hex = Some(CString::new(hex).unwrap_or_default());
+    }
+    context
+        ._body_hex
+        .as_ref()
+        .map_or(std::ptr::null(), |value| value.as_ptr())
 }
 
 /// `request.on("data" | "end", callback)`. Registers the callback; the
