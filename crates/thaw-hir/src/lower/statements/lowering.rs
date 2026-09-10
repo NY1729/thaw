@@ -1,5 +1,206 @@
 type GeneratorYieldEmission = (Vec<HirStmt>, Option<(HirExpr, HirType)>);
 
+fn iterator_object_adapter(
+    iterator: HirExpr,
+    iterator_type: &HirType,
+    iterator_name: Symbol,
+) -> Option<(HirExpr, HirType)> {
+    let HirType::Object(fields) = iterator_type else {
+        return None;
+    };
+    let HirType::Function(params, result_type) = fields
+        .iter()
+        .find_map(|(name, ty)| (name == "next").then_some(ty))?
+    else {
+        return None;
+    };
+    if !params.is_empty() {
+        return None;
+    }
+    let HirType::Object(result_fields) = result_type.as_ref() else {
+        return None;
+    };
+    let value_type = result_fields
+        .iter()
+        .find_map(|(name, ty)| (name == "value").then_some(ty))?
+        .clone();
+    if result_fields
+        .iter()
+        .find_map(|(name, ty)| (name == "done").then_some(ty))
+        != Some(&HirType::Bool)
+    {
+        return None;
+    }
+    let result_name = format!("{iterator_name}_result");
+    let control = format!("{iterator_name}_control");
+    let error = format!("{iterator_name}_error");
+    let returns = format!("{iterator_name}_returns");
+    let return_request = format!("{iterator_name}_return_request");
+    let forced_return = format!("{iterator_name}_forced_return");
+    let channel = HirType::Array(Box::new(value_type.clone()));
+    let producer_type = generator_function_type(
+        false,
+        value_type.clone(),
+        value_type.clone(),
+        HirType::Undefined,
+    );
+    let call_method = |name: &str, args: Vec<HirExpr>| {
+        HirExpr::Call(
+            Box::new(HirExpr::PropAccess(
+                Box::new(HirExpr::Var(iterator_name.clone())),
+                iterator_type.clone(),
+                name.into(),
+            )),
+            args,
+        )
+    };
+    let result_statements = |name: Symbol, call: HirExpr| {
+        vec![
+            HirStmt::Let(name.clone(), result_type.as_ref().clone(), call),
+            HirStmt::If(
+                HirExpr::PropAccess(
+                    Box::new(HirExpr::Var(name.clone())),
+                    result_type.as_ref().clone(),
+                    "done".into(),
+                ),
+                vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
+                Vec::new(),
+            ),
+            HirStmt::Return(Some(HirExpr::ArrayLit(vec![HirExpr::PropAccess(
+                Box::new(HirExpr::Var(name)),
+                result_type.as_ref().clone(),
+                "value".into(),
+            )]))),
+        ]
+    };
+    let return_method = fields.iter().any(|(name, ty)| {
+        name == "return"
+            && matches!(ty, HirType::Function(params, result) if params.is_empty() && result.as_ref() == result_type.as_ref())
+    });
+    let throw_method = fields.iter().any(|(name, ty)| {
+        name == "throw"
+            && matches!(ty, HirType::Function(params, result) if params == &[HirType::Str] && result.as_ref() == result_type.as_ref())
+    });
+    let mut producer_body = Vec::new();
+    producer_body.push(HirStmt::If(
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::Var(control.clone())),
+            Box::new(HirExpr::Lit(HirLit::I64(2))),
+        ),
+        if throw_method {
+            result_statements(
+                format!("{result_name}_throw"),
+                call_method("throw", vec![HirExpr::Var(error.clone())]),
+            )
+        } else {
+            vec![HirStmt::Throw(HirExpr::Var(error.clone()))]
+        },
+        Vec::new(),
+    ));
+    let mut return_body = Vec::new();
+    if return_method {
+        let name = format!("{result_name}_return");
+        return_body.extend([
+            HirStmt::Let(
+                name.clone(),
+                result_type.as_ref().clone(),
+                call_method("return", Vec::new()),
+            ),
+            HirStmt::If(
+                HirExpr::PropAccess(
+                    Box::new(HirExpr::Var(name.clone())),
+                    result_type.as_ref().clone(),
+                    "done".into(),
+                ),
+                vec![
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![
+                            HirExpr::Var(returns.clone()),
+                            HirExpr::PropAccess(
+                                Box::new(HirExpr::Var(name.clone())),
+                                result_type.as_ref().clone(),
+                                "value".into(),
+                            ),
+                        ],
+                    )),
+                    HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))),
+                ],
+                Vec::new(),
+            ),
+            HirStmt::Return(Some(HirExpr::ArrayLit(vec![HirExpr::PropAccess(
+                Box::new(HirExpr::Var(name)),
+                result_type.as_ref().clone(),
+                "value".into(),
+            )]))),
+        ]);
+    }
+    return_body.push(HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))));
+    producer_body.push(HirStmt::If(
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::Var(control.clone())),
+            Box::new(HirExpr::Lit(HirLit::I64(1))),
+        ),
+        return_body,
+        Vec::new(),
+    ));
+    producer_body.extend(result_statements(
+        result_name,
+        call_method("next", Vec::new()),
+    ));
+    let producer = HirExpr::Lambda(
+        vec![HirParam {
+            name: iterator_name.clone(),
+            ty: iterator_type.clone(),
+        }],
+        vec![
+            HirParam {
+                name: control.clone(),
+                ty: HirType::I64,
+            },
+            HirParam {
+                name: error.clone(),
+                ty: HirType::Str,
+            },
+            HirParam {
+                name: format!("{iterator_name}_input"),
+                ty: HirType::Undefined,
+            },
+            HirParam {
+                name: returns,
+                ty: channel.clone(),
+            },
+            HirParam {
+                name: return_request,
+                ty: channel.clone(),
+            },
+            HirParam {
+                name: forced_return,
+                ty: channel.clone(),
+            },
+        ],
+        channel.clone(),
+        Box::new(HirExpr::Block(producer_body)),
+    );
+    Some((
+        HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: iterator_name,
+                    ty: iterator_type.clone(),
+                }],
+                producer_type.clone(),
+                Box::new(HirExpr::Block(vec![HirStmt::Return(Some(producer))])),
+            )),
+            vec![iterator],
+        ),
+        producer_type,
+    ))
+}
+
 impl<'a> FnLowerer<'a> {
     fn collect_pattern_bindings(pattern: &Pat, names: &mut Vec<String>) {
         match pattern {
@@ -88,6 +289,7 @@ impl<'a> FnLowerer<'a> {
         values: &str,
         element: &HirType,
         input: &str,
+        returns: &str,
     ) -> Result<GeneratorYieldEmission, String> {
         if yield_expr.delegate {
             let value = yield_expr
@@ -95,8 +297,27 @@ impl<'a> FnLowerer<'a> {
                 .as_ref()
                 .ok_or("generator `yield*` requires a value")?;
             let expected_array_type = HirType::Array(Box::new(element.clone()));
-            let value = self.lower_expr(value)?;
-            let value_type = self.infer_expr_type(&value)?;
+            let source = value.as_ref();
+            let mut value = self.lower_expr(source)?;
+            let mut value_type = self.infer_expr_type(&value)?;
+            if value_type == HirType::Str && matches!(element, HirType::Str | HirType::Dynamic) {
+                return Ok((
+                    vec![HirStmt::Expr(HirExpr::Assign(
+                        values.into(),
+                        Box::new(HirExpr::ArrayConcat(
+                            vec![
+                                HirExpr::Var(values.into()),
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_to_array".into())),
+                                    vec![value],
+                                ),
+                            ],
+                            HirType::Str,
+                        )),
+                    ))],
+                    Some((HirExpr::Lit(HirLit::Undefined), HirType::Undefined)),
+                ));
+            }
             if let HirType::Array(actual_element) = &value_type {
                 if element == &HirType::Dynamic || actual_element.as_ref() == element {
                     let concat_element = actual_element.as_ref().clone();
@@ -123,6 +344,34 @@ impl<'a> FnLowerer<'a> {
                     ))],
                     Some((HirExpr::Lit(HirLit::Undefined), HirType::Undefined)),
                 ));
+            }
+            if matches!(value_type, HirType::Object(_)) {
+                let iterator = Expr::Call(CallExpr {
+                    span: swc_common::DUMMY_SP,
+                    ctxt: Default::default(),
+                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                        span: swc_common::DUMMY_SP,
+                        obj: Box::new(source.clone()),
+                        prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                            "__thaw_symbol_iterator".into(),
+                            swc_common::DUMMY_SP,
+                        )),
+                    }))),
+                    args: Vec::new(),
+                    type_args: None,
+                });
+                value = self.lower_expr(&iterator)?;
+                value_type = self.infer_expr_type(&value)?;
+            }
+            if matches!(value_type, HirType::Object(_)) {
+                let name = format!("__thaw_iterator_{}", self.next_binding);
+                self.next_binding += 1;
+                if let Some((producer, producer_type)) =
+                    iterator_object_adapter(value.clone(), &value_type, name)
+                {
+                    value = producer;
+                    value_type = producer_type;
+                }
             }
             let HirType::Function(params, result) = &value_type else {
                 return Err(format!(
@@ -287,10 +536,36 @@ impl<'a> FnLowerer<'a> {
                             vec![
                                 HirStmt::If(
                                     HirExpr::Var(returning.clone()),
-                                    vec![HirStmt::Expr(HirExpr::Assign(
-                                        "__thaw_generator_control".into(),
-                                        Box::new(HirExpr::Lit(HirLit::I64(1))),
-                                    ))],
+                                    vec![
+                                        HirStmt::If(
+                                            HirExpr::BinOp(
+                                                BinOp::Gt,
+                                                Box::new(HirExpr::ArrayLen(Box::new(
+                                                    HirExpr::Var(completion.clone()),
+                                                ))),
+                                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                            ),
+                                            vec![HirStmt::Expr(HirExpr::Call(
+                                                Box::new(HirExpr::Var(
+                                                    "__thaw_array_push".into(),
+                                                )),
+                                                vec![
+                                                    HirExpr::Var(returns.into()),
+                                                    HirExpr::Call(
+                                                        Box::new(HirExpr::Var(
+                                                            "__thaw_array_shift".into(),
+                                                        )),
+                                                        vec![HirExpr::Var(completion.clone())],
+                                                    ),
+                                                ],
+                                            ))],
+                                            Vec::new(),
+                                        ),
+                                        HirStmt::Expr(HirExpr::Assign(
+                                            "__thaw_generator_control".into(),
+                                            Box::new(HirExpr::Lit(HirLit::I64(1))),
+                                        )),
+                                    ],
                                     Vec::new(),
                                 ),
                                 HirStmt::Break,
@@ -493,13 +768,13 @@ impl<'a> FnLowerer<'a> {
                 if let Some(assign) = assignment {
                     if assign.op == AssignOp::Assign {
                         if let Expr::Yield(yield_expr) = assign.right.as_ref() {
-                    let Some((values, element, input, _, _, _)) =
+                    let Some((values, element, input, _, returns, _)) =
                         self.generator_yields.clone()
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
                             let (emission, delegated) = self.lower_generator_yield_emission(
-                                yield_expr, &values, &element, &input,
+                                yield_expr, &values, &element, &input, &returns,
                             )?;
                             let resumed = delegated
                                 .map(|(value, _)| value)
@@ -513,12 +788,19 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if let Expr::Yield(yield_expr) = expr_stmt.expr.as_ref() {
-                    let Some((values, element, input, _, _, _)) = self.generator_yields.clone()
+                    let Some((values, element, input, _, returns, _)) =
+                        self.generator_yields.clone()
                     else {
                         return Err("`yield` is only valid inside a generator function".into());
                     };
                     return self
-                        .lower_generator_yield_emission(yield_expr, &values, &element, &input)
+                        .lower_generator_yield_emission(
+                            yield_expr,
+                            &values,
+                            &element,
+                            &input,
+                            &returns,
+                        )
                         .map(|(statements, _)| statements);
                 }
                 let discarded_dynamic_call = |expr: &Expr| {
@@ -798,35 +1080,6 @@ impl<'a> FnLowerer<'a> {
                     let mut values = self.lower_expr(&for_of.right)?;
                     let mut values_type = self.infer_expr_type(&values)?;
                     let mut generator_producer = None;
-                    if let HirType::Function(params, result) = &values_type {
-                        let (result, async_generator) = match result.as_ref() {
-                            HirType::Array(_) => (Some(result.as_ref().clone()), false),
-                            HirType::Promise(result)
-                                if for_of.is_await
-                                    && matches!(result.as_ref(), HirType::Array(_)) =>
-                            {
-                                (Some(result.as_ref().clone()), true)
-                            }
-                            _ => (None, false),
-                        };
-                        if let Some(result) = result.filter(|_| {
-                            params.len() == 6
-                            && params[0] == HirType::I64
-                            && params[1] == HirType::Str
-                        }) {
-                            let producer_type = values_type.clone();
-                            let producer = format!(
-                                "__thaw_generator_producer_{}",
-                                self.next_binding
-                            );
-                            self.next_binding += 1;
-                            self.scope.insert(producer.clone(), producer_type.clone());
-                            generator_producer =
-                                Some((producer, producer_type, values, async_generator));
-                            values_type = result;
-                            values = HirExpr::ArrayLit(Vec::new());
-                        }
-                    }
                     if values_type == HirType::Str {
                         values = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_to_array".into())),
@@ -863,6 +1116,63 @@ impl<'a> FnLowerer<'a> {
                             )),
                         );
                         values_type = array_type;
+                    }
+                    if matches!(values_type, HirType::Object(_))
+                        && matches!(for_of.right.as_ref(), Expr::Ident(_))
+                    {
+                        let iterator = Expr::Call(CallExpr {
+                            span: swc_common::DUMMY_SP,
+                            ctxt: Default::default(),
+                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                span: swc_common::DUMMY_SP,
+                                obj: Box::new(for_of.right.as_ref().clone()),
+                                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                    "__thaw_symbol_iterator".into(),
+                                    swc_common::DUMMY_SP,
+                                )),
+                            }))),
+                            args: Vec::new(),
+                            type_args: None,
+                        });
+                        values = self.lower_expr(&iterator)?;
+                        values_type = self.infer_expr_type(&values)?;
+                    }
+                    if matches!(values_type, HirType::Object(_)) {
+                        let name = format!("__thaw_iterator_{}", self.next_binding);
+                        self.next_binding += 1;
+                        if let Some((producer, producer_type)) =
+                            iterator_object_adapter(values.clone(), &values_type, name)
+                        {
+                            values = producer;
+                            values_type = producer_type;
+                        }
+                    }
+                    if let HirType::Function(params, result) = &values_type {
+                        let (result, async_generator) = match result.as_ref() {
+                            HirType::Array(_) => (Some(result.as_ref().clone()), false),
+                            HirType::Promise(result)
+                                if for_of.is_await
+                                    && matches!(result.as_ref(), HirType::Array(_)) =>
+                            {
+                                (Some(result.as_ref().clone()), true)
+                            }
+                            _ => (None, false),
+                        };
+                        if let Some(result) = result.filter(|_| {
+                            params.len() == 6
+                                && params[0] == HirType::I64
+                                && params[1] == HirType::Str
+                        }) {
+                            let producer_type = values_type.clone();
+                            let producer =
+                                format!("__thaw_generator_producer_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(producer.clone(), producer_type.clone());
+                            generator_producer =
+                                Some((producer, producer_type, values, async_generator));
+                            values_type = result;
+                            values = HirExpr::ArrayLit(Vec::new());
+                        }
                     }
                     let (element, json_array) = match &values_type {
                         HirType::Array(element) => (element.as_ref().clone(), false),
