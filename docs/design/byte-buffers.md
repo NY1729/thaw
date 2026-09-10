@@ -2,25 +2,19 @@
 
 ## Status
 
-**Interim landed:** `Buffer` / `Uint8Array` in an annotation position
-now resolves to `HirType::Array(F64)` -- a plain `number[]` -- so
-`const b: Uint8Array = ...` indexes, `.length`s, iterates, and
-interchanges with `number[]` instead of erroring. This is *not* the
-distinct type below; `buf.toString("utf8")` comma-joins like an array.
+**Phase 1 done (`e6ed1dd9`).** `HirType::Bytes` is a real distinct type
+during lowering -- `Buffer` / `Uint8Array` annotations resolve to it,
+`expect_type` / `coerce_to_declared` interchange it with `Array(F64)`
+both directions, `infer_expr_type` surfaces it as `Array(F64)` for
+indexing / `.length` / iteration / spread / array methods -- and
+`lower/bytes_erasure.rs` walks the whole lowered `HirProgram` rewriting
+every `Bytes` to `Array(F64)` before it leaves `thaw_hir::lower`.
+Codegen never sees `Bytes`. `buf.toString("utf8")` still comma-joins
+(Phase 2).
 
 `request.bodyHex()` (commit `34e38005`) is the stopgap for a byte-exact
-HTTP request body: the raw bytes as a lowercase hex string the handler
-decodes itself. `new Uint8Array([...])` still lowers through the dynamic
-host (`constructDynamicValue`, a QuickJS `JsValue`).
-
-**Blocker for the real type:** thaw has no HIR type-normalization pass
-between lowering and codegen -- a `HirType` recorded in a `HirStmt::Let`
-/ function signature / `ArrayAlloc` flows straight to codegen. A
-distinct `HirType::Bytes` that shares `Array(F64)`'s layout would need
-either ~60 `HirType::Array` codegen sites to grow a `| HirType::Bytes`
-arm, or a new recursive erase-markers walk over the whole `HirProgram`
-(the `HirExpr` visitor doesn't exist yet either). Phase 1 below assumes
-that walk gets written first.
+HTTP request body. `new Uint8Array([...])` still lowers through the
+dynamic host (`constructDynamicValue`, a QuickJS `JsValue`).
 
 ## Goal
 
@@ -54,26 +48,19 @@ body is still better served by `bodyHex()` (2 chars/byte) until a packed
 
 ## Phases
 
-### Phase 1 -- the type
+### Phase 1 -- the type ✅ (`e6ed1dd9`)
 
-- `HirType::Bytes` variant (`crates/thaw-hir/src/hir/types.rs`).
-- `lower_ts_type` (`type_resolution.rs`): a bare `Buffer` / `Uint8Array`
-  type reference with no type arguments -> `HirType::Bytes`. (Keep the
-  `__thaw_`-prefix -> `JsValue` check ahead of it; a rewritten external
-  `Buffer` stays `JsValue`.)
-- `expect_type` / `infer_expr_type`: `Bytes` is assignment- and
-  argument-compatible with `Array(F64)` **both directions** (they share a
-  layout; the distinction is only for dispatch), and with `Json`
-  (decode) and `JsValue`.
-- Codegen: wherever `HirType::Array` with an `F64` element is matched for
-  alloc / index / length / iterate / spread / to-string / stringify /
-  eq, add `HirType::Bytes`. Grep `crates/thaw-llvm/src/hir_codegen/` for
-  `HirType::Array` and audit each. `typeof buf` -> `"object"`;
-  `Array.isArray(buf)` -> `true` (Node agrees for `Uint8Array`? no --
-  keep `false`, matching Node).
-- Test: a `declare function f(): Buffer` result indexes, lengths, and
-  `for..of`s like a number array; assigning it to a `number[]` and back
-  type-checks.
+- `HirType::Bytes` variant.
+- `lower_ts_type`: bare `Buffer` / `Uint8Array` -> `HirType::Bytes`
+  (after the `__thaw_`-prefix -> `JsValue` check, so a rewritten
+  external `Buffer` stays `JsValue`).
+- `expect_type` / `coerce_to_declared`: `Bytes` <-> `Array(F64)` both
+  directions. `infer_expr_type` normalizes `Bytes` -> `Array(F64)` for
+  every consumer (a wrapper over `infer_expr_type_inner`).
+- `lower/bytes_erasure.rs`: full `HirProgram` walk, `Bytes` -> `Array(F64)`.
+- `native_typeof_name(Bytes)` -> `"object"`.
+- Not done: `Array.isArray(buf)` still `false` (matches Node);
+  `new Uint8Array([...])` still dynamic-host.
 
 ### Phase 2 -- string <-> bytes
 
