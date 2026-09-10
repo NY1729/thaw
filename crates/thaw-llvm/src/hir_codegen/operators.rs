@@ -81,6 +81,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 | "__thaw_string_array_to_string"
                                 | "__thaw_bool_array_to_string"
                                 | "__thaw_object_array_to_string"
+                                | "__thaw_bytes_to_string"
                                 | "__thaw_object_to_string"
                                 | "__thaw_number_array_join"
                                 | "__thaw_string_array_join"

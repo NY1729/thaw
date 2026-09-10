@@ -665,6 +665,21 @@ impl<'ctx> HirCompiler<'ctx> {
             string_transform_type,
             Some(Linkage::External),
         );
+        // `buf.toString(enc)` / `Buffer.from(str, enc)` -- both take a
+        // (buffer-or-string, encoding) pair of pointers and return a
+        // pointer (a C string / a raw `[len][elem...]` buffer).
+        for name in ["thaw_bytes_to_string", "thaw_bytes_from_string"] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_bytes_alloc",
+            i8_ptr.fn_type(&[f64_type.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_string_split",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),

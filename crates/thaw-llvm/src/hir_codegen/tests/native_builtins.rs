@@ -2970,3 +2970,29 @@ fn compiles_number_predicates_and_aggregate_numeric_conversion() {
         "true\nstrict-predicate-evaluated\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n0\n7\ntrue\ntrue\nawaited-predicate\nfalse\n12\ntrue\nfalse\n"
     );
 }
+
+#[test]
+fn byte_buffer_from_and_to_string() {
+    let source = r#"
+        function main(): void {
+            const b: Buffer = Buffer.from("héllo");
+            console.log(b.length);
+            console.log(b.toString());
+            console.log(b.toString("hex"));
+            console.log(b.toString("base64"));
+            console.log(Buffer.from("68656c6c6f", "hex").toString());
+            console.log(Buffer.from("aGk=", "base64").toString());
+            const z: Uint8Array = Buffer.alloc(3);
+            console.log(z.length + " " + z[0] + " " + z[2]);
+            const wrapped: Buffer = Buffer.from([0, 255, 65]);
+            console.log(wrapped.toString("hex"));
+            let sum = 0;
+            for (const byte of b) { sum = sum + byte; }
+            console.log(sum);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "byte_buffer_from_and_to_string"),
+        "6\nhéllo\n68c3a96c6c6f\naMOpbGxv\nhello\nhi\n3 0 0\n00ff41\n795\n"
+    );
+}
