@@ -400,6 +400,81 @@ fn read_one_response_body(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&buffer[header_end..header_end + content_length]).into_owned()
 }
 
+/// Reads exactly one HTTP response off `stream` and returns its decoded
+/// body, handling both `Content-Length` and `Transfer-Encoding: chunked`
+/// framing (so it works whether the handler buffered its response or
+/// streamed it).
+fn read_one_response_body_any(stream: &mut TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 512];
+    let header_end = loop {
+        if let Some(index) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            break index + 4;
+        }
+        let length = stream.read(&mut chunk).unwrap();
+        assert!(length > 0, "connection closed before headers completed");
+        buffer.extend_from_slice(&chunk[..length]);
+    };
+    let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+    let chunked = head
+        .lines()
+        .any(|line| {
+            let Some((name, value)) = line.split_once(':') else {
+                return false;
+            };
+            name.trim().eq_ignore_ascii_case("Transfer-Encoding")
+                && value.to_ascii_lowercase().contains("chunked")
+        });
+    if !chunked {
+        let content_length: usize = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("Content-Length")
+                    .then(|| value.trim().parse().ok())?
+            })
+            .expect("response had neither Content-Length nor chunked framing");
+        while buffer.len() < header_end + content_length {
+            let length = stream.read(&mut chunk).unwrap();
+            assert!(length > 0, "connection closed before body completed");
+            buffer.extend_from_slice(&chunk[..length]);
+        }
+        return String::from_utf8_lossy(&buffer[header_end..header_end + content_length])
+            .into_owned();
+    }
+    // Decode chunks: `<hex len>\r\n<bytes>\r\n` ..., ending at a 0-length chunk.
+    let mut rest = buffer[header_end..].to_vec();
+    let mut body = Vec::new();
+    loop {
+        let line_end = loop {
+            if let Some(index) = rest.windows(2).position(|bytes| bytes == b"\r\n") {
+                break index;
+            }
+            let length = stream.read(&mut chunk).unwrap();
+            assert!(length > 0, "connection closed mid-chunk-size");
+            rest.extend_from_slice(&chunk[..length]);
+        };
+        let size = usize::from_str_radix(
+            String::from_utf8_lossy(&rest[..line_end]).trim(),
+            16,
+        )
+        .expect("invalid chunk size");
+        rest.drain(..line_end + 2);
+        while rest.len() < size + 2 {
+            let length = stream.read(&mut chunk).unwrap();
+            assert!(length > 0, "connection closed mid-chunk-body");
+            rest.extend_from_slice(&chunk[..length]);
+        }
+        body.extend_from_slice(&rest[..size]);
+        rest.drain(..size + 2);
+        if size == 0 {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
 /// The originally-requested comparison: 50 concurrent connections, each
 /// making several keep-alive requests on the *same* socket (never
 /// reconnecting -- if the server incorrectly closed after one response,
@@ -613,17 +688,180 @@ function main(): void {
                         failures.lock().unwrap().push(format!("{path}: got [{body}]"));
                     }
                 }
-                // A handler that writes around its awaits: the buffered
-                // pieces come back concatenated, in order.
+                // A handler that writes around its awaits: streamed as
+                // chunks, they arrive concatenated and in order.
                 stream
                     .write_all(b"GET /pieces HTTP/1.1\r\nHost: localhost\r\n\r\n")
                     .unwrap();
-                let body = read_one_response_body(&mut stream);
+                let body = read_one_response_body_any(&mut stream);
                 if body != "abc" {
                     failures
                         .lock()
                         .unwrap()
                         .push(format!("/pieces on conn{connection_id}: got [{body}]"));
+                }
+            });
+        }
+    });
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let failures = failures.into_inner().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Reads a chunked response's decoded pieces off `stream`, each tagged
+/// with how long after the read started it arrived. Stops at the
+/// terminating zero-length chunk.
+fn read_chunks_timed(stream: &mut TcpStream) -> Vec<(String, Duration)> {
+    let started = std::time::Instant::now();
+    let mut buffer = Vec::new();
+    let mut scratch = [0_u8; 512];
+    let header_end = loop {
+        if let Some(index) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            break index + 4;
+        }
+        let length = stream.read(&mut scratch).unwrap();
+        assert!(length > 0, "closed before headers");
+        buffer.extend_from_slice(&scratch[..length]);
+    };
+    let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+    assert!(
+        head.to_ascii_lowercase().contains("transfer-encoding: chunked"),
+        "expected a chunked response, got head:\n{head}"
+    );
+    let mut rest = buffer[header_end..].to_vec();
+    let mut pieces = Vec::new();
+    loop {
+        let line_end = loop {
+            if let Some(index) = rest.windows(2).position(|bytes| bytes == b"\r\n") {
+                break index;
+            }
+            let length = stream.read(&mut scratch).unwrap();
+            assert!(length > 0, "closed mid-chunk-size");
+            rest.extend_from_slice(&scratch[..length]);
+        };
+        let size =
+            usize::from_str_radix(String::from_utf8_lossy(&rest[..line_end]).trim(), 16).unwrap();
+        rest.drain(..line_end + 2);
+        while rest.len() < size + 2 {
+            let length = stream.read(&mut scratch).unwrap();
+            assert!(length > 0, "closed mid-chunk-body");
+            rest.extend_from_slice(&scratch[..length]);
+        }
+        if size == 0 {
+            break;
+        }
+        pieces.push((
+            String::from_utf8_lossy(&rest[..size]).into_owned(),
+            started.elapsed(),
+        ));
+        rest.drain(..size + 2);
+    }
+    pieces
+}
+
+/// A streamed response must reach the client incrementally: each
+/// `response.write(...)` after an `await` arrives on its own, spaced by
+/// the handler's real delay -- not all buffered up and flushed together
+/// at `end()`. Runs several such streams concurrently to confirm one
+/// connection's chunks never bleed into another's.
+#[test]
+fn node_http_streams_response_chunks_incrementally_as_the_handler_produces_them() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-streaming-http-handler-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+async function delay(ms: number): Promise<void> {
+    await sleep(ms);
+}
+function main(): void {
+    const server = createServer(async (
+        request: { method: string; url: string; statusCode: number },
+        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+    ): Promise<void> => {
+        response.write("A" + request.url + ";");
+        await delay(250);
+        response.write("B;");
+        await delay(250);
+        response.end("C;");
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (0..500)
+        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("server did not start");
+
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    std::thread::scope(|scope| {
+        for connection_id in 0..15 {
+            let failures = &failures;
+            scope.spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(20)))
+                    .unwrap();
+                let path = format!("/c{connection_id}");
+                stream
+                    .write_all(
+                        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+                    )
+                    .unwrap();
+                let pieces = read_chunks_timed(&mut stream);
+                let joined: String = pieces.iter().map(|(text, _)| text.as_str()).collect();
+                if joined != format!("A{path};B;C;") {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("{path}: reassembled [{joined}]"));
+                    return;
+                }
+                // Three separate chunks, each meaningfully later than the
+                // last -- not one buffered flush.
+                if pieces.len() < 3 {
+                    failures.lock().unwrap().push(format!(
+                        "{path}: got {} chunk(s), expected the writes to arrive separately",
+                        pieces.len()
+                    ));
+                    return;
+                }
+                let gap_ab = pieces[1].1.saturating_sub(pieces[0].1);
+                let gap_bc = pieces[2].1.saturating_sub(pieces[1].1);
+                if gap_ab < Duration::from_millis(150) || gap_bc < Duration::from_millis(150) {
+                    failures.lock().unwrap().push(format!(
+                        "{path}: chunk gaps {gap_ab:?}/{gap_bc:?} -- arrived bunched, not streamed"
+                    ));
                 }
             });
         }
