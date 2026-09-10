@@ -592,7 +592,8 @@ function main(): void {
 /// `semver`'s `.d.ts` returns `string | null` from `valid`/`coerce`/
 /// `diff` and unions like `string | number` elsewhere -- exercises
 /// thaw's `Nullable`/`Union` truthiness (`if (v)`), string coercion
-/// (`"x: " + v`), and `??`.
+/// (`"x: " + v`), `??`, and flow narrowing: `if (v) { v.method() }` and
+/// `if (!v) return;` narrow `v` from `string | null` to `string`.
 #[test]
 fn registry_add_uses_real_semver_nullable_and_union_returns_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -607,6 +608,11 @@ fn registry_add_uses_real_semver_nullable_and_union_returns_when_enabled() {
     std::fs::write(
         &source,
         r#"import semver from "semver";
+function normalize(raw: string): string {
+    const v = semver.valid(raw);
+    if (!v) { return "invalid"; }
+    return v.toUpperCase();
+}
 function main(): void {
     const good = semver.valid("1.2.3");
     console.log(good ? "valid: " + good : "invalid");
@@ -617,6 +623,10 @@ function main(): void {
     console.log(semver.gt("1.2.3", "1.2.0"));
     console.log(semver.major("2.5.9"));
     console.log(semver.diff("1.2.3", "2.0.0") ?? "none");
+    const cleaned = semver.clean(" =1.4.7 ");
+    if (cleaned) { console.log("cleaned:" + cleaned.length); }
+    console.log(normalize("1.2.3"));
+    console.log(normalize("bogus"));
 }"#,
     )
     .unwrap();
@@ -630,7 +640,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "valid: 1.2.3\ninvalid\ncoerced\ntrue\n2\nmajor\n"
+        "valid: 1.2.3\ninvalid\ncoerced\ntrue\n2\nmajor\ncleaned:5\n1.2.3\ninvalid\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

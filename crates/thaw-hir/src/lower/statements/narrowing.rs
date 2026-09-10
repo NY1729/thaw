@@ -396,6 +396,27 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Paren(paren) = expr {
             return self.optional_undefined_narrowing(&paren.expr);
         }
+        // A bare `if (x)` on an `Optional`/`Nullable`/`Nullish` value:
+        // truthy => the payload is present (narrow the then-branch, or
+        // via `!x`/the guard-clause path, the else-branch / rest of the
+        // function). The other branch is *not* narrowed -- a present but
+        // falsy payload (`0`, `""`, `false`) also fails the test.
+        if let Expr::Ident(ident) = expr {
+            let name = self.resolve_binding(ident.sym.as_ref());
+            let absence_kind = match self.scope.get(&name)? {
+                HirType::Optional(_) => 0,
+                HirType::Nullable(_) => 1,
+                HirType::Nullish(_) => 2,
+                _ => return None,
+            };
+            let payload = match self.scope.get(&name)? {
+                HirType::Optional(payload)
+                | HirType::Nullable(payload)
+                | HirType::Nullish(payload) => payload.as_ref().clone(),
+                _ => unreachable!(),
+            };
+            return Some((name, payload, true, absence_kind));
+        }
         if let Expr::Unary(unary) = expr {
             if unary.op == swc_ecma_ast::UnaryOp::Bang {
                 return self
@@ -1046,6 +1067,43 @@ impl<'a> FnLowerer<'a> {
             .or_else(|| self.union_boolean_discriminant_narrowing(expr))
             .or_else(|| self.union_instanceof_narrowing(expr))
             .or_else(|| self.union_in_narrowing(expr))
+            .or_else(|| self.union_truthy_narrowing(expr))
+    }
+
+    /// A bare `if (x)` on a union that includes `null` / `undefined`:
+    /// the truthy branch drops those members. (A present-but-falsy
+    /// member -- `0` / `""` / `false` -- also fails the test, but thaw
+    /// doesn't track literal falsiness, so every other member is kept.)
+    fn union_truthy_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        let Expr::Ident(ident) = expr else {
+            return None;
+        };
+        let name = self.resolve_binding(ident.sym.as_ref());
+        let HirType::Union(elements) = self.scope.get(&name)? else {
+            return None;
+        };
+        let allowed = self
+            .union_narrowings
+            .get(&name)
+            .map(|(allowed, _)| allowed.clone())
+            .unwrap_or_else(|| (0..elements.len()).collect());
+        let matching = allowed
+            .iter()
+            .copied()
+            .filter(|index| !matches!(elements[*index], HirType::Null | HirType::Undefined))
+            .collect::<Vec<_>>();
+        (matching.len() < allowed.len() && !matching.is_empty()).then(|| {
+            (
+                vec![UnionNarrowingTarget {
+                    name,
+                    matching,
+                    allowed,
+                    elements: elements.clone(),
+                }],
+                true,
+                false,
+            )
+        })
     }
 
     fn lower_body_with_union_narrowing(
