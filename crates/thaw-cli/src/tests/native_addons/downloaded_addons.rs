@@ -503,7 +503,7 @@ async function main(): Promise<void> {
     assert_eq!(&frame, b"\x82\x05hello");
     let result = child.wait_with_output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "\"hello\"\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "hello\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
