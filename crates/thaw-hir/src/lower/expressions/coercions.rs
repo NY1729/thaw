@@ -527,6 +527,14 @@ impl<'a> FnLowerer<'a> {
                 vec![value],
             )),
             HirType::Json => Ok(HirExpr::JsonAsString(Box::new(value))),
+            // Mirrors `coerce_primitive_to_number`'s `JsValue` arm: read
+            // the handle back as JSON, then stringify. Lets `"" + x` /
+            // `x + ","` work on an opaque handle (a dynamic property read
+            // such as p-limit's `limit.activeCount`), not just a `Json`.
+            HirType::JsValue => Ok(HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("readDynamicValue".to_string())),
+                vec![value],
+            )))),
             HirType::Null => Ok(HirExpr::Lit(HirLit::Str("null".to_string()))),
             HirType::Undefined => Ok(HirExpr::Lit(HirLit::Str("undefined".to_string()))),
             HirType::Optional(payload) => {

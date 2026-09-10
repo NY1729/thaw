@@ -723,19 +723,25 @@ impl<'a> FnLowerer<'a> {
                         )
                     }
                     BinaryOp::Add
-                        if self.infer_expr_type(&lhs)? == HirType::Json
-                            || self.infer_expr_type(&rhs)? == HirType::Json =>
+                        if matches!(
+                            self.infer_expr_type(&lhs)?,
+                            HirType::Json | HirType::JsValue
+                        ) || matches!(
+                            self.infer_expr_type(&rhs)?,
+                            HirType::Json | HirType::JsValue
+                        ) =>
                     {
                         // `+` on a dynamic value a static checker can't
-                        // prove numeric (the numeric `Json + F64` case is
-                        // handled just above). JS would `ToPrimitive` then
-                        // add-or-concat; for the packages this reaches --
-                        // terminal-colour helpers and the like, whose
-                        // functions return strings -- it is always a string
-                        // join, so stringify both sides and concat, the
-                        // same `String(x) + String(y)` fallback a `.d.ts`
-                        // author would reach for. Previously this errored
-                        // (`arithmetic requires F64 operands`).
+                        // prove numeric (the numeric `Json/JsValue + F64`
+                        // case is handled just above). JS would
+                        // `ToPrimitive` then add-or-concat; for the
+                        // packages this reaches -- terminal-colour helpers
+                        // and the like, whose functions return strings --
+                        // it is always a string join, so stringify both
+                        // sides and concat, the same `String(x) +
+                        // String(y)` fallback a `.d.ts` author would reach
+                        // for. Previously this errored (`arithmetic
+                        // requires F64 operands`).
                         HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                             vec![
