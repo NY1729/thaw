@@ -1174,6 +1174,144 @@ function main(): void {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Reads `count` pipelined HTTP/1.1 responses (each `Content-Length`-
+/// framed) off one stream and returns their bodies in order. Unlike
+/// `read_one_response_body_any` this keeps a single buffer across
+/// responses, so bytes of response N+1 that arrive coalesced with
+/// response N aren't dropped.
+fn read_pipelined_bodies(stream: &mut TcpStream, count: usize) -> Vec<String> {
+    let mut buffer = Vec::new();
+    let mut scratch = [0_u8; 1024];
+    let mut bodies = Vec::new();
+    while bodies.len() < count {
+        let header_end = loop {
+            if let Some(index) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break index + 4;
+            }
+            let length = stream.read(&mut scratch).unwrap();
+            assert!(length > 0, "connection closed before response {}", bodies.len() + 1);
+            buffer.extend_from_slice(&scratch[..length]);
+        };
+        let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+        let content_length: usize = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("Content-Length")
+                    .then(|| value.trim().parse().ok())?
+            })
+            .expect("pipelined response had no Content-Length");
+        while buffer.len() < header_end + content_length {
+            let length = stream.read(&mut scratch).unwrap();
+            assert!(length > 0, "connection closed mid-body of response {}", bodies.len() + 1);
+            buffer.extend_from_slice(&scratch[..length]);
+        }
+        bodies.push(
+            String::from_utf8_lossy(&buffer[header_end..header_end + content_length]).into_owned(),
+        );
+        buffer.drain(..header_end + content_length);
+    }
+    bodies
+}
+
+/// A client that sends several requests back to back without waiting for
+/// each response (HTTP/1.1 pipelining) gets every response, in request
+/// order -- including when a handler in the middle of the pipeline is
+/// `async` and suspends. Nothing sent ahead is dropped.
+#[test]
+fn node_http_answers_pipelined_requests_in_order() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-pipelining-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+async function delay(ms: number): Promise<void> {
+    await sleep(ms);
+}
+function main(): void {
+    const server = createServer(async (
+        request: { method: string; url: string; statusCode: number; body: string },
+        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+    ): Promise<void> => {
+        // A couple of paths make the handler genuinely suspend, so a
+        // pipelined request behind them has to wait its turn.
+        if (request.url === "/slow") {
+            await delay(120);
+            response.end("slow[" + request.body + "]");
+            return;
+        }
+        response.end(request.method + " " + request.url + "[" + request.body + "]");
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(
+        (0..500)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("server did not start"),
+    );
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    // One write, six requests -- fixed body, chunked body, a slow async
+    // one with a pipelined fast one right behind it, an empty GET, and a
+    // final `Connection: close`.
+    stream
+        .write_all(
+            b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nAAA\
+              POST /b HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nBB\r\n0\r\n\r\n\
+              POST /slow HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nSLOW\
+              GET /c HTTP/1.1\r\nHost: x\r\n\r\n\
+              GET /d HTTP/1.1\r\nHost: x\r\n\r\n\
+              GET /e HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+    let bodies = read_pipelined_bodies(&mut stream, 6);
+    assert_eq!(
+        bodies,
+        vec![
+            "POST /a[AAA]".to_string(),
+            "POST /b[BB]".to_string(),
+            "slow[SLOW]".to_string(),
+            "GET /c[]".to_string(),
+            "GET /d[]".to_string(),
+            "GET /e[]".to_string(),
+        ]
+    );
+    // After the last (`Connection: close`) response the server closes.
+    let mut trailing = Vec::new();
+    stream.read_to_end(&mut trailing).unwrap();
+    assert!(trailing.is_empty());
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn multifile_cli_includes_transitive_node_builtin_dependencies() {
     let dir = std::env::temp_dir().join(format!(

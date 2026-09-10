@@ -78,12 +78,15 @@ fn parse_body_plan(head: &str) -> BodyPlan {
 }
 
 /// Decodes a `Transfer-Encoding: chunked` body (`<hex len>\r\n<bytes>\r\n`
-/// ..., ending at a zero-length chunk). Returns `None` if the bytes seen
-/// so far don't yet contain a complete body, or are malformed.
-fn decode_chunked_body(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut rest = bytes;
+/// ..., ending at a zero-length chunk). Returns the decoded body and how
+/// many bytes of `bytes` it consumed (so a pipelined next request left
+/// after the terminator isn't swallowed). `None` if `bytes` doesn't yet
+/// contain a complete body, or is malformed.
+fn decode_chunked_body(bytes: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let mut offset = 0;
     let mut body = Vec::new();
     loop {
+        let rest = &bytes[offset..];
         let line_end = rest.windows(2).position(|pair| pair == b"\r\n")?;
         let size =
             usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).ok()?.trim(), 16).ok()?;
@@ -94,11 +97,11 @@ fn decode_chunked_body(bytes: &[u8]) -> Option<Vec<u8>> {
         if &after_size[size..size + 2] != b"\r\n" {
             return None;
         }
+        offset += line_end + 2 + size + 2;
         if size == 0 {
-            return Some(body);
+            return Some((body, offset));
         }
         body.extend_from_slice(&after_size[..size]);
-        rest = &after_size[size + 2..];
     }
 }
 
@@ -829,6 +832,10 @@ struct ConnectionState {
     head_end: usize,
     /// How the body length is framed, decided when the head completes.
     body_plan: BodyPlan,
+    /// Total bytes of `request` the current request occupies (head +
+    /// body). On keep-alive these are drained and anything past them --
+    /// a pipelined next request -- is kept and processed in turn.
+    consumed: usize,
 }
 
 /// Live `ConnectionState` box addresses, so `thaw_http_run_servers` can
@@ -1068,6 +1075,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         head_deadline: Some(Instant::now() + header_timeout()),
         head_end: 0,
         body_plan: BodyPlan::None,
+        consumed: 0,
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -1089,26 +1097,42 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
 
 extern "C" fn connection_ready(context: *mut u8, _events: i16) {
     let connection = unsafe { &mut *(context as *mut ConnectionState) };
-    if connection.awaiting_handler {
-        // An `async` handler is still running; its eventual
-        // `response.end(...)` re-arms this connection for writing. Any
-        // socket event now (including the client hanging up) is left for
-        // that path to notice.
-        return;
-    }
-    if connection.streaming && !connection.response_ended {
-        // Mid-stream: flush whatever chunk bytes are queued. A readable
-        // event here (pipelined bytes, half-close) is ignored until the
-        // handler produces the next chunk or ends the response.
-        if !connection.response.is_empty() {
-            write_response(connection);
+    loop {
+        if connection.awaiting_handler {
+            // An `async` handler is still running; its eventual
+            // `response.end(...)` re-arms this connection for writing. Any
+            // socket event now (including the client hanging up) is left
+            // for that path to notice.
+            return;
         }
-        return;
+        if connection.streaming && !connection.response_ended {
+            // Mid-stream: flush whatever chunk bytes are queued. A
+            // readable event here (pipelined bytes, half-close) is
+            // ignored until the handler produces the next chunk or ends.
+            if !connection.response.is_empty() {
+                write_response(connection);
+            }
+            return;
+        }
+        if connection.response.is_empty() && !read_request(connection) {
+            return;
+        }
+        // `write_response`, on a fully-sent keep-alive response, drains
+        // the request it just answered and leaves any pipelined bytes in
+        // `connection.request`. If a whole next request is already
+        // buffered, loop and answer it now -- the readable event that
+        // would otherwise trigger it may never come. Any other outcome
+        // (closed, or still writing) ends this call; note `connection`
+        // must not be touched after a `Closed`.
+        match write_response(connection) {
+            FlushResult::KeptAlive
+                if connection
+                    .request
+                    .windows(4)
+                    .any(|bytes| bytes == b"\r\n\r\n") => {}
+            _ => return,
+        }
     }
-    if connection.response.is_empty() && !read_request(connection) {
-        return;
-    }
-    write_response(connection);
 }
 
 /// Whether `request` (the buffered head, including its trailing blank
@@ -1171,69 +1195,69 @@ fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan) {
     )
 }
 
-/// If `connection.request` now holds a full body per `connection.body_plan`,
-/// returns it (owned, decoded); `None` means keep reading.
-fn take_complete_body(connection: &mut ConnectionState) -> Option<Vec<u8>> {
+/// If `connection.request` (from `head_end` on) already holds a full
+/// body per `connection.body_plan`, returns it decoded plus how many
+/// bytes of the body region it spans (so pipelined bytes past it are
+/// left in place). `None` means keep reading.
+fn take_complete_body(connection: &ConnectionState) -> Option<(Vec<u8>, usize)> {
     let tail = &connection.request[connection.head_end..];
     match connection.body_plan {
-        BodyPlan::None => Some(Vec::new()),
-        BodyPlan::Fixed(length) => (tail.len() >= length).then(|| tail[..length].to_vec()),
+        BodyPlan::None => Some((Vec::new(), 0)),
+        BodyPlan::Fixed(length) => {
+            (tail.len() >= length).then(|| (tail[..length].to_vec(), length))
+        }
         BodyPlan::Chunked => decode_chunked_body(tail),
     }
+}
+
+/// Tries to turn what's currently buffered in `connection.request` into a
+/// dispatched request, without reading the socket. Returns `Some(true)`
+/// if a request was dispatched, `Some(false)` if the connection was torn
+/// down (oversized / malformed), `None` if more bytes are needed.
+fn try_buffered_request(connection: &mut ConnectionState) -> Option<bool> {
+    if connection.head_end == 0 {
+        let index = connection
+            .request
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")?;
+        connection.head_end = index + 4;
+        let (_, _, _, body_plan) = parse_head(&connection.request[..connection.head_end]);
+        connection.body_plan = body_plan;
+    }
+    // A `Content-Length` past the cap, or a chunked body that grows past
+    // it, is refused -- and the connection can't be reused (unread body
+    // bytes would desync it), so it's closed outright.
+    let body_seen = connection.request.len() - connection.head_end;
+    let over_cap = match connection.body_plan {
+        BodyPlan::Fixed(length) => length > MAX_REQUEST_BODY,
+        BodyPlan::Chunked => body_seen > MAX_REQUEST_BODY,
+        BodyPlan::None => false,
+    };
+    if over_cap {
+        finish_connection(connection);
+        return Some(false);
+    }
+    let (body, body_len) = take_complete_body(connection)?;
+    connection.consumed = connection.head_end + body_len;
+    Some(dispatch_request(connection, body))
 }
 
 fn read_request(connection: &mut ConnectionState) -> bool {
     let mut chunk = [0_u8; 4096];
     loop {
-        // Already have a full head from a previous readable event? Skip
-        // straight to the body-completeness check.
-        if connection.head_end != 0 {
-            if let Some(body) = take_complete_body(connection) {
-                return dispatch_request(connection, body);
-            }
+        if let Some(dispatched) = try_buffered_request(connection) {
+            return dispatched;
+        }
+        if connection.head_end == 0 && connection.request.len() > MAX_REQUEST_HEAD {
+            finish_connection(connection);
+            return false;
         }
         match connection.stream.read(&mut chunk) {
             Ok(0) => {
                 finish_connection(connection);
                 return false;
             }
-            Ok(length) => {
-                connection.request.extend_from_slice(&chunk[..length]);
-                if connection.head_end == 0 {
-                    if connection.request.len() > MAX_REQUEST_HEAD {
-                        finish_connection(connection);
-                        return false;
-                    }
-                    let Some(index) = connection
-                        .request
-                        .windows(4)
-                        .position(|bytes| bytes == b"\r\n\r\n")
-                    else {
-                        continue;
-                    };
-                    connection.head_end = index + 4;
-                    let (_, _, _, body_plan) =
-                        parse_head(&connection.request[..connection.head_end]);
-                    connection.body_plan = body_plan;
-                }
-                // A `Content-Length` larger than the cap, or a chunked
-                // body that grows past it, is refused -- and the
-                // connection can't be reused (unread body bytes would
-                // desync it), so it's closed outright.
-                let body_seen = connection.request.len() - connection.head_end;
-                let over_cap = match connection.body_plan {
-                    BodyPlan::Fixed(length) => length > MAX_REQUEST_BODY,
-                    BodyPlan::Chunked => body_seen > MAX_REQUEST_BODY,
-                    BodyPlan::None => false,
-                };
-                if over_cap {
-                    finish_connection(connection);
-                    return false;
-                }
-                if let Some(body) = take_complete_body(connection) {
-                    return dispatch_request(connection, body);
-                }
-            }
+            Ok(length) => connection.request.extend_from_slice(&chunk[..length]),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return false,
             Err(_) => {
                 finish_connection(connection);
@@ -1269,7 +1293,20 @@ fn dispatch_request(connection: &mut ConnectionState, body: Vec<u8>) -> bool {
     }
 }
 
-fn write_response(connection: &mut ConnectionState) {
+/// What `write_response` left the connection in.
+enum FlushResult {
+    /// The connection was torn down (write error, or a non-keep-alive
+    /// response finished) -- `connection` is now freed.
+    Closed,
+    /// The response was fully sent and the connection reset for the next
+    /// request; safe to look for a pipelined follow-up.
+    KeptAlive,
+    /// Still in progress: a slow client (would-block, re-armed for
+    /// writability) or a streamed response waiting on its next chunk.
+    Pending,
+}
+
+fn write_response(connection: &mut ConnectionState) -> FlushResult {
     while connection.written < connection.response.len() {
         match connection
             .stream
@@ -1277,16 +1314,19 @@ fn write_response(connection: &mut ConnectionState) {
         {
             Ok(0) => {
                 finish_connection(connection);
-                return;
+                return FlushResult::Closed;
             }
             Ok(length) => connection.written += length,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                rewatch_connection(connection, THAW_FD_WRITABLE);
-                return;
+                return if rewatch_connection(connection, THAW_FD_WRITABLE) {
+                    FlushResult::Pending
+                } else {
+                    FlushResult::Closed
+                };
             }
             Err(_) => {
                 finish_connection(connection);
-                return;
+                return FlushResult::Closed;
             }
         }
     }
@@ -1298,29 +1338,25 @@ fn write_response(connection: &mut ConnectionState) {
         connection.response.clear();
         connection.written = 0;
         rewatch_connection(connection, THAW_FD_READABLE);
-        return;
+        return FlushResult::Pending;
     }
     if connection.keep_alive {
-        // Reuse the connection instead of closing it: reset the
-        // per-request fields and re-arm for another request's head,
-        // exactly the same registration `register_connection` already
-        // does for a brand-new connection. `connection_ready` decides
-        // whether to read or write purely from `response.is_empty()`,
-        // so clearing it here is what makes the next readiness event
-        // re-enter `read_request` instead of trying to write again.
+        // Reuse the connection instead of closing it: drain the request
+        // just answered and reset the per-request fields for the next
+        // one. `connection_ready` decides whether to read or write purely
+        // from `response.is_empty()`, so clearing it here is what makes
+        // the next readiness event re-enter `read_request`.
         //
-        // Pipelining (a client sending a second request before reading
-        // this response) isn't supported: `connection.request.clear()`
-        // discards any bytes already read past this request's own
-        // `\r\n\r\n`, and `read_request` only ever looks for new bytes
-        // via a fresh readable event, not ones already sitting in a
-        // just-cleared buffer -- a genuinely pipelining client's second
-        // request would be silently lost. A client that waits for each
-        // response before sending the next one (the common case, and
-        // what Node's own default `http.Agent` does on a keep-alive
-        // connection) is unaffected.
+        // Pipelining is supported: bytes past this request (a client's
+        // already-sent next request) stay in `connection.request` and
+        // `connection_ready` loops straight into them; responses still go
+        // out in request order because each is fully sent before the
+        // next request is read.
         free_response_context(connection);
-        connection.request.clear();
+        connection
+            .request
+            .drain(..connection.consumed.min(connection.request.len()));
+        connection.consumed = 0;
         connection.response.clear();
         connection.written = 0;
         connection.awaiting_handler = false;
@@ -1331,10 +1367,14 @@ fn write_response(connection: &mut ConnectionState) {
         // Waiting for the next request now: the read-side timeout applies
         // again (doubling as a keep-alive idle timeout).
         connection.head_deadline = Some(Instant::now() + header_timeout());
-        rewatch_connection(connection, THAW_FD_READABLE);
-        return;
+        return if rewatch_connection(connection, THAW_FD_READABLE) {
+            FlushResult::KeptAlive
+        } else {
+            FlushResult::Closed
+        };
     }
     finish_connection(connection);
+    FlushResult::Closed
 }
 
 /// Drops the boxed `RequestContext` a still-in-flight (or just-completed)
@@ -1346,7 +1386,9 @@ fn free_response_context(connection: &mut ConnectionState) {
     }
 }
 
-fn rewatch_connection(connection: &mut ConnectionState, interests: u8) {
+/// Returns `false` if re-registering the fd watch failed and the
+/// connection was torn down (so `connection` is now freed).
+fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
     unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
     connection.watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -1358,7 +1400,9 @@ fn rewatch_connection(connection: &mut ConnectionState, interests: u8) {
     };
     if connection.watcher == 0 {
         finish_connection(connection);
+        return false;
     }
+    true
 }
 
 fn finish_connection(connection: &mut ConnectionState) {
@@ -1679,11 +1723,15 @@ mod tests {
 
     #[test]
     fn decodes_a_chunked_request_body() {
-        assert_eq!(
-            decode_chunked_body(b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n").as_deref(),
-            Some(&b"hello world"[..])
-        );
-        assert_eq!(decode_chunked_body(b"0\r\n\r\n").as_deref(), Some(&b""[..]));
+        let input = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let (body, consumed) = decode_chunked_body(input).unwrap();
+        assert_eq!(body, b"hello world");
+        assert_eq!(consumed, input.len());
+        // Bytes past the terminator (a pipelined request) aren't consumed.
+        let (body, consumed) = decode_chunked_body(b"3\r\nabc\r\n0\r\n\r\nGET /next").unwrap();
+        assert_eq!(body, b"abc");
+        assert_eq!(consumed, b"3\r\nabc\r\n0\r\n\r\n".len());
+        assert_eq!(decode_chunked_body(b"0\r\n\r\n"), Some((Vec::new(), 5)));
         // Incomplete: terminator not yet received.
         assert_eq!(decode_chunked_body(b"5\r\nhel"), None);
         assert_eq!(decode_chunked_body(b"5\r\nhello\r\n"), None);
