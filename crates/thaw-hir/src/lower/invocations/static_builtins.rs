@@ -184,7 +184,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             (object, property),
             ("Array", "of" | "from" | "isArray")
-                | ("Buffer", "from" | "alloc" | "concat")
+                | ("Buffer", "from" | "alloc" | "concat" | "byteLength")
                 | ("Map", "groupBy")
                 | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
                 | ("JSON", "stringify")
@@ -204,6 +204,30 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                     if object.sym == *"Buffer" {
+                        if property.sym == *"byteLength" {
+                            // `Buffer.byteLength(string, encoding?)` -- how
+                            // many bytes the string occupies once encoded
+                            // (`utf8` default). Handy for a `Content-Length`.
+                            let (arguments, bindings) = self
+                                .lower_native_spread_values(&call.args, "Buffer.byteLength")?;
+                            let text = arguments
+                                .first()
+                                .ok_or("`Buffer.byteLength` expects a string")?
+                                .clone();
+                            let encoding = match arguments.get(1) {
+                                Some(argument) => argument.clone(),
+                                None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
+                            };
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var(
+                                        "__thaw_bytes_byte_length".to_string(),
+                                    )),
+                                    vec![text, encoding],
+                                ),
+                                &bindings,
+                            );
+                        }
                         if property.sym == *"concat" {
                             // `Buffer.concat(list)` -- flatten an array of
                             // byte buffers into one. (`totalLength` isn't
