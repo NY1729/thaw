@@ -1550,3 +1550,26 @@ fn accepts_undefined_for_an_optional_callable_annotation() {
         }"#,
     );
 }
+
+#[test]
+fn rewritten_external_type_name_resolves_to_jsvalue_bare_and_generic() {
+    // The module graph renames an imported external class/interface used
+    // in type position to a `__thaw_`-prefixed rewrite symbol. That name
+    // has no thaw-modelled type; resolving it (with or without type
+    // arguments -- `Context` vs `Context<Env, Params>`) must degrade to
+    // `JsValue`, not fail the build. A `JsValue` parameter admits a
+    // dynamic member call; a failed resolution would abort lowering.
+    lower(
+        r#"
+        function bare(value: __thaw_typed_js_abc123): string {
+            return value.text("hi");
+        }
+        function generic(value: __thaw_type_pkg_Ctx<number, string>): string {
+            return value.text("bye");
+        }
+        function main(): void {
+            console.log(bare(getDynamicValue("x")), generic(getDynamicValue("y")));
+        }
+        "#,
+    );
+}
