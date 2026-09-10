@@ -386,7 +386,7 @@ fn embedded_frontend_and_api_run_without_the_asset_directory() {
         format!(
             r#"import {{ createServer }} from "node:http";
 function main(): void {{
-  const server = createServer((request: {{ method: string; url: string; statusCode: number }}, response: {{ statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }}): boolean => {{
+  const server = createServer((request: {{ method: string; url: string; statusCode: number; body: string }}, response: {{ statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }}): boolean => {{
     if (request.url === "/api/message") {{
       response.setHeader("Content-Type", "application/json; charset=utf-8");
       return response.end(request.method === "POST" ? "{{\"saved\":true}}" : "{{\"message\":\"hello\"}}");

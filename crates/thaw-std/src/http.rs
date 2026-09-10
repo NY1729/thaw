@@ -29,6 +29,78 @@ unsafe extern "C" {
 const THAW_FD_READABLE: u8 = 1;
 const THAW_FD_WRITABLE: u8 = 2;
 const MAX_REQUEST_HEAD: usize = 64 * 1024;
+const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
+
+/// How the request body's length is framed, parsed from the head once
+/// `\r\n\r\n` is seen and then consulted on every subsequent read until
+/// the body is fully in hand.
+#[derive(Clone, Copy, PartialEq)]
+enum BodyPlan {
+    /// No body (no `Content-Length`, no `Transfer-Encoding: chunked`).
+    None,
+    /// Exactly this many bytes follow the head.
+    Fixed(usize),
+    /// `Transfer-Encoding: chunked`; ends at the `0\r\n\r\n` terminator.
+    Chunked,
+}
+
+/// Parses the body framing from an already-complete request head.
+/// `Transfer-Encoding: chunked` wins over `Content-Length` (per RFC
+/// 9112); a `Content-Length` that isn't a plain number is treated as no
+/// body.
+fn parse_body_plan(head: &str) -> BodyPlan {
+    let mut content_length = None;
+    for line in head.lines().skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("Transfer-Encoding") {
+            if value
+                .to_ascii_lowercase()
+                .split(',')
+                .any(|token| token.trim() == "chunked")
+            {
+                return BodyPlan::Chunked;
+            }
+        } else if name.eq_ignore_ascii_case("Content-Length") {
+            content_length = value.parse::<usize>().ok();
+        }
+    }
+    match content_length {
+        Some(length) if length > 0 => BodyPlan::Fixed(length),
+        _ => BodyPlan::None,
+    }
+}
+
+/// Decodes a `Transfer-Encoding: chunked` body (`<hex len>\r\n<bytes>\r\n`
+/// ..., ending at a zero-length chunk). Returns `None` if the bytes seen
+/// so far don't yet contain a complete body, or are malformed.
+fn decode_chunked_body(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut rest = bytes;
+    let mut body = Vec::new();
+    loop {
+        let line_end = rest.windows(2).position(|pair| pair == b"\r\n")?;
+        let size =
+            usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).ok()?.trim(), 16).ok()?;
+        let after_size = &rest[line_end + 2..];
+        if after_size.len() < size + 2 {
+            return None;
+        }
+        if &after_size[size..size + 2] != b"\r\n" {
+            return None;
+        }
+        if size == 0 {
+            return Some(body);
+        }
+        body.extend_from_slice(&after_size[..size]);
+        rest = &after_size[size + 2..];
+    }
+}
 
 /// How long a connection may take to send a complete request head (and,
 /// between requests on a kept-alive connection, how long it may sit idle
@@ -232,6 +304,16 @@ struct ResponseState {
 struct IncomingMessage {
     method: *const c_char,
     url: *const c_char,
+    /// Meaningless on a server request (Node only has it on a *client*
+    /// response), and always 0; kept only because it was already in the
+    /// declared `.d.ts` interface and dropping it would churn every
+    /// handler's structural type annotation.
+    status_code: f64,
+    /// The fully-read request body as a UTF-8 string. `read_request`
+    /// consumes `Content-Length` / `Transfer-Encoding: chunked` bytes
+    /// before the handler runs, so this is complete by the time the
+    /// handler sees it. Empty for a bodyless request.
+    body: *const c_char,
 }
 
 #[repr(C)]
@@ -280,10 +362,16 @@ struct RequestContext {
     // read through directly (hence the underscores), just kept alive.
     _method: CString,
     _url: CString,
+    _body: CString,
 }
 
 impl RequestContext {
-    fn new(method: &str, target: &str, connection: *mut ConnectionState) -> Box<RequestContext> {
+    fn new(
+        method: &str,
+        target: &str,
+        body: &[u8],
+        connection: *mut ConnectionState,
+    ) -> Box<RequestContext> {
         let mut context = Box::new(RequestContext {
             connection,
             resumable: false,
@@ -303,6 +391,8 @@ impl RequestContext {
             request: IncomingMessage {
                 method: std::ptr::null(),
                 url: std::ptr::null(),
+                status_code: 0.0,
+                body: std::ptr::null(),
             },
             set_header: NativeClosure {
                 code: response_set_header as *const c_void,
@@ -322,11 +412,18 @@ impl RequestContext {
             },
             _method: CString::new(method).unwrap_or_default(),
             _url: CString::new(target).unwrap_or_default(),
+            // Exposed as a string, so decode lossily and drop interior
+            // NULs (which would otherwise truncate it). JSON / form /
+            // text bodies -- the target use case -- are unaffected;
+            // binary bodies are not supported through this field.
+            _body: CString::new(String::from_utf8_lossy(body).replace('\0', "\u{fffd}"))
+                .unwrap_or_default(),
         });
         // The box has a stable address now -- wire every self pointer.
         let context_ptr: *mut RequestContext = &mut *context;
         context.request.method = context._method.as_ptr();
         context.request.url = context._url.as_ptr();
+        context.request.body = context._body.as_ptr();
         context.set_header.context = context_ptr.cast();
         context.write.context = context_ptr.cast();
         context.end.context = context_ptr.cast();
@@ -576,9 +673,10 @@ fn run_server_callback(
     callback: *const c_void,
     method: &str,
     target: &str,
+    body: &[u8],
     connection: *mut ConnectionState,
 ) -> CallbackOutcome {
-    let mut context = RequestContext::new(method, target, connection);
+    let mut context = RequestContext::new(method, target, body, connection);
     unsafe {
         // The ambient `.d.ts` declares this callback `=> void`, so thaw
         // emits a void-returning native function for a plain handler --
@@ -611,9 +709,10 @@ fn run_server_callback(
 }
 
 /// Synchronous entry point for the one-shot helpers, which have no event
-/// loop and so can only ever see a `Ready` outcome.
+/// loop and so can only ever see a `Ready` outcome. They don't parse a
+/// request body, so it's always empty here.
 fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -> ResponseSpec {
-    match run_server_callback(callback, method, target, std::ptr::null_mut()) {
+    match run_server_callback(callback, method, target, &[], std::ptr::null_mut()) {
         CallbackOutcome::Ready(spec) => spec,
         CallbackOutcome::Pending(context) => {
             let context = unsafe { Box::from_raw(context) };
@@ -725,6 +824,11 @@ struct ConnectionState {
     /// streaming -- those phases are bounded by the handler, not by this
     /// read-side timeout.
     head_deadline: Option<Instant>,
+    /// Byte offset in `request` where the body starts (just past the
+    /// head's `\r\n\r\n`). 0 until the head is complete.
+    head_end: usize,
+    /// How the body length is framed, decided when the head completes.
+    body_plan: BodyPlan,
 }
 
 /// Live `ConnectionState` box addresses, so `thaw_http_run_servers` can
@@ -962,6 +1066,8 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         streaming: false,
         response_ended: false,
         head_deadline: Some(Instant::now() + header_timeout()),
+        head_end: 0,
+        body_plan: BodyPlan::None,
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -1026,7 +1132,6 @@ fn negotiate_keep_alive(request: &str) -> bool {
         .is_some_and(|version| version.eq_ignore_ascii_case("HTTP/1.1"));
     let mut connection_close = false;
     let mut connection_keep_alive = false;
-    let mut has_body_header = false;
     for line in lines {
         if line.is_empty() {
             break;
@@ -1034,10 +1139,8 @@ fn negotiate_keep_alive(request: &str) -> bool {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        let name = name.trim();
-        let value = value.trim();
-        if name.eq_ignore_ascii_case("Connection") {
-            for token in value.split(',') {
+        if name.trim().eq_ignore_ascii_case("Connection") {
+            for token in value.trim().split(',') {
                 let token = token.trim();
                 if token.eq_ignore_ascii_case("close") {
                     connection_close = true;
@@ -1045,14 +1148,7 @@ fn negotiate_keep_alive(request: &str) -> bool {
                     connection_keep_alive = true;
                 }
             }
-        } else if name.eq_ignore_ascii_case("Content-Length")
-            || name.eq_ignore_ascii_case("Transfer-Encoding")
-        {
-            has_body_header = true;
         }
-    }
-    if has_body_header {
-        return false;
     }
     if http_1_1 {
         !connection_close
@@ -1061,9 +1157,41 @@ fn negotiate_keep_alive(request: &str) -> bool {
     }
 }
 
+/// Parses a complete request head (bytes up to and including `\r\n\r\n`).
+fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan) {
+    let head = String::from_utf8_lossy(head);
+    let mut request_line = head.lines().next().unwrap_or("").split_whitespace();
+    let method = request_line.next().unwrap_or("GET").to_string();
+    let target = request_line.next().unwrap_or("/").to_string();
+    (
+        method,
+        target,
+        negotiate_keep_alive(&head),
+        parse_body_plan(&head),
+    )
+}
+
+/// If `connection.request` now holds a full body per `connection.body_plan`,
+/// returns it (owned, decoded); `None` means keep reading.
+fn take_complete_body(connection: &mut ConnectionState) -> Option<Vec<u8>> {
+    let tail = &connection.request[connection.head_end..];
+    match connection.body_plan {
+        BodyPlan::None => Some(Vec::new()),
+        BodyPlan::Fixed(length) => (tail.len() >= length).then(|| tail[..length].to_vec()),
+        BodyPlan::Chunked => decode_chunked_body(tail),
+    }
+}
+
 fn read_request(connection: &mut ConnectionState) -> bool {
     let mut chunk = [0_u8; 4096];
     loop {
+        // Already have a full head from a previous readable event? Skip
+        // straight to the body-completeness check.
+        if connection.head_end != 0 {
+            if let Some(body) = take_complete_body(connection) {
+                return dispatch_request(connection, body);
+            }
+        }
         match connection.stream.read(&mut chunk) {
             Ok(0) => {
                 finish_connection(connection);
@@ -1071,48 +1199,39 @@ fn read_request(connection: &mut ConnectionState) -> bool {
             }
             Ok(length) => {
                 connection.request.extend_from_slice(&chunk[..length]);
-                if connection.request.len() > MAX_REQUEST_HEAD {
+                if connection.head_end == 0 {
+                    if connection.request.len() > MAX_REQUEST_HEAD {
+                        finish_connection(connection);
+                        return false;
+                    }
+                    let Some(index) = connection
+                        .request
+                        .windows(4)
+                        .position(|bytes| bytes == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    connection.head_end = index + 4;
+                    let (_, _, _, body_plan) =
+                        parse_head(&connection.request[..connection.head_end]);
+                    connection.body_plan = body_plan;
+                }
+                // A `Content-Length` larger than the cap, or a chunked
+                // body that grows past it, is refused -- and the
+                // connection can't be reused (unread body bytes would
+                // desync it), so it's closed outright.
+                let body_seen = connection.request.len() - connection.head_end;
+                let over_cap = match connection.body_plan {
+                    BodyPlan::Fixed(length) => length > MAX_REQUEST_BODY,
+                    BodyPlan::Chunked => body_seen > MAX_REQUEST_BODY,
+                    BodyPlan::None => false,
+                };
+                if over_cap {
                     finish_connection(connection);
                     return false;
                 }
-                if connection
-                    .request
-                    .windows(4)
-                    .any(|bytes| bytes == b"\r\n\r\n")
-                {
-                    let (method, target, keep_alive) = {
-                        let request = String::from_utf8_lossy(&connection.request);
-                        let mut request_line =
-                            request.lines().next().unwrap_or("").split_whitespace();
-                        let method = request_line.next().unwrap_or("GET").to_string();
-                        let target = request_line.next().unwrap_or("/").to_string();
-                        let keep_alive = negotiate_keep_alive(&request);
-                        (method, target, keep_alive)
-                    };
-                    let callback = unsafe { &*connection.server }.callback as *const c_void;
-                    // The head is in: the read-side timeout no longer
-                    // applies -- the handler (and any streaming response)
-                    // bounds its own lifetime from here.
-                    connection.head_deadline = None;
-                    // Set before running the handler: an `async` handler
-                    // that suspends won't return through here, and
-                    // `finish_response` needs the negotiated value when it
-                    // renders the response later.
-                    connection.keep_alive = keep_alive;
-                    match run_server_callback(
-                        callback,
-                        &method,
-                        &target,
-                        connection as *mut ConnectionState,
-                    ) {
-                        CallbackOutcome::Ready(spec) => {
-                            connection.response = render_response(spec, keep_alive);
-                            return true;
-                        }
-                        CallbackOutcome::Pending(context) => {
-                            return park_pending_context(connection, context, keep_alive);
-                        }
-                    }
+                if let Some(body) = take_complete_body(connection) {
+                    return dispatch_request(connection, body);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return false,
@@ -1121,6 +1240,32 @@ fn read_request(connection: &mut ConnectionState) -> bool {
                 return false;
             }
         }
+    }
+}
+
+/// The head and body are both fully in hand: run the handler.
+fn dispatch_request(connection: &mut ConnectionState, body: Vec<u8>) -> bool {
+    let (method, target, keep_alive, _) = parse_head(&connection.request[..connection.head_end]);
+    let callback = unsafe { &*connection.server }.callback as *const c_void;
+    // The whole request is in: the read-side timeout no longer applies --
+    // the handler (and any streaming response) bounds its own lifetime.
+    connection.head_deadline = None;
+    // Set before running the handler: an `async` handler that suspends
+    // won't return through here, and `finish_response` needs the
+    // negotiated value when it renders the response later.
+    connection.keep_alive = keep_alive;
+    match run_server_callback(
+        callback,
+        &method,
+        &target,
+        &body,
+        connection as *mut ConnectionState,
+    ) {
+        CallbackOutcome::Ready(spec) => {
+            connection.response = render_response(spec, keep_alive);
+            true
+        }
+        CallbackOutcome::Pending(context) => park_pending_context(connection, context, keep_alive),
     }
 }
 
@@ -1181,6 +1326,8 @@ fn write_response(connection: &mut ConnectionState) {
         connection.awaiting_handler = false;
         connection.streaming = false;
         connection.response_ended = false;
+        connection.head_end = 0;
+        connection.body_plan = BodyPlan::None;
         // Waiting for the next request now: the read-side timeout applies
         // again (doubling as a keep-alive idle timeout).
         connection.head_deadline = Some(Instant::now() + header_timeout());
@@ -1476,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn negotiates_keep_alive_by_version_header_and_body_presence() {
+    fn negotiates_keep_alive_by_version_and_connection_header() {
         assert!(negotiate_keep_alive(
             "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
         ));
@@ -1489,22 +1636,62 @@ mod tests {
         assert!(negotiate_keep_alive(
             "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"
         ));
-        // No request-body parsing support (a separate, pre-existing
-        // limitation) means reusing the connection while unread body
-        // bytes are still in the stream would desync every request
-        // after this one -- force close whenever a body might exist,
-        // even on an otherwise keep-alive-eligible HTTP/1.1 request.
-        assert!(!negotiate_keep_alive(
+        // The request body is consumed now (`read_request` /
+        // `take_complete_body`), so a `Content-Length` / chunked request
+        // no longer forces the connection closed.
+        assert!(negotiate_keep_alive(
             "POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n"
         ));
-        assert!(!negotiate_keep_alive(
+        assert!(negotiate_keep_alive(
             "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+        ));
+        assert!(!negotiate_keep_alive(
+            "POST / HTTP/1.1\r\nContent-Length: 4\r\nConnection: close\r\n\r\n"
         ));
     }
 
     #[test]
+    fn parses_body_framing_from_the_head() {
+        assert!(matches!(
+            parse_body_plan("GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+            BodyPlan::None
+        ));
+        assert!(matches!(
+            parse_body_plan("POST / HTTP/1.1\r\nContent-Length: 11\r\n\r\n"),
+            BodyPlan::Fixed(11)
+        ));
+        assert!(matches!(
+            parse_body_plan("POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n"),
+            BodyPlan::None
+        ));
+        assert!(matches!(
+            parse_body_plan("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            BodyPlan::Chunked
+        ));
+        // Transfer-Encoding wins over a (spec-forbidden) Content-Length.
+        assert!(matches!(
+            parse_body_plan(
+                "POST / HTTP/1.1\r\nContent-Length: 9\r\nTransfer-Encoding: chunked\r\n\r\n"
+            ),
+            BodyPlan::Chunked
+        ));
+    }
+
+    #[test]
+    fn decodes_a_chunked_request_body() {
+        assert_eq!(
+            decode_chunked_body(b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n").as_deref(),
+            Some(&b"hello world"[..])
+        );
+        assert_eq!(decode_chunked_body(b"0\r\n\r\n").as_deref(), Some(&b""[..]));
+        // Incomplete: terminator not yet received.
+        assert_eq!(decode_chunked_body(b"5\r\nhel"), None);
+        assert_eq!(decode_chunked_body(b"5\r\nhello\r\n"), None);
+    }
+
+    #[test]
     fn encoded_response_decodes_binary_bytes() {
-        let context = RequestContext::new("GET", "/", std::ptr::null_mut());
+        let context = RequestContext::new("GET", "/", b"", std::ptr::null_mut());
         let content = CString::new("89504e4700ff").unwrap();
         let encoding = CString::new("hex").unwrap();
         assert!(unsafe {

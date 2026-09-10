@@ -236,7 +236,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                         let requests: number = 0;
                         const server = createServer(
                             (
-                                request: {{ method: string; url: string; statusCode: number }},
+                                request: {{ method: string; url: string; statusCode: number; body: string }},
                                 response: {{
                                     statusCode: number;
                                     setHeader: (name: string, value: string) => boolean;
@@ -342,7 +342,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
             r#"import { createServer } from "node:http";
             function main(): void {
                 const server = createServer((
-                    request: { method: string; url: string; statusCode: number },
+                    request: { method: string; url: string; statusCode: number; body: string },
                     response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
                 ): boolean => true);
                 server.listen(70000);
@@ -504,7 +504,7 @@ fn node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_whe
         r#"import { createServer } from "node:http";
 function main(): void {
     const server = createServer((
-        request: { method: string; url: string; statusCode: number },
+        request: { method: string; url: string; statusCode: number; body: string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): void => {
         response.setHeader("Content-Type", "text/plain");
@@ -626,7 +626,7 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number },
+        request: { method: string; url: string; statusCode: number; body: string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         if (request.url === "/pieces") {
@@ -788,7 +788,7 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number },
+        request: { method: string; url: string; statusCode: number; body: string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         response.write("A" + request.url + ";");
@@ -900,7 +900,7 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number },
+        request: { method: string; url: string; statusCode: number; body: string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         if (request.url === "/slow") {
@@ -1027,6 +1027,146 @@ function main(): void {
     assert!(
         after_aborts_fds <= baseline_fds + 8,
         "fd count grew from {baseline_fds} to {after_aborts_fds} after 20 mid-handler aborts"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The native server reads a request body (`Content-Length` or
+/// `Transfer-Encoding: chunked`) before invoking the handler and exposes
+/// it as `request.body`. Consuming it also means a body-carrying request
+/// no longer forces the connection closed -- several with distinct
+/// bodies ride one keep-alive connection without desyncing. Oversized
+/// and stalled bodies are refused / timed out rather than buffered
+/// forever.
+#[test]
+fn node_http_reads_request_bodies_and_keeps_the_connection_in_sync() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-request-body-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+function main(): void {
+    const server = createServer((
+        request: { method: string; url: string; statusCode: number; body: string },
+        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+    ): void => {
+        response.end(request.method + " " + request.url + " [" + request.body + "]");
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .env("THAW_HTTP_HEADER_TIMEOUT_MS", "700")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(
+        (0..500)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("server did not start"),
+    );
+
+    let send = |stream: &mut TcpStream, raw: &[u8]| {
+        stream.write_all(raw).unwrap();
+        read_one_response_body_any(stream)
+    };
+
+    // Three distinct bodies -- fixed, chunked, and empty -- back to back
+    // on one connection: each handler sees exactly its own body and the
+    // stream stays framed.
+    let mut keep = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    keep.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(
+        send(
+            &mut keep,
+            b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nalpha"
+        ),
+        "POST /a [alpha]"
+    );
+    assert_eq!(
+        send(
+            &mut keep,
+            b"POST /b HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n\
+              4\r\nbeta\r\n5\r\n-body\r\n0\r\n\r\n"
+        ),
+        "POST /b [beta-body]"
+    );
+    assert_eq!(
+        send(&mut keep, b"GET /c HTTP/1.1\r\nHost: x\r\n\r\n"),
+        "GET /c []"
+    );
+    drop(keep);
+
+    // A ~2 MiB body round-trips intact (well under the 8 MiB cap).
+    let big = "x".repeat(2 * 1024 * 1024);
+    let mut large = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    large.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    large
+        .write_all(
+            format!(
+                "POST /big HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{big}",
+                big.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    assert_eq!(
+        read_one_response_body_any(&mut large),
+        format!("POST /big [{big}]")
+    );
+    drop(large);
+
+    // A body that stops arriving mid-stream is closed by the read-side
+    // timeout, not buffered indefinitely.
+    let mut stalled = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stalled
+        .write_all(b"POST /slow HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nonly-a-few-bytes")
+        .unwrap();
+    stalled
+        .set_read_timeout(Some(Duration::from_secs(4)))
+        .unwrap();
+    let started = std::time::Instant::now();
+    let mut sink = [0_u8; 16];
+    loop {
+        match stalled.read(&mut sink) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => panic!("stalled body conn: unexpected {error}"),
+        }
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "stalled body connection not closed within the timeout"
+    );
+
+    // The server is still healthy for the next well-behaved client.
+    let mut after = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    after.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(
+        send(&mut after, b"GET /done HTTP/1.1\r\nHost: x\r\n\r\n"),
+        "GET /done []"
     );
 
     child.kill().unwrap();
