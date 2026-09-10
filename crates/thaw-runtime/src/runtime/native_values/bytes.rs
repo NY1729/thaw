@@ -191,6 +191,143 @@ pub unsafe extern "C" fn thaw_bytes_from_array(array: *const u8) -> *mut u8 {
     unsafe { write_byte_array(&bytes) }
 }
 
+/// Element width in bytes for a `thaw_bytes_read`/`write` `width`/`kind`
+/// pair; `None` for an unsupported combination.
+fn accessor_width(width: f64) -> Option<usize> {
+    match width as u32 {
+        1 => Some(1),
+        2 => Some(2),
+        4 => Some(4),
+        8 => Some(8),
+        _ => None,
+    }
+}
+
+/// Reassembles `width` little-endian bytes (already byte-swapped by the
+/// caller if the accessor was big-endian) into the number the accessor
+/// `kind` (0 = unsigned int, 1 = signed int, 2 = float) names.
+fn decode_scalar(le: &[u8], kind: u32) -> f64 {
+    let mut buf = [0u8; 8];
+    buf[..le.len()].copy_from_slice(le);
+    match (kind, le.len()) {
+        (2, 4) => f64::from(f32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
+        (2, 8) => f64::from_le_bytes(buf),
+        (1, 1) => f64::from(buf[0] as i8),
+        (1, 2) => f64::from(i16::from_le_bytes([buf[0], buf[1]])),
+        (1, 4) => f64::from(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
+        (1, 8) => i64::from_le_bytes(buf) as f64,
+        (_, 1) => f64::from(buf[0]),
+        (_, 2) => f64::from(u16::from_le_bytes([buf[0], buf[1]])),
+        (_, 4) => f64::from(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
+        (_, 8) => u64::from_le_bytes(buf) as f64,
+        _ => 0.0,
+    }
+}
+
+/// Encodes `value` into `width` little-endian bytes per the accessor
+/// `kind`. Integer kinds truncate toward zero then wrap mod 2^bits
+/// (`Buffer`'s own coercion); floats use IEEE-754.
+fn encode_scalar(value: f64, width: usize, kind: u32) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    match (kind, width) {
+        (2, 4) => out[..4].copy_from_slice(&(value as f32).to_le_bytes()),
+        (2, 8) => out = value.to_le_bytes(),
+        (_, 1) => out[0] = value as i64 as u8,
+        (_, 2) => out[..2].copy_from_slice(&(value as i64 as u16).to_le_bytes()),
+        (_, 4) => out[..4].copy_from_slice(&(value as i64 as u32).to_le_bytes()),
+        (_, 8) => out = (value as i64).to_le_bytes(),
+        _ => {}
+    }
+    out
+}
+
+#[no_mangle]
+/// `buf.readUInt16BE(offset)` / `buf.readInt8(offset)` /
+/// `buf.readDoubleLE(offset)` &c. -- a fixed-width scalar out of the
+/// native byte layout. `kind` is 0 (unsigned int), 1 (signed int), or 2
+/// (float); `le` is 1 for little-endian. An out-of-range offset reads as
+/// `0` (no `RangeError` across this boundary).
+///
+/// # Safety
+///
+/// `buf` must be null or point to a Thaw array of `f64` element slots.
+pub unsafe extern "C" fn thaw_bytes_read(
+    buf: *const u8,
+    offset: f64,
+    width: f64,
+    kind: f64,
+    le: f64,
+) -> f64 {
+    let Some(bytes) = (unsafe { read_byte_array(buf) }) else {
+        return 0.0;
+    };
+    let Some(width) = accessor_width(width) else {
+        return 0.0;
+    };
+    if !(offset.is_finite() && offset >= 0.0) {
+        return 0.0;
+    }
+    let offset = offset as usize;
+    if offset + width > bytes.len() {
+        return 0.0;
+    }
+    let mut le_bytes = vec![0u8; width];
+    for index in 0..width {
+        le_bytes[index] = if le != 0.0 {
+            bytes[offset + index]
+        } else {
+            bytes[offset + width - 1 - index]
+        };
+    }
+    decode_scalar(&le_bytes, kind as u32)
+}
+
+#[no_mangle]
+/// `buf.writeUInt16BE(value, offset)` &c. -- writes a fixed-width scalar
+/// into the native byte layout in place and returns `offset + width`
+/// (Node's contract). An out-of-range offset is a no-op. `kind` / `le`
+/// as `thaw_bytes_read`.
+///
+/// # Safety
+///
+/// `buf` must be null or point to a writable Thaw array of `f64` slots.
+pub unsafe extern "C" fn thaw_bytes_write(
+    buf: *mut u8,
+    offset: f64,
+    value: f64,
+    width: f64,
+    kind: f64,
+    le: f64,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(buf) }) else {
+        return offset;
+    };
+    let Some(width) = accessor_width(width) else {
+        return offset;
+    };
+    if !(offset.is_finite() && offset >= 0.0) {
+        return offset;
+    }
+    let offset = offset as usize;
+    if offset + width > length {
+        return (offset + width) as f64;
+    }
+    let encoded = encode_scalar(value, width, kind as u32);
+    for index in 0..width {
+        let byte = if le != 0.0 {
+            encoded[index]
+        } else {
+            encoded[width - 1 - index]
+        };
+        unsafe {
+            buf.add(8 + (offset + index) * 8)
+                .cast::<f64>()
+                .write_unaligned(f64::from(byte));
+        }
+    }
+    (offset + width) as f64
+}
+
 #[no_mangle]
 /// `Buffer.byteLength(string, encoding)` -- the number of bytes the
 /// string occupies in `encoding` (null defaults to `utf8`): the UTF-8

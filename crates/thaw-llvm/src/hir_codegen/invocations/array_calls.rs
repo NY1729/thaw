@@ -27,6 +27,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_from_array"
                 | "__thaw_bytes_concat"
                 | "__thaw_bytes_equals"
+                | "__thaw_bytes_read"
+                | "__thaw_bytes_write"
                 | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
         );
@@ -180,6 +182,32 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map(Into::into)
                     .map_err(|error| error.to_string());
+            }
+            "__thaw_bytes_read" | "__thaw_bytes_write" => {
+                let (runtime, label) = if name == "__thaw_bytes_write" {
+                    ("thaw_bytes_write", "bytes_write")
+                } else {
+                    ("thaw_bytes_read", "bytes_read")
+                };
+                let [receiver, rest @ ..] = args else {
+                    return Err(format!("`{name}` expects a receiver"));
+                };
+                let handle = self.compile_expr(receiver)?.into_pointer_value();
+                let mut call_args = vec![self.compile_array_data(handle)?.into()];
+                for argument in rest {
+                    call_args.push(self.compile_expr(argument)?.into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(runtime).unwrap(),
+                        &call_args,
+                        label,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| format!("`{name}` returned no value"));
             }
             "__thaw_bytes_byte_length" => {
                 let [text, encoding] = args else {

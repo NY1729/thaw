@@ -1,6 +1,50 @@
 impl<'a> FnLowerer<'a> {
+    /// A fixed-width `Buffer` numeric accessor -- `readUInt16BE`,
+    /// `writeInt32LE`, `readDoubleLE`, &c. Returns `(width bytes, signed,
+    /// float, big-endian, write)`. These names are `Buffer`-idiomatic and
+    /// don't collide with any array/string/Date/Map method, so an
+    /// unconditional match here is safe; `lower_native_bytes_accessor`
+    /// still rejects a non-`Bytes` receiver.
+    fn bytes_numeric_accessor(property: &str) -> Option<(usize, bool, bool, bool, bool)> {
+        let (write, rest) = match property.strip_prefix("write") {
+            Some(rest) => (true, rest),
+            None => (false, property.strip_prefix("read")?),
+        };
+        if let Some(endian) = rest.strip_prefix("Float") {
+            let big = match endian {
+                "LE" => false,
+                "BE" => true,
+                _ => return None,
+            };
+            return Some((4, true, true, big, write));
+        }
+        if let Some(endian) = rest.strip_prefix("Double") {
+            let big = match endian {
+                "LE" => false,
+                "BE" => true,
+                _ => return None,
+            };
+            return Some((8, true, true, big, write));
+        }
+        let (signed, rest) = if let Some(rest) = rest.strip_prefix("UInt") {
+            (false, rest)
+        } else {
+            (true, rest.strip_prefix("Int")?)
+        };
+        let (width, big) = match rest {
+            "8" => (1, false),
+            "16LE" => (2, false),
+            "16BE" => (2, true),
+            "32LE" => (4, false),
+            "32BE" => (4, true),
+            _ => return None,
+        };
+        Some((width, signed, false, big, write))
+    }
+
     fn is_native_instance_builtin(property: &str) -> bool {
-        matches!(
+        Self::bytes_numeric_accessor(property).is_some()
+            || matches!(
             property,
             "charAt" | "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
@@ -72,6 +116,9 @@ impl<'a> FnLowerer<'a> {
             }
             "toJSON" | "toDateString" | "toTimeString" | "toUTCString" | "toString"
             | "valueOf" | "equals" => self.lower_native_conversion_method(member, property, call),
+            other if Self::bytes_numeric_accessor(other).is_some() => {
+                self.lower_native_bytes_accessor(member, property, call)
+            }
             _ => unreachable!("native instance builtin dispatch was checked before lowering"),
         }
     }
