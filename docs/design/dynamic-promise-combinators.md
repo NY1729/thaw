@@ -1,5 +1,14 @@
 # `Promise.all` / `race` / `allSettled` / `any` over dynamic thenables
 
+**Status: done (`5aebc209`).** Implemented as planned below --
+`try_dynamic_promise_combinator` in `promises.rs` routes an
+all-dynamic array-literal combinator call to QuickJS's own
+`Promise.<method>` via `callDynamicMethod`. Also landed alongside: a
+`JsValue` arm in `coerce_primitive_to_string`, and `JsValue` added to
+the `Json + _` string-concat fallback in `Expr::Bin` lowering, so
+`limit.activeCount + " "` works. Pinned:
+`registry_add_awaits_p_limit_promise_all_over_dynamic_thenables_when_enabled`.
+
 ## Problem
 
 `Promise.all([limit(fn), limit(fn)])` -- where each element is a
