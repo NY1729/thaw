@@ -195,12 +195,11 @@ fn registry_add_builds_and_runs_yaml_when_enabled() {
         &source,
         r#"import { parse, stringify } from "yaml";
                 function main(): void {
-                    const args: Json = JSON.parse("[\"name: thaw\\nitems:\\n  - 20\\n  - 22\\n\"]");
-                    const value: Json = parse(args);
+                    const value: Json = parse("name: thaw\nitems:\n  - 20\n  - 22\n");
                     console.log(String(value.name));
                     console.log(Number(value.items[0]) + Number(value.items[1]));
-                    const output: Json = stringify(JSON.parse("[{\"enabled\":true}]"));
-                    console.log(String(output));
+                    const output: string = stringify({ enabled: true });
+                    console.log(output);
                 }"#,
     )
     .unwrap();
