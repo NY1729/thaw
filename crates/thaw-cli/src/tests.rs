@@ -128,6 +128,31 @@ fn run_requires_a_script_name() {
 }
 
 #[test]
+fn direct_file_execution_forwards_arguments_and_removes_the_binary() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-run-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    let arguments = directory.join("arguments.json");
+    std::fs::write(
+        &input,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs'; import {{ argv }} from 'node:process'; function main(): void {{ writeFileSync({}, JSON.stringify(argv)); }}",
+            serde_json::to_string(arguments.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        run_file_at(input.to_str().unwrap(), &["forwarded".into()], &output).unwrap(),
+        0
+    );
+    let recorded: Vec<String> = serde_json::from_slice(&std::fs::read(arguments).unwrap()).unwrap();
+    assert_eq!(recorded.last().map(String::as_str), Some("forwarded"));
+    assert!(!output.exists());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn dev_fingerprint_tracks_sources_but_ignores_dependencies() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-dev-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("node_modules/package")).unwrap();
