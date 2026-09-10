@@ -1017,13 +1017,20 @@ function main(): void {
 
     // 3. A client that hangs up while a genuinely `async` handler is
     //    still awaiting must not crash the server or wedge the event
-    //    loop -- and its descriptor is released *right away*, not only
-    //    once the (still-running) handler finishes 400ms later.
-    for _ in 0..20 {
+    //    loop -- and both its descriptor *and* its connection state (a
+    //    ~64 KiB buffered request body here) are released right away, not
+    //    only once the still-running handler finishes 400ms later.
+    let big_body = "x".repeat(64 * 1024);
+    for index in 0..20 {
         let mut aborter = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        aborter
-            .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
+        let head = format!(
+            "POST /slow HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            big_body.len()
+        );
+        aborter.write_all(head.as_bytes()).unwrap();
+        if index % 2 == 0 {
+            let _ = aborter.write_all(big_body.as_bytes());
+        }
         // Vanish well before the handler's 400ms delay elapses.
         std::thread::sleep(Duration::from_millis(5));
         drop(aborter);
