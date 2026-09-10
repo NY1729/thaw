@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::raw::{c_char, c_void};
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -354,6 +354,12 @@ struct RequestContext {
     /// Set once the chunked response head has been queued -- from then on
     /// every `write`/`end` frames a chunk instead of buffering.
     headers_sent: bool,
+    /// Set by `finish_connection` when it tore the connection down while
+    /// this context's handler was still running: `connection` is now
+    /// null *and* there's nothing left to do, so any further `res.*`
+    /// no-ops. (A plain null `connection` -- the one-shot helpers --
+    /// still buffers normally; this flag is what tells the two apart.)
+    abandoned: bool,
     state: ResponseState,
     response: ServerResponse,
     request: IncomingMessage,
@@ -379,6 +385,7 @@ impl RequestContext {
             connection,
             resumable: false,
             headers_sent: false,
+            abandoned: false,
             state: ResponseState {
                 headers: Vec::new(),
                 body: Vec::new(),
@@ -537,6 +544,9 @@ fn stream_head_and_chunk(context: &mut RequestContext, payload: &[u8]) -> Vec<u8
 }
 
 fn stream_write(context: &mut RequestContext, payload: &[u8]) {
+    if bail_if_client_gone(context) {
+        return;
+    }
     let outbound = stream_head_and_chunk(context, payload);
     let connection = unsafe { &mut *context.connection };
     connection.streaming = true;
@@ -551,6 +561,9 @@ fn stream_write(context: &mut RequestContext, payload: &[u8]) {
 /// whole body is in hand and goes out buffered with a `Content-Length`
 /// (`finish_response` handles the synchronous vs parked-async split).
 fn stream_or_buffer_end(context: &mut RequestContext, tail: Vec<u8>) {
+    if bail_if_client_gone(context) {
+        return;
+    }
     let force_stream = stream_should_engage(context) && !context.state.body.is_empty();
     if !context.headers_sent && !force_stream {
         context.state.body.extend(tail);
@@ -618,6 +631,9 @@ fn finish_response(context: &mut RequestContext) {
     if !context.resumable || context.connection.is_null() {
         return;
     }
+    if bail_if_client_gone(context) {
+        return;
+    }
     let connection = unsafe { &mut *context.connection };
     connection.awaiting_handler = false;
     let spec = ResponseSpec {
@@ -641,6 +657,50 @@ fn normalize_status(status_code: f64) -> u16 {
     } else {
         500
     }
+}
+
+/// Non-blocking check for the client having closed the read side. `peek`
+/// doesn't consume, so it can't lose bytes a client did send.
+fn client_hung_up(connection: &ConnectionState) -> bool {
+    let mut probe = [0_u8; 1];
+    matches!(connection.stream.peek(&mut probe), Ok(0))
+}
+
+/// The client vanished mid-response: shut the socket and stop watching it
+/// now. The `ConnectionState` itself is kept until the in-flight handler
+/// next touches it (it still holds a `*mut ConnectionState`), at which
+/// point `bail_if_client_gone` tears it down.
+fn mark_client_gone(connection: &mut ConnectionState) {
+    connection.client_gone = true;
+    let _ = connection.stream.shutdown(Shutdown::Both);
+    if connection.watcher != 0 {
+        unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
+        connection.watcher = 0;
+    }
+}
+
+/// Called from the response-side closures. Returns `true` -- meaning the
+/// caller should stop and not touch `context` further -- when the
+/// response can't be delivered: either the connection was already torn
+/// down (this is a husk, `context.connection == null`), or the client
+/// has hung up, in which case the connection is finished now (which also
+/// defers this `RequestContext`'s free) rather than rendering / streaming
+/// a response nobody will read.
+fn bail_if_client_gone(context: &mut RequestContext) -> bool {
+    if context.abandoned {
+        return true;
+    }
+    if context.connection.is_null() {
+        // A one-shot helper with no event loop: not abandoned, just no
+        // connection to stream onto -- let the buffered path handle it.
+        return false;
+    }
+    let connection = unsafe { &mut *context.connection };
+    if connection.client_gone {
+        finish_connection(connection);
+        return true;
+    }
+    false
 }
 
 /// One-request native slice of Node's `createServer` callback shape.
@@ -836,6 +896,12 @@ struct ConnectionState {
     /// body). On keep-alive these are drained and anything past them --
     /// a pipelined next request -- is kept and processed in turn.
     consumed: usize,
+    /// Set when the client is seen to have hung up while an `async`
+    /// handler (or a streaming response) is still in flight: the socket
+    /// is shut down and unwatched right away, and the handler's next
+    /// `response.write`/`end` tears the connection down instead of
+    /// rendering / streaming into a dead socket.
+    client_gone: bool,
 }
 
 /// Live `ConnectionState` box addresses, so `thaw_http_run_servers` can
@@ -918,6 +984,9 @@ fn arm_idle_wakeup(next_deadline: Option<Instant>) {
 #[no_mangle]
 pub extern "C" fn thaw_http_run_servers() {
     loop {
+        // Any handler continuation whose connection was torn down mid-flight
+        // has fully unwound by now: free the husks it left behind.
+        drain_pending_context_frees();
         arm_idle_wakeup(sweep_idle_connections());
         {
             let mut servers = active_servers().lock().unwrap();
@@ -1076,6 +1145,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         head_end: 0,
         body_plan: BodyPlan::None,
         consumed: 0,
+        client_gone: false,
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -1098,18 +1168,20 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
 extern "C" fn connection_ready(context: *mut u8, _events: i16) {
     let connection = unsafe { &mut *(context as *mut ConnectionState) };
     loop {
-        if connection.awaiting_handler {
-            // An `async` handler is still running; its eventual
-            // `response.end(...)` re-arms this connection for writing. Any
-            // socket event now (including the client hanging up) is left
-            // for that path to notice.
-            return;
-        }
-        if connection.streaming && !connection.response_ended {
-            // Mid-stream: flush whatever chunk bytes are queued. A
-            // readable event here (pipelined bytes, half-close) is
-            // ignored until the handler produces the next chunk or ends.
-            if !connection.response.is_empty() {
+        if connection.awaiting_handler || (connection.streaming && !connection.response_ended) {
+            // An `async` handler / streaming response is still in flight.
+            // Its `response.write`/`end` drives things from here -- but a
+            // readable event now may be the client hanging up. If so,
+            // shut the socket and stop watching immediately (freeing the
+            // descriptor); the handler's next `res.*` call then tears the
+            // rest down via `bail_if_client_gone` rather than rendering /
+            // streaming into a dead socket.
+            if !connection.client_gone && client_hung_up(connection) {
+                mark_client_gone(connection);
+            } else if connection.streaming
+                && !connection.response_ended
+                && !connection.response.is_empty()
+            {
                 write_response(connection);
             }
             return;
@@ -1386,6 +1458,23 @@ fn free_response_context(connection: &mut ConnectionState) {
     }
 }
 
+thread_local! {
+    /// `RequestContext` boxes whose connection was torn down while their
+    /// handler was still in flight. The handler may still call back into
+    /// `res.*` synchronously as its continuation unwinds; those calls
+    /// see `context.connection == null` and no-op. `thaw_http_run_servers`
+    /// frees these on its next turn, once that continuation is done.
+    static PENDING_CONTEXT_FREE: std::cell::RefCell<Vec<*mut RequestContext>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn drain_pending_context_frees() {
+    let stale = PENDING_CONTEXT_FREE.with(|list| std::mem::take(&mut *list.borrow_mut()));
+    for context in stale {
+        unsafe { drop(Box::from_raw(context)) };
+    }
+}
+
 /// Returns `false` if re-registering the fd watch failed and the
 /// connection was torn down (so `connection` is now freed).
 fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
@@ -1407,7 +1496,19 @@ fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
 
 fn finish_connection(connection: &mut ConnectionState) {
     untrack_connection(connection);
-    free_response_context(connection);
+    // An `async` handler that hasn't finished still holds a
+    // `*mut ConnectionState` and may call `res.*` again as its
+    // continuation unwinds -- don't free its `RequestContext` out from
+    // under it. Null the back-pointer (so those calls no-op) and defer
+    // the free to the next event-loop turn.
+    if !connection.response_ctx.is_null() {
+        unsafe {
+            (*connection.response_ctx).connection = std::ptr::null_mut();
+            (*connection.response_ctx).abandoned = true;
+        }
+        PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(connection.response_ctx));
+        connection.response_ctx = std::ptr::null_mut();
+    }
     if connection.watcher != 0 {
         unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
         connection.watcher = 0;
