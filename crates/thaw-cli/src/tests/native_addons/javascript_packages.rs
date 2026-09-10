@@ -613,6 +613,12 @@ function normalize(raw: string): string {
     if (!v) { return "invalid"; }
     return v.toUpperCase();
 }
+function shout(raw: string): string {
+    // `x && x.method()` on a `string | null` -> `string | null`.
+    const v = semver.valid(raw);
+    const loud = v && v.toUpperCase();
+    return loud ? loud : "-";
+}
 function main(): void {
     const good = semver.valid("1.2.3");
     console.log(good ? "valid: " + good : "invalid");
@@ -627,6 +633,8 @@ function main(): void {
     if (cleaned) { console.log("cleaned:" + cleaned.length); }
     console.log(normalize("1.2.3"));
     console.log(normalize("bogus"));
+    console.log(shout("3.1.4"));
+    console.log(shout("bad"));
 }"#,
     )
     .unwrap();
@@ -640,7 +648,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "valid: 1.2.3\ninvalid\ncoerced\ntrue\n2\nmajor\ncleaned:5\n1.2.3\ninvalid\n"
+        "valid: 1.2.3\ninvalid\ncoerced\ntrue\n2\nmajor\ncleaned:5\n1.2.3\ninvalid\n3.1.4\n-\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
