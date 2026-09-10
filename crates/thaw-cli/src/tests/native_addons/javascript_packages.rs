@@ -559,6 +559,62 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `p-limit`'s `LimitFunction` call signature is `<A, R>(fn, ...a):
+/// Promise<R>`; the unresolved generic `R` makes `limit(fn)` return
+/// bare `Json`, so `Promise.all([limit(fn), limit(fn)])` -- an array of
+/// dynamic thenables, not native `Promise`s -- used to fail lowering
+/// (`Promise.all element 0 must be a Promise, got Json`). It now routes
+/// to QuickJS's own `Promise.all` via `callDynamicMethod`
+/// (`docs/design/dynamic-promise-combinators.md`); `allSettled` /
+/// `race` / `any` too. `limit.activeCount + " "` (a `JsValue` property
+/// read in a string `+`) is covered by the same-session
+/// `coerce_primitive_to_string` `JsValue` arm.
+#[test]
+fn registry_add_awaits_p_limit_promise_all_over_dynamic_thenables_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-p-limit-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "p-limit@6.2.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import pLimit from "p-limit";
+async function main(): Promise<void> {
+    const limit = pLimit(2);
+    const results = await Promise.all([
+        limit(async () => 1),
+        limit(async () => 2),
+        limit(async () => 3),
+    ]);
+    console.log(results[0] + "," + results[1] + "," + results[2]);
+    const settled = await Promise.allSettled([limit(async () => 4), limit(async () => 5)]);
+    console.log(settled[0].status + " " + settled[1].value);
+    console.log(limit.activeCount + " " + limit.pendingCount);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["p-limit".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1,2,3\nfulfilled 5\n0 0\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_add_builds_and_calls_real_chalk_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {

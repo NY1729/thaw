@@ -142,6 +142,63 @@ impl<'a> FnLowerer<'a> {
         unreachable!("promise member dispatch was checked before lowering")
     }
 
+    /// `Promise.<method>([...])` where every element is a dynamic
+    /// thenable (`Json` / `JsValue` -- a live QuickJS `Promise` handle,
+    /// not a native `ThawPromise`). Returns `Some` with a call to
+    /// QuickJS's own `Promise.<method>` over the array via
+    /// `callDynamicMethod`, which settles the returned promise and hands
+    /// back its resolved value as `Json`; `Expr::Await` already treats a
+    /// `callDynamicMethod` result as resolved-at-the-boundary, so
+    /// `await Promise.all([...])` is that `Json` directly. Returns `None`
+    /// (leaving the caller's native-combinator path untouched) for an
+    /// empty list, a hole, a spread, or any element that isn't dynamic.
+    /// See `docs/design/dynamic-promise-combinators.md`.
+    fn try_dynamic_promise_combinator(
+        &mut self,
+        method: &str,
+        elems: &[Option<swc_ecma_ast::ExprOrSpread>],
+    ) -> Result<Option<HirExpr>, String> {
+        if elems.is_empty() {
+            return Ok(None);
+        }
+        let mut lowered = Vec::with_capacity(elems.len());
+        for element in elems {
+            let Some(element) = element else {
+                return Ok(None);
+            };
+            if element.spread.is_some() {
+                return Ok(None);
+            }
+            lowered.push(self.lower_expr(&element.expr)?);
+        }
+        if !lowered.iter().all(|value| {
+            matches!(
+                self.infer_expr_type(value),
+                Ok(HirType::Json | HirType::JsValue)
+            )
+        }) {
+            return Ok(None);
+        }
+        let laundered = lowered
+            .into_iter()
+            .map(|value| self.coerce_to_declared(&HirType::Json, value))
+            .collect::<Result<Vec<_>, String>>()?;
+        let inner = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(laundered))?;
+        let args = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![inner]))?;
+        let promise_global = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".to_string())),
+            vec![HirExpr::Lit(HirLit::Str("Promise".to_string()))],
+        );
+        Ok(Some(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+            vec![
+                promise_global,
+                HirExpr::Lit(HirLit::Str(method.to_string())),
+                args,
+            ],
+        )))
+    }
+
     fn lower_promise_static_call(
         &mut self,
         callee_name: &str,
@@ -172,6 +229,9 @@ impl<'a> FnLowerer<'a> {
             {
                 let (values, element) = self.lower_promise_array_value(&arg.expr, "all")?;
                 return Ok(HirExpr::PromiseAllArray(Box::new(values), element));
+            }
+            if let Some(dynamic) = self.try_dynamic_promise_combinator("all", &array.elems)? {
+                return Ok(dynamic);
             }
             let mut element_types = Vec::new();
             let promises = array
@@ -240,6 +300,11 @@ impl<'a> FnLowerer<'a> {
             {
                 let (values, element) = self.lower_promise_array_value(&arg.expr, "allSettled")?;
                 return Ok(HirExpr::PromiseAllSettledArray(Box::new(values), element));
+            }
+            if let Some(dynamic) =
+                self.try_dynamic_promise_combinator("allSettled", &array.elems)?
+            {
+                return Ok(dynamic);
             }
             let mut element_type = None;
             let promises = array
@@ -321,6 +386,9 @@ impl<'a> FnLowerer<'a> {
             if array.elems.is_empty() {
                 return Err("`Promise.race` requires at least one promise".into());
             }
+            if let Some(dynamic) = self.try_dynamic_promise_combinator("race", &array.elems)? {
+                return Ok(dynamic);
+            }
             let mut element_type = None;
             let promises = array
                 .elems
@@ -396,6 +464,9 @@ impl<'a> FnLowerer<'a> {
             }
             if array.elems.is_empty() {
                 return Err("`Promise.any` requires at least one promise".into());
+            }
+            if let Some(dynamic) = self.try_dynamic_promise_combinator("any", &array.elems)? {
+                return Ok(dynamic);
             }
             let mut element_type = None;
             let promises = array
