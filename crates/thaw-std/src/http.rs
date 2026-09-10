@@ -84,14 +84,18 @@ fn handle_stream(
     let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET").to_string();
     let target = request_line.next().unwrap_or("/").to_string();
-    let response = render_response(response_for(&method, &target));
+    // `handle_stream` backs the one-shot helpers (`serveOnce`,
+    // `serveOnceWith`, and `run_server_many`'s blocking per-connection
+    // loop) -- each handles exactly one request per accepted TCP
+    // connection by construction, so keep-alive doesn't apply here.
+    let response = render_response(response_for(&method, &target), false);
     stream
         .write_all(&response)
         .map_err(|error| format!("response write failed: {error}"))?;
     Ok(target)
 }
 
-fn render_response(response_spec: ResponseSpec) -> Vec<u8> {
+fn render_response(response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
     let reason = match response_spec.status {
         201 => "Created",
         204 => "No Content",
@@ -108,8 +112,9 @@ fn render_response(response_spec: ResponseSpec) -> Vec<u8> {
         response.push_str("\r\n");
     }
     response.push_str(&format!(
-        "Content-Length: {}\r\nConnection: close\r\n\r\n",
-        response_spec.body.len()
+        "Content-Length: {}\r\nConnection: {}\r\n\r\n",
+        response_spec.body.len(),
+        if keep_alive { "keep-alive" } else { "close" }
     ));
     let mut response = response.into_bytes();
     response.extend(response_spec.body);
@@ -232,11 +237,19 @@ fn run_server(port: f64, callback: *const c_void) -> String {
 
 fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -> ResponseSpec {
     unsafe {
-        type Callback = unsafe extern "C" fn(
-            *const c_void,
-            *const IncomingMessage,
-            *mut ServerResponse,
-        ) -> bool;
+        // The ambient `.d.ts` declares this callback's return type as
+        // `void` (`createServer(callback: (request, response) => void):
+        // Server`), so thaw's own codegen genuinely emits a
+        // void-returning native function for it -- transmuting the code
+        // pointer through a `-> bool` signature instead (as this used to
+        // do) is a real ABI mismatch, not just an unread return value:
+        // confirmed to crash on the very first request from an actual
+        // compiled program (every existing test here calls this through
+        // a hand-built `NativeClosure` in Rust directly, bypassing
+        // thaw's codegen and its declared-`void` return entirely, so
+        // none of them caught this).
+        type Callback =
+            unsafe extern "C" fn(*const c_void, *const IncomingMessage, *mut ServerResponse);
         let mut state = ResponseState {
             headers: Vec::new(),
             body: Vec::new(),
@@ -358,6 +371,11 @@ struct ConnectionState {
     response: Vec<u8>,
     written: usize,
     watcher: u64,
+    /// Decided once per request, right after the head is parsed
+    /// (`negotiate_keep_alive`), and consumed by `write_response` once
+    /// the response finishes: reuse the connection for another request
+    /// instead of closing it.
+    keep_alive: bool,
 }
 
 fn register_server(state: *const ServerState) {
@@ -519,6 +537,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         response: Vec::new(),
         written: 0,
         watcher: 0,
+        keep_alive: false,
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -545,6 +564,62 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
     write_response(connection);
 }
 
+/// Whether `request` (the buffered head, including its trailing blank
+/// line) should keep the connection open for another request once this
+/// one's response is fully sent. HTTP/1.1 defaults to keep-alive unless
+/// the request says `Connection: close`; HTTP/1.0 defaults to close
+/// unless it says `Connection: keep-alive`. A `Content-Length`/
+/// `Transfer-Encoding` header forces `false` regardless of version --
+/// this parser doesn't read a request body at all (a separate,
+/// pre-existing limitation), and reusing the connection while unread
+/// body bytes are still sitting in the stream would desync every
+/// request after this one, which is worse than just not reusing it.
+fn negotiate_keep_alive(request: &str) -> bool {
+    let mut lines = request.lines();
+    let Some(request_line) = lines.next() else {
+        return false;
+    };
+    let http_1_1 = request_line
+        .split_whitespace()
+        .next_back()
+        .is_some_and(|version| version.eq_ignore_ascii_case("HTTP/1.1"));
+    let mut connection_close = false;
+    let mut connection_keep_alive = false;
+    let mut has_body_header = false;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("Connection") {
+            for token in value.split(',') {
+                let token = token.trim();
+                if token.eq_ignore_ascii_case("close") {
+                    connection_close = true;
+                } else if token.eq_ignore_ascii_case("keep-alive") {
+                    connection_keep_alive = true;
+                }
+            }
+        } else if name.eq_ignore_ascii_case("Content-Length")
+            || name.eq_ignore_ascii_case("Transfer-Encoding")
+        {
+            has_body_header = true;
+        }
+    }
+    if has_body_header {
+        return false;
+    }
+    if http_1_1 {
+        !connection_close
+    } else {
+        connection_keep_alive
+    }
+}
+
 fn read_request(connection: &mut ConnectionState) -> bool {
     let mut chunk = [0_u8; 4096];
     loop {
@@ -568,12 +643,13 @@ fn read_request(connection: &mut ConnectionState) -> bool {
                     let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
                     let method = request_line.next().unwrap_or("GET");
                     let target = request_line.next().unwrap_or("/");
+                    let keep_alive = negotiate_keep_alive(&request);
                     let server = unsafe { &*connection.server };
-                    connection.response = render_response(invoke_server_callback(
-                        server.callback as *const c_void,
-                        method,
-                        target,
-                    ));
+                    connection.response = render_response(
+                        invoke_server_callback(server.callback as *const c_void, method, target),
+                        keep_alive,
+                    );
+                    connection.keep_alive = keep_alive;
                     return true;
                 }
             }
@@ -606,6 +682,31 @@ fn write_response(connection: &mut ConnectionState) {
                 return;
             }
         }
+    }
+    if connection.keep_alive {
+        // Reuse the connection instead of closing it: reset the
+        // per-request fields and re-arm for another request's head,
+        // exactly the same registration `register_connection` already
+        // does for a brand-new connection. `connection_ready` decides
+        // whether to read or write purely from `response.is_empty()`,
+        // so clearing it here is what makes the next readiness event
+        // re-enter `read_request` instead of trying to write again.
+        //
+        // Pipelining (a client sending a second request before reading
+        // this response) isn't supported: `connection.request.clear()`
+        // discards any bytes already read past this request's own
+        // `\r\n\r\n`, and `read_request` only ever looks for new bytes
+        // via a fresh readable event, not ones already sitting in a
+        // just-cleared buffer -- a genuinely pipelining client's second
+        // request would be silently lost. A client that waits for each
+        // response before sending the next one (the common case, and
+        // what Node's own default `http.Agent` does on a keep-alive
+        // connection) is unaffected.
+        connection.request.clear();
+        connection.response.clear();
+        connection.written = 0;
+        rewatch_connection(connection, THAW_FD_READABLE);
+        return;
     }
     finish_connection(connection);
 }
@@ -885,6 +986,33 @@ mod tests {
     }
 
     #[test]
+    fn negotiates_keep_alive_by_version_header_and_body_presence() {
+        assert!(negotiate_keep_alive(
+            "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        ));
+        assert!(!negotiate_keep_alive(
+            "GET / HTTP/1.1\r\nConnection: close\r\n\r\n"
+        ));
+        assert!(!negotiate_keep_alive(
+            "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n"
+        ));
+        assert!(negotiate_keep_alive(
+            "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"
+        ));
+        // No request-body parsing support (a separate, pre-existing
+        // limitation) means reusing the connection while unread body
+        // bytes are still in the stream would desync every request
+        // after this one -- force close whenever a body might exist,
+        // even on an otherwise keep-alive-eligible HTTP/1.1 request.
+        assert!(!negotiate_keep_alive(
+            "POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n"
+        ));
+        assert!(!negotiate_keep_alive(
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+        ));
+    }
+
+    #[test]
     fn encoded_response_decodes_binary_bytes() {
         let mut state = ResponseState {
             headers: Vec::new(),
@@ -1042,10 +1170,10 @@ mod tests {
                     Err(_) => thread::sleep(Duration::from_millis(5)),
                 }
             };
-            slow.write_all(b"GET /slow HTTP/1.1\r\nHost: localhost")
+            slow.write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close")
                 .unwrap();
             let mut fast = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            fast.write_all(b"GET /fast HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            fast.write_all(b"GET /fast HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .unwrap();
             let mut fast_response = String::new();
             fast.read_to_string(&mut fast_response).unwrap();
@@ -1059,6 +1187,130 @@ mod tests {
         let (fast_response, slow_response) = client.join().unwrap();
         assert!(fast_response.ends_with("/fast"));
         assert!(slow_response.ends_with("/slow"));
+        assert_eq!(CALLBACKS.load(Ordering::Acquire), 2);
+        assert!(unsafe { &*state }.closed.load(Ordering::Acquire));
+    }
+
+    /// Reads exactly one HTTP response (status line + headers + a body
+    /// exactly `Content-Length` bytes long) off `stream` without relying
+    /// on the connection closing -- the point of this helper is to work
+    /// correctly on a kept-alive connection, unlike `read_to_string`.
+    fn read_one_response(stream: &mut TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 256];
+        let header_end = loop {
+            if let Some(index) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break index + 4;
+            }
+            let length = stream.read(&mut chunk).unwrap();
+            assert!(length > 0, "connection closed before headers completed");
+            buffer.extend_from_slice(&chunk[..length]);
+        };
+        let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+        let content_length: usize = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("Content-Length")
+                    .then(|| value.trim().parse().ok())?
+            })
+            .expect("response had no Content-Length");
+        while buffer.len() < header_end + content_length {
+            let length = stream.read(&mut chunk).unwrap();
+            assert!(length > 0, "connection closed before body completed");
+            buffer.extend_from_slice(&chunk[..length]);
+        }
+        String::from_utf8_lossy(&buffer[..header_end + content_length]).into_owned()
+    }
+
+    #[test]
+    fn keep_alive_reuses_the_connection_for_a_second_request() {
+        static CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn callback(
+            environment: *const c_void,
+            request: *const IncomingMessage,
+            response: *mut ServerResponse,
+        ) -> bool {
+            let body = CString::new(string_from_ptr((*request).url)).unwrap();
+            let ended = response_end((*response).end.cast(), body.as_ptr());
+            // Both requests share one `ServerState`, closing the
+            // *listening* socket only after the second response is
+            // built -- closing a `Server` never touches an already
+            // in-flight `ConnectionState`, so this doesn't interfere
+            // with either response actually being written; it's just
+            // what lets `thaw_http_run_servers()` return once both are
+            // done, the same way the slow/fast test above does.
+            if CALLBACKS.fetch_add(1, Ordering::AcqRel) == 1 {
+                let closure = &*(environment as *const NativeClosure);
+                close_server_state(&*(closure.context as *const ServerState));
+            }
+            ended
+        }
+
+        CALLBACKS.store(0, Ordering::Release);
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let callback = Box::into_raw(Box::new(NativeClosure {
+            code: callback as *const c_void,
+            context: std::ptr::null_mut(),
+        }));
+        let state = Box::into_raw(Box::new(ServerState {
+            callback: callback as usize,
+            closed: AtomicBool::new(false),
+            listener: Mutex::new(None),
+            watcher: AtomicU64::new(0),
+            connections: AtomicUsize::new(0),
+            listening_listeners: Mutex::new(Vec::new()),
+            close_listeners: Mutex::new(Vec::new()),
+            error_listeners: Mutex::new(Vec::new()),
+            pending_listening: AtomicBool::new(false),
+            pending_errors: Mutex::new(Vec::new()),
+            close_requested: AtomicBool::new(false),
+        }));
+        unsafe { (*callback).context = state.cast() };
+        let listen = NativeClosure {
+            code: server_listen as *const c_void,
+            context: state.cast(),
+        };
+        unsafe {
+            let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
+            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+        }
+
+        let client = thread::spawn(move || {
+            let mut stream = loop {
+                match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            };
+            // Neither request says `Connection: close` -- HTTP/1.1
+            // defaults to keep-alive, so both should arrive on this same
+            // TCP connection without it ever closing in between.
+            stream
+                .write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let first = read_one_response(&mut stream);
+            stream
+                .write_all(b"GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let second = read_one_response(&mut stream);
+            // The second request asked to close -- the stream should now
+            // hit EOF rather than staying open.
+            let mut trailing = Vec::new();
+            stream.read_to_end(&mut trailing).unwrap();
+            assert!(trailing.is_empty());
+            (first, second)
+        });
+        thaw_http_run_servers();
+        let (first, second) = client.join().unwrap();
+        assert!(first.contains("Connection: keep-alive"));
+        assert!(first.ends_with("/first"));
+        assert!(second.contains("Connection: close"));
+        assert!(second.ends_with("/second"));
         assert_eq!(CALLBACKS.load(Ordering::Acquire), 2);
         assert!(unsafe { &*state }.closed.load(Ordering::Acquire));
     }

@@ -236,7 +236,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                         let requests: number = 0;
                         const server = createServer(
                             (
-                                request: {{ method: string; url: string }},
+                                request: {{ method: string; url: string; statusCode: number }},
                                 response: {{
                                     statusCode: number;
                                     setHeader: (name: string, value: string) => boolean;
@@ -342,7 +342,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
             r#"import { createServer } from "node:http";
             function main(): void {
                 const server = createServer((
-                    request: { method: string; url: string },
+                    request: { method: string; url: string; statusCode: number },
                     response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
                 ): boolean => true);
                 server.listen(70000);
@@ -365,6 +365,161 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("Unhandled 'error' event"));
     drop(occupied_listener);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Reads exactly one HTTP response (status line + headers + a body
+/// exactly `Content-Length` bytes long) off `stream`, returning just the
+/// body -- correct on a kept-alive connection, unlike reading to EOF.
+fn read_one_response_body(stream: &mut TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 512];
+    let header_end = loop {
+        if let Some(index) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            break index + 4;
+        }
+        let length = stream.read(&mut chunk).unwrap();
+        assert!(length > 0, "connection closed before headers completed");
+        buffer.extend_from_slice(&chunk[..length]);
+    };
+    let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+    let content_length: usize = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("Content-Length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .expect("response had no Content-Length");
+    while buffer.len() < header_end + content_length {
+        let length = stream.read(&mut chunk).unwrap();
+        assert!(length > 0, "connection closed before body completed");
+        buffer.extend_from_slice(&chunk[..length]);
+    }
+    String::from_utf8_lossy(&buffer[header_end..header_end + content_length]).into_owned()
+}
+
+/// The originally-requested comparison: 50 concurrent connections, each
+/// making several keep-alive requests on the *same* socket (never
+/// reconnecting -- if the server incorrectly closed after one response,
+/// the next write/read on that same `TcpStream` would fail or hang),
+/// against both a real compiled thaw `createServer` program and a real
+/// `node` reference server with equivalent logic, asserting identical
+/// behavior. Streaming/delayed-chunk responses aren't implemented yet
+/// (a separate, later stage) -- this covers keep-alive/concurrency
+/// parity only.
+#[test]
+fn node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-keepalive-vs-node-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+function main(): void {
+    const server = createServer((
+        request: { method: string; url: string; statusCode: number },
+        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+    ): void => {
+        response.setHeader("Content-Type", "text/plain");
+        response.end("thaw:" + request.url);
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let reference = dir.join("reference.js");
+    std::fs::write(
+        &reference,
+        r#"const http = require("http");
+const server = http.createServer((request, response) => {
+    response.setHeader("Content-Type", "text/plain");
+    response.end("node:" + request.url);
+});
+server.listen(Number(process.env.PORT));
+"#,
+    )
+    .unwrap();
+
+    let free_port = || {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        port
+    };
+    let thaw_port = free_port();
+    let node_port = free_port();
+
+    let mut thaw_child = Command::new(&output)
+        .env("PORT", thaw_port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut node_child = Command::new("node")
+        .arg(&reference)
+        .env("PORT", node_port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let wait_for_port = |port: u16| {
+        (0..500)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("server on port {port} did not start"))
+    };
+    drop(wait_for_port(thaw_port));
+    drop(wait_for_port(node_port));
+
+    for (label, port) in [("thaw", thaw_port), ("node", node_port)] {
+        std::thread::scope(|scope| {
+            for connection_id in 0..50 {
+                scope.spawn(move || {
+                    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    for request_id in 0..3 {
+                        let path = format!("/conn{connection_id}/req{request_id}");
+                        stream
+                            .write_all(
+                                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                                    .as_bytes(),
+                            )
+                            .unwrap();
+                        let body = read_one_response_body(&mut stream);
+                        assert_eq!(body, format!("{label}:{path}"));
+                    }
+                });
+            }
+        });
+    }
+
+    thaw_child.kill().unwrap();
+    thaw_child.wait().unwrap();
+    node_child.kill().unwrap();
+    node_child.wait().unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
 
