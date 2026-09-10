@@ -271,6 +271,34 @@ fn net_socket_timeout_fires_without_closing_the_connection() {
 }
 
 #[test]
+fn http_client_request_timeout_fires() {
+    use std::ffi::{CStr, CString};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    });
+    let dir = temp_registry("builtin_http_request_timeout");
+    fs::write(dir.join("index.js"), "var http = require('node:http'); module.exports = function(port) { return new Promise(function(resolve, reject) { var request = http.get({ hostname: '127.0.0.1', port: port }); request.on('error', reject); request.setTimeout(10, function() { request.destroy(); resolve(request.timeout); }); }); };").unwrap();
+    let empty_node_modules = temp_registry("builtin_http_request_timeout_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpTimeout = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseHttpTimeout").unwrap().as_ptr(),
+        CString::new(format!("[{port}]")).unwrap().as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "10");
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
 fn http_client_requests_and_parses_a_real_chunked_response() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
@@ -281,7 +309,11 @@ fn http_client_requests_and_parses_a_real_chunked_response() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = Vec::new();
-        stream.read_to_end(&mut request).unwrap();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with("GET /items?q=thaw HTTP/1.1\r\n"));
         assert!(request.to_ascii_lowercase().contains("x-thaw: enabled\r\n"));
@@ -377,7 +409,11 @@ fn http_client_emits_informational_responses_and_parses_trailers() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = Vec::new();
-        stream.read_to_end(&mut request).unwrap();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
         stream
                 .write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\nHTTP/1.1 100 Continue\r\nX-Interim: yes\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Check, Set-Cookie\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\nX-Check: one\r\nX-Check: two\r\nSet-Cookie: t=1\r\n\r\n")
                 .unwrap();
@@ -421,6 +457,25 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
     brotli.write_all(b"compressed").unwrap();
     let brotli = brotli.into_inner();
     let server = std::thread::spawn(move || {
+        fn read_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&request);
+            let length = head
+                .lines()
+                .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_owned))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let start = request.len();
+            request.resize(start + length, 0);
+            stream.read_exact(&mut request[start..]).unwrap();
+            request
+        }
+
         for expected in [
             "GET /redirect ",
             "GET /final ",
@@ -433,8 +488,7 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
             "GET /br ",
         ] {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            stream.read_to_end(&mut request).unwrap();
+            let request = read_request(&mut stream);
             let request = String::from_utf8(request).unwrap();
             assert!(request.starts_with(expected), "{request}");
             if expected.contains("post-redirect") {
@@ -548,9 +602,17 @@ fn global_fetch_resolves_headers_before_delayed_body_chunks() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
+        fn read_request(stream: &mut std::net::TcpStream) {
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+        }
+
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = Vec::new();
-        stream.read_to_end(&mut request).unwrap();
+        read_request(&mut stream);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n")
             .unwrap();
@@ -562,8 +624,7 @@ fn global_fetch_resolves_headers_before_delayed_body_chunks() {
         stream.write_all(b"two").unwrap();
         drop(stream);
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = Vec::new();
-        stream.read_to_end(&mut request).unwrap();
+        read_request(&mut stream);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
             .unwrap();
