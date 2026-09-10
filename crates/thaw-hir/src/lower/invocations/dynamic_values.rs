@@ -47,7 +47,13 @@ impl<'a> FnLowerer<'a> {
         if bindings.is_empty() {
             return Ok(result);
         }
-        let result_type = self.infer_expr_type(&result)?;
+        // `_inner`, not the normalizing `infer_expr_type`, so a
+        // `Bytes`-typed call (`Buffer.from(x)`, `buf.slice(...)`) keeps
+        // its byte-buffer identity through the binding wrapper -- the
+        // Lambda's declared return type is what a chained
+        // `.toString("hex")` later reads to decide whether to decode.
+        // `bytes_erasure` rewrites it to `Array(F64)` before codegen.
+        let result_type = self.infer_expr_type_inner(&result)?;
         for index in (0..bindings.len()).rev() {
             let (name, ty, source) = &bindings[index];
             let body = if result_type == HirType::Void {

@@ -2993,6 +2993,11 @@ fn byte_buffer_from_and_to_string() {
             console.log(clamped[1]);
             const joined: Buffer = Buffer.concat([wrapped, clamped, Buffer.from("Z")]);
             console.log(joined.length + " " + joined.toString("hex"));
+            // `slice` / `subarray` keep the `Buffer` identity, so a
+            // chained `.toString("hex")` decodes instead of comma-joining.
+            console.log(joined.slice(1, 4).toString("hex"));
+            console.log(joined.subarray(6).toString("hex"));
+            console.log(Buffer.byteLength("héllo") + " " + Buffer.byteLength("aGk=", "base64"));
             let sum = 0;
             for (const byte of b) { sum = sum + byte; }
             console.log(sum);
@@ -3000,6 +3005,6 @@ fn byte_buffer_from_and_to_string() {
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_from_and_to_string"),
-        "6\nhéllo\n68c3a96c6c6f\naMOpbGxv\nhello\nhi\n3 0 0\n00ff41\n00ff2c03\n255\n8 00ff4100ff2c035a\n795\n"
+        "6\nhéllo\n68c3a96c6c6f\naMOpbGxv\nhello\nhi\n3 0 0\n00ff41\n00ff2c03\n255\n8 00ff4100ff2c035a\nff4100\n035a\n6 2\n795\n"
     );
 }

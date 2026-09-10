@@ -590,12 +590,25 @@ impl<'a> FnLowerer<'a> {
                         this_arg,
                     );
                 }
-                if property.sym == *"slice" {
+                if property.sym == *"slice" || property.sym == *"subarray" {
+                    let is_subarray = property.sym == *"subarray";
                     let mut receiver = self.lower_expr(&member.obj)?;
+                    // `slice`/`subarray` keep the byte-buffer identity: a
+                    // sliced `Buffer` is still a `Buffer`, so a chained
+                    // `buf.slice(0, 4).toString("hex")` decodes rather than
+                    // comma-joining. `infer_expr_type` normalizes `Bytes`
+                    // away, so ask for the raw receiver type.
+                    let receiver_is_bytes =
+                        self.infer_expr_type_inner(&receiver)? == HirType::Bytes;
                     let mut receiver_type = self.infer_expr_type(&receiver)?;
                     if matches!(receiver_type, HirType::Json | HirType::JsValue) {
                         receiver = self.coerce_primitive_to_string(receiver)?;
                         receiver_type = HirType::Str;
+                    }
+                    if is_subarray && !matches!(receiver_type, HirType::Array(_)) {
+                        return Err(format!(
+                            "`.subarray()` is only supported on a Buffer / array, got {receiver_type:?}"
+                        ));
                     }
                     if receiver_type == HirType::Str {
                         let (arguments, bindings) =
@@ -655,8 +668,13 @@ impl<'a> FnLowerer<'a> {
                         arguments.push(HirExpr::Var(name.clone()));
                         bindings.push((name, HirType::F64, index));
                     }
+                    let intrinsic = if receiver_is_bytes {
+                        "__thaw_bytes_slice"
+                    } else {
+                        "__thaw_array_slice"
+                    };
                     let result = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_array_slice".to_string())),
+                        Box::new(HirExpr::Var(intrinsic.to_string())),
                         arguments,
                     );
                     return self.wrap_call_argument_bindings(result, &bindings);
