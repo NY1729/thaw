@@ -588,3 +588,93 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "e99baa\n雪\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `semver`'s `.d.ts` returns `string | null` from `valid`/`coerce`/
+/// `diff` and unions like `string | number` elsewhere -- exercises
+/// thaw's `Nullable`/`Union` truthiness (`if (v)`), string coercion
+/// (`"x: " + v`), and `??`.
+#[test]
+fn registry_add_uses_real_semver_nullable_and_union_returns_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-semver-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "semver@7.6.3").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import semver from "semver";
+function main(): void {
+    const good = semver.valid("1.2.3");
+    console.log(good ? "valid: " + good : "invalid");
+    const bad = semver.valid("nope");
+    console.log(bad ? "valid: " + bad : "invalid");
+    const coerced = semver.coerce("v2");
+    console.log(coerced ? "coerced" : "no");
+    console.log(semver.gt("1.2.3", "1.2.0"));
+    console.log(semver.major("2.5.9"));
+    console.log(semver.diff("1.2.3", "2.0.0") ?? "none");
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "valid: 1.2.3\ninvalid\ncoerced\ntrue\n2\nmajor\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `qs`, `clsx`, and `slugify` -- object/array-shaped arguments and
+/// options bags through the dynamic bridge, and query-string round trips.
+#[test]
+fn registry_add_runs_real_qs_clsx_and_slugify_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-qs-clsx-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "qs@6.13.0").unwrap();
+    thaw_registry::add(&registry, "clsx@2.1.1").unwrap();
+    thaw_registry::add(&registry, "slugify@1.6.6").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import qs from "qs";
+import clsx from "clsx";
+import slugify from "slugify";
+function main(): void {
+    console.log(qs.stringify(JSON.parse("{\"a\":\"1\",\"b\":\"2\"}")));
+    const parsed = qs.parse("x=10&y=hello");
+    console.log(String(parsed.x) + "," + String(parsed.y));
+    console.log(clsx("base", JSON.parse("{\"active\":true,\"off\":false}"), JSON.parse("[\"extra\"]")));
+    console.log(slugify("Hello World! Foo & Bar", JSON.parse("{\"lower\":true,\"strict\":true}")));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "a=1&b=2\n10,hello\nbase active extra\nhello-world-foo-and-bar\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
