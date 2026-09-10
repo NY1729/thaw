@@ -879,6 +879,161 @@ function main(): void {
     );
 }
 
+/// The native server must survive hostile / broken clients: ones that
+/// open a connection and never finish the request head, ones that
+/// connect and vanish by the hundred, and ones that hang up while an
+/// `async` handler is mid-flight. None of that may leak descriptors or
+/// take the server down for the well-behaved clients sharing it.
+#[test]
+fn node_http_survives_disconnects_timeouts_and_aborts_without_leaking() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-resilience-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+async function delay(ms: number): Promise<void> {
+    await sleep(ms);
+}
+function main(): void {
+    const server = createServer(async (
+        request: { method: string; url: string; statusCode: number },
+        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+    ): Promise<void> => {
+        if (request.url === "/slow") {
+            await delay(400);
+            response.end("slow-done");
+            return;
+        }
+        response.end("ok:" + request.url);
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        // A short header-read timeout so the stalled-client case is quick.
+        .env("THAW_HTTP_HEADER_TIMEOUT_MS", "700")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    drop(
+        (0..500)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("server did not start"),
+    );
+
+    let fd_count = || {
+        std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    let ok_request = |path: &str| {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .unwrap();
+        read_one_response_body(&mut stream)
+    };
+
+    assert_eq!(ok_request("/warmup"), "ok:/warmup");
+    let baseline_fds = fd_count();
+
+    // 1. A client that sends a partial head and then stalls forever is
+    //    closed by the server's read-side timeout (700ms here), not left
+    //    to occupy a descriptor indefinitely.
+    let mut stalled = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stalled.write_all(b"GET /never HTTP/1.1\r\n").unwrap();
+    let closed_within = {
+        let started = std::time::Instant::now();
+        stalled
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
+        let mut sink = [0_u8; 16];
+        // Read returns 0 (clean EOF) once the server drops the connection.
+        loop {
+            match stalled.read(&mut sink) {
+                Ok(0) => break started.elapsed(),
+                Ok(_) => {}
+                Err(error) => panic!("unexpected read error on stalled conn: {error}"),
+            }
+        }
+    };
+    assert!(
+        closed_within >= Duration::from_millis(500)
+            && closed_within < Duration::from_secs(3),
+        "stalled connection closed after {closed_within:?}, expected ~700ms"
+    );
+    assert_eq!(ok_request("/after-timeout"), "ok:/after-timeout");
+
+    // 2. Hundreds of connect-write-a-byte-then-vanish clients must not
+    //    accumulate descriptors on the server.
+    for index in 0..300 {
+        let mut fleeting = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let _ = fleeting.write_all(b"G");
+        drop(fleeting);
+        if index % 50 == 0 {
+            // Let the server process the churn.
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    // Give the server a beat to reap them (its own timeout plus slack).
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(ok_request("/after-churn"), "ok:/after-churn");
+    let after_churn_fds = fd_count();
+    assert!(
+        after_churn_fds <= baseline_fds + 8,
+        "fd count grew from {baseline_fds} to {after_churn_fds} after 300 disconnects"
+    );
+
+    // 3. A client that hangs up while a genuinely `async` handler is
+    //    still awaiting must not crash the server or wedge the event
+    //    loop; the descriptor is released once that handler completes.
+    for _ in 0..20 {
+        let mut aborter = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        aborter
+            .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        // Vanish well before the handler's 400ms delay elapses.
+        std::thread::sleep(Duration::from_millis(20));
+        drop(aborter);
+    }
+    // Wait past the slow handler's delay so the aborted requests finish
+    // server-side and release their descriptors.
+    std::thread::sleep(Duration::from_millis(900));
+    assert_eq!(ok_request("/after-aborts"), "ok:/after-aborts");
+    let after_aborts_fds = fd_count();
+    assert!(
+        after_aborts_fds <= baseline_fds + 8,
+        "fd count grew from {baseline_fds} to {after_aborts_fds} after 20 mid-handler aborts"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn multifile_cli_includes_transitive_node_builtin_dependencies() {
     let dir = std::env::temp_dir().join(format!(
