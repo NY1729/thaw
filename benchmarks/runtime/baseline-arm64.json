@@ -1,0 +1,1 @@
+{"architecture":"aarch64","thaw":{"startup_ms":33,"max_rss_kb":1544,"executable_bytes":405152},"node":{"startup_ms":88,"max_rss_kb":43816,"executable_bytes":122159120},"bun":{"startup_ms":5,"max_rss_kb":11872,"executable_bytes":79420872}}
