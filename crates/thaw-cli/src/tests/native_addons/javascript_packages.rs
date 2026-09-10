@@ -203,10 +203,10 @@ fn registry_add_routes_and_serves_a_real_hono_app_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
-        r#"import { Hono } from "hono";
+        r#"import { Hono, Context } from "hono";
 async function main(): Promise<void> {
     const appA = new Hono();
-    appA.get('/', (c: JsValue) => { return c.text('hello world'); });
+    appA.get('/', (c: Context) => { return c.text('hello world'); });
     const resA: JsValue = appA.request('/');
     console.log(resA.status);
 
