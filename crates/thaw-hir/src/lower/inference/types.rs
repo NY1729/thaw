@@ -100,9 +100,20 @@ impl<'a> FnLowerer<'a> {
             }
             _ => false,
         };
+        // `Bytes` and `Array(F64)` are one physical layout; the separate
+        // identity is only for method dispatch, so they assign either
+        // way (a `Buffer` into a `number[]` slot and back).
+        let bytes_array_compatible = |a: &HirType, b: &HirType| {
+            matches!(
+                (a, b),
+                (HirType::Bytes, HirType::Array(elem)) | (HirType::Array(elem), HirType::Bytes)
+                    if **elem == HirType::F64
+            )
+        };
         if actual == HirType::Dynamic
             || *expected == HirType::Dynamic
             || actual == *expected
+            || bytes_array_compatible(expected, &actual)
             || callable_compatible
             || match (expected, value) {
                 (HirType::Tuple(types), HirExpr::ArrayLit(values)) => {
@@ -136,6 +147,17 @@ impl<'a> FnLowerer<'a> {
     /// shared checker for assignments, returns, operators, indexes and call
     /// arguments, keeping unresolved/dynamic layouts out of LLVM lowering.
     fn infer_expr_type(&self, expr: &HirExpr) -> Result<HirType, String> {
+        // Indexing, `.length`, iteration, spread, the array methods, and
+        // codegen are all written for `Array` -- surface a byte buffer as
+        // `Array(F64)` for them. Method *dispatch* that must tell them
+        // apart (`buf.toString`) reads the receiver's type from `scope`.
+        Ok(match self.infer_expr_type_inner(expr)? {
+            HirType::Bytes => HirType::Array(Box::new(HirType::F64)),
+            other => other,
+        })
+    }
+
+    fn infer_expr_type_inner(&self, expr: &HirExpr) -> Result<HirType, String> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Ok(HirType::F64),
             HirExpr::Lit(HirLit::I64(_)) => Ok(HirType::I64),
