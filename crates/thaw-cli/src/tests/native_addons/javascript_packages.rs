@@ -682,6 +682,12 @@ fn registry_add_runs_a_real_debug_logger_when_enabled() {
         &source,
         r#"import createDebug from "debug";
 function main(): void {
+    // The config API on the callable default export -- a function-typed
+    // property signature (`enable: (ns) => void`) on `debug.Debug`, on
+    // top of its `(ns): Debugger` call signature.
+    createDebug.enable("app:*");
+    console.log(createDebug.enabled("app:db"));
+    console.log(createDebug.enabled("other:x"));
     const log = createDebug("app:db");
     const other = createDebug("app:cache");
     log("query %s took %d ms", "SELECT 1", 12);
@@ -692,26 +698,34 @@ function main(): void {
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    // DEBUG unset -> the debug lines are suppressed, only our own
-    // console.log reaches stdout; debug writes to stderr anyway.
-    let result = Command::new(&output).env_remove("DEBUG").output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "done\n");
-
-    // DEBUG=app:* -> both loggers fire, to stderr, with the namespace
-    // and the formatted message.
-    let result = Command::new(&output).env("DEBUG", "app:*").output().unwrap();
-    assert!(result.status.success());
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        stderr.contains("app:db query SELECT 1 took 12 ms"),
-        "stderr: {stderr}"
-    );
-    assert!(stderr.contains("app:cache miss"), "stderr: {stderr}");
+    // `createDebug.enable("app:*")` runs from code, so the namespaces are
+    // active regardless of the DEBUG env var. `enabled(...)` reflects
+    // that (`true` for a matching namespace, `false` otherwise), and both
+    // loggers fire to stderr. debug writes only to stderr, so stdout is
+    // just our three `console.log`s.
+    for debug_env in [None, Some("nothing:here")] {
+        let mut command = Command::new(&output);
+        match debug_env {
+            Some(value) => command.env("DEBUG", value),
+            None => command.env_remove("DEBUG"),
+        };
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "true\nfalse\ndone\n"
+        );
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("app:db query SELECT 1 took 12 ms"),
+            "stderr: {stderr}"
+        );
+        assert!(stderr.contains("app:cache miss"), "stderr: {stderr}");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 
