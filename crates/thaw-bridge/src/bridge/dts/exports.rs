@@ -140,6 +140,23 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
             values.push(DtsValue { name, ty });
         }
     }
+    // A package whose whole `.d.ts` is `import * as m from "./index.js";
+    // export default m;` plus a couple of option interfaces -- no usable
+    // function/class types at all, because the real API is JSDoc in a
+    // `.js` file thaw can't resolve (real example: `mustache`). Bind its
+    // default export to the runtime module object as an opaque handle, so
+    // `import M from "pkg"; M.method(...)` routes through the dynamic
+    // method-call path instead of failing with "unknown function".
+    if values.is_empty()
+        && callable.is_empty()
+        && class_names.is_empty()
+        && self_referential_namespace_aliases(source).contains("default")
+    {
+        values.push(DtsValue {
+            name: "default".to_string(),
+            ty: DtsType::Native(HirType::JsValue),
+        });
+    }
     Ok(values)
 }
 

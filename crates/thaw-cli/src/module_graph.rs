@@ -956,6 +956,11 @@ pub fn bundle_with_source_transform(
                     // "zod"` already does: the whole package's own export
                     // table, not a single symbol.
                     if !modules[index].dependencies.contains_key(specifier)
+                        // A concrete export for `requested` (e.g. a
+                        // synthetic `default` value for a typeless package
+                        // -- `mustache`) wins over binding the whole
+                        // (possibly empty) export table as a namespace.
+                        && !dependency_exports.contains_key(&requested)
                         && external_namespace_aliases
                             .get(specifier)
                             .is_some_and(|aliases| aliases.contains(&requested))
