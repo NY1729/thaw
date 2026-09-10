@@ -645,6 +645,59 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `debug` -- its default export's `.d.ts` type is `debug.Debug & {
+/// ... }`, an intersection of a *callable* interface (`(ns): Debugger`)
+/// with a plain property bag. `createDebug(ns)` returns a live
+/// `Debugger`, and calling that -- `log("msg %s", x)` -- is the whole
+/// point of the package.
+#[test]
+fn registry_add_runs_a_real_debug_logger_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-debug-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "debug@4.3.7").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import createDebug from "debug";
+function main(): void {
+    const log = createDebug("app:db");
+    const other = createDebug("app:cache");
+    log("query %s took %d ms", "SELECT 1", 12);
+    other("miss");
+    console.log("done");
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    // DEBUG unset -> the debug lines are suppressed, only our own
+    // console.log reaches stdout; debug writes to stderr anyway.
+    let result = Command::new(&output).env_remove("DEBUG").output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "done\n");
+
+    // DEBUG=app:* -> both loggers fire, to stderr, with the namespace
+    // and the formatted message.
+    let result = Command::new(&output).env("DEBUG", "app:*").output().unwrap();
+    assert!(result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("app:db query SELECT 1 took 12 ms"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("app:cache miss"), "stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `pluralize` -- a callable default export that also has methods
 /// (`pluralize.singular`, `pluralize.isPlural`), plus an optional numeric
 /// second argument.
