@@ -111,7 +111,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "\"2024-01-15\"\n\"2024-01-25\"\n"
+        "2024-01-15\n2024-01-25\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
