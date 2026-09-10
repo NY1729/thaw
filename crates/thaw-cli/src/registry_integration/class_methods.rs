@@ -150,22 +150,32 @@ fn rewrite_external_class_methods_with_static(
                 let Expr::Member(member) = callee.as_ref() else {
                     return factory_call_class(expression, factories).map(str::to_owned);
                 };
-                let method = member_property_name(&member.prop)?;
-                let receiver = source_instance_class(
-                    &member.obj,
-                    classes,
-                    factories,
-                    methods,
-                    variables,
-                )?;
-                methods
-                    .iter()
-                    .find(|candidate| {
-                        candidate.0 == receiver
-                            && candidate.1 == method
-                            && candidate.3 == call.args.len()
-                    })
-                    .and_then(|candidate| candidate.6.clone())
+                // A `Member` callee is usually an instance-method call whose
+                // result is another instance (`builder.where(...)` etc.) --
+                // resolve that first. But a namespace-qualified factory call
+                // (`Hapi.server(...)`, `import * as Hapi from "@hapi/hapi"`)
+                // is *also* a `Member` callee and has no instance receiver;
+                // fall back to matching it as a factory by name so its
+                // result still binds to the returned class.
+                let instance_method_class = member_property_name(&member.prop).and_then(|method| {
+                    let receiver = source_instance_class(
+                        &member.obj,
+                        classes,
+                        factories,
+                        methods,
+                        variables,
+                    )?;
+                    methods
+                        .iter()
+                        .find(|candidate| {
+                            candidate.0 == receiver
+                                && candidate.1 == method
+                                && candidate.3 == call.args.len()
+                        })
+                        .and_then(|candidate| candidate.6.clone())
+                });
+                instance_method_class
+                    .or_else(|| factory_call_class(expression, factories).map(str::to_owned))
             }
             _ => constructed_class(expression, classes)
                 .or_else(|| factory_call_class(expression, factories))
