@@ -547,16 +547,45 @@ function main(): void {
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &["picocolors".to_string()]).unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let result = Command::new(&output).output().unwrap();
+    // `NO_COLOR` so `isColorSupported` is false regardless of the CI
+    // runner's `FORCE_COLOR` / `TERM` -- this test is about the `+`, not
+    // the escape codes.
+    let result = Command::new(&output)
+        .env("NO_COLOR", "1")
+        .env_remove("FORCE_COLOR")
+        .output()
+        .unwrap();
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    // Not a TTY, so picocolors emits no ANSI escapes -- just the text,
-    // and the `+` produced a real string join rather than a build error.
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\nbad\nxy\n");
+    // The `+` produced a real string join rather than a build error.
+    assert_eq!(
+        strip_ansi(&String::from_utf8_lossy(&result.stdout)),
+        "ok\nbad\nxy\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Drops CSI escape sequences (`\x1b[ ... m` and friends) so a colour
+/// library's output can be asserted against plain text no matter what
+/// the runner's `FORCE_COLOR` / TTY detection decides.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            for escaped in chars.by_ref() {
+                if escaped.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// `p-limit`'s `LimitFunction` call signature is `<A, R>(fn, ...a):
@@ -645,15 +674,23 @@ function main(): void {
     .unwrap();
     build(&source, &output, &[], &[], &[], &registry, &["kleur".to_string()]).unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let result = Command::new(&output).output().unwrap();
+    let result = Command::new(&output)
+        .env("NO_COLOR", "1")
+        .env_remove("FORCE_COLOR")
+        .output()
+        .unwrap();
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    // Not a TTY -> no ANSI escapes, just the text; the chained
-    // `bold().red(...)` and the `+` of two results all resolve.
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "g\nbr\nab\n");
+    // The chained `bold().red(...)` and the `+` of two results all
+    // resolve; ANSI escapes (if the runner forces colour anyway) are
+    // stripped -- this test is about the calls, not the codes.
+    assert_eq!(
+        strip_ansi(&String::from_utf8_lossy(&result.stdout)),
+        "g\nbr\nab\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
