@@ -85,13 +85,24 @@ fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>,
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         available.sort();
+        let targets = if available.is_empty() {
+            "none".to_string()
+        } else {
+            available.join(", ")
+        };
+        let hint = if available.is_empty() {
+            // Nothing was fetched at all -- the package publishes no
+            // prebuilt binary for any target and expects a source build
+            // at install time. thaw only ever fetches a `.node`, it never
+            // runs node-gyp, so it can't recover from this itself.
+            " -- this package version publishes no prebuilt binaries; \
+             pin an older version that does, or vendor a prebuilt `.node` \
+             under `prebuilds/<platform>-<arch>/`"
+        } else {
+            ""
+        };
         return Err(format!(
-            "no bundled native addon matches {platform}-{arch}-{libc}; available targets: {}",
-            if available.is_empty() {
-                "none".into()
-            } else {
-                available.join(", ")
-            }
+            "no bundled native addon matches {platform}-{arch}-{libc}; available targets: {targets}{hint}"
         ));
     }
     let mut candidates = fs::read_dir(&target_dir)
