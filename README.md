@@ -30,6 +30,35 @@ function main(): void {
 }
 ```
 
+### Run an HTTP server
+
+Thaw's built-in `node:http` support compiles a request handler to
+native code -- no npm install required. Create `app.ts`:
+
+```ts
+import { createServer } from "node:http";
+
+function main(): void {
+  const server = createServer((request, response): boolean => {
+    response.setHeader("Content-Type", "text/plain");
+    return response.end("Hello from Thaw's HTTP server\n");
+  });
+  server.listen(3000);
+}
+```
+
+```sh
+target/release/thaw build app.ts -o app
+./app &
+curl http://127.0.0.1:3000/
+```
+
+This built-in server handles one request per connection (each response
+closes the connection) rather than keeping it alive for further
+requests -- for keep-alive, streaming responses, or a framework's own
+routing (Express, Fastify, Hono, ...), install it as a package instead;
+see [Projects and npm packages](#projects-and-npm-packages) below.
+
 Use `--static` on Linux to request a fully static ELF:
 
 ```sh
