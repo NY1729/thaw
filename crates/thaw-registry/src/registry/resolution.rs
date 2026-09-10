@@ -269,31 +269,26 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "fs/promises" => {
             "export declare function access(path: string, mode?: number): Promise<void>;\nexport declare function open(argsArray: any): any;\nexport declare function readFile(path: string, encoding: string): Promise<string>;\nexport declare function readdir(path: string): Promise<string[]>;\nexport declare function readdir(path: string, options: any): Promise<any>;\nexport declare function stat(path: string, options?: any): JsValue;\nexport declare function lstat(path: string, options?: any): JsValue;\nexport declare function writeFile(path: string, data: Json, options?: any): Promise<void>;\nexport declare function appendFile(path: string, data: Json, options?: any): Promise<void>;\nexport declare function mkdir(path: string, options?: any): Promise<any>;\nexport declare function unlink(path: string): Promise<void>;\nexport declare function rm(path: string, options?: any): Promise<void>;\nexport declare function rmdir(path: string, options?: any): Promise<void>;\nexport declare function rename(path: string, destination: string): Promise<void>;\nexport declare function copyFile(path: string, destination: string, mode?: number): Promise<void>;\nexport declare function realpath(argsArray: any): any;\nexport declare function mkdtemp(argsArray: any): any;\nexport declare function mkdtempDisposable(argsArray: any): any;\nexport declare function link(argsArray: any): any;\nexport declare function symlink(argsArray: any): any;\nexport declare function readlink(argsArray: any): any;\nexport declare function chmod(argsArray: any): any;\n"
         }
-        // `IncomingMessage` deliberately has no `on(...)` member (real
-        // Node's `IncomingMessage` is an EventEmitter, but thaw-std's
-        // backing `#[repr(C)] struct IncomingMessage` only carries plain
-        // fields -- there's no closure field or dispatch for it at all,
-        // so declaring it here would be a pure type-level lie). `body`
-        // is thaw's own convenience field (real Node exposes the request
-        // body only as a stream): it holds the fully-read request body
-        // as a string, populated before the handler runs. `statusCode`
-        // is kept only for backwards compatibility with existing
-        // structural annotations; it's meaningless on a server request
-        // and always 0.
-        // Also fixes a real, confirmed crash: a method-shorthand member
-        // (`on(event, callback): T`) mixed into an interface otherwise
-        // made of plain fields broke thaw-hir/thaw-llvm's classification
-        // of the *whole* interface for a native ambient callback
-        // parameter -- `request.method`/`request.url` silently stopped
-        // resolving through the ordinary static-field-offset path
-        // (`compile_field_ptr`) entirely, reading garbage instead
-        // (confirmed via a temporary diagnostic: no `PropAccess` for
-        // `url` was ever compiled at all with `on(...)` present). Not
-        // investigated further as a general thaw-hir/thaw-bridge fix --
-        // removing the one dead, never-backed member here was enough to
-        // unblock this callback shape.
+        // `body` is thaw's own convenience field (real Node exposes the
+        // request body only as a stream): it holds the fully-read request
+        // body as a string, populated before the handler runs.
+        // `statusCode` is kept only for backwards compatibility with
+        // existing structural annotations; it's meaningless on a server
+        // request and always 0. `on` streams that same fully-read body:
+        // `data` fires once with the whole body (if non-empty) and `end`
+        // once after, both delivered as soon as the synchronous part of
+        // the handler returns -- enough for the common "accumulate chunks,
+        // process on end" body-reading pattern, but not true incremental
+        // streaming (the body is already fully buffered) and not binary
+        // (`data` chunks are strings, like `body`). Declared as a
+        // *function-typed property*, not a method shorthand (`on(...):
+        // T`): the latter, mixed into an otherwise-plain-field interface,
+        // breaks thaw-hir/thaw-llvm's static-field-offset classification
+        // for a native ambient callback parameter (`request.method` then
+        // reads garbage); the property form matches `ServerResponse`'s
+        // own `setHeader`/`write` closures and classifies correctly.
         "http" => {
-            "export interface IncomingMessage { method: string; url: string; statusCode: number; body: string; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; on: (event: string, callback: () => void) => boolean; __onError: (event: string, callback: (error: { message: string; code: string; syscall: string; address: string; port: number }) => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => void): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => void): Server;\nexport declare const get: JsValue;\nexport declare const request: JsValue;\n"
+            "export interface IncomingMessage { method: string; url: string; statusCode: number; body: string; on: (event: string, callback: (chunk: string) => void) => boolean; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; on: (event: string, callback: () => void) => boolean; __onError: (event: string, callback: (error: { message: string; code: string; syscall: string; address: string; port: number }) => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => void): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => void): Server;\nexport declare const get: JsValue;\nexport declare const request: JsValue;\n"
         }
         "https" => {
             "export declare function request(argsArray: any): any;\nexport declare function get(argsArray: any): any;\nexport declare function createServer(argsArray: any): any;\nexport declare const ClientRequest: any;\nexport declare const IncomingMessage: any;\nexport declare const ServerResponse: any;\nexport declare const Server: any;\nexport declare const globalAgent: any;\n"

@@ -189,12 +189,75 @@ fn hir_type_as_ts_type(ty: &HirType) -> Result<TsType, String> {
                 })
                 .collect::<Result<Vec<_>, String>>()?,
         }),
+        HirType::Function(params, ret) => {
+            function_ts_type(params, None, ret)?
+        }
+        HirType::CallableFunction(params, _, rest, ret) => {
+            function_ts_type(params, rest.as_deref(), ret)?
+        }
         other => {
             return Err(format!(
                 "cannot express inferred generic class type {other:?}"
             ))
         }
     })
+}
+
+/// Renders a `HirType::Function` / `CallableFunction` back as a `TsFnType`
+/// AST node (`(arg0: A, arg1: B) => R`). Parameter names are synthetic --
+/// nothing downstream reads them, only the arity and types matter.
+fn function_ts_type(
+    params: &[HirType],
+    rest: Option<&HirType>,
+    ret: &HirType,
+) -> Result<TsType, String> {
+    let mut fn_params = params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            Ok(swc_ecma_ast::TsFnParam::Ident(swc_ecma_ast::BindingIdent {
+                id: swc_ecma_ast::Ident::new_no_ctxt(
+                    format!("arg{index}").into(),
+                    swc_common::DUMMY_SP,
+                ),
+                type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn {
+                    span: swc_common::DUMMY_SP,
+                    type_ann: Box::new(hir_type_as_ts_type(param)?),
+                })),
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if let Some(rest) = rest {
+        fn_params.push(swc_ecma_ast::TsFnParam::Rest(swc_ecma_ast::RestPat {
+            span: swc_common::DUMMY_SP,
+            dot3_token: swc_common::DUMMY_SP,
+            arg: Box::new(swc_ecma_ast::Pat::Ident(swc_ecma_ast::BindingIdent {
+                id: swc_ecma_ast::Ident::new_no_ctxt(
+                    format!("arg{}", params.len()).into(),
+                    swc_common::DUMMY_SP,
+                ),
+                type_ann: None,
+            })),
+            type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn {
+                span: swc_common::DUMMY_SP,
+                type_ann: Box::new(TsType::TsArrayType(swc_ecma_ast::TsArrayType {
+                    span: swc_common::DUMMY_SP,
+                    elem_type: Box::new(hir_type_as_ts_type(rest)?),
+                })),
+            })),
+        }));
+    }
+    Ok(TsType::TsFnOrConstructorType(
+        swc_ecma_ast::TsFnOrConstructorType::TsFnType(swc_ecma_ast::TsFnType {
+            span: swc_common::DUMMY_SP,
+            params: fn_params,
+            type_params: None,
+            type_ann: Box::new(swc_ecma_ast::TsTypeAnn {
+                span: swc_common::DUMMY_SP,
+                type_ann: Box::new(hir_type_as_ts_type(ret)?),
+            }),
+        }),
+    ))
 }
 
 fn infer_generic_constructor_expr_type(

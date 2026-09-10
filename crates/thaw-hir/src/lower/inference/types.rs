@@ -6,32 +6,57 @@ impl<'a> FnLowerer<'a> {
         context: &str,
     ) -> Result<(), String> {
         let actual = self.infer_expr_type(value)?;
-        let callback_param_compatible = |expected: &HirType, actual: &HirType| {
-            expected == actual
-                || matches!(
-                    (expected, actual),
-                    (
-                        HirType::Json,
-                        HirType::F64
-                            | HirType::I64
-                            | HirType::Bool
-                            | HirType::Undefined
-                            | HirType::Null
-                            | HirType::Str
-                            | HirType::StrLiteral(_)
-                            | HirType::Dictionary(_)
-                            | HirType::Array(_)
-                            | HirType::Tuple(_)
-                            | HirType::Object(_)
-                            | HirType::Union(_)
-                            | HirType::Optional(_)
-                            | HirType::Nullable(_)
-                            | HirType::Nullish(_)
-                            | HirType::JsValue
-                    )
-                        | (HirType::JsValue, HirType::Json)
+        // Is a callback whose parameter is typed `actual` usable where one
+        // whose parameter is typed `expected` is wanted? The caller will
+        // hand the callback an `expected`, so `actual` may be a *narrower*
+        // object that names only a leading subset of `expected`'s fields
+        // (width subtyping, as in TS: a `(r: { method; url }) => void`
+        // handler is fine for a slot that provides `{ method; url; body;
+        // ... }`). Restricted to a matching *prefix* so the handler's
+        // field offsets still line up with the value it's handed; the
+        // reverse -- naming a field the caller won't provide, or a
+        // different order -- stays rejected. Real trigger: `createServer`
+        // handlers annotated `{ method; url; statusCode; body }` after
+        // `IncomingMessage` grew an `on` member.
+        fn callback_param_compatible(expected: &HirType, actual: &HirType) -> bool {
+            if expected == actual {
+                return true;
+            }
+            if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) =
+                (expected, actual)
+            {
+                return actual_fields.len() <= expected_fields.len()
+                    && actual_fields.iter().zip(expected_fields).all(
+                        |((name, actual_ty), (expected_name, expected_ty))| {
+                            name == expected_name
+                                && callback_param_compatible(expected_ty, actual_ty)
+                        },
+                    );
+            }
+            matches!(
+                (expected, actual),
+                (
+                    HirType::Json,
+                    HirType::F64
+                        | HirType::I64
+                        | HirType::Bool
+                        | HirType::Undefined
+                        | HirType::Null
+                        | HirType::Str
+                        | HirType::StrLiteral(_)
+                        | HirType::Dictionary(_)
+                        | HirType::Array(_)
+                        | HirType::Tuple(_)
+                        | HirType::Object(_)
+                        | HirType::Union(_)
+                        | HirType::Optional(_)
+                        | HirType::Nullable(_)
+                        | HirType::Nullish(_)
+                        | HirType::JsValue
                 )
-        };
+                    | (HirType::JsValue, HirType::Json)
+            )
+        }
         // A callback parameter declared to return `void` accepts a function
         // value of any return type, including `Promise<T>` -- the caller has
         // stated it discards whatever comes back, so an `async` handler
