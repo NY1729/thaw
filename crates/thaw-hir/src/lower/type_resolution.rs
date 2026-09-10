@@ -375,6 +375,18 @@ fn lower_ts_type(
             if ref_name == Some("JsValue") && ty_ref.type_params.is_none() {
                 return Ok(HirType::JsValue);
             }
+            // A `__thaw_`-prefixed name in type position is never
+            // user-written: it's a registry rewrite of an imported
+            // external value (e.g. `import { Context } from "hono"`, where
+            // `Context` is a class the module graph maps to its
+            // constructor helper) that also got used as a type
+            // annotation. The external value has no thaw-modelled type, so
+            // an annotation naming it means "some opaque value from that
+            // package" -- treat it as `JsValue` rather than failing the
+            // build.
+            if ref_name.is_some_and(|name| name.starts_with("__thaw_")) {
+                return Ok(HirType::JsValue);
+            }
             if ref_name == Some("Record") {
                 let [keys, value] = ty_ref
                     .type_params
