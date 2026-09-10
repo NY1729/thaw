@@ -698,6 +698,53 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `mustache` -- its `.d.ts` is `import * as m from "./index.js";
+/// export default m;` plus two option interfaces: no usable function
+/// types at all (the real API is JSDoc in a `.js` file). thaw synthesizes
+/// a `default` value export bound to the runtime module object, so
+/// `import M from "mustache"; M.render(tpl, view)` works through the
+/// dynamic method-call path.
+#[test]
+fn registry_add_renders_a_real_mustache_template_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-mustache-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "mustache@4.2.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import Mustache from "mustache";
+function main(): void {
+    const out: string = Mustache.render(
+        "{{greeting}}, {{name}}!",
+        JSON.parse("{\"greeting\":\"Hello\",\"name\":\"thaw\"}")
+    );
+    console.log(out);
+    console.log(Mustache.escape("<a>&\"'"));
+    const tokens = Mustache.parse("Hi {{x}}");
+    console.log(JSON.stringify(tokens).length > 2 ? "parsed" : "empty");
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "Hello, thaw!\n&lt;a&gt;&amp;&quot;&#39;\nparsed\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `pluralize` -- a callable default export that also has methods
 /// (`pluralize.singular`, `pluralize.isPlural`), plus an optional numeric
 /// second argument.
