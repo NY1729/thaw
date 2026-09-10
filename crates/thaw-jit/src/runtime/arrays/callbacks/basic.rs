@@ -20,6 +20,7 @@ fn array_extreme(value: f64, is_min: bool) -> f64 {
     result
 }
 
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_min(value: f64) -> f64 {
     array_extreme(value, true)
 }
