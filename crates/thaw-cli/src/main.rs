@@ -597,7 +597,7 @@ fn write_static_asset_server_entry() -> Result<PathBuf, String> {
         r#"import { createServer } from "node:http";
 function main(): void {
   const port: number = Number(process.env.PORT) || 3000;
-  const server = createServer((request: { method: string; url: string }, response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }): boolean => {
+  const server = createServer((request: { method: string; url: string; statusCode: number; body: string }, response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (body: string) => boolean; write: (body: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }): boolean => {
     if (request.method === "GET" && thawServeAsset(response, request.url)) { return true; }
     response.statusCode = 404;
     return response.end("Not Found");
