@@ -148,11 +148,25 @@ body is still better served by `bodyHex()` (2 chars/byte) until a packed
 
 ### Phase 4 -- fill in the Buffer surface
 
-`buf.slice(start, end)`, `buf.subarray(...)`, `Buffer.byteLength(str)`,
-`buf.equals(other)`, `buf.indexOf(...)`, `buf.copy(...)`, and the
-numeric accessors (`readUInt8` / `readUInt16LE` / `readUInt32BE` /
-`readBigUInt64BE` / the `write*` mirror). Each is a small builtin over
-the native layout. Add as real code needs them, not speculatively.
+Landed so far:
+
+- `buf.slice(start?, end?)` / `buf.subarray(start?, end?)` -- reuse
+  `__thaw_array_slice`'s codegen under a `Bytes`-result alias
+  (`__thaw_bytes_slice`), so a sliced `Buffer` stays a `Buffer` and a
+  chained `.toString("hex")` decodes. `subarray` returns a **copy**, not
+  a view (thaw arrays aren't views); it errors on a non-array receiver.
+- `Buffer.byteLength(str, enc?)` -- `thaw_bytes_byte_length`, the
+  encoded byte count (`utf8` default) for a `Content-Length`.
+- The binding-wrapper (`wrap_call_argument_bindings`) now types its
+  lambda return with `infer_expr_type_inner`, so a `Bytes`-typed call
+  whose args needed hoisting (`buf.slice(i, j)`, `Buffer.from(someVar)`)
+  keeps its byte-buffer identity for a chained `.toString`.
+
+Still speculative -- add when real code needs them, not before:
+`buf.equals(other)`, `buf.indexOf(...)`, `buf.copy(...)`,
+`Buffer.concat`'s `totalLength`, and the numeric accessors (`readUInt8`
+/ `readUInt16LE` / `readUInt32BE` / `readBigUInt64BE` / the `write*`
+mirror). Each is a small builtin over the native layout.
 
 ## Where to hook (file map)
 

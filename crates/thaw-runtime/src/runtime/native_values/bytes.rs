@@ -192,6 +192,26 @@ pub unsafe extern "C" fn thaw_bytes_from_array(array: *const u8) -> *mut u8 {
 }
 
 #[no_mangle]
+/// `Buffer.byteLength(string, encoding)` -- the number of bytes the
+/// string occupies in `encoding` (null defaults to `utf8`): the UTF-8
+/// byte length, `len / 2` for `hex`, the decoded length for `base64`,
+/// the character count for `latin1`.
+///
+/// # Safety
+///
+/// `text` / `encoding` must be null or valid NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_bytes_byte_length(
+    text: *const c_char,
+    encoding: *const c_char,
+) -> f64 {
+    if text.is_null() {
+        return 0.0;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
+    decode_string(&text, &encoding_str(encoding)).len() as f64
+}
+
+#[no_mangle]
 /// `Buffer.concat(list)` -- flattens an array of byte buffers into one
 /// fresh byte array, in order. A null / unreadable entry contributes
 /// nothing (rather than faulting). `list` is the raw outer

@@ -15,6 +15,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_array_copy_within"
                 | "__thaw_array_fill"
                 | "__thaw_array_slice"
+                | "__thaw_bytes_slice"
                 | "__thaw_array_to_reversed"
                 | "__thaw_array_push"
                 | "__thaw_array_unshift"
@@ -25,6 +26,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_from_string"
                 | "__thaw_bytes_from_array"
                 | "__thaw_bytes_concat"
+                | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
         );
         if !typed_array_call && !generic_array_call {
@@ -130,6 +132,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or_else(|| format!("`{name}` returned no value"))?
                     .into_pointer_value();
                 return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_byte_length" => {
+                let [text, encoding] = args else {
+                    return Err("Buffer.byteLength expects a string and an encoding".into());
+                };
+                let text = self.compile_expr(text)?;
+                let encoding = self.compile_expr(encoding)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_byte_length").unwrap(),
+                        &[text.into(), encoding.into()],
+                        "bytes_byte_length",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Buffer.byteLength returned no value".to_string());
             }
             "__thaw_bytes_alloc" => {
                 let [size] = args else {
@@ -313,7 +333,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 return Ok(handle.into());
             }
-            "__thaw_array_slice" => {
+            // `__thaw_bytes_slice` is `__thaw_array_slice` with a `Bytes`
+            // result type (see thaw-hir inference) -- identical codegen:
+            // the receiver is bound as an `Array(F64)` either way.
+            "__thaw_array_slice" | "__thaw_bytes_slice" => {
                 if args.len() != 3 {
                     return Err("array slice expects three operands".to_string());
                 }

@@ -690,6 +690,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
+        // `Buffer.byteLength(str, enc)` -- two string pointers to a count.
+        self.module.add_function(
+            "thaw_bytes_byte_length",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_string_split",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
