@@ -19,6 +19,30 @@ Codegen never sees `Bytes`. `buf.toString("utf8")` still comma-joins
 `Buffer.from(request.bodyHex(), "hex")` round-trips a byte-exact HTTP
 body today.
 
+**Phase 3 done.** `node:http` produces and consumes the native byte
+array directly: `request.bodyBytes()` hands the handler the raw request
+body as a first-class array it indexes / iterates / `.length`s with no
+hex detour, and `response.writeBytes(...)` / `response.endBytes(...)`
+send an arbitrary byte sequence back verbatim (same streaming /
+buffering path as the string `write`/`end`, only the payload is decoded
+from an `Array(F64)` handle instead of a NUL-terminated C string). All
+three go through thaw-std's existing native-closure property mechanism
+(`crates/thaw-std/src/http.rs`, `native_bytes_to_vec` /
+`native_bytes_from_slice` build and read the `[len: i64][f64 * len]`
+layout `compile_array_wrap` assumes) -- no new codegen ABI. A
+`00 ff 41 80` body round-trips exactly, handler-computed length and
+checksum proving each byte value arrived intact
+(`node_http_round_trips_a_binary_body_as_first_class_bytes`).
+
+Not done in Phase 3: the `node:http` `.d.ts` types these as `number[]`,
+not `Uint8Array` -- the bridge's `.d.ts` parser doesn't resolve
+`Uint8Array` in a native-builtin interface member position (it drops the
+whole interface, taking `bodyHex`/`on` with it), so the return of
+`request.bodyBytes()` is a plain `number[]` and `.toString("hex")` /
+`.slice(...)` don't dispatch on it as `Bytes` yet. Wrap it with
+`Buffer.from(request.bodyBytes())` for that. `request.on("data")` chunks
+are still lossy strings.
+
 `new Uint8Array([...])` still lowers through the dynamic host
 (`constructDynamicValue`, a QuickJS `JsValue`).
 
@@ -85,27 +109,36 @@ body is still better served by `bodyHex()` (2 chars/byte) until a packed
 - Not done: `Buffer.concat`, clamping in `Buffer.from(number[])`, real
   `node:buffer` `.d.ts` signatures.
 
-### Phase 3 -- thaw-std produces/consumes Bytes
+### Phase 3 -- thaw-std produces/consumes Bytes ✅
 
-- An ABI for a thaw-std function to return a native array. Options, in
-  order of preference:
-  1. reuse the FFI array-return path (`crates/thaw-llvm/src/hir_codegen/
-     ffi_calls.rs`, `ffi_array_alloc`) -- if a std `.d.ts` signature
-     returning `Bytes` / `number[]` already routes through it, this is
-     free;
-  2. a `#[no_mangle] extern "C"` pair `__thaw_native_bytes_alloc(len) ->
-     *mut u8` / `__thaw_native_bytes_finish(ptr, len) -> <native array>`
-     that builds the codegen layout from Rust.
-- `node:http`: `request.bodyBytes(): Buffer` returns the raw body as
-  `Bytes` (the http `RequestContext` already keeps `_raw_body:
-  Vec<u8>`). Optionally make the `request.on("data", cb)` chunk `Bytes`
-  instead of a lossy string (a breaking `.d.ts` change to that callback
-  signature -- do it with the `callback_param_compatible` width-subtyping
-  already in place).
-- `response.end` / `write` gain a `Bytes` overload (send the bytes
-  verbatim, no `endEncoded("hex")` dance).
-- Test: a `00 ff 41 80` body reaches the handler as `Bytes` with those
-  four values and echoes back verbatim.
+- No new codegen ABI was needed. thaw-std already builds the native
+  `[len: i64][f64 * len]` payload + one-word handle from Rust in
+  `json.rs` (`wrap_array_handle`); `http.rs` gained the same two
+  helpers, `native_bytes_from_slice` / `native_bytes_to_vec`, arena-
+  allocated so the value lives as long as any other heap value the
+  handler sees. A `bodyBytes` / `writeBytes` / `endBytes` native-closure
+  property on `IncomingMessage` / `ServerResponse` (exactly like the
+  existing `bodyHex` / `write` closures) returns / accepts that handle;
+  the generic function-typed-property call path in thaw-hir/thaw-llvm
+  passes it through unmarshalled since an `Array(F64)` value already
+  *is* a pointer.
+- `request.bodyBytes()` -- the raw request body as a native byte array,
+  a fresh handle per call (bodies are bounded by `MAX_REQUEST_BODY`).
+- `response.writeBytes(bytes)` / `response.endBytes(bytes)` -- same
+  streaming / buffering path as the string `write`/`end`, payload
+  decoded from the handle (each element truncated toward zero, mod 256,
+  matching `Buffer`'s `ToUint8`), so an arbitrary byte sequence goes out
+  verbatim -- no `endEncoded("hex")` dance.
+- Test: `node_http_round_trips_a_binary_body_as_first_class_bytes` --
+  a `00 ff 41 80` body reaches the handler, which indexes / iterates /
+  `.length`s it (length 4, checksum 448 in response headers) and echoes
+  it back byte-for-byte through `endBytes`.
+- Not done: the `.d.ts` types these `number[]`, not `Uint8Array` (the
+  bridge's native-builtin interface parser drops any interface with an
+  unresolved member type ref, and `Uint8Array` is one there), so the
+  result isn't a dispatch-distinct `Bytes` -- `.toString`/`.slice` on it
+  need a `Buffer.from(...)` wrap. `request.on("data")` chunks are still
+  lossy strings.
 
 ### Phase 4 -- fill in the Buffer surface
 
