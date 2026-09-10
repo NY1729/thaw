@@ -122,7 +122,13 @@ fn registry_add_runs_a_real_drizzle_query_builder_chain_when_enabled() {
     ));
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "drizzle-orm").unwrap();
-    thaw_registry::add(&registry, "better-sqlite3").unwrap();
+    // Pinned: better-sqlite3 13 dropped its `prebuild-install` dependency
+    // for a packaging scheme the registry doesn't resolve yet ("available
+    // targets: none"). 12.11.1 is the last release thaw can fetch a
+    // prebuilt `.node` for. (The compiled program below drives the
+    // sqlite-proxy driver through an async callback and never loads this
+    // addon; it is fetched only so drizzle-orm's peer resolves.)
+    thaw_registry::add(&registry, "better-sqlite3@12.11.1").unwrap();
     let source = dir.join("main.ts");
     let output = dir.join("app");
     std::fs::create_dir_all(&dir).unwrap();
