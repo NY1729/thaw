@@ -680,6 +680,16 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[f64_type.into()], false),
             Some(Linkage::External),
         );
+        // `Buffer.from(number[])` clamps each element to a byte;
+        // `Buffer.concat(list)` flattens an array of byte buffers. Both
+        // take a raw `[len][elem...]` buffer and return a fresh one.
+        for name in ["thaw_bytes_from_array", "thaw_bytes_concat"] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
         self.module.add_function(
             "thaw_string_split",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
