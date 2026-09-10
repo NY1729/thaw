@@ -170,10 +170,12 @@ impl<'a> FnLowerer<'a> {
         // (evaluated with `x` narrowed to `T`, as the caller already
         // lowered it). A present-but-falsy payload (`""`, `0`) is folded
         // into the absent case.
-        if is_and {
-            if let HirType::Nullable(_) | HirType::Optional(_) | HirType::Nullish(_) = &lhs_type {
-                return self.lower_nullish_and(lhs, lhs_type, rhs, rhs_type);
-            }
+        if let HirType::Nullable(_) | HirType::Optional(_) | HirType::Nullish(_) = &lhs_type {
+            return if is_and {
+                self.lower_nullish_and(lhs, lhs_type, rhs, rhs_type)
+            } else {
+                self.lower_nullish_or(lhs, lhs_type, rhs, rhs_type)
+            };
         }
         if lhs_type != rhs_type && lhs_type != HirType::Json {
             return Err(format!(
@@ -238,6 +240,49 @@ impl<'a> FnLowerer<'a> {
             condition,
             vec![HirStmt::Return(Some(present))],
             vec![HirStmt::Return(Some(none))],
+        )]);
+        self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
+    /// `x || rhs` for an `Optional`/`Nullable`/`Nullish` `x`: an IIFE
+    /// returning `x`'s payload when `x` is present-and-truthy, else `rhs`.
+    /// Result type is the payload when `rhs` has that same type,
+    /// otherwise the union of the two.
+    fn lower_nullish_or(
+        &mut self,
+        lhs: HirExpr,
+        lhs_type: HirType,
+        rhs: HirExpr,
+        rhs_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let payload = match &lhs_type {
+            HirType::Optional(p) | HirType::Nullable(p) | HirType::Nullish(p) => p.as_ref().clone(),
+            _ => unreachable!(),
+        };
+        let name = format!("__thaw_nullish_or_left_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), lhs_type.clone());
+        let payload_value = match &lhs_type {
+            HirType::Optional(_) => {
+                HirExpr::OptionalValue(Box::new(HirExpr::Var(name.clone())), payload.clone())
+            }
+            HirType::Nullable(_) => {
+                HirExpr::NullableValue(Box::new(HirExpr::Var(name.clone())), payload.clone())
+            }
+            _ => HirExpr::NullishValue(Box::new(HirExpr::Var(name.clone())), payload.clone()),
+        };
+        let condition = self.truthiness_expr(HirExpr::Var(name.clone()), &lhs_type)?;
+        let result_type = if rhs_type == payload {
+            payload
+        } else {
+            HirType::Union(vec![payload, rhs_type])
+        };
+        let present = self.coerce_to_declared(&result_type, payload_value)?;
+        let fallback = self.coerce_to_declared(&result_type, rhs)?;
+        let result = HirExpr::Block(vec![HirStmt::If(
+            condition,
+            vec![HirStmt::Return(Some(present))],
+            vec![HirStmt::Return(Some(fallback))],
         )]);
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
