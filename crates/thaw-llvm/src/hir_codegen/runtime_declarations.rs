@@ -706,6 +706,38 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        // `buf.readUInt16BE(offset)` -- (buffer, offset, width, kind, le)
+        // -> value; `buf.writeUInt16BE(value, offset)` -- (buffer, offset,
+        // value, width, kind, le) -> offset + width.
+        self.module.add_function(
+            "thaw_bytes_read",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_bytes_write",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_string_split",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),

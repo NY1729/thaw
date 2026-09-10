@@ -8,4 +8,5 @@ include!("instance_builtins/array_mutation_methods.rs");
 include!("instance_builtins/date_methods.rs");
 include!("instance_builtins/map_set_methods.rs");
 include!("instance_builtins/conversion_methods.rs");
+include!("instance_builtins/bytes_methods.rs");
 include!("instance_builtins/dispatch.rs");
