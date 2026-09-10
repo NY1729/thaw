@@ -514,6 +514,51 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `picocolors`' whole API is a single `declare const picocolors: Colors
+/// & { createColors: ... }` whose functions come back across the
+/// Fallback boundary as `Json`. `pc.dim("x") + pc.underline("y")` --
+/// concatenating two of those results -- used to fail lowering with
+/// `arithmetic requires F64 operands, got Json and Json`; `+` on a
+/// `Json` operand now falls back to `String(x) + String(y)` the way JS
+/// would for a non-numeric `+`.
+#[test]
+fn registry_add_concatenates_dynamic_results_with_picocolors_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-picocolors-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "picocolors@1.1.1").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import pc from "picocolors";
+function main(): void {
+    console.log(pc.green("ok"));
+    console.log(pc.bold(pc.red("bad")));
+    console.log(pc.dim("x") + pc.underline("y"));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["picocolors".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // Not a TTY, so picocolors emits no ANSI escapes -- just the text,
+    // and the `+` produced a real string join rather than a build error.
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "ok\nbad\nxy\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_add_builds_and_calls_real_chalk_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
