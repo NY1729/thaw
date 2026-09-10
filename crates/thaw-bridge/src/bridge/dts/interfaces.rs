@@ -463,6 +463,19 @@ fn resolve_interface(
 
     let result = match failure {
         Some(reason) => DtsType::Unsupported(format!("interface `{name}` {reason}")),
+        // Every field an opaque `JsValue` (an interface whose members are
+        // all bare-call-signature interfaces -- kleur's `interface Kleur {
+        // red: Color; ... }` where `Color` is `{ (x): string }`). A
+        // native `Object` of such fields can't be materialised (a JSON
+        // decode drops the functions), and calling one goes nowhere; the
+        // whole interface is better modelled as one opaque handle so
+        // `value.red(...)` routes through the dynamic host.
+        None if dictionary.is_none()
+            && !fields.is_empty()
+            && fields.iter().all(|(_, ty)| *ty == HirType::JsValue) =>
+        {
+            DtsType::Native(HirType::JsValue)
+        }
         None => DtsType::Native(dictionary.map_or(HirType::Object(fields), |element| {
             HirType::Dictionary(Box::new(element))
         })),

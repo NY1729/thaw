@@ -615,6 +615,48 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `kleur`'s API is `interface Kleur { red: Color; bold: Color; ... }`
+/// where `Color` is `interface Color { (x: string | number): string;
+/// (): Kleur; }` -- a bare-call-signature (overloaded) interface. Every
+/// `Kleur` field is one, so `resolve_interface` (thaw-bridge) collapses
+/// `Kleur` to a single opaque `JsValue` rather than a native `Object`
+/// of unmaterialisable function fields; `kleur.green("x")` /
+/// `kleur.bold().red("y")` then route through the dynamic host.
+#[test]
+fn registry_add_paints_with_real_kleur_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-kleur-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "kleur@4.1.5").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import kleur from "kleur";
+function main(): void {
+    console.log(kleur.green("g"));
+    console.log(kleur.bold().red("br"));
+    console.log(kleur.green("a") + kleur.red("b"));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["kleur".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // Not a TTY -> no ANSI escapes, just the text; the chained
+    // `bold().red(...)` and the `+` of two results all resolve.
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "g\nbr\nab\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_add_builds_and_calls_real_chalk_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
