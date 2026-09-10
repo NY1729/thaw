@@ -1945,6 +1945,25 @@ impl<'a> FnLowerer<'a> {
                     HirType::Object(fields) => Some(fields.as_slice()),
                     _ => None,
                 },
+                // A `T | T[]` (or `T | undefined`) parameter -- real:
+                // hapi's `route(route: ServerRoute | ServerRoute[])` --
+                // contextually types an object-literal argument against
+                // its single object member, without which the nested
+                // `handler` callback's parameters get no type and lowering
+                // fails outright. Restricted to exactly one object member:
+                // a discriminated union of several object shapes
+                // (`{ text: string } | { count: number }`) must keep
+                // matching each literal against its own member instead.
+                HirType::Union(elements) => {
+                    let mut objects = elements.iter().filter_map(|element| match element {
+                        HirType::Object(fields) => Some(fields.as_slice()),
+                        _ => None,
+                    });
+                    match (objects.next(), objects.next()) {
+                        (Some(fields), None) => Some(fields),
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             if let Some(fields) = fields {
