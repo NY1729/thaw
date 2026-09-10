@@ -632,6 +632,93 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The exact `while`-loop shape the soak test above deliberately avoids
+/// (see its own doc comment) -- confirms it's now fixed rather than
+/// leaving it permanently worked around. `await app.request(...)`
+/// (itself awaited, unlike the soak test's synchronous receiver) then
+/// `await response.text()`, checked via a compound `Number(response.
+/// status) !== 200 || body !== "..."` condition inside a `while
+/// (stable && ...)` loop, used to segfault (a dangling string pointer
+/// read by `strcmp`, confirmed via `gdb`) or silently misevaluate the
+/// condition on the loop's *second* iteration onward -- the first
+/// iteration, and a `for` loop with an otherwise-identical body, never
+/// reproduced it.
+///
+/// Root cause: `response`/`body`, declared directly inside the loop
+/// body (redeclared -- the same `Let` statement recompiled -- every
+/// iteration), are correctly recognized as async-frame locals (durable
+/// storage meant to survive the suspend/resume boundary between
+/// iterations), but `HirStmt::Let`'s ordinary compilation
+/// (`crates/thaw-llvm/src/hir_codegen/statements.rs`) unconditionally
+/// allocated a *new*, ordinary stack cell and rebound `self.
+/// variables[name]` to it regardless -- clobbering the frame-backed
+/// binding `bind_async_frame_locals` had just installed moments
+/// earlier. That new cell is hoisted into the *current* physical
+/// function's entry block, valid only for that one invocation of the
+/// async coroutine's `resume` function -- not across the separate
+/// invocation the next iteration's own suspend/resume causes. The `&&`/
+/// `||` operators' closure-based desugaring (`lower_logical_expr`/
+/// `wrap_call_argument_bindings`, `crates/thaw-hir/src/lower/
+/// expressions/coercions.rs` and `.../invocations/dynamic_values.rs`)
+/// captures `response`/`body` into that closure; by the second
+/// iteration the captured pointer is dangling, reading whatever now
+/// occupies that stack slot -- silently wrong values, or a crash,
+/// depending on what that happens to be. A local declared *before* the
+/// loop (its own `Let` never re-executes) was unaffected, which is why
+/// `deadline` in the original repro worked fine while `response`/`body`
+/// didn't.
+///
+/// Fixed by having `HirStmt::Let` reuse the existing frame cell (just
+/// `build_store` into it) instead of allocating a fresh one, whenever
+/// the name being declared is already bound to one.
+#[test]
+fn registry_add_runs_a_real_hono_route_repeatedly_through_a_while_loop_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-hono-while-loop-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "hono@4.13.7").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { Hono } from "hono";
+async function main(): Promise<void> {
+    const app = new Hono();
+    app.get("/", (c) => c.text("Hello Thaw"));
+    const deadline = Date.now() + 3000;
+    let count = 0;
+    let ok = true;
+    while (ok && count < 4 && Date.now() < deadline) {
+        const response = await app.request("/");
+        const body: string = await response.text();
+        if (Number(response.status) !== 200 || body !== "Hello Thaw") {
+            ok = false;
+        } else {
+            count++;
+        }
+    }
+    console.log(ok ? "stable:" + count : "unstable at request " + count);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["hono".into()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "hono while-loop run did not exit cleanly: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "stable:4\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Short soak test: a real, listening Fastify server hit with
 /// sequential HTTP requests over a fixed wall-clock window, then
 /// cleanly shut down -- checks the compiled binary stays alive and
