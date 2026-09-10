@@ -133,6 +133,7 @@ impl<'a> GeneratorStateMachine<'a> {
                 let forwards_control = body.iter().any(|statement| {
                     matches!(statement, HirStmt::Let(name, _, _) if name.starts_with("__thaw_yield_delegate_chunk_"))
                 });
+                let suspends = body.iter().any(stmt_contains_await);
                 let condition_id = self.block(
                     Vec::new(),
                     GeneratorTerm::Done,
@@ -151,7 +152,11 @@ impl<'a> GeneratorStateMachine<'a> {
                     GeneratorTerm::Branch(condition.clone(), body_entry, continuation);
                 if forwards_control {
                     for block in &mut self.blocks[first_block..] {
-                        block.forwards_control = true;
+                        block.forwards_control = !(suspends
+                            && matches!(
+                                block.term,
+                                GeneratorTerm::Next(next) if next == continuation
+                            ));
                     }
                 }
                 Some(condition_id)
@@ -307,11 +312,14 @@ fn lower_generator_state_machine(
     returns: &str,
     return_request: &str,
     pending_return: Option<&str>,
+    pending_control: &str,
+    suspends: bool,
     forced_return: &str,
 ) -> Option<(usize, Vec<HirStmt>, Vec<HirStmt>)> {
     let mut machine = GeneratorStateMachine::new(values, finalizers);
     let done = machine.block(Vec::new(), GeneratorTerm::Done, None, 0);
     let entry = machine.sequence(statements, done, None, None, None, done)?;
+    let delegates = suspends && machine.blocks.iter().any(|block| block.forwards_control);
     let cancel_dispatch = machine.blocks.iter().enumerate().rev().fold(
         Vec::new(),
         |otherwise, (id, block)| {
@@ -389,6 +397,42 @@ fn lower_generator_state_machine(
                 0,
                 generator_control_transition(control, error, values, state, cancel_target),
             );
+            let resumed_cancel = vec![
+                HirStmt::Expr(HirExpr::Assign(
+                    values.into(),
+                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                )),
+                HirStmt::Expr(HirExpr::Assign(
+                    control.into(),
+                    Box::new(HirExpr::Lit(HirLit::I64(0))),
+                )),
+                HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                    vec![HirExpr::Var(pending_control.into())],
+                )),
+                generator_set_state(state, cancel_target),
+            ];
+            if delegates {
+                selected = vec![HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::Gt,
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                        pending_control.into(),
+                    )))),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                ),
+                vec![HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::Var(control.into())),
+                        Box::new(HirExpr::Lit(HirLit::I64(0))),
+                    ),
+                    resumed_cancel,
+                    selected.clone(),
+                )],
+                selected,
+                )];
+            }
         }
         if let Some(handler) = block.handler {
             let caught = format!("__thaw_generator_caught_{id}");
@@ -419,6 +463,31 @@ fn lower_generator_state_machine(
         entry,
         machine.locals,
         vec![
+            if delegates { HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Var(control.into())),
+                    Box::new(HirExpr::Lit(HirLit::I64(1))),
+                ),
+                vec![HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                            pending_control.into(),
+                        )))),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    ),
+                    vec![HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![
+                            HirExpr::Var(pending_control.into()),
+                            HirExpr::Lit(HirLit::Bool(true)),
+                        ],
+                    ))],
+                    Vec::new(),
+                )],
+                Vec::new(),
+            ) } else { HirStmt::Expr(HirExpr::Lit(HirLit::Undefined)) },
             HirStmt::If(
                 HirExpr::BinOp(
                     BinOp::EqEqEq,

@@ -2125,6 +2125,32 @@ fn async_generator_delegates_to_async_generator() {
 }
 
 #[test]
+fn async_generator_delegation_forwards_return_across_await() {
+    let source = r#"
+        let progress: number = 0;
+        async function* inner(): AsyncGenerator<number> {
+            try { yield 1; }
+            finally { await Promise.resolve(); progress += 1; }
+        }
+        async function* outer(): AsyncGenerator<number> {
+            try { yield* inner(); yield 99; }
+            finally { progress += 100; }
+        }
+        async function main(): Promise<void> {
+            const iterator = outer();
+            console.log((await iterator.next()).value, progress);
+            const stopped = await iterator.return(9);
+            console.log(stopped.value, stopped.done, progress);
+            console.log((await iterator.next()).done, progress);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_generator_delegate_return"),
+        "1 0\n9 true 101\ntrue 101\n"
+    );
+}
+
+#[test]
 fn sync_generator_rejects_async_generator_delegation() {
     let module = thaw_parser::parse_typescript(
         r#"

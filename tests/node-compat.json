@@ -307,8 +307,7 @@
     },
     {
       "name": "util callbackify falsy rejection metadata",
-      "expect": "unsupported",
-      "detailContains": "ERR_FALSY_VALUE_REJECTION",
+      "expect": "matched",
       "source": "import { callbackify } from 'node:util'; async function fail(): Promise<void> { throw 0; } function main(): void { const callback = callbackify(fail); callback((error: JsValue): void => console.log(error.name, error.code, error.message, String(error.reason))); }"
     },
     {
@@ -613,14 +612,13 @@
     },
     {
       "name": "unhandled timer exception exits with failure",
-      "expect": "failed",
-      "detailContains": "timer fatal",
+      "expect": "matched",
       "exitCode": 1,
       "source": "function main(): void { setTimeout(() => { throw new Error('timer fatal'); }, 0); }"
     },
     {
       "name": "process exitCode controls status",
-      "expect": "failed",
+      "expect": "matched",
       "exitCode": 7,
       "source": "function main(): void { process.exitCode = 7; }"
     },

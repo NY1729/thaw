@@ -1216,6 +1216,7 @@ fn lower_function_statements(
         let returns = "__thaw_generator_returns".to_string();
         let return_request = "__thaw_generator_return_request".to_string();
         let pending_return = "__thaw_generator_pending_return".to_string();
+        let pending_control = "__thaw_generator_pending_control".to_string();
         let forced_return = "__thaw_generator_forced_return".to_string();
         let HirType::Array(return_type) = &params[3] else {
             unreachable!("generator completion channel is an array");
@@ -1230,6 +1231,9 @@ fn lower_function_statements(
         lowerer
             .scope
             .insert(pending_return.clone(), params[4].clone());
+        lowerer
+            .scope
+            .insert(pending_control.clone(), HirType::Array(Box::new(HirType::Bool)));
         lowerer
             .scope
             .insert(forced_return.clone(), params[5].clone());
@@ -1249,6 +1253,11 @@ fn lower_function_statements(
         body.push(HirStmt::Let(
             pending_return.clone(),
             params[4].clone(),
+            HirExpr::ArrayLit(Vec::new()),
+        ));
+        body.push(HirStmt::Let(
+            pending_control.clone(),
+            HirType::Array(Box::new(HirType::Bool)),
             HirExpr::ArrayLit(Vec::new()),
         ));
         let lowered_generator_body = lowerer.lower_stmts(statements)?;
@@ -1281,6 +1290,8 @@ fn lower_function_statements(
                 &returns,
                 &return_request,
                 preserves_return.then_some(pending_return.as_str()),
+                &pending_control,
+                generator_suspends,
                 &forced_return,
             )
         {
