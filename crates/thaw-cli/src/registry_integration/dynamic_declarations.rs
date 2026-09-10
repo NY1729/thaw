@@ -1010,6 +1010,26 @@ fn typed_dynamic_bare_alias(
         }
         _ => false,
     };
+    // The untyped `(argsArray: Json)` native-addon / `callDynamic` shim
+    // already serves a zero- or single-argument Fallback function
+    // correctly: a call `f(x)` builds `[x]`, which *is* the packed
+    // argument array that shim expects. `6448a499` added this typed bare
+    // alias to fix *multi*-argument bare/qualified calls -- where `f(a,
+    // b)` builds `[a, b]` and the one-parameter untyped shim rejects the
+    // arity outright -- but for a single argument it only adds a second
+    // layer of wrapping. Real breakage: `utf-8-validate`'s
+    // `isValidUTF8(buffer: Buffer)` (`Buffer` renders as `Json`), called
+    // with an already-array-shaped `Buffer` payload, reached the addon as
+    // `[[...]]` and tripped an N-API assertion. Keep the typed alias only
+    // where it genuinely earns its place: more than one real parameter,
+    // or a parameter/return the untyped shim can't marshal (a callback).
+    let param_needs_marshaling = function.params.iter().any(|(_, ty)| match ty {
+        thaw_bridge::DtsType::Native(ty) => contains_callable_type(ty),
+        thaw_bridge::DtsType::Unsupported(_) => false,
+    });
+    if function.params.len() <= 1 && !param_needs_marshaling && !callback_adapter_applies {
+        return None;
+    }
     // A JIT-backed `symbol` (`jit_numeric_declaration`) renders its own
     // return type with a special, parenthesized convention for an
     // `Optional`-wrapped tagged union -- `(A | B) | undefined`, not the
