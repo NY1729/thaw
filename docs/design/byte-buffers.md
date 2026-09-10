@@ -12,9 +12,15 @@ every `Bytes` to `Array(F64)` before it leaves `thaw_hir::lower`.
 Codegen never sees `Bytes`. `buf.toString("utf8")` still comma-joins
 (Phase 2).
 
-`request.bodyHex()` (commit `34e38005`) is the stopgap for a byte-exact
-HTTP request body. `new Uint8Array([...])` still lowers through the
-dynamic host (`constructDynamicValue`, a QuickJS `JsValue`).
+**Phase 2 done (`67ed65d3`).** `Buffer.from(str, enc?)` / `Buffer.alloc(n)`
+/ `buf.toString(enc?)` -- `utf8` (default), `hex`, `base64`/`base64url`,
+`latin1` -- all on the native array layout via
+`thaw_bytes_*` (`thaw-runtime/.../native_values/bytes.rs`). So
+`Buffer.from(request.bodyHex(), "hex")` round-trips a byte-exact HTTP
+body today.
+
+`new Uint8Array([...])` still lowers through the dynamic host
+(`constructDynamicValue`, a QuickJS `JsValue`).
 
 ## Goal
 
@@ -62,26 +68,22 @@ body is still better served by `bodyHex()` (2 chars/byte) until a packed
 - Not done: `Array.isArray(buf)` still `false` (matches Node);
   `new Uint8Array([...])` still dynamic-host.
 
-### Phase 2 -- string <-> bytes
+### Phase 2 -- string <-> bytes ✅ (`67ed65d3`)
 
-- Two thaw-hir intrinsics + thaw-std impls, operating on the native
-  layout (Phase 1) so no QuickJS:
-  - `__thaw_bytes_from_string(str, encoding) -> Bytes`
-  - `__thaw_bytes_to_string(bytes, encoding) -> Str`
-  - encodings: `utf8` (default, lossy on decode), `hex`, `base64`,
-    `latin1`.
-- Surface them as `Buffer.from(x, enc?)` / `buf.toString(enc?)`:
-  - `Buffer.from(str, enc?)` -> `__thaw_bytes_from_string`
-  - `Buffer.from(numberArray)` -> clamp each element to `u8` (a small
-    codegen loop or a `__thaw_bytes_from_number_array` helper)
-  - `buf.toString(enc?)` -> `__thaw_bytes_to_string`
-  - `Buffer.alloc(n)` -> zero-filled `Bytes` of length `n`
-  - `Buffer.concat(list)` -> flatten (reuse array concat)
-- `.d.ts` for `node:buffer` / the ambient `Buffer` class: real signatures
-  returning `Bytes`, not `any`.
-- Test: `Buffer.from("héllo").toString()` round-trips; `hex` and
-  `base64` round-trip; `Buffer.from([256, -1, 65])` clamps to
-  `[0, 255, 65]`.
+- `thaw-runtime/.../native_values/bytes.rs`:
+  `thaw_bytes_from_string(text, enc) -> [len][f64...]`,
+  `thaw_bytes_to_string(buf, enc) -> cstr`, `thaw_bytes_alloc(size)`.
+  Encodings: `utf8` (default, lossy decode), `hex`,
+  `base64` / `base64url` (hand-rolled, no crate), `latin1` / `binary` /
+  `ascii`.
+- thaw-hir: `Buffer.from(str, enc?)` / `Buffer.alloc(n)` static
+  builtins (infer `Bytes`); `Buffer.from(number[])` passes through;
+  `buf.toString(enc?)` on a `Bytes` receiver (via
+  `infer_expr_type_inner`) decodes.
+- thaw-llvm: decls + `compile_array_call` dispatch (wrap/unwrap the
+  array handle).
+- Not done: `Buffer.concat`, clamping in `Buffer.from(number[])`, real
+  `node:buffer` `.d.ts` signatures.
 
 ### Phase 3 -- thaw-std produces/consumes Bytes
 
