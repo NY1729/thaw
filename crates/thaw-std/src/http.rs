@@ -149,57 +149,11 @@ struct NativeClosure {
 struct ResponseState {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-}
-
-unsafe fn response_state(environment: *const c_void) -> &'static mut ResponseState {
-    let closure = &*(environment as *const NativeClosure);
-    &mut *(closure.context as *mut ResponseState)
-}
-
-unsafe extern "C" fn response_set_header(
-    environment: *const c_void,
-    name: *const c_char,
-    value: *const c_char,
-) -> bool {
-    response_state(environment)
-        .headers
-        .push((string_from_ptr(name), string_from_ptr(value)));
-    true
-}
-
-unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_char) -> bool {
-    response_state(environment)
-        .body
-        .extend(string_from_ptr(chunk).as_bytes());
-    true
-}
-
-unsafe extern "C" fn response_end_encoded(
-    environment: *const c_void,
-    content: *const c_char,
-    encoding: *const c_char,
-) -> bool {
-    let content = string_from_ptr(content);
-    if string_from_ptr(encoding) != "hex" {
-        response_state(environment).body.extend(content.as_bytes());
-        return true;
-    }
-    if !content.len().is_multiple_of(2) {
-        return false;
-    }
-    let decoded = (0..content.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&content[index..index + 2], 16))
-        .collect::<Result<Vec<_>, _>>();
-    let Ok(decoded) = decoded else {
-        return false;
-    };
-    response_state(environment).body.extend(decoded);
-    true
-}
-
-unsafe extern "C" fn response_end(environment: *const c_void, chunk: *const c_char) -> bool {
-    response_write(environment, chunk)
+    /// Set the first time `response.end(...)` (or `endEncoded`) runs.
+    /// Until then the handler isn't finished -- a plain handler that
+    /// simply hasn't returned yet, or an `async` one currently suspended
+    /// on an `await` -- and there is no response to send.
+    ended: bool,
 }
 
 #[repr(C)]
@@ -215,6 +169,194 @@ struct ServerResponse {
     end: *const NativeClosure,
     write: *const NativeClosure,
     end_encoded: *const NativeClosure,
+}
+
+/// Everything one in-flight request/response needs that must outlive a
+/// single turn of the event loop. A synchronous handler runs start to
+/// finish inside `run_server_callback` and this could all be stack
+/// local -- but an `async` handler suspends on its first `await` and
+/// returns control before it has called `response.end(...)`, so the
+/// `ServerResponse`/`IncomingMessage` it keeps referencing (and the
+/// buffers its `write`/`end` closures append to) are boxed and owned by
+/// the `ConnectionState` until the response has been fully written.
+struct RequestContext {
+    /// The connection this request arrived on, or null for the one-shot
+    /// helpers (`createServerOnce` etc.) that run no event loop and so
+    /// can't resume a handler that suspends.
+    connection: *mut ConnectionState,
+    /// False until `run_server_callback` hands ownership of this context
+    /// to the connection because the handler suspended. `finish_response`
+    /// checks it *before* touching `connection`, so the synchronous path
+    /// (where the caller still holds `&mut ConnectionState`) never
+    /// aliases it.
+    resumable: bool,
+    state: ResponseState,
+    response: ServerResponse,
+    request: IncomingMessage,
+    set_header: NativeClosure,
+    write: NativeClosure,
+    end: NativeClosure,
+    end_encoded: NativeClosure,
+    // Backing storage the `IncomingMessage` pointers borrow from; never
+    // read through directly (hence the underscores), just kept alive.
+    _method: CString,
+    _url: CString,
+}
+
+impl RequestContext {
+    fn new(method: &str, target: &str, connection: *mut ConnectionState) -> Box<RequestContext> {
+        let mut context = Box::new(RequestContext {
+            connection,
+            resumable: false,
+            state: ResponseState {
+                headers: Vec::new(),
+                body: Vec::new(),
+                ended: false,
+            },
+            response: ServerResponse {
+                status_code: 200.0,
+                set_header: std::ptr::null(),
+                end: std::ptr::null(),
+                write: std::ptr::null(),
+                end_encoded: std::ptr::null(),
+            },
+            request: IncomingMessage {
+                method: std::ptr::null(),
+                url: std::ptr::null(),
+            },
+            set_header: NativeClosure {
+                code: response_set_header as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            write: NativeClosure {
+                code: response_write as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            end: NativeClosure {
+                code: response_end as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            end_encoded: NativeClosure {
+                code: response_end_encoded as *const c_void,
+                context: std::ptr::null_mut(),
+            },
+            _method: CString::new(method).unwrap_or_default(),
+            _url: CString::new(target).unwrap_or_default(),
+        });
+        // The box has a stable address now -- wire every self pointer.
+        let context_ptr: *mut RequestContext = &mut *context;
+        context.request.method = context._method.as_ptr();
+        context.request.url = context._url.as_ptr();
+        context.set_header.context = context_ptr.cast();
+        context.write.context = context_ptr.cast();
+        context.end.context = context_ptr.cast();
+        context.end_encoded.context = context_ptr.cast();
+        context.response.set_header = &context.set_header;
+        context.response.end = &context.end;
+        context.response.write = &context.write;
+        context.response.end_encoded = &context.end_encoded;
+        context
+    }
+}
+
+unsafe fn request_context(environment: *const c_void) -> &'static mut RequestContext {
+    let closure = &*(environment as *const NativeClosure);
+    &mut *(closure.context as *mut RequestContext)
+}
+
+unsafe extern "C" fn response_set_header(
+    environment: *const c_void,
+    name: *const c_char,
+    value: *const c_char,
+) -> bool {
+    request_context(environment)
+        .state
+        .headers
+        .push((string_from_ptr(name), string_from_ptr(value)));
+    true
+}
+
+unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_char) -> bool {
+    request_context(environment)
+        .state
+        .body
+        .extend(string_from_ptr(chunk).as_bytes());
+    true
+}
+
+unsafe extern "C" fn response_end_encoded(
+    environment: *const c_void,
+    content: *const c_char,
+    encoding: *const c_char,
+) -> bool {
+    let content = string_from_ptr(content);
+    let context = request_context(environment);
+    if string_from_ptr(encoding) != "hex" {
+        context.state.body.extend(content.as_bytes());
+        finish_response(context);
+        return true;
+    }
+    if !content.len().is_multiple_of(2) {
+        return false;
+    }
+    let decoded = (0..content.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&content[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(decoded) = decoded else {
+        return false;
+    };
+    context.state.body.extend(decoded);
+    finish_response(context);
+    true
+}
+
+unsafe extern "C" fn response_end(environment: *const c_void, chunk: *const c_char) -> bool {
+    let context = request_context(environment);
+    context.state.body.extend(string_from_ptr(chunk).as_bytes());
+    finish_response(context);
+    true
+}
+
+/// Marks the response complete. On the synchronous path this just flips
+/// `ended` and returns -- `run_server_callback` is still on the stack
+/// (and still holds the caller's `&mut ConnectionState`) and renders the
+/// response itself once the handler returns. On the async path the
+/// handler has already suspended and returned, the connection is parked
+/// (`awaiting_handler`), and this call -- reached from inside the
+/// handler's resumed continuation -- is the signal to render and hand
+/// the response to the event loop.
+fn finish_response(context: &mut RequestContext) {
+    if context.state.ended {
+        return;
+    }
+    context.state.ended = true;
+    if !context.resumable || context.connection.is_null() {
+        return;
+    }
+    let connection = unsafe { &mut *context.connection };
+    connection.awaiting_handler = false;
+    let spec = ResponseSpec {
+        status: normalize_status(context.response.status_code),
+        headers: std::mem::take(&mut context.state.headers),
+        body: std::mem::take(&mut context.state.body),
+    };
+    connection.response = render_response(spec, connection.keep_alive);
+    // Deliberately does not write here: this runs inside the async
+    // handler's resume, and any handler code after `response.end(...)`
+    // still expects a live `ServerResponse`. Re-arming for writability
+    // instead defers `write_response` (which may free the whole
+    // connection, `RequestContext` included) to the next event-loop
+    // turn, once that continuation has fully unwound.
+    rewatch_connection(connection, THAW_FD_WRITABLE);
+}
+
+fn normalize_status(status_code: f64) -> u16 {
+    if status_code.is_finite() && (100.0..=999.0).contains(&status_code) {
+        status_code as u16
+    } else {
+        500
+    }
 }
 
 /// One-request native slice of Node's `createServer` callback shape.
@@ -235,69 +377,67 @@ fn run_server(port: f64, callback: *const c_void) -> String {
     .unwrap_or_default()
 }
 
-fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -> ResponseSpec {
+/// Result of running the user's `createServer` handler for one request.
+enum CallbackOutcome {
+    /// The handler called `response.end(...)` (or there is no event loop
+    /// to wait on): the finished response.
+    Ready(ResponseSpec),
+    /// An `async` handler suspended before finishing. The boxed context's
+    /// ownership transfers to the caller, which parks it on the
+    /// connection; `finish_response` completes it on a later turn.
+    Pending(*mut RequestContext),
+}
+
+fn run_server_callback(
+    callback: *const c_void,
+    method: &str,
+    target: &str,
+    connection: *mut ConnectionState,
+) -> CallbackOutcome {
+    let mut context = RequestContext::new(method, target, connection);
     unsafe {
-        // The ambient `.d.ts` declares this callback's return type as
-        // `void` (`createServer(callback: (request, response) => void):
-        // Server`), so thaw's own codegen genuinely emits a
-        // void-returning native function for it -- transmuting the code
-        // pointer through a `-> bool` signature instead (as this used to
-        // do) is a real ABI mismatch, not just an unread return value:
-        // confirmed to crash on the very first request from an actual
-        // compiled program (every existing test here calls this through
-        // a hand-built `NativeClosure` in Rust directly, bypassing
-        // thaw's codegen and its declared-`void` return entirely, so
-        // none of them caught this).
+        // The ambient `.d.ts` declares this callback `=> void`, so thaw
+        // emits a void-returning native function for a plain handler --
+        // transmuting the code pointer through a `-> bool` signature (as
+        // this once did) is a real ABI mismatch that crashed on the
+        // first real request. An `async` handler's value is accepted
+        // against that same `=> void` slot (a void-returning callback
+        // position admits any return type, matching TypeScript) and
+        // genuinely returns a promise handle -- harmlessly ignored: a
+        // lone pointer-sized return left unread in a register is fine
+        // under the C ABI.
         type Callback =
             unsafe extern "C" fn(*const c_void, *const IncomingMessage, *mut ServerResponse);
-        let mut state = ResponseState {
-            headers: Vec::new(),
-            body: Vec::new(),
-        };
-        let state_ptr = &mut state as *mut ResponseState;
-        let set_header = NativeClosure {
-            code: response_set_header as *const c_void,
-            context: state_ptr.cast(),
-        };
-        let write = NativeClosure {
-            code: response_write as *const c_void,
-            context: state_ptr.cast(),
-        };
-        let end = NativeClosure {
-            code: response_end as *const c_void,
-            context: state_ptr.cast(),
-        };
-        let end_encoded = NativeClosure {
-            code: response_end_encoded as *const c_void,
-            context: state_ptr.cast(),
-        };
-        let method = CString::new(method).unwrap_or_default();
-        let target_string = CString::new(target).unwrap_or_default();
-        let request = IncomingMessage {
-            method: method.as_ptr(),
-            url: target_string.as_ptr(),
-        };
-        let mut response = ServerResponse {
-            status_code: 200.0,
-            set_header: &set_header,
-            end: &end,
-            write: &write,
-            end_encoded: &end_encoded,
-        };
+        let request_ptr: *const IncomingMessage = &context.request;
+        let response_ptr: *mut ServerResponse = &mut context.response;
         let code = *(callback as *const *const c_void);
         let callback_fn: Callback = std::mem::transmute(code);
-        callback_fn(callback, &request, &mut response);
-        ResponseSpec {
-            status: if response.status_code.is_finite()
-                && response.status_code >= 100.0
-                && response.status_code <= 999.0
-            {
-                response.status_code as u16
-            } else {
-                500
-            },
-            headers: state.headers,
-            body: state.body,
+        callback_fn(callback, request_ptr, response_ptr);
+    }
+    if context.state.ended || connection.is_null() {
+        CallbackOutcome::Ready(ResponseSpec {
+            status: normalize_status(context.response.status_code),
+            headers: std::mem::take(&mut context.state.headers),
+            body: std::mem::take(&mut context.state.body),
+        })
+    } else {
+        context.resumable = true;
+        CallbackOutcome::Pending(Box::into_raw(context))
+    }
+}
+
+/// Synchronous entry point for the one-shot helpers, which have no event
+/// loop and so can only ever see a `Ready` outcome.
+fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -> ResponseSpec {
+    match run_server_callback(callback, method, target, std::ptr::null_mut()) {
+        CallbackOutcome::Ready(spec) => spec,
+        CallbackOutcome::Pending(context) => {
+            let context = unsafe { Box::from_raw(context) };
+            ResponseSpec {
+                status: normalize_status(context.response.status_code),
+                headers: context.state.headers.clone(),
+                body: context.state.body.clone(),
+            }
         }
     }
 }
@@ -376,6 +516,15 @@ struct ConnectionState {
     /// the response finishes: reuse the connection for another request
     /// instead of closing it.
     keep_alive: bool,
+    /// True between an `async` handler suspending and its eventual
+    /// `response.end(...)`. While set, `connection_ready` ignores socket
+    /// events -- the handler's resumed continuation drives the response
+    /// (`finish_response`), not a read here.
+    awaiting_handler: bool,
+    /// The boxed per-request context, owned here while an `async` handler
+    /// is in flight (and until the response it produced is fully
+    /// written). Null the rest of the time.
+    response_ctx: *mut RequestContext,
 }
 
 fn register_server(state: *const ServerState) {
@@ -538,6 +687,8 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         written: 0,
         watcher: 0,
         keep_alive: false,
+        awaiting_handler: false,
+        response_ctx: std::ptr::null_mut(),
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -558,6 +709,13 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
 
 extern "C" fn connection_ready(context: *mut u8, _events: i16) {
     let connection = unsafe { &mut *(context as *mut ConnectionState) };
+    if connection.awaiting_handler {
+        // An `async` handler is still running; its eventual
+        // `response.end(...)` re-arms this connection for writing. Any
+        // socket event now (including the client hanging up) is left for
+        // that path to notice.
+        return;
+    }
     if connection.response.is_empty() && !read_request(connection) {
         return;
     }
@@ -639,18 +797,37 @@ fn read_request(connection: &mut ConnectionState) -> bool {
                     .windows(4)
                     .any(|bytes| bytes == b"\r\n\r\n")
                 {
-                    let request = String::from_utf8_lossy(&connection.request);
-                    let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
-                    let method = request_line.next().unwrap_or("GET");
-                    let target = request_line.next().unwrap_or("/");
-                    let keep_alive = negotiate_keep_alive(&request);
-                    let server = unsafe { &*connection.server };
-                    connection.response = render_response(
-                        invoke_server_callback(server.callback as *const c_void, method, target),
-                        keep_alive,
-                    );
+                    let (method, target, keep_alive) = {
+                        let request = String::from_utf8_lossy(&connection.request);
+                        let mut request_line =
+                            request.lines().next().unwrap_or("").split_whitespace();
+                        let method = request_line.next().unwrap_or("GET").to_string();
+                        let target = request_line.next().unwrap_or("/").to_string();
+                        let keep_alive = negotiate_keep_alive(&request);
+                        (method, target, keep_alive)
+                    };
+                    let callback = unsafe { &*connection.server }.callback as *const c_void;
+                    // Set before running the handler: an `async` handler
+                    // that suspends won't return through here, and
+                    // `finish_response` needs the negotiated value when it
+                    // renders the response later.
                     connection.keep_alive = keep_alive;
-                    return true;
+                    match run_server_callback(
+                        callback,
+                        &method,
+                        &target,
+                        connection as *mut ConnectionState,
+                    ) {
+                        CallbackOutcome::Ready(spec) => {
+                            connection.response = render_response(spec, keep_alive);
+                            return true;
+                        }
+                        CallbackOutcome::Pending(context) => {
+                            connection.response_ctx = context;
+                            connection.awaiting_handler = true;
+                            return false;
+                        }
+                    }
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return false,
@@ -702,13 +879,24 @@ fn write_response(connection: &mut ConnectionState) {
         // response before sending the next one (the common case, and
         // what Node's own default `http.Agent` does on a keep-alive
         // connection) is unaffected.
+        free_response_context(connection);
         connection.request.clear();
         connection.response.clear();
         connection.written = 0;
+        connection.awaiting_handler = false;
         rewatch_connection(connection, THAW_FD_READABLE);
         return;
     }
     finish_connection(connection);
+}
+
+/// Drops the boxed `RequestContext` a still-in-flight (or just-completed)
+/// `async` request left parked on the connection, if any.
+fn free_response_context(connection: &mut ConnectionState) {
+    if !connection.response_ctx.is_null() {
+        unsafe { drop(Box::from_raw(connection.response_ctx)) };
+        connection.response_ctx = std::ptr::null_mut();
+    }
 }
 
 fn rewatch_connection(connection: &mut ConnectionState, interests: u8) {
@@ -727,6 +915,7 @@ fn rewatch_connection(connection: &mut ConnectionState, interests: u8) {
 }
 
 fn finish_connection(connection: &mut ConnectionState) {
+    free_response_context(connection);
     if connection.watcher != 0 {
         unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
         connection.watcher = 0;
@@ -1014,24 +1203,18 @@ mod tests {
 
     #[test]
     fn encoded_response_decodes_binary_bytes() {
-        let mut state = ResponseState {
-            headers: Vec::new(),
-            body: Vec::new(),
-        };
-        let closure = NativeClosure {
-            code: response_end_encoded as *const c_void,
-            context: (&mut state as *mut ResponseState).cast(),
-        };
+        let context = RequestContext::new("GET", "/", std::ptr::null_mut());
         let content = CString::new("89504e4700ff").unwrap();
         let encoding = CString::new("hex").unwrap();
         assert!(unsafe {
             response_end_encoded(
-                (&closure as *const NativeClosure).cast(),
+                (&context.end_encoded as *const NativeClosure).cast(),
                 content.as_ptr(),
                 encoding.as_ptr(),
             )
         });
-        assert_eq!(state.body, [0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+        assert_eq!(context.state.body, [0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+        assert!(context.state.ended);
     }
 
     use std::net::TcpStream;

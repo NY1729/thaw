@@ -523,6 +523,124 @@ server.listen(Number(process.env.PORT));
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A genuinely `async` `createServer` handler -- one that `await`s
+/// (suspending the whole handler body, `response.end(...)` included,
+/// until a timer fires) before it produces any output -- must still get
+/// its response written, and must do so per-connection under concurrent
+/// keep-alive load without one request's buffered body leaking into
+/// another's. `run_server_callback` returning `Pending` and the
+/// event-loop resuming the handler later (its `response.end(...)` then
+/// driving the write) is what this exercises; with that path disabled
+/// every request comes back with an empty body. Also covers a handler
+/// that interleaves `response.write(...)` calls around the `await`: the
+/// pieces are buffered and flushed together on `end()` (true incremental
+/// streaming is a later stage).
+#[test]
+fn node_http_runs_a_genuinely_async_handler_under_concurrent_keep_alive_load() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-async-http-handler-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+async function delay(ms: number): Promise<void> {
+    await sleep(ms);
+}
+function main(): void {
+    const server = createServer(async (
+        request: { method: string; url: string; statusCode: number },
+        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+    ): Promise<void> => {
+        if (request.url === "/pieces") {
+            response.write("a");
+            await delay(5);
+            response.write("b");
+            await delay(5);
+            response.end("c");
+            return;
+        }
+        await delay(5);
+        response.end("thaw:" + request.url);
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (0..500)
+        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("server did not start");
+
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    std::thread::scope(|scope| {
+        for connection_id in 0..50 {
+            let failures = &failures;
+            scope.spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(20)))
+                    .unwrap();
+                for request_id in 0..4 {
+                    let path = format!("/conn{connection_id}/req{request_id}");
+                    stream
+                        .write_all(
+                            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+                        )
+                        .unwrap();
+                    let body = read_one_response_body(&mut stream);
+                    if body != format!("thaw:{path}") {
+                        failures.lock().unwrap().push(format!("{path}: got [{body}]"));
+                    }
+                }
+                // A handler that writes around its awaits: the buffered
+                // pieces come back concatenated, in order.
+                stream
+                    .write_all(b"GET /pieces HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .unwrap();
+                let body = read_one_response_body(&mut stream);
+                if body != "abc" {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("/pieces on conn{connection_id}: got [{body}]"));
+                }
+            });
+        }
+    });
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let failures = failures.into_inner().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn multifile_cli_includes_transitive_node_builtin_dependencies() {
     let dir = std::env::temp_dir().join(format!(
