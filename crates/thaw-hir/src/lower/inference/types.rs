@@ -484,6 +484,7 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_object_to_string"
                     | "__thaw_bytes_to_string" => return Ok(HirType::Str),
                     "__thaw_bytes_byte_length" => return Ok(HirType::F64),
+                    "__thaw_bytes_equals" => return Ok(HirType::Bool),
                     "__thaw_bytes_from_string" | "__thaw_bytes_alloc"
                     | "__thaw_bytes_from_array" | "__thaw_bytes_concat"
                     | "__thaw_bytes_slice" => {
