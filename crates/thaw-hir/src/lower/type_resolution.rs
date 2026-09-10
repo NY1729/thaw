@@ -467,6 +467,43 @@ fn lower_ts_type(
                 return Ok(HirType::Array(Box::new(HirType::Str)));
             }
 
+            if matches!(
+                ref_name,
+                Some("Generator" | "IterableIterator" | "AsyncGenerator" | "AsyncIterableIterator")
+            ) {
+                let params = ty_ref
+                    .type_params
+                    .as_ref()
+                    .ok_or("generator type needs a yield type")?;
+                let yielded = params
+                    .params
+                    .first()
+                    .ok_or_else(|| "generator type needs a yield type".to_string())
+                    .and_then(|ty| lower_ts_type(ty, interfaces, generic_interfaces))?;
+                let returned = params
+                    .params
+                    .get(1)
+                    .map(|ty| lower_ts_type(ty, interfaces, generic_interfaces))
+                    .transpose()?
+                    .unwrap_or_else(|| yielded.clone());
+                let input = params
+                    .params
+                    .get(2)
+                    .map(|ty| lower_ts_type(ty, interfaces, generic_interfaces))
+                    .transpose()?
+                    .unwrap_or(HirType::Undefined);
+                return Ok(generator_function_type(
+                    matches!(ref_name, Some("AsyncGenerator" | "AsyncIterableIterator")),
+                    yielded,
+                    if returned == HirType::Void {
+                        HirType::Undefined
+                    } else {
+                        returned
+                    },
+                    input,
+                ));
+            }
+
             match (ref_name, single_type_param) {
                 (Some("Array" | "ReadonlyArray"), Some(elem)) => Ok(HirType::Array(Box::new(
                     lower_ts_type(elem, interfaces, generic_interfaces)?,

@@ -137,6 +137,12 @@ fn static_class_member_name(
 ) -> Option<String> {
     match expression {
         Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().into_owned()),
+        Expr::Member(member)
+            if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Symbol")
+                && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "iterator") =>
+        {
+            Some("__thaw_symbol_iterator".into())
+        }
         Expr::Ident(identifier) => constants.get(identifier.sym.as_ref()).cloned(),
         Expr::Bin(binary) if binary.op == BinaryOp::Add => Some(format!(
             "{}{}",
@@ -332,6 +338,26 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
                 raw: None,
             }));
         }
+
+        fn visit_mut_prop_name(&mut self, property: &mut PropName) {
+            let PropName::Computed(computed) = property else {
+                property.visit_mut_children_with(self);
+                return;
+            };
+            if self.expression_is_shadowed(&computed.expr) {
+                computed.visit_mut_children_with(self);
+                return;
+            }
+            let Some(value) = static_class_member_name(&computed.expr, self.constants) else {
+                computed.visit_mut_children_with(self);
+                return;
+            };
+            *property = PropName::Str(swc_ecma_ast::Str {
+                span: computed.span,
+                value: value.into(),
+                raw: None,
+            });
+        }
     }
     normalized.visit_mut_with(&mut ComputedAccessNormalizer {
         constants: &constants,
@@ -424,4 +450,3 @@ fn normalize_private_class_members(module: &Module) -> Module {
     }
     module
 }
-

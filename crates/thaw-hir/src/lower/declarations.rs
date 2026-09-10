@@ -1340,6 +1340,47 @@ fn lower_function_statements(
             generator_body.push(HirStmt::Return(Some(HirExpr::Var(values.clone()))));
         }
         generator_body.push(HirStmt::Return(Some(HirExpr::Var(values))));
+        if !async_generator {
+            let running = "__thaw_generator_running".to_string();
+            let reentry_error = "__thaw_generator_reentry_error".to_string();
+            lowerer.scope.insert(running.clone(), HirType::Bool);
+            lowerer.scope.insert(reentry_error.clone(), HirType::Str);
+            body.push(HirStmt::Let(
+                running.clone(),
+                HirType::Bool,
+                HirExpr::Lit(HirLit::Bool(false)),
+            ));
+            let clear_running = HirStmt::Expr(HirExpr::Assign(
+                running.clone(),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            ));
+            generator_body = vec![
+                HirStmt::If(
+                    HirExpr::Var(running.clone()),
+                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                        "TypeError: Generator is already running".into(),
+                    )))],
+                    Vec::new(),
+                ),
+                HirStmt::Expr(HirExpr::Assign(
+                    running,
+                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                )),
+                HirStmt::Try(
+                    inject_finally_before_exits(
+                        generator_body,
+                        std::slice::from_ref(&clear_running),
+                        false,
+                    ),
+                    reentry_error.clone(),
+                    vec![
+                        clear_running.clone(),
+                        HirStmt::Throw(HirExpr::Var(reentry_error)),
+                    ],
+                ),
+                clear_running,
+            ];
+        }
         let generator_body = HirExpr::Block(generator_body);
         let mut referenced = BTreeSet::new();
         collect_referenced_bindings(&generator_body, &mut referenced);
