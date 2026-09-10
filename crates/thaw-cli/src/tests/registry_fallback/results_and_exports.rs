@@ -515,3 +515,61 @@ fn imports_node_builtin_object_values() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "4\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// An interface whose every field is itself a bare-call-signature
+/// interface -- kleur's `interface Kleur { red: Color; ... }` where
+/// `Color` is `{ (x): string }` (which thaw-bridge already classifies
+/// to `JsValue`). A native `Object` of such fields can't be
+/// materialised -- a JSON decode of the Fallback result drops the
+/// functions, so `palette.red(...)` hit `invalid JavaScript value
+/// handle 0` at run time. `resolve_interface` now collapses an
+/// all-`JsValue`-field interface to one opaque `JsValue`, so the
+/// Fallback returns a live handle and `palette.red("x")` routes through
+/// the existing `JsValue`-receiver dynamic method call.
+#[test]
+fn an_all_opaque_field_interface_stays_an_opaque_handle() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-callable-field-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("palette-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Painter { (text: string): string; }\n\
+         export interface Palette { red: Painter; bold: Painter; }\n\
+         export declare function makePalette(): Palette;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makePalette: function() { return { \
+         red: function(t) { return '[' + t + ']'; }, \
+         bold: function(t) { return '<' + t + '>'; } \
+         }; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makePalette } from "palette-kit";
+function main(): void {
+    const p = makePalette();
+    console.log(p.red("a"));
+    console.log(p.bold("b"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "[a]\n<b>\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
