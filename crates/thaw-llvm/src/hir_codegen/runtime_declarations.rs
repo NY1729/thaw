@@ -754,6 +754,21 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        // `buf.indexOf(needle, from)` -- haystack + needle buffers, a
+        // start offset, and a reverse flag, to an index or `-1`.
+        self.module.add_function(
+            "thaw_bytes_index_of",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_string_split",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),

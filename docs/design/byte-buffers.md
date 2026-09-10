@@ -178,15 +178,17 @@ Landed so far:
 - `source.copy(target, targetStart?, sourceStart?, sourceEnd?)` --
   `thaw_bytes_copy`, blits into an existing `Bytes` target in place,
   returns the count copied. Offsets clamp to their buffers.
+- `buf.indexOf` / `includes` / `lastIndexOf` with a string or
+  sub-buffer needle -- `thaw_bytes_index_of`, a byte-subsequence scan
+  (`lower_native_bytes_search` normalises the needle to a buffer: a
+  string decodes `utf8`, a number becomes one byte). A numeric needle
+  still takes the plain `Array.indexOf` element path.
 
-Still speculative -- add when real code needs them, not before:
-`buf.indexOf(sub)` (the number form already works via `Array.indexOf`;
-this is string / sub-buffer search -- needs surgery in the shared
-`indexOf` lowering), the `readBigUInt64*` / `readBigInt64*` pair (thaw
-has no `BigInt`), and `readUIntLE(offset, byteLength)` / `readUIntBE`'s
-variable width. `request.on("data")` chunks stay lossy strings --
-`request.bodyBytes()` is the binary path and covers the whole body at
-once.
+Still speculative -- add when real code needs them, not before: the
+`readBigUInt64*` / `readBigInt64*` pair (thaw has no `BigInt`) and
+`readUIntLE(offset, byteLength)` / `readUIntBE`'s variable width.
+`request.on("data")` chunks stay lossy strings -- `request.bodyBytes()`
+is the binary path and covers the whole body at once.
 
 ## Where to hook (file map)
 
