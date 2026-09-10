@@ -3038,10 +3038,14 @@ fn byte_buffer_numeric_accessors() {
             // Float round-trip.
             buf.writeFloatLE(1.5, 0);
             console.log(buf.readFloatLE(0));
+            // `copy` blits into an existing buffer and returns the count.
+            const dst: Buffer = Buffer.alloc(4);
+            const n: number = Buffer.from([10, 20, 30, 40, 50]).copy(dst, 1, 2);
+            console.log(n + " " + dst.toString("hex"));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_numeric_accessors"),
-        "12343412deadbeef\n4660 4660\n3735928559\n1 127\n-2 254\n0\n1.5\n"
+        "12343412deadbeef\n4660 4660\n3735928559\n1 127\n-2 254\n0\n1.5\n3 001e2832\n"
     );
 }

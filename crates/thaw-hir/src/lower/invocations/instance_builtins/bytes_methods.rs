@@ -65,4 +65,47 @@ impl<'a> FnLowerer<'a> {
         };
         self.wrap_call_argument_bindings(result, &bindings)
     }
+
+    /// `source.copy(target, targetStart?, sourceStart?, sourceEnd?)` --
+    /// blits bytes into an existing byte buffer in place and returns the
+    /// count copied (Node's contract). Both receiver and `target` must be
+    /// `Bytes`; the three offsets default to `0`, `0`, and the source
+    /// length (`-1` sentinel, resolved in the runtime).
+    fn lower_native_bytes_copy(
+        &mut self,
+        member: &MemberExpr,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver = self.lower_expr(&member.obj)?;
+        if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
+            return Err("`.copy()` is only supported on a Buffer / Uint8Array".into());
+        }
+        let (arguments, bindings) =
+            self.lower_native_spread_values(&call.args, "Buffer.copy")?;
+        if arguments.is_empty() || arguments.len() > 4 {
+            return Err(
+                "`Buffer.prototype.copy` expects a target and up to three offsets".into(),
+            );
+        }
+        let target = arguments[0].clone();
+        self.expect_type(
+            &HirType::Array(Box::new(HirType::F64)),
+            &target,
+            "`.copy()` target",
+        )?;
+        let offset = |lowerer: &mut Self, index: usize, default: f64| -> Result<HirExpr, String> {
+            match arguments.get(index) {
+                Some(value) => lowerer.coerce_primitive_to_number(value.clone()),
+                None => Ok(HirExpr::Lit(HirLit::F64(default))),
+            }
+        };
+        let target_start = offset(self, 1, 0.0)?;
+        let source_start = offset(self, 2, 0.0)?;
+        let source_end = offset(self, 3, -1.0)?;
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_copy".to_string())),
+            vec![receiver, target, target_start, source_start, source_end],
+        );
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
 }

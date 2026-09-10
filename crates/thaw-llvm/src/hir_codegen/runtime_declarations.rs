@@ -738,6 +738,22 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        // `source.copy(target, targetStart, sourceStart, sourceEnd)` --
+        // two raw buffers + three offsets to the count copied.
+        self.module.add_function(
+            "thaw_bytes_copy",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_string_split",
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
