@@ -137,6 +137,11 @@ jobs:
         run: |
           cargo build --release -p thaw-cli
           benchmarks/runtime/run.sh target/release/thaw "runtime-${{ matrix.architecture }}.json"
+      - name: Check for a startup time / RSS regression
+        run: |
+          benchmarks/runtime/check_regression.sh \
+            "runtime-${{ matrix.architecture }}.json" \
+            "benchmarks/runtime/baseline-${{ matrix.architecture }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-${{ matrix.architecture }}
