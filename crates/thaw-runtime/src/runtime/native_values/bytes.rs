@@ -175,6 +175,53 @@ pub unsafe extern "C" fn thaw_bytes_from_string(
 }
 
 #[no_mangle]
+/// `Buffer.from(array)` for a `number[]` / byte buffer source -- a fresh
+/// byte array holding each element truncated toward zero and taken mod
+/// 256 (`300` -> `44`, `-1` -> `255`, `NaN` -> `0`), matching `Buffer`'s
+/// own `ToUint8` element coercion. Always copies, so the result is
+/// detached from the source array (also `Buffer.from(array)` semantics).
+///
+/// # Safety
+///
+/// `array` must point to a Thaw array of `f64` element slots.
+pub unsafe extern "C" fn thaw_bytes_from_array(array: *const u8) -> *mut u8 {
+    let Some(bytes) = (unsafe { read_byte_array(array) }) else {
+        return std::ptr::null_mut();
+    };
+    unsafe { write_byte_array(&bytes) }
+}
+
+#[no_mangle]
+/// `Buffer.concat(list)` -- flattens an array of byte buffers into one
+/// fresh byte array, in order. A null / unreadable entry contributes
+/// nothing (rather than faulting). `list` is the raw outer
+/// `[len][elem...]` buffer; each element slot holds an inner array
+/// *handle* (one word onto the inner `[len][elem...]` buffer), the same
+/// nesting every `T[][]` uses.
+///
+/// # Safety
+///
+/// `list` must point to a Thaw array whose element slots are array
+/// handles onto `f64`-slot byte buffers.
+pub unsafe extern "C" fn thaw_bytes_concat(list: *const u8) -> *mut u8 {
+    let Some(count) = (unsafe { native_array_length(list) }) else {
+        return std::ptr::null_mut();
+    };
+    let mut result = Vec::new();
+    for index in 0..count {
+        let inner_handle = unsafe { list.add(8 + index * 8).cast::<*const u8>().read() };
+        if inner_handle.is_null() {
+            continue;
+        }
+        let inner_buffer = unsafe { inner_handle.cast::<*const u8>().read() };
+        if let Some(bytes) = unsafe { read_byte_array(inner_buffer) } {
+            result.extend(bytes);
+        }
+    }
+    unsafe { write_byte_array(&result) }
+}
+
+#[no_mangle]
 /// `Buffer.alloc(size)` -- a zero-filled byte buffer of `size` bytes
 /// (clamped at 0; a fractional/negative size truncates like `Buffer`).
 pub extern "C" fn thaw_bytes_alloc(size: f64) -> *mut u8 {

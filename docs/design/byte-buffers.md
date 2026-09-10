@@ -17,7 +17,10 @@ Codegen never sees `Bytes`. `buf.toString("utf8")` still comma-joins
 `latin1` -- all on the native array layout via
 `thaw_bytes_*` (`thaw-runtime/.../native_values/bytes.rs`). So
 `Buffer.from(request.bodyHex(), "hex")` round-trips a byte-exact HTTP
-body today.
+body today. Follow-up: `Buffer.from(number[])` now copies through
+`thaw_bytes_from_array`, clamping each element to a byte (`300` -> `44`,
+`-1` -> `255`) and detaching the copy from the source array; `Buffer.concat(list)`
+(`thaw_bytes_concat`, 1-arg form) flattens an array of byte buffers.
 
 **Phase 3 done.** `node:http` produces and consumes the native byte
 array directly: `request.bodyBytes()` hands the handler the raw request
@@ -106,7 +109,10 @@ body is still better served by `bodyHex()` (2 chars/byte) until a packed
   `infer_expr_type_inner`) decodes.
 - thaw-llvm: decls + `compile_array_call` dispatch (wrap/unwrap the
   array handle).
-- Not done: `Buffer.concat`, clamping in `Buffer.from(number[])`, real
+- Follow-up landed: `Buffer.from(number[])` byte-clamping copy
+  (`thaw_bytes_from_array`); `Buffer.concat(list)` 1-arg
+  (`thaw_bytes_concat`).
+- Not done: `Buffer.concat`'s optional `totalLength`, real
   `node:buffer` `.d.ts` signatures.
 
 ### Phase 3 -- thaw-std produces/consumes Bytes ✅

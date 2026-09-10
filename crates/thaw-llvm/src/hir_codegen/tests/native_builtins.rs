@@ -2986,6 +2986,13 @@ fn byte_buffer_from_and_to_string() {
             console.log(z.length + " " + z[0] + " " + z[2]);
             const wrapped: Buffer = Buffer.from([0, 255, 65]);
             console.log(wrapped.toString("hex"));
+            // Out-of-range elements clamp to a byte at construction:
+            // 256 -> 0, -1 -> 255, 300 -> 44, 3.9 -> 3.
+            const clamped: Buffer = Buffer.from([256, -1, 300, 3.9]);
+            console.log(clamped.toString("hex"));
+            console.log(clamped[1]);
+            const joined: Buffer = Buffer.concat([wrapped, clamped, Buffer.from("Z")]);
+            console.log(joined.length + " " + joined.toString("hex"));
             let sum = 0;
             for (const byte of b) { sum = sum + byte; }
             console.log(sum);
@@ -2993,6 +3000,6 @@ fn byte_buffer_from_and_to_string() {
     "#;
     assert_eq!(
         compile_and_run(source, "byte_buffer_from_and_to_string"),
-        "6\nhéllo\n68c3a96c6c6f\naMOpbGxv\nhello\nhi\n3 0 0\n00ff41\n795\n"
+        "6\nhéllo\n68c3a96c6c6f\naMOpbGxv\nhello\nhi\n3 0 0\n00ff41\n00ff2c03\n255\n8 00ff4100ff2c035a\n795\n"
     );
 }
