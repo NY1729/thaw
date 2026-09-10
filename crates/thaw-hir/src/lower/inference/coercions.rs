@@ -44,9 +44,18 @@ impl<'a> FnLowerer<'a> {
         }
         if matches!(
             declared,
-            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Bytes
         ) {
             let actual = self.infer_expr_type(&value)?;
+            // `Bytes` and `Array(F64)` share a layout -- pass either
+            // straight through as the other.
+            if matches!(
+                (declared, &actual),
+                (HirType::Bytes, HirType::Array(elem)) | (HirType::Array(elem), HirType::Bytes)
+                    if **elem == HirType::F64
+            ) {
+                return Ok(value);
+            }
             if matches!(actual, HirType::Json | HirType::JsValue) {
                 let value = if actual == HirType::JsValue {
                     HirExpr::Call(

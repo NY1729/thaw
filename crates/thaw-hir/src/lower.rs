@@ -331,6 +331,7 @@ include!("lower/declarations.rs");
 include!("lower/type_resolution.rs");
 
 include!("lower/control_flow.rs");
+include!("lower/bytes_erasure.rs");
 
 include!("lower/context.rs");
 include!("lower/calls.rs");

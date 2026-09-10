@@ -1575,24 +1575,31 @@ fn rewritten_external_type_name_resolves_to_jsvalue_bare_and_generic() {
 }
 
 #[test]
-fn buffer_and_uint8array_annotations_resolve_to_a_number_array() {
-    // `Buffer` / `Uint8Array` in an annotation position -> `number[]`:
-    // indexable, has `.length`, iterable, and interchangeable with a
-    // plain `number[]` in both directions.
-    lower(
+fn buffer_is_a_distinct_type_that_erases_to_a_number_array() {
+    // `Buffer` / `Uint8Array` -> `HirType::Bytes` during lowering
+    // (type-checks and would dispatch differently), but the erase pass
+    // collapses it to `Array(F64)` before the program leaves lowering,
+    // so codegen -- and this assertion -- never see `Bytes`.
+    let program = lower(
         r#"
         declare function raw(): Buffer;
         function takesArray(a: number[]): number { return a.length; }
+        function nested(): void {
+            const pair: Uint8Array[] = [raw(), raw()];
+            const opt: Uint8Array | undefined = raw();
+        }
         function main(): void {
             const b: Uint8Array = raw();
-            const n: number = b.length;
-            const first: number = b[0];
             let sum = 0;
             for (const byte of b) { sum = sum + byte; }
             const asArray: number[] = b;
             const backToBuf: Buffer = asArray;
-            console.log(n, first, sum, takesArray(b), backToBuf.length);
+            console.log(b.length, b[0], sum, takesArray(b), backToBuf.length);
         }
         "#,
+    );
+    assert!(
+        !format!("{program:?}").contains("Bytes"),
+        "a `Bytes` marker survived the erase pass into the lowered program"
     );
 }

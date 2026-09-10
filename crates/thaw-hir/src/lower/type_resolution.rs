@@ -389,14 +389,10 @@ fn lower_ts_type(
             }
             // A byte buffer, spelled either way (reached only when the
             // name isn't a resolved `interface` -- that's handled above --
-            // and isn't a rewritten external `__thaw_` name). Modelled as
-            // a plain `number[]`: same layout, same operations. A
-            // distinct byte type -- so `buf.toString("utf8")` can decode
-            // instead of comma-joining -- is docs/design/byte-buffers.md
-            // and needs a HIR type-normalization pass first. Type
-            // arguments, if any, are ignored.
+            // and isn't a rewritten external `__thaw_` name). Type
+            // arguments, if any, are ignored: `Uint8Array` is bytes.
             if matches!(ref_name, Some("Buffer" | "Uint8Array")) {
-                return Ok(HirType::Array(Box::new(HirType::F64)));
+                return Ok(HirType::Bytes);
             }
             if ref_name == Some("Record") {
                 let [keys, value] = ty_ref

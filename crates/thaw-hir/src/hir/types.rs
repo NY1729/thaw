@@ -131,6 +131,14 @@ pub enum HirType {
     JsValue,
     Promise(Box<HirType>),
     Array(Box<HirType>),
+    /// A byte buffer (`Buffer` / `Uint8Array`). Physically an
+    /// `Array(F64)` -- same `[len][payload]` heap block, same element
+    /// load/store, same `.length` -- and every codegen and inference
+    /// site that handles `Array(F64)` handles this identically (grep
+    /// `HirType::Bytes`). The separate identity is only so method
+    /// dispatch can tell `buf.toString("utf8")` (decode) from an array's
+    /// `.toString()` (comma-join). Elements are logically `u8`.
+    Bytes,
     /// A native hash-table-backed `Map<K, V>`. `K` must be `F64` or `Str`
     /// (SameValueZero-equal numbers or content-equal strings) -- there is
     /// no reference-identity hashing for object/array keys, since nothing
