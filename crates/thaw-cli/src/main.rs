@@ -8,11 +8,14 @@ mod module_graph;
 include!("compat.rs");
 include!("node_compat.rs");
 
+const USAGE: &str = "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => println!("thaw {}", env!("CARGO_PKG_VERSION")),
+        Some("--help" | "-h") => println!("{USAGE}"),
         Some("build") => {
             if let Err(err) = run_build(&args[2..]) {
                 eprintln!("error: {err}");
@@ -74,9 +77,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!(
-                "usage: thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]"
-            );
+            eprintln!("{USAGE}");
             std::process::exit(1);
         }
     }
