@@ -30,6 +30,7 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
         if !matches!(expected, "matched" | "unsupported" | "failed") {
             return Err(format!("case `{name}` has invalid expectation `{expected}`"));
         }
+        let expected_exit_code = case.get("exitCode").and_then(serde_json::Value::as_i64);
         let source = case["source"]
             .as_str()
             .ok_or_else(|| format!("case `{name}` is missing `source`"))?;
@@ -59,7 +60,10 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
             EXECUTION_TIMEOUT,
         )
             .map_err(|error| format!("failed to run Node.js: {error}"))?;
-        if !node.status.success() && expected != "failed" {
+        if !node.status.success()
+            && expected != "failed"
+            && node.status.code().map(i64::from) != expected_exit_code
+        {
             reference_errors += 1;
             results.push(serde_json::json!({
                 "name": name,
@@ -98,13 +102,15 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
             .and_then(|output| output.status.code())
             .map(i64::from);
         let (actual, detail) = match outcome {
+            Ok(thaw)
+                if thaw.status.code() == node.status.code() && thaw.stdout == node.stdout =>
+            {
+                ("matched", None)
+            }
             Ok(thaw) if !node.status.success() && !thaw.status.success() => (
                 "failed",
                 Some(String::from_utf8_lossy(&thaw.stderr).trim().to_string()),
             ),
-            Ok(thaw) if node.status.success() && thaw.status.success() && thaw.stdout == node.stdout => {
-                ("matched", None)
-            }
             Ok(thaw) if thaw.status.success() => (
                 "unsupported",
                 Some(format!(
@@ -125,7 +131,6 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
                 .as_deref()
                 .is_some_and(|detail| detail.contains(expected))
         });
-        let expected_exit_code = case.get("exitCode").and_then(serde_json::Value::as_i64);
         let exit_code_matches = expected_exit_code.is_none_or(|expected| {
             node.status.code().map(i64::from) == Some(expected) && thaw_exit_code == Some(expected)
         });
