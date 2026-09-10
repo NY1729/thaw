@@ -5,6 +5,7 @@ use std::os::raw::{c_char, c_void};
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use thaw_runtime as _;
@@ -18,11 +19,31 @@ unsafe extern "C" {
     ) -> u64;
     fn thaw_runtime_unwatch_fd(id: u64) -> bool;
     fn thaw_runtime_run_one_event() -> bool;
+    /// Registers a timer promise that settles after at least `milliseconds`.
+    /// Used here only to bound how long the event loop blocks in `poll`, so
+    /// the connection-deadline sweep runs on time.
+    fn thaw_sleep_ms(milliseconds: u64) -> *mut c_void;
+    fn thaw_promise_destroy(promise: *mut c_void);
 }
 
 const THAW_FD_READABLE: u8 = 1;
 const THAW_FD_WRITABLE: u8 = 2;
 const MAX_REQUEST_HEAD: usize = 64 * 1024;
+
+/// How long a connection may take to send a complete request head (and,
+/// between requests on a kept-alive connection, how long it may sit idle
+/// before the next one) before the server closes it. Mirrors the purpose
+/// of Node's `headersTimeout` / `keepAliveTimeout`. Overridable for
+/// tests via `THAW_HTTP_HEADER_TIMEOUT_MS`.
+fn header_timeout() -> Duration {
+    static MS: OnceLock<u64> = OnceLock::new();
+    Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("THAW_HTTP_HEADER_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(60_000)
+    }))
+}
 
 fn string_from_ptr(value: *const c_char) -> String {
     if value.is_null() {
@@ -697,6 +718,54 @@ struct ConnectionState {
     /// queued: the next time `response` fully drains, the connection
     /// moves on to the keep-alive-or-close decision.
     response_ended: bool,
+    /// When set, the point by which the client must have sent a complete
+    /// request head (or, on a kept-alive connection, its next request):
+    /// `thaw_http_run_servers` closes the connection once it passes.
+    /// Cleared while a handler is actually running or a response is
+    /// streaming -- those phases are bounded by the handler, not by this
+    /// read-side timeout.
+    head_deadline: Option<Instant>,
+}
+
+/// Live `ConnectionState` box addresses, so `thaw_http_run_servers` can
+/// sweep for ones whose `head_deadline` has passed. Entries are added by
+/// `register_connection` and removed by `finish_connection`.
+fn tracked_connections() -> &'static Mutex<Vec<usize>> {
+    static CONNECTIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+    CONNECTIONS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn track_connection(connection: *const ConnectionState) {
+    tracked_connections()
+        .lock()
+        .unwrap()
+        .push(connection as usize);
+}
+
+fn untrack_connection(connection: *const ConnectionState) {
+    let address = connection as usize;
+    tracked_connections()
+        .lock()
+        .unwrap()
+        .retain(|tracked| *tracked != address);
+}
+
+/// Closes every tracked connection whose `head_deadline` has passed, and
+/// returns the earliest still-pending deadline (so the caller can bound
+/// how long it blocks before sweeping again).
+fn sweep_idle_connections() -> Option<Instant> {
+    let now = Instant::now();
+    let tracked: Vec<usize> = tracked_connections().lock().unwrap().clone();
+    let mut next = None::<Instant>;
+    for address in tracked {
+        let connection = unsafe { &mut *(address as *mut ConnectionState) };
+        match connection.head_deadline {
+            Some(deadline) if deadline <= now => finish_connection(connection),
+            Some(deadline) => next = Some(next.map_or(deadline, |current| current.min(deadline))),
+            None => {}
+        }
+    }
+    next
 }
 
 fn register_server(state: *const ServerState) {
@@ -707,11 +776,38 @@ fn register_server(state: *const ServerState) {
     }
 }
 
+/// Keeps a short timer promise alive so the event loop's `poll` never
+/// blocks longer than `cap` while a connection deadline is pending --
+/// without it, an idle watched socket would block `poll` indefinitely
+/// and `sweep_idle_connections` would never run. Recreated (and the old
+/// one destroyed) each call; passing `None` just clears it.
+fn arm_idle_wakeup(next_deadline: Option<Instant>) {
+    thread_local! {
+        static IDLE_TIMER: std::cell::Cell<*mut c_void> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+    }
+    IDLE_TIMER.with(|timer| {
+        let existing = timer.replace(std::ptr::null_mut());
+        if !existing.is_null() {
+            unsafe { thaw_promise_destroy(existing) };
+        }
+        let Some(deadline) = next_deadline else {
+            return;
+        };
+        let cap = Duration::from_millis(250);
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .min(cap)
+            .max(Duration::from_millis(1));
+        timer.set(unsafe { thaw_sleep_ms(wait.as_millis() as u64) });
+    });
+}
+
 /// Drives all listeners registered by `Server.listen`. Generated native entry
 /// points call this after the user's main function has returned.
 #[no_mangle]
 pub extern "C" fn thaw_http_run_servers() {
     loop {
+        arm_idle_wakeup(sweep_idle_connections());
         {
             let mut servers = active_servers().lock().unwrap();
             servers.retain(|address| {
@@ -742,10 +838,12 @@ pub extern "C" fn thaw_http_run_servers() {
                 }
             });
             if servers.is_empty() && ACTIVE_CONNECTIONS.load(Ordering::Acquire) == 0 {
+                arm_idle_wakeup(None);
                 return;
             }
         }
         if !unsafe { thaw_runtime_run_one_event() } {
+            arm_idle_wakeup(None);
             return;
         }
     }
@@ -863,6 +961,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         response_ctx: std::ptr::null_mut(),
         streaming: false,
         response_ended: false,
+        head_deadline: Some(Instant::now() + header_timeout()),
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -877,6 +976,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         return;
     }
     unsafe { (*connection).watcher = watcher };
+    track_connection(connection);
     ACTIVE_CONNECTIONS.fetch_add(1, Ordering::AcqRel);
     server.connections.fetch_add(1, Ordering::AcqRel);
 }
@@ -990,6 +1090,10 @@ fn read_request(connection: &mut ConnectionState) -> bool {
                         (method, target, keep_alive)
                     };
                     let callback = unsafe { &*connection.server }.callback as *const c_void;
+                    // The head is in: the read-side timeout no longer
+                    // applies -- the handler (and any streaming response)
+                    // bounds its own lifetime from here.
+                    connection.head_deadline = None;
                     // Set before running the handler: an `async` handler
                     // that suspends won't return through here, and
                     // `finish_response` needs the negotiated value when it
@@ -1077,6 +1181,9 @@ fn write_response(connection: &mut ConnectionState) {
         connection.awaiting_handler = false;
         connection.streaming = false;
         connection.response_ended = false;
+        // Waiting for the next request now: the read-side timeout applies
+        // again (doubling as a keep-alive idle timeout).
+        connection.head_deadline = Some(Instant::now() + header_timeout());
         rewatch_connection(connection, THAW_FD_READABLE);
         return;
     }
@@ -1108,6 +1215,7 @@ fn rewatch_connection(connection: &mut ConnectionState, interests: u8) {
 }
 
 fn finish_connection(connection: &mut ConnectionState) {
+    untrack_connection(connection);
     free_response_context(connection);
     if connection.watcher != 0 {
         unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
