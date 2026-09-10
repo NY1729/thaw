@@ -95,31 +95,82 @@ fn handle_stream(
     Ok(target)
 }
 
-fn render_response(response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
-    let reason = match response_spec.status {
+fn status_reason(status: u16) -> &'static str {
+    match status {
         201 => "Created",
         204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
         500 => "Internal Server Error",
         _ => "OK",
-    };
-    let mut response = format!("HTTP/1.1 {} {}\r\n", response_spec.status, reason);
-    for (name, value) in response_spec.headers {
-        response.push_str(&name.replace(['\r', '\n'], ""));
-        response.push_str(": ");
-        response.push_str(&value.replace(['\r', '\n'], ""));
-        response.push_str("\r\n");
     }
-    response.push_str(&format!(
-        "Content-Length: {}\r\nConnection: {}\r\n\r\n",
-        response_spec.body.len(),
-        if keep_alive { "keep-alive" } else { "close" }
-    ));
-    let mut response = response.into_bytes();
+}
+
+fn render_head(
+    status: u16,
+    headers: &[(String, String)],
+    framing: &str,
+    keep_alive: bool,
+) -> String {
+    let mut head = format!("HTTP/1.1 {} {}\r\n", status, status_reason(status));
+    for (name, value) in headers {
+        head.push_str(&name.replace(['\r', '\n'], ""));
+        head.push_str(": ");
+        head.push_str(&value.replace(['\r', '\n'], ""));
+        head.push_str("\r\n");
+    }
+    head.push_str(framing);
+    head.push_str(if keep_alive {
+        "Connection: keep-alive\r\n\r\n"
+    } else {
+        "Connection: close\r\n\r\n"
+    });
+    head
+}
+
+fn render_response(response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
+    let framing = format!("Content-Length: {}\r\n", response_spec.body.len());
+    let mut response = render_head(
+        response_spec.status,
+        &response_spec.headers,
+        &framing,
+        keep_alive,
+    )
+    .into_bytes();
     response.extend(response_spec.body);
     response
 }
+
+/// The status line + headers for a response whose body is streamed as it
+/// is produced: `Transfer-Encoding: chunked` since the total length
+/// isn't known when the head goes out. Any caller-set `Content-Length`
+/// is dropped (it would contradict the chunked framing).
+fn render_streaming_head(status: u16, headers: &[(String, String)], keep_alive: bool) -> Vec<u8> {
+    let headers: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"))
+        .cloned()
+        .collect();
+    render_head(
+        status,
+        &headers,
+        "Transfer-Encoding: chunked\r\n",
+        keep_alive,
+    )
+    .into_bytes()
+}
+
+/// One `Transfer-Encoding: chunked` chunk: `<hex len>\r\n<bytes>\r\n`.
+/// A zero-length payload would frame the terminating chunk, so callers
+/// skip empty writes rather than routing them here.
+fn frame_chunk(payload: &[u8]) -> Vec<u8> {
+    let mut chunk = format!("{:x}\r\n", payload.len()).into_bytes();
+    chunk.extend_from_slice(payload);
+    chunk.extend_from_slice(b"\r\n");
+    chunk
+}
+
+const CHUNKED_TERMINATOR: &[u8] = b"0\r\n\r\n";
 
 /// Invokes a Thaw closure with the request target and uses its returned string
 /// as the response body. A closure is `[code pointer][captures...]`; generated
@@ -188,8 +239,15 @@ struct RequestContext {
     /// to the connection because the handler suspended. `finish_response`
     /// checks it *before* touching `connection`, so the synchronous path
     /// (where the caller still holds `&mut ConnectionState`) never
-    /// aliases it.
+    /// aliases it. Also gates streaming: a `response.write(...)` only
+    /// streams once the handler has suspended at least once (before that
+    /// the whole response is still buffered and sent with a real
+    /// `Content-Length`, which no observer can tell from streaming since
+    /// the handler hasn't yielded).
     resumable: bool,
+    /// Set once the chunked response head has been queued -- from then on
+    /// every `write`/`end` frames a chunk instead of buffering.
+    headers_sent: bool,
     state: ResponseState,
     response: ServerResponse,
     request: IncomingMessage,
@@ -208,6 +266,7 @@ impl RequestContext {
         let mut context = Box::new(RequestContext {
             connection,
             resumable: false,
+            headers_sent: false,
             state: ResponseState {
                 headers: Vec::new(),
                 body: Vec::new(),
@@ -277,10 +336,17 @@ unsafe extern "C" fn response_set_header(
 }
 
 unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_char) -> bool {
-    request_context(environment)
-        .state
-        .body
-        .extend(string_from_ptr(chunk).as_bytes());
+    let context = request_context(environment);
+    let bytes = string_from_ptr(chunk).into_bytes();
+    if stream_should_engage(context) {
+        stream_write(context, &bytes);
+    } else {
+        // Still in the handler's synchronous burst (or a one-shot helper
+        // with no event loop): buffer, and let the `Content-Length` path
+        // send the whole thing -- nothing has observed a partial
+        // response, so this is indistinguishable from streaming.
+        context.state.body.extend(bytes);
+    }
     true
 }
 
@@ -292,8 +358,7 @@ unsafe extern "C" fn response_end_encoded(
     let content = string_from_ptr(content);
     let context = request_context(environment);
     if string_from_ptr(encoding) != "hex" {
-        context.state.body.extend(content.as_bytes());
-        finish_response(context);
+        stream_or_buffer_end(context, content.into_bytes());
         return true;
     }
     if !content.len().is_multiple_of(2) {
@@ -306,15 +371,113 @@ unsafe extern "C" fn response_end_encoded(
     let Ok(decoded) = decoded else {
         return false;
     };
-    context.state.body.extend(decoded);
-    finish_response(context);
+    stream_or_buffer_end(context, decoded);
     true
 }
 
 unsafe extern "C" fn response_end(environment: *const c_void, chunk: *const c_char) -> bool {
     let context = request_context(environment);
-    context.state.body.extend(string_from_ptr(chunk).as_bytes());
-    finish_response(context);
+    stream_or_buffer_end(context, string_from_ptr(chunk).into_bytes());
+    true
+}
+
+/// Whether a `response.write(...)` on `context` should stream directly
+/// onto the socket rather than buffer. Only once the handler has
+/// suspended at least once (`resumable`) and this context owns a real
+/// connection: before that the whole response is still gathered and sent
+/// with a `Content-Length`, which no client can distinguish from a
+/// stream since the handler hasn't yielded.
+fn stream_should_engage(context: &RequestContext) -> bool {
+    context.resumable && !context.connection.is_null()
+}
+
+/// Builds the bytes for one streamed `write`: the chunked response head
+/// the first time (plus any bytes the handler buffered before it first
+/// suspended, as the leading chunk), then `payload` as its own chunk.
+fn stream_head_and_chunk(context: &mut RequestContext, payload: &[u8]) -> Vec<u8> {
+    let mut outbound = Vec::new();
+    if !context.headers_sent {
+        context.headers_sent = true;
+        let keep_alive = unsafe { (*context.connection).keep_alive };
+        outbound.extend(render_streaming_head(
+            normalize_status(context.response.status_code),
+            &context.state.headers,
+            keep_alive,
+        ));
+        let pending = std::mem::take(&mut context.state.body);
+        if !pending.is_empty() {
+            outbound.extend(frame_chunk(&pending));
+        }
+    }
+    if !payload.is_empty() {
+        outbound.extend(frame_chunk(payload));
+    }
+    outbound
+}
+
+fn stream_write(context: &mut RequestContext, payload: &[u8]) {
+    let outbound = stream_head_and_chunk(context, payload);
+    let connection = unsafe { &mut *context.connection };
+    connection.streaming = true;
+    connection.awaiting_handler = false;
+    queue_and_flush(connection, outbound);
+}
+
+/// `response.end(tail)`. If the response is already streaming (a
+/// `write` happened), or a `write` happened before the handler suspended
+/// and it's now ending without another `write`, finish it as a stream:
+/// final chunk (if any) then the terminating `0\r\n\r\n`. Otherwise the
+/// whole body is in hand and goes out buffered with a `Content-Length`
+/// (`finish_response` handles the synchronous vs parked-async split).
+fn stream_or_buffer_end(context: &mut RequestContext, tail: Vec<u8>) {
+    let force_stream = stream_should_engage(context) && !context.state.body.is_empty();
+    if !context.headers_sent && !force_stream {
+        context.state.body.extend(tail);
+        finish_response(context);
+        return;
+    }
+    let mut outbound = stream_head_and_chunk(context, &tail);
+    outbound.extend_from_slice(CHUNKED_TERMINATOR);
+    context.state.ended = true;
+    let connection = unsafe { &mut *context.connection };
+    connection.streaming = true;
+    connection.awaiting_handler = false;
+    connection.response_ended = true;
+    queue_and_flush(connection, outbound);
+}
+
+fn queue_and_flush(connection: &mut ConnectionState, mut bytes: Vec<u8>) {
+    connection.response.append(&mut bytes);
+    write_response(connection);
+}
+
+/// Parks a suspended `async` handler's context on the connection. If the
+/// handler already wrote bytes before suspending, the chunked stream
+/// begins with them now: Node flushes an early `response.write(...)`
+/// immediately, so holding those bytes until the handler resumes would
+/// add its whole `await` to the client's wait for the first byte.
+/// Returns whether there is now output for `write_response` to flush.
+fn park_pending_context(
+    connection: &mut ConnectionState,
+    context: *mut RequestContext,
+    keep_alive: bool,
+) -> bool {
+    connection.response_ctx = context;
+    let context = unsafe { &mut *context };
+    if context.state.body.is_empty() {
+        connection.awaiting_handler = true;
+        return false;
+    }
+    context.headers_sent = true;
+    connection.streaming = true;
+    let mut head = render_streaming_head(
+        normalize_status(context.response.status_code),
+        &context.state.headers,
+        keep_alive,
+    );
+    head.extend(frame_chunk(&std::mem::take(&mut context.state.body)));
+    connection.response = head;
+    connection.written = 0;
     true
 }
 
@@ -525,6 +688,15 @@ struct ConnectionState {
     /// is in flight (and until the response it produced is fully
     /// written). Null the rest of the time.
     response_ctx: *mut RequestContext,
+    /// True once a `response.write(...)` has begun streaming a chunked
+    /// response directly onto this socket. `response` is then an
+    /// incremental outbound buffer that drains as the socket accepts it,
+    /// rather than a whole response rendered at once.
+    streaming: bool,
+    /// True once the streamed response's terminating chunk has been
+    /// queued: the next time `response` fully drains, the connection
+    /// moves on to the keep-alive-or-close decision.
+    response_ended: bool,
 }
 
 fn register_server(state: *const ServerState) {
@@ -689,6 +861,8 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         keep_alive: false,
         awaiting_handler: false,
         response_ctx: std::ptr::null_mut(),
+        streaming: false,
+        response_ended: false,
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -714,6 +888,15 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
         // `response.end(...)` re-arms this connection for writing. Any
         // socket event now (including the client hanging up) is left for
         // that path to notice.
+        return;
+    }
+    if connection.streaming && !connection.response_ended {
+        // Mid-stream: flush whatever chunk bytes are queued. A readable
+        // event here (pipelined bytes, half-close) is ignored until the
+        // handler produces the next chunk or ends the response.
+        if !connection.response.is_empty() {
+            write_response(connection);
+        }
         return;
     }
     if connection.response.is_empty() && !read_request(connection) {
@@ -823,9 +1006,7 @@ fn read_request(connection: &mut ConnectionState) -> bool {
                             return true;
                         }
                         CallbackOutcome::Pending(context) => {
-                            connection.response_ctx = context;
-                            connection.awaiting_handler = true;
-                            return false;
+                            return park_pending_context(connection, context, keep_alive);
                         }
                     }
                 }
@@ -860,6 +1041,16 @@ fn write_response(connection: &mut ConnectionState) {
             }
         }
     }
+    if connection.streaming && !connection.response_ended {
+        // A streamed response with more chunks still to come: everything
+        // queued so far is on the wire, so drop it and wait (idle, armed
+        // only for readable so the socket isn't spuriously "writable")
+        // for the handler's next `write`/`end`.
+        connection.response.clear();
+        connection.written = 0;
+        rewatch_connection(connection, THAW_FD_READABLE);
+        return;
+    }
     if connection.keep_alive {
         // Reuse the connection instead of closing it: reset the
         // per-request fields and re-arm for another request's head,
@@ -884,6 +1075,8 @@ fn write_response(connection: &mut ConnectionState) {
         connection.response.clear();
         connection.written = 0;
         connection.awaiting_handler = false;
+        connection.streaming = false;
+        connection.response_ended = false;
         rewatch_connection(connection, THAW_FD_READABLE);
         return;
     }
