@@ -327,7 +327,7 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
     std::fs::write(
             &source,
             format!(
-                "function main(): void {{ const result: Json = writeSnapshot({watched_literal}, {snapshot_literal}, {{ backend: \"inotify\" }}); console.log(\"snapshot-created\"); }}\n"
+                "async function main(): Promise<void> {{ const result: string = await writeSnapshot({watched_literal}, {snapshot_literal}, {{ backend: \"inotify\" }}); console.log(\"snapshot-created\"); }}\n"
             ),
         )
         .unwrap();
