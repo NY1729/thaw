@@ -1,4 +1,6 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
+    // ponytail: native Promise rejections currently cross a string ABI; remove
+    // callbackifyReason's falsy decoding when that channel preserves JS values.
     match name {
         "util" => Some(
             "var inspectCustom = Symbol.for('nodejs.util.inspect.custom');\n\
@@ -45,9 +47,11 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20Object.setPrototypeOf(wrapped, Object.getPrototypeOf(original)); return wrapped;\n\
              }\n\
              promisify.custom = promisifyCustom;\n\
+             function callbackifyError(reason) { var error = new Error('Promise was rejected with falsy value'); error.code = 'ERR_FALSY_VALUE_REJECTION'; error.reason = reason; return error; }\n\
+             function callbackifyReason(error) { if (!error) return callbackifyError(error); if (error instanceof Error && error.code === undefined) { var reasons = { '': '', '0': 0, 'false': false, 'null': null, 'undefined': undefined, 'NaN': NaN }; if (Object.prototype.hasOwnProperty.call(reasons, error.message)) return callbackifyError(reasons[error.message]); } return error; }\n\
              function callbackify(original) {\n\
              \x20\x20if (typeof original !== 'function') throw new TypeError('original must be a function');\n\
-             \x20\x20return function() { var args = Array.prototype.slice.call(arguments); var callback = args.pop(); if (typeof callback !== 'function') throw new TypeError('callback must be a function'); Promise.resolve(original.apply(this, args)).then(function(value) { queueMicrotask(function() { callback(null, value); }); }, function(error) { queueMicrotask(function() { callback(error || new Error('Promise was rejected with a falsy value')); }); }); };\n\
+             \x20\x20return function() { var args = Array.prototype.slice.call(arguments); var callback = args.pop(); if (typeof callback !== 'function') throw new TypeError('callback must be a function'); Promise.resolve(original.apply(this, args)).then(function(value) { queueMicrotask(function() { callback(null, value); }); }, function(error) { queueMicrotask(function() { callback(callbackifyReason(error)); }); }); };\n\
              }\n\
              function deprecate(fn) { return function() { return fn.apply(this, arguments); }; }\n\
              function debuglog(section) { var enabled = String(process.env.NODE_DEBUG || '').toUpperCase().split(/[ ,]+/).indexOf(String(section).toUpperCase()) >= 0; var logger = enabled ? function() { console.error(String(section).toUpperCase() + ' ' + format.apply(null, arguments)); } : function() {}; logger.enabled = enabled; return logger; }\n\
