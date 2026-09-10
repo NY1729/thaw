@@ -345,6 +345,17 @@ impl<'a> FnLowerer<'a> {
                     elements.clone(),
                 ));
             }
+            // A `T | null` / `T | undefined` (`T | null | undefined`)
+            // value flowing into a wider union that already covers every
+            // one of those cases -- e.g. a `.d.ts` overload whose own
+            // return is `string | null` reaching the merged
+            // `string | number | null` signature thaw builds for the
+            // whole function. Re-tag it: test the presence flag, then
+            // `UnionInject` the payload or the absent literal into the
+            // matching slot.
+            if let Some(retagged) = self.retag_nullish_into_union(&actual, elements, &value)? {
+                return Ok(retagged);
+            }
             if matches!(value, HirExpr::ObjectLit(_)) {
                 for (index, member) in elements.iter().enumerate() {
                     if !matches!(member, HirType::Object(_)) {
@@ -473,5 +484,120 @@ impl<'a> FnLowerer<'a> {
             .collect::<Result<Vec<_>, String>>()?;
 
         Ok(HirExpr::ObjectLit(reordered))
+    }
+
+    /// Re-tags an `Optional`/`Nullable`/`Nullish` value into a `Union`
+    /// that already contains its payload type and its absent form(s)
+    /// (`Undefined` / `Null`). Returns `None` when `actual` isn't one of
+    /// those, or the union doesn't fully cover it (so the caller can fall
+    /// through to its existing error).
+    fn retag_nullish_into_union(
+        &self,
+        actual: &HirType,
+        elements: &[HirType],
+        value: &HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let slot = |ty: &HirType| elements.iter().position(|element| element == ty);
+        // (payload type, absent-form arms as (is-none test, injected literal))
+        let (payload, arms): (&HirType, Vec<(HirExpr, HirLit)>) = match actual {
+            HirType::Nullable(payload) => (
+                payload.as_ref(),
+                vec![(
+                    HirExpr::NullableIsNone(
+                        Box::new(HirExpr::Var("__thaw_nullish_retag".into())),
+                        payload.as_ref().clone(),
+                    ),
+                    HirLit::Null,
+                )],
+            ),
+            HirType::Optional(payload) => (
+                payload.as_ref(),
+                vec![(
+                    HirExpr::OptionalIsNone(
+                        Box::new(HirExpr::Var("__thaw_nullish_retag".into())),
+                        payload.as_ref().clone(),
+                    ),
+                    HirLit::Undefined,
+                )],
+            ),
+            HirType::Nullish(payload) => (
+                payload.as_ref(),
+                vec![
+                    (
+                        HirExpr::NullishIsNull(
+                            Box::new(HirExpr::Var("__thaw_nullish_retag".into())),
+                            payload.as_ref().clone(),
+                        ),
+                        HirLit::Null,
+                    ),
+                    (
+                        HirExpr::NullishIsUndefined(
+                            Box::new(HirExpr::Var("__thaw_nullish_retag".into())),
+                            payload.as_ref().clone(),
+                        ),
+                        HirLit::Undefined,
+                    ),
+                ],
+            ),
+            _ => return Ok(None),
+        };
+        let Some(payload_slot) = slot(payload) else {
+            return Ok(None);
+        };
+        let mut absent_slots = Vec::with_capacity(arms.len());
+        for (_, literal) in &arms {
+            let absent_ty = match literal {
+                HirLit::Null => HirType::Null,
+                HirLit::Undefined => HirType::Undefined,
+                _ => unreachable!("retag arms only carry Null/Undefined"),
+            };
+            match slot(&absent_ty) {
+                Some(index) => absent_slots.push(index),
+                None => return Ok(None),
+            }
+        }
+
+        let payload_value = match actual {
+            HirType::Nullable(payload) => HirExpr::NullableValue(
+                Box::new(HirExpr::Var("__thaw_nullish_retag".into())),
+                payload.as_ref().clone(),
+            ),
+            HirType::Optional(payload) => HirExpr::OptionalValue(
+                Box::new(HirExpr::Var("__thaw_nullish_retag".into())),
+                payload.as_ref().clone(),
+            ),
+            HirType::Nullish(payload) => HirExpr::NullishValue(
+                Box::new(HirExpr::Var("__thaw_nullish_retag".into())),
+                payload.as_ref().clone(),
+            ),
+            _ => unreachable!(),
+        };
+        let mut statements = Vec::with_capacity(arms.len() + 1);
+        for ((test, literal), absent_slot) in arms.into_iter().zip(absent_slots) {
+            statements.push(HirStmt::If(
+                test,
+                vec![HirStmt::Return(Some(HirExpr::UnionInject(
+                    Box::new(HirExpr::Lit(literal)),
+                    absent_slot,
+                    elements.to_vec(),
+                )))],
+                Vec::new(),
+            ));
+        }
+        statements.push(HirStmt::Return(Some(HirExpr::UnionInject(
+            Box::new(payload_value),
+            payload_slot,
+            elements.to_vec(),
+        ))));
+        let adapter = HirExpr::Lambda(
+            Vec::new(),
+            vec![HirParam {
+                name: "__thaw_nullish_retag".into(),
+                ty: actual.clone(),
+            }],
+            HirType::Union(elements.to_vec()),
+            Box::new(HirExpr::Block(statements)),
+        );
+        Ok(Some(HirExpr::Call(Box::new(adapter), vec![value.clone()])))
     }
 }

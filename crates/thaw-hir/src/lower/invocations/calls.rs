@@ -1043,6 +1043,11 @@ impl<'a> FnLowerer<'a> {
                         | HirType::Tuple(_)
                         | HirType::Object(_)
                         | HirType::Optional(_)
+                        | HirType::Nullable(_)
+                        | HirType::Nullish(_)
+                        | HirType::Union(_)
+                        | HirType::Null
+                        | HirType::Undefined
                 )
             {
                 return self.coerce_primitive_to_string(value);

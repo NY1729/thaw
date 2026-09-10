@@ -51,6 +51,98 @@ impl<'a> FnLowerer<'a> {
             | HirType::Promise(_)
             | HirType::Function(_, _)
             | HirType::CallableFunction(..) => Ok(HirExpr::Lit(HirLit::Bool(true))),
+            // `T | null` / `T | undefined` (`T | null | undefined`):
+            // falsy when absent, otherwise the payload's own truthiness.
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                let param = "__thaw_truthy".to_string();
+                let is_none = match ty {
+                    HirType::Optional(_) => HirExpr::OptionalIsNone(
+                        Box::new(HirExpr::Var(param.clone())),
+                        payload.as_ref().clone(),
+                    ),
+                    HirType::Nullable(_) => HirExpr::NullableIsNone(
+                        Box::new(HirExpr::Var(param.clone())),
+                        payload.as_ref().clone(),
+                    ),
+                    _ => HirExpr::NullishIsNone(
+                        Box::new(HirExpr::Var(param.clone())),
+                        payload.as_ref().clone(),
+                    ),
+                };
+                let payload_value = match ty {
+                    HirType::Optional(_) => HirExpr::OptionalValue(
+                        Box::new(HirExpr::Var(param.clone())),
+                        payload.as_ref().clone(),
+                    ),
+                    HirType::Nullable(_) => HirExpr::NullableValue(
+                        Box::new(HirExpr::Var(param.clone())),
+                        payload.as_ref().clone(),
+                    ),
+                    _ => HirExpr::NullishValue(
+                        Box::new(HirExpr::Var(param.clone())),
+                        payload.as_ref().clone(),
+                    ),
+                };
+                let payload_truthy = self.truthiness_expr(payload_value, payload)?;
+                let adapter = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: param,
+                        ty: ty.clone(),
+                    }],
+                    HirType::Bool,
+                    Box::new(HirExpr::Block(vec![
+                        HirStmt::If(
+                            is_none,
+                            vec![HirStmt::Return(Some(false_lit()))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(payload_truthy)),
+                    ])),
+                );
+                Ok(HirExpr::Call(Box::new(adapter), vec![value]))
+            }
+            // A tagged union: each member contributes its own truthiness.
+            HirType::Union(members) => {
+                let param = "__thaw_union_truthy".to_string();
+                let mut statements = Vec::with_capacity(members.len());
+                for (index, member) in members.iter().enumerate() {
+                    let member_truthy = self.truthiness_expr(
+                        HirExpr::UnionValue(
+                            Box::new(HirExpr::Var(param.clone())),
+                            index,
+                            members.clone(),
+                        ),
+                        member,
+                    )?;
+                    if index + 1 == members.len() {
+                        statements.push(HirStmt::Return(Some(member_truthy)));
+                    } else {
+                        statements.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(
+                                    Box::new(HirExpr::Var(param.clone())),
+                                    members.clone(),
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            vec![HirStmt::Return(Some(member_truthy))],
+                            Vec::new(),
+                        ));
+                    }
+                }
+                let adapter = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: param,
+                        ty: ty.clone(),
+                    }],
+                    HirType::Bool,
+                    Box::new(HirExpr::Block(statements)),
+                );
+                Ok(HirExpr::Call(Box::new(adapter), vec![value]))
+            }
             other => Err(format!(
                 "logical truthiness is not defined for native type {other:?}"
             )),
@@ -341,6 +433,8 @@ impl<'a> FnLowerer<'a> {
                 vec![value],
             )),
             HirType::Json => Ok(HirExpr::JsonAsString(Box::new(value))),
+            HirType::Null => Ok(HirExpr::Lit(HirLit::Str("null".to_string()))),
+            HirType::Undefined => Ok(HirExpr::Lit(HirLit::Str("undefined".to_string()))),
             HirType::Optional(payload) => {
                 let optional_type = HirType::Optional(payload.clone());
                 let name = format!("__thaw_string_optional_{}", self.next_binding);
@@ -359,6 +453,87 @@ impl<'a> FnLowerer<'a> {
                     vec![HirStmt::Return(Some(present))],
                 )]);
                 self.wrap_call_argument_bindings(result, &[(name, optional_type, value)])
+            }
+            HirType::Nullable(payload) => {
+                let nullable_type = HirType::Nullable(payload.clone());
+                let name = format!("__thaw_string_nullable_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), nullable_type.clone());
+                let bound = HirExpr::Var(name.clone());
+                let present = self.coerce_primitive_to_string(HirExpr::NullableValue(
+                    Box::new(bound.clone()),
+                    payload.as_ref().clone(),
+                ))?;
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone()),
+                    vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
+                        "null".to_string(),
+                    ))))],
+                    vec![HirStmt::Return(Some(present))],
+                )]);
+                self.wrap_call_argument_bindings(result, &[(name, nullable_type, value)])
+            }
+            HirType::Nullish(payload) => {
+                let nullish_type = HirType::Nullish(payload.clone());
+                let name = format!("__thaw_string_nullish_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), nullish_type.clone());
+                let bound = HirExpr::Var(name.clone());
+                let present = self.coerce_primitive_to_string(HirExpr::NullishValue(
+                    Box::new(bound.clone()),
+                    payload.as_ref().clone(),
+                ))?;
+                let result = HirExpr::Block(vec![
+                    HirStmt::If(
+                        HirExpr::NullishIsNull(Box::new(bound.clone()), payload.as_ref().clone()),
+                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
+                            "null".to_string(),
+                        ))))],
+                        Vec::new(),
+                    ),
+                    HirStmt::If(
+                        HirExpr::NullishIsUndefined(Box::new(bound), payload.as_ref().clone()),
+                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
+                            "undefined".to_string(),
+                        ))))],
+                        vec![HirStmt::Return(Some(present))],
+                    ),
+                ]);
+                self.wrap_call_argument_bindings(result, &[(name, nullish_type, value)])
+            }
+            HirType::Union(members) => {
+                let union_type = HirType::Union(members.clone());
+                let name = format!("__thaw_string_union_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), union_type.clone());
+                let mut statements = Vec::with_capacity(members.len());
+                for index in 0..members.len() {
+                    let part = self.coerce_primitive_to_string(HirExpr::UnionValue(
+                        Box::new(HirExpr::Var(name.clone())),
+                        index,
+                        members.clone(),
+                    ))?;
+                    if index + 1 == members.len() {
+                        statements.push(HirStmt::Return(Some(part)));
+                    } else {
+                        statements.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(
+                                    Box::new(HirExpr::Var(name.clone())),
+                                    members.clone(),
+                                )),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            vec![HirStmt::Return(Some(part))],
+                            Vec::new(),
+                        ));
+                    }
+                }
+                self.wrap_call_argument_bindings(
+                    HirExpr::Block(statements),
+                    &[(name, union_type, value)],
+                )
             }
             HirType::Object(fields) => {
                 // A class extending `Error`/`TypeError`/etc. (see
