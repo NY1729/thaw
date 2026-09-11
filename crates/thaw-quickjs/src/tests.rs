@@ -1117,6 +1117,109 @@ fn crypto_key_object_and_secret_key_support_hmac_normalization() {
     );
 }
 
+/// `Intl.DateTimeFormat` -- the practical, English/Latin-numeral-only
+/// polyfill (`docs/design/intl-polyfill.md`) added for real luxon, whose
+/// entire timezone system is built on exactly this shape (real luxon's
+/// own `IANAZone.offset()`: `new Intl.DateTimeFormat("en-US", {hour12:
+/// false, timeZone, year:"numeric", month:"2-digit", day:"2-digit",
+/// hour:"2-digit", minute:"2-digit", second:"2-digit",
+/// era:"short"}).formatToParts(date)`, deriving the UTC offset by
+/// diffing the reported *local* fields against the real timestamp).
+/// Covers a real DST-transition zone (`America/New_York`, one summer +
+/// one winter date -- confirming `jiff`'s bundled tzdata, not a
+/// hand-rolled DST rule, actually drives this) and a fixed-offset zone
+/// (`Asia/Tokyo`), every field style `.formatToParts` renders, and the
+/// `h11`/`h12`/`h23`/`h24` hour-padding quirk (confirmed against real
+/// Node: `hourCycle` `h23`/`h24` always zero-pads even under the
+/// `'numeric'` style, unlike `h11`/`h12`).
+#[test]
+fn intl_date_time_format_matches_real_node_for_every_field_and_style_luxon_uses() {
+    assert_eq!(
+        load(
+            "function ianaZoneOffsetShape() {\n\
+               const summer = new Date('2024-07-04T16:30:45.000Z');\n\
+               const winter = new Date('2024-01-04T16:30:45.000Z');\n\
+               const dtf = new Intl.DateTimeFormat('en-US', { hour12: false, timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', era: 'short' });\n\
+               return [dtf.format(summer), dtf.format(winter)];\n\
+             }\n\
+             function fixedOffsetZone() {\n\
+               const date = new Date('2024-07-04T16:30:45.000Z');\n\
+               return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', timeZoneName: 'short', timeZone: 'Asia/Tokyo' }).format(date);\n\
+             }\n\
+             function fieldStyles() {\n\
+               const date = new Date('2024-07-04T16:30:45.000Z');\n\
+               const opts = (o) => new Intl.DateTimeFormat('en-US', { ...o, timeZone: 'UTC' }).format(date);\n\
+               return [\n\
+                 opts({ weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }),\n\
+                 opts({ year: 'numeric', month: 'short', day: 'numeric', weekday: 'short' }),\n\
+                 opts({ hour: 'numeric', hourCycle: 'h12' }),\n\
+                 opts({ hour: 'numeric', minute: 'numeric', hourCycle: 'h23' }),\n\
+               ];\n\
+             }\n\
+             function invalidZoneThrows() {\n\
+               try { new Intl.DateTimeFormat('en-US', { timeZone: 'Not/AReal' }); return 'no-throw'; }\n\
+               catch (error) { return error instanceof RangeError; }\n\
+             }\n\
+             function defaultsToUtc() {\n\
+               return new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone;\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("ianaZoneOffsetShape", "[]"),
+        r#"["07/04/2024 AD, 12:30:45","01/04/2024 AD, 11:30:45"]"#
+    );
+    assert_eq!(call("fixedOffsetZone", "[]"), r#""1:30:45 AM JST""#);
+    assert_eq!(
+        call("fieldStyles", "[]"),
+        r#"["Thursday, July 4, 2024","Thu, Jul 4, 2024","4 PM","16:30"]"#
+    );
+    assert_eq!(call("invalidZoneThrows", "[]"), "true");
+    assert_eq!(call("defaultsToUtc", "[]"), r#""UTC""#);
+}
+
+/// `Intl.NumberFormat`/`Intl.ListFormat` -- covers `PolyNumberFormatter`'s
+/// actual usage (plain grouping/padding), the `style: 'unit'` shape real
+/// luxon's own `Duration.toHuman()` uses (found while getting luxon's
+/// `.toHuman()` itself to match real Node -- the initial, narrower plan
+/// only anticipated the plain-decimal shape), and `Intl.ListFormat`'s
+/// conjunction/disjunction joining across 1/2/3+ items.
+#[test]
+fn intl_number_format_and_list_format_match_real_node() {
+    assert_eq!(
+        load(
+            "function paddedNoGrouping() {\n\
+               const nf = new Intl.NumberFormat('en-US', { useGrouping: false, minimumIntegerDigits: 2 });\n\
+               return [nf.format(5), nf.format(1234)];\n\
+             }\n\
+             function defaultGrouping() {\n\
+               return new Intl.NumberFormat('en-US').format(1234567.891);\n\
+             }\n\
+             function unitDurations() {\n\
+               const of = (n, unit, unitDisplay) => new Intl.NumberFormat('en-US', { style: 'unit', unit, unitDisplay }).format(n);\n\
+               return [of(3, 'day', 'long'), of(1, 'day', 'long'), of(3, 'hour', 'short'), of(3, 'year', 'short'), of(3, 'day', 'narrow')];\n\
+             }\n\
+             function lists() {\n\
+               const lf = new Intl.ListFormat('en-US');\n\
+               const disjunction = new Intl.ListFormat('en-US', { type: 'disjunction' });\n\
+               return [lf.format(['a']), lf.format(['a', 'b']), lf.format(['a', 'b', 'c']), disjunction.format(['a', 'b', 'c'])];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(call("paddedNoGrouping", "[]"), r#"["05","1234"]"#);
+    assert_eq!(call("defaultGrouping", "[]"), r#""1,234,567.891""#);
+    assert_eq!(
+        call("unitDurations", "[]"),
+        r#"["3 days","1 day","3 hr","3 yrs","3d"]"#
+    );
+    assert_eq!(
+        call("lists", "[]"),
+        r#"["a","a and b","a, b, and c","a, b, or c"]"#
+    );
+}
+
 #[test]
 fn retains_and_calls_a_callable_javascript_value() {
     assert_eq!(

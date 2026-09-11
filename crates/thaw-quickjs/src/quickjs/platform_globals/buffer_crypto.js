@@ -399,4 +399,3 @@
   cryptoModule.webcrypto = webCrypto;
   cryptoModule.subtle = webCrypto.subtle;
   globalThis.__thaw_crypto_module = cryptoModule;
-})();
