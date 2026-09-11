@@ -1951,17 +1951,26 @@ function main(): void {
 /// for the synthetic, network-free regression test and full root-cause
 /// writeup.
 ///
-/// Deliberately its own test, not combined with the streaming test
-/// below in one file: importing `csv-parse` and `csv-parse/sync`
-/// together, each providing a same-named bare top-level `parse`
-/// function (one aliased, one not), was found to compile *inconsistently
-/// depending on `--use` order* -- one order builds and runs correctly,
-/// the other silently miscompiles a later call's argument type
-/// ("argument 1 ... expected JsValue" against a value that was actually
-/// the *other* package's own return value). A real, general, and
-/// separate gap (two different packages exporting a same-named bare
-/// function, order-dependent) -- found while writing exactly this kind
-/// of combined test, not chased down here; noted for a future session.
+/// A separate, real, general gap was found (and then fixed) while
+/// writing an earlier version of this test that combined `csv-parse`
+/// and `csv-parse/sync` in one file: both export a same-named bare
+/// top-level `parse` (one aliased on import, one not), and `class_
+/// methods.rs`'s `rewrite_fallback_function_overloads` matched a bare
+/// `parse(...)` call site against *either* package's own overload
+/// candidates indiscriminately (no awareness of which package the
+/// call's own identifier was actually imported from) -- silently
+/// invoking whichever one happened to score-match best, order-
+/// dependent on `--use` order, rather than the package the user's own
+/// `import { parse } from "..."` actually named. Fixed by tracing a
+/// bare call's identifier back to its own `import { name } from "pkg"`
+/// statement and preferring that package's own qualified-alias
+/// candidate (`{sanitized-package}_{name}`, which every Fallback
+/// function already gets, collision or not) over the ambiguous bare-
+/// name match whenever it's known. See `selects_fallback_function_
+/// overloads_from_the_correct_colliding_package` (`tests/overload_
+/// inference.rs`) for the synthetic, network-free regression test, and
+/// `registry_add_parses_csv_with_both_csv_parse_entry_points_when_
+/// enabled` below for this real package combined end to end.
 #[test]
 fn registry_add_parses_csv_with_real_csv_parse_sync_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -2118,6 +2127,75 @@ function main(): void {
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
         "{\"x\":\"7\",\"y\":\"8\"}\n{\"x\":\"9\",\"y\":\"10\"}\n2\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Both csv-parse entry points together in one file, `--use`d and
+/// imported side by side: `csv-parse/sync`'s `parse` (aliased on
+/// import, `parseSync`) and the main `csv-parse` package's own `parse`
+/// (bare) -- real example of the general, now-fixed bug documented on
+/// `registry_add_parses_csv_with_real_csv_parse_sync_when_enabled`'s own
+/// doc comment (a bare call against a name two different packages both
+/// export used to match whichever package's overload happened to
+/// score-match best, not the one the call's own identifier was actually
+/// imported from). Verified both `--use` orderings build identically
+/// (order no longer matters at all, unlike before this fix) --
+/// `use_packages` here lists `csv-parse` before `csv-parse/sync`
+/// deliberately, the order that most exposed the bug.
+#[test]
+fn registry_add_parses_csv_with_both_csv_parse_entry_points_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-csv-parse-both-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "csv-parse").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { parse as parseSync } from "csv-parse/sync";
+import { parse } from "csv-parse";
+
+function main(): void {
+    const records = parseSync("a,b,c\n1,2,3\n4,5,6\n", { columns: true });
+    console.log(JSON.stringify(records));
+
+    const parser = parse({ columns: true });
+    parser.write("x,y\n7,8\n");
+    parser.end();
+    parser.on("end", function () {
+        console.log("done");
+    });
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["csv-parse".to_string(), "csv-parse/sync".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[{\"a\":\"1\",\"b\":\"2\",\"c\":\"3\"},{\"a\":\"4\",\"b\":\"5\",\"c\":\"6\"}]\ndone\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
