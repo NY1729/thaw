@@ -343,6 +343,71 @@ fn installed_package_inlines_default_reexports() {
 }
 
 #[test]
+fn installed_package_inlines_a_default_reexported_literal_constant() {
+    // `export { default as NIL } from './nil.js'` -- the exact same
+    // barrel shape as `installed_package_inlines_default_reexports`
+    // above, but the target file's own default export is a bare data
+    // *constant*, not a function (real-world uuid's own `dist/nil.d.ts`:
+    // `declare const _default: "00000000-0000-0000-0000-000000000000";
+    // export default _default;`). Previously fell through every case in
+    // the `name == "default"` resolution block (which only ever looked
+    // for a matching `Decl::Fn`), so `NIL`/`MAX` never made it into the
+    // flattened `.d.ts` at all -- "`uuid` has no export named `NIL`" at
+    // build time, even though every function export from the same
+    // package worked fine.
+    let scratch = temp_registry("installed-dts-default-const-reexport-scratch");
+    let registry = temp_registry("installed-dts-default-const-reexport-registry");
+    let package = scratch.join("node_modules/id-kit");
+    fs::create_dir_all(package.join("dist")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"id-kit","version":"1.0.0","types":"./dist/index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/index.d.ts"),
+        "export { default as NIL } from './nil';\nexport { default as MAX } from './max';\nexport { default as v4 } from './v4';",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/nil.d.ts"),
+        "declare const _default: \"00000000-0000-0000-0000-000000000000\";\nexport default _default;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/max.d.ts"),
+        "declare const _default: \"ffffffff-ffff-ffff-ffff-ffffffffffff\";\nexport default _default;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/v4.d.ts"),
+        "declare function v4(options?: unknown): string;\nexport default v4;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { NIL: '00000000-0000-0000-0000-000000000000', MAX: 'ffffffff-ffff-ffff-ffff-ffffffffffff', v4: function() { return 'id'; } };",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "id-kit").unwrap();
+    let declarations = resolve(&registry, "id-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("declare const NIL: \"00000000-0000-0000-0000-000000000000\""),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("declare const MAX: \"ffffffff-ffff-ffff-ffff-ffffffffffff\""),
+        "{declarations}"
+    );
+    // The sibling function-shaped export from the same barrel is
+    // unaffected.
+    assert!(declarations.contains("declare function v4(options?: unknown): string"));
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_named_import_reexports() {
     // `import { Name } from './path'; export { Name };` (ordinary ES
     // import + a *local* re-export, no `from` clause on the export
