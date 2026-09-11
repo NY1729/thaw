@@ -573,3 +573,68 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "[a]\n<b>\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// An interface that `extends` an already-opaque one (an interface
+/// with a bare call signature, or one that itself collapsed via the
+/// "every field is `JsValue`" rule directly above) used to crash
+/// thaw-bridge outright: `resolve_interface`'s own `extends` handling
+/// only expected the base to resolve to `Object`, `Dictionary`, or
+/// `Unsupported` -- `unreachable!("resolve_interface always returns an
+/// Object or Unsupported")` -- never accounting for the opaque
+/// `JsValue` case its own sibling rule can produce. Found via axios:
+/// `interface AxiosInstance extends Axios { <call signatures>; ... }`
+/// (opaque, from its own call signatures) is itself the `extends`
+/// target of `interface AxiosStatic extends AxiosInstance { ... }`.
+/// Fixed generally: an interface extending an opaque base is opaque
+/// too, regardless of what fields it adds of its own -- there's no
+/// concrete `Object` shape to merge inherited fields into.
+#[test]
+fn an_interface_extending_an_opaque_base_stays_opaque_too() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-opaque-extends-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("palette-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Painter { (text: string): string; }\n\
+         export interface Palette { red: Painter; bold: Painter; }\n\
+         export interface RichPalette extends Palette { extra: string; }\n\
+         export declare function makePalette(): RichPalette;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makePalette: function() { return { \
+         red: function(t) { return '[' + t + ']'; }, \
+         bold: function(t) { return '<' + t + '>'; }, \
+         extra: 'more' \
+         }; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makePalette } from "palette-kit";
+function main(): void {
+    const p: JsValue = makePalette();
+    console.log(p.red("a"));
+    console.log(p.bold("b"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "[a]\n<b>\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+

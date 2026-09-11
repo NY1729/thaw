@@ -1294,3 +1294,83 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// axios crashed thaw-bridge outright at build time (not just a
+/// runtime error): `interface AxiosStatic extends AxiosInstance`,
+/// where `AxiosInstance` itself has bare call signatures (making it
+/// opaque per the existing "all-call-signature interface" rule) --
+/// `resolve_interface`'s `extends` handling only expected an `Object`,
+/// `Dictionary`, or `Unsupported` base and hit its own `unreachable!()`
+/// the moment a base resolved to the opaque case instead. Fixed
+/// generally in thaw-bridge: an interface extending an opaque base is
+/// opaque too, regardless of what fields it adds of its own. See
+/// `an_interface_extending_an_opaque_base_stays_opaque_too`
+/// (thaw-bridge, network-free) for the isolated shape; this drives the
+/// real package end to end -- a plain `axios.get`, `axios.create(...)`
+/// building a `baseURL`-scoped instance, and a real network failure
+/// surfacing as a caught JS error, not a crash.
+#[test]
+fn registry_add_fetches_with_real_axios_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-axios-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "axios").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).unwrap();
+            let body = r#"{"ok":true,"n":42}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            conn.write_all(response.as_bytes()).unwrap();
+        }
+    });
+
+    std::fs::write(
+        &source,
+        format!(
+            r#"import axios from "axios";
+async function main(): Promise<void> {{
+    const response = await axios.get("http://127.0.0.1:{port}/data.json");
+    console.log(response.status);
+    console.log(response.data.n);
+    const instance = axios.create({{ baseURL: "http://127.0.0.1:{port}" }});
+    const scoped = await instance.get("/data.json");
+    console.log(scoped.data.ok);
+    try {{
+        await axios.get("http://127.0.0.1:1/nope");
+        console.log("unreachable");
+    }} catch (error: JsValue) {{
+        console.log(typeof error.message);
+    }}
+}}"#
+        ),
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["axios".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    server.join().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "200\n42\ntrue\nstring\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
