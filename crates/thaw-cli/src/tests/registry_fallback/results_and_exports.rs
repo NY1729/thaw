@@ -998,3 +998,72 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A generic Fallback function's type parameter whose only parameter is
+/// *optional* and omitted entirely at the call site -- real example:
+/// yup's own `object<C = AnyObject, S extends ObjectShape = {}>(spec?:
+/// S): ObjectSchema<...>`, called as `yup.object()` with zero
+/// arguments -- had nothing to infer `S` from, no preserved default
+/// (`{}` isn't on `dynamic_declarations.rs`'s conservative reparseable-
+/// syntax whitelist, so it never survives into the generated wrapper's
+/// own type-parameter list), and no preserved constraint (an interface
+/// name like `ObjectShape` isn't on it either) -- `S` ends up bare in
+/// the synthesized declaration, and every call failed outright
+/// ("cannot infer generic type parameter `S` from this call"), even
+/// though a *given* argument (`yup.object({...})`) already worked fine
+/// (that path infers `S` structurally from the object literal). Fixed
+/// generally: `infer_generic_type_tuple` (thaw-hir) now falls back to
+/// `Dynamic` for an ambient (`is_extern`) signature's type parameter
+/// when neither an inferred value, a default, nor a bound is available
+/// -- every Fallback call is fully JSON-marshaled regardless of what
+/// the parameter resolves to statically, and `Dynamic` is already an
+/// accepted resolution elsewhere in this same code path. Scoped to
+/// `is_extern` only, so a real ambiguity in a user's own hand-written
+/// generic function still errors.
+#[test]
+fn a_generic_fallback_functions_only_optional_parameter_can_be_omitted_entirely() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-omitted-optional-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("shapekit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface ObjectShape { [key: string]: any; }\n\
+         export declare function object<S extends ObjectShape = {}>(spec?: S): any;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { object: function(spec) { return spec || { empty: true }; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { object } from "shapekit";
+function main(): void {
+    const bare = object();
+    console.log(JSON.stringify(bare));
+    const given = object({ name: "hi" });
+    console.log(JSON.stringify(given));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "{\"empty\":true}\n{\"name\":\"hi\"}\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
