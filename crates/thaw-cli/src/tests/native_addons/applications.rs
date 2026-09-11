@@ -1180,6 +1180,13 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A real commander program: an action callback whose parameter type is
+/// inferred, *and* a fluent builder chain (`program.name("x")
+/// .description("y").version("z")`). commander's builder methods return
+/// `this`, which used to classify as `HirType::Void` -- so a chained
+/// call hit `unsupported member call target`. A `this` return now
+/// records the enclosing class as its instance-return type (a chainable
+/// `JsValue` handle).
 #[test]
 fn registry_add_infers_a_real_commander_action_callback_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -1199,6 +1206,7 @@ fn registry_add_infers_a_real_commander_action_callback_when_enabled() {
         r#"import { Command } from "commander";
 function main(): void {
     const program = new Command();
+    program.name("greet").description("greeter").version("1.0.0");
     program.argument("<name>");
     program.action((name) => console.log(name));
     program.parse(["node", "app", "Thaw"]);
