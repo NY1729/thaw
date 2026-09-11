@@ -325,6 +325,15 @@ fn resolve_interface(
     let mut fields: Vec<(String, HirType)> = Vec::new();
     let mut dictionary = None;
     let mut failure = None;
+    // Set when an `extends` base itself resolved to one opaque `JsValue`
+    // handle (a bare-call-signature interface, or another interface that
+    // already collapsed this same way -- see the final `result` match's
+    // own "every field opaque" rule below). There's no concrete `Object`
+    // shape to merge inherited fields into in that case, so the whole
+    // derived interface becomes opaque too, regardless of what fields it
+    // adds of its own -- real example: axios's `AxiosStatic extends
+    // AxiosInstance`, where `AxiosInstance` itself has call signatures.
+    let mut base_is_opaque = false;
     'extends: for base in &iface.extends {
         if base.type_args.is_some() {
             failure =
@@ -363,8 +372,11 @@ fn resolve_interface(
                 }
                 dictionary = Some(*element);
             }
+            DtsType::Native(HirType::JsValue) => {
+                base_is_opaque = true;
+            }
             DtsType::Native(_) => {
-                unreachable!("resolve_interface always returns an Object or Unsupported")
+                unreachable!("resolve_interface always returns an Object, a Dictionary, JsValue, or Unsupported")
             }
             DtsType::Unsupported(reason) => {
                 failure = Some(format!("extends unresolvable base `{base_name}`: {reason}"));
@@ -463,16 +475,31 @@ fn resolve_interface(
 
     let result = match failure {
         Some(reason) => DtsType::Unsupported(format!("interface `{name}` {reason}")),
-        // Every field an opaque `JsValue` (an interface whose members are
-        // all bare-call-signature interfaces -- kleur's `interface Kleur {
-        // red: Color; ... }` where `Color` is `{ (x): string }`). A
-        // native `Object` of such fields can't be materialised (a JSON
-        // decode drops the functions), and calling one goes nowhere; the
-        // whole interface is better modelled as one opaque handle so
-        // `value.red(...)` routes through the dynamic host.
+        // An opaque `extends` base (see `base_is_opaque` above) leaves
+        // nothing concrete to combine with, so the whole interface is
+        // opaque too, whatever its own fields look like.
+        None if base_is_opaque => DtsType::Native(HirType::JsValue),
+        // *Any* field an opaque `JsValue` (a method, or a property typed
+        // as a bare-call-signature interface -- kleur's `interface Kleur
+        // { red: Color; ... }` where `Color` is `{ (x): string }`, every
+        // field opaque). A native `Object` decoded from a live JS value
+        // can only ever carry its *data* fields across (a JSON decode
+        // drops any function, whether that's the whole value or just one
+        // field of it) -- fine on its own for a field nothing ever reads
+        // back, but real schema-builder objects (joi's `AnySchema`,
+        // mixing plain data like `_flags: Record<string, any>` with
+        // methods like `.min()`) are live objects whose *methods*
+        // themselves depend on that exact identity (joi's own internal
+        // "Must be invoked on a Joi instance" check) -- reconstructing
+        // even just the data fields from a JSON decode and discarding
+        // the rest silently produces a different, no-longer-callable
+        // object. Once decided opaque, the whole interface is modelled
+        // as one live handle instead, so `value.red(...)` / `schema.min
+        // (...)` alike route through the dynamic host against the real,
+        // original object.
         None if dictionary.is_none()
             && !fields.is_empty()
-            && fields.iter().all(|(_, ty)| *ty == HirType::JsValue) =>
+            && fields.iter().any(|(_, ty)| *ty == HirType::JsValue) =>
         {
             DtsType::Native(HirType::JsValue)
         }
