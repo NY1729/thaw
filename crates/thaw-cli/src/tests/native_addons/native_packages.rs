@@ -149,6 +149,59 @@ fn registry_add_runs_real_p_limit_promise_workload_when_enabled() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `p-queue`'s whole export is `export default class PQueue extends
+/// EventEmitter<EventName> { ... }`. Constructing a `Fallback`
+/// (QuickJS) class resolves its constructor as a JS *global* named
+/// after the class (`thaw_js_get_global`) -- populated, for a *named*
+/// export, by the generic `module.exports` -> `globalThis` copy loop.
+/// A default-exported class's `module.exports` instead *is* the class
+/// itself, so that loop enumerates the class's own static properties,
+/// never a property literally named after the class -- `new PQueue()`
+/// used to fail at run time with `JavaScript value handle N is not a
+/// constructor`. `ModuleBundle::class_names` now binds every package
+/// class's name the same way a default-exported *function* already
+/// was.
+#[test]
+fn registry_add_runs_a_real_p_queue_promise_workload_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-p-queue-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "p-queue@8.1.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import PQueue from "p-queue";
+async function main(): Promise<void> {
+    const queue = new PQueue({ concurrency: 2 });
+    const results = await Promise.all([
+        queue.add(async () => 1),
+        queue.add(async () => 2),
+        queue.add(async () => 3),
+    ]);
+    console.log(results[0] + "," + results[1] + "," + results[2]);
+    console.log(queue.size + " " + queue.pending);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["p-queue".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "1,2,3\n0 0\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_add_builds_and_runs_a_real_esm_package_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {

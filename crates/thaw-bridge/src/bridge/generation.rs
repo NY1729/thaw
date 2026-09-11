@@ -389,6 +389,25 @@ pub struct ModuleBundle<'a> {
     /// `(export_name, runtime_getter, local, typed_getter_symbol)` for
     /// non-callable values captured once after this bundle is loaded.
     pub value_exports: &'a [(String, String, String, String)],
+    /// This package's constructible class names (`pkg.classes`, not just
+    /// the ones reached through a named export). A `new Class(...)`
+    /// construction for the Fallback/QuickJS backend resolves its
+    /// constructor by looking up a JS *global* named after the class
+    /// (`thaw_js_get_global`, `dynamic_host/typed_calls.rs`'s `$new$`
+    /// key) -- which the generic `module.exports` -> `globalThis`
+    /// copy-loop below only ever populates for a *named* export
+    /// (`module.exports = { PQueue }`, where `PQueue` is `module.
+    /// exports`'s own enumerable key). A `export default class PQueue`
+    /// package's `module.exports` instead *is* the class itself (`for
+    /// (var k in module.exports)` then enumerates the class's own static
+    /// properties -- `default`, `__esModule`, real statics -- never a
+    /// property literally named `"PQueue"`), so `globalThis.PQueue` was
+    /// never set and `new PQueue()` failed at run time with `JavaScript
+    /// value handle N is not a constructor` (`N` being whatever
+    /// `thaw_js_get_global` happened to resolve for a name nothing ever
+    /// bound). Bound here the same way `fallback_names` binds a
+    /// default-exported *function*.
+    pub class_names: &'a [String],
 }
 
 /// Wraps a real npm package's CommonJS source so it can run inside
@@ -444,20 +463,24 @@ pub struct ModuleBundle<'a> {
 fn wrap_as_commonjs_module(
     js_source: &str,
     fallback_names: &[String],
+    class_names: &[String],
     nested_namespace_aliases: &[(String, String)],
 ) -> String {
     // `name` is always a valid JS identifier here: it's a function name
     // SWC already parsed out of a `.d.ts` `declare function` statement,
     // not arbitrary text, so splicing it directly as a property-access
-    // identifier (not a bracketed string) is safe.
+    // identifier (not a bracketed string) is safe -- same for a class
+    // name, parsed out of a `declare class` statement.
+    let bind_default_export = |name: &str| {
+        format!(
+            "if (typeof module.exports === 'function' && typeof globalThis.{name} !== 'function') {{ globalThis.{name} = module.exports; }}\n\
+             else if (typeof module.exports === 'object' && module.exports !== null && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n"
+        )
+    };
     let bind_default_exports: String = fallback_names
         .iter()
-        .map(|name| {
-            format!(
-                "if (typeof module.exports === 'function' && typeof globalThis.{name} !== 'function') {{ globalThis.{name} = module.exports; }}\n\
-                 else if (typeof module.exports === 'object' && module.exports !== null && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n"
-            )
-        })
+        .chain(class_names)
+        .map(|name| bind_default_export(name))
         .collect();
     // Captured *here*, inside the same wrapped script that just set
     // `module.exports` (not via a separate, later `loadScript` call the
@@ -603,6 +626,7 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
         let wrapped = wrap_as_commonjs_module(
             bundle.js_source,
             bundle.fallback_names,
+            bundle.class_names,
             bundle.nested_namespace_aliases,
         );
         let wrapped = if bundle.js_source.len() >= 1024 {
