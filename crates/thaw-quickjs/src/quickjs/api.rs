@@ -665,6 +665,21 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
     Ok(index as u64 + 1)
 }
 
+/// Calls a live, retained function *value* (as opposed to a call by global
+/// name, `invoke_impl`, or by method name, `invoke_method`) -- used
+/// whenever the call's own *result* is itself a `JsValue`/handle rather
+/// than JSON data (`thaw_js_call_handle_handle_result`, `invoke_mixed`).
+/// A thrown exception here is just as catchable from compiled Thaw code as
+/// one from any other call convention, so it must be tagged
+/// (`describe_tagged_exception`) too -- real example: jsonwebtoken's own
+/// `verify(token, secret)`, whose 2-argument overload resolves to a
+/// `JwtPayload | string` union return type (so its call goes through this
+/// handle-result convention), reported a caught `JsonWebTokenError`'s
+/// `.name` as plain `"Error"` before this fix, even though the message
+/// ("invalid signature") came through correctly -- `describe_exception`
+/// (the untagged variant) discards `.name` entirely by design, which is
+/// fine for the handful of internal/startup-only call sites that still use
+/// it, but wrong for anything a user `try/catch` can observe.
 fn invoke_raw<'js>(
     ctx: Ctx<'js>,
     target: Function<'js>,
@@ -694,7 +709,7 @@ fn invoke_raw<'js>(
         call_args.push_arg(arg).map_err(|error| error.to_string())?;
     }
     target.call_arg(call_args).map_err(|error| match error {
-        rquickjs::Error::Exception => describe_exception(&ctx),
+        rquickjs::Error::Exception => describe_tagged_exception(&ctx),
         error => error.to_string(),
     })
 }
@@ -736,8 +751,10 @@ unsafe fn invoke_mixed<'js>(
             .push_arg(value_for_handle(&ctx, *handle)?)
             .map_err(|error| error.to_string())?;
     }
+    // See `invoke_raw`'s doc comment -- same call convention (a live
+    // function value, not a call by name), same fix.
     target.call_arg(call_args).map_err(|error| match error {
-        rquickjs::Error::Exception => describe_exception(&ctx),
+        rquickjs::Error::Exception => describe_tagged_exception(&ctx),
         error => error.to_string(),
     })
 }
@@ -808,10 +825,12 @@ pub extern "C" fn thaw_js_construct_handle_result(
             )
             .map_err(|error| error.to_string())?;
         }
+        // See `invoke_raw`'s doc comment -- `new SomeClass(...)` against a
+        // live constructor value is just as catchable as any other call.
         let value: Value = constructor
             .construct_args(args)
             .map_err(|error| match error {
-                rquickjs::Error::Exception => describe_exception(&ctx),
+                rquickjs::Error::Exception => describe_tagged_exception(&ctx),
                 error => error.to_string(),
             })?;
         retain_value(&ctx, value)
@@ -1115,8 +1134,9 @@ pub extern "C" fn thaw_js_call_handle_value_result(handle: u64, argument: u64) -
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         let argument = value_for_handle(&ctx, argument)?;
+        // See `invoke_raw`'s doc comment -- same call convention, same fix.
         let value: Value = target.call((argument,)).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
             error => error.to_string(),
         })?;
         resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"), true)
@@ -1195,8 +1215,9 @@ pub extern "C" fn thaw_js_get_property_result(
     let name = to_str(name);
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
+        // See `invoke_raw`'s doc comment -- a getter can throw too.
         let value = object.get(name.as_str()).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
             error => error.to_string(),
         })?;
         retain_value(&ctx, value)
@@ -1223,10 +1244,11 @@ pub extern "C" fn thaw_js_set_property_result(
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
         let value = value_for_handle(&ctx, value_handle)?;
+        // See `invoke_raw`'s doc comment -- a setter can throw too.
         object
             .set(name.as_str(), value)
             .map_err(|error| match error {
-                rquickjs::Error::Exception => describe_exception(&ctx),
+                rquickjs::Error::Exception => describe_tagged_exception(&ctx),
                 error => error.to_string(),
             })?;
         Ok(1)
@@ -1276,8 +1298,9 @@ pub extern "C" fn thaw_js_set_property_json_result(
             .map_err(|error| error.to_string())?
             .map(|value| value.to_string().unwrap_or_default())
             .unwrap_or_else(|| r#"{"$__thaw_napi_undefined$":true}"#.to_string());
+        // See `invoke_raw`'s doc comment -- a setter can throw too.
         object.set(name.as_str(), value).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
             error => error.to_string(),
         })?;
         Ok(returned)
@@ -1301,8 +1324,12 @@ fn invoke_method<'js>(
     args_json: &str,
 ) -> Result<Value<'js>, String> {
     let object = object_for_handle(ctx, handle)?;
+    // See `invoke_raw`'s doc comment -- a property getter backing this
+    // method lookup can throw too (e.g. a class using an accessor), and
+    // the *call* below already preserves the tag, so the lookup should
+    // match for consistency.
     let method: Function = object.get(name).map_err(|error| match error {
-        rquickjs::Error::Exception => describe_exception(ctx),
+        rquickjs::Error::Exception => describe_tagged_exception(ctx),
         error => error.to_string(),
     })?;
     let json: Object = ctx
