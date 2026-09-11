@@ -81,6 +81,107 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A class with **no public constructor** (real example: luxon's
+/// `DateTime`/`Duration`/`Interval`, each `private constructor(...)`,
+/// built only via static factories like `DateTime.fromISO(...)`) --
+/// exercises three general bugs found and fixed together while getting
+/// real luxon working:
+///
+/// 1. `generate_napi_class_constructors` bails out immediately on
+///    `!class.constructible` (correctly -- `new Clock()` really
+///    shouldn't compile), so a non-constructible class never got a
+///    `class_targets` entry at all -- and every OTHER exported class
+///    name's bare-identifier resolution relies entirely on that entry.
+///    With none, the class name fell back to the type-only `JsValue`
+///    alias every exported class also gets (needed for `let x: Clock`
+///    to type-check) -- fine as a *type*, but using the same name as a
+///    *value* (any non-call use: a static method call's own callee,
+///    reading a static property, ...) failed to build ("unknown
+///    variable"). Fixed by treating such a class like any other named
+///    package value once `class_targets` has nothing for it: bound via
+///    the same `$value$`-keyed runtime-getter mechanism a `Str`/`F64`/
+///    `JsValue` constant export already uses, reading the *real* class
+///    value straight off the bundle's own live JS exports
+///    (`shim_generation.rs`'s `non_constructible_classes`).
+/// 2. A static method call's own receiver (`compile_typed_napi_method`,
+///    `crates/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs`) is looked
+///    up via `thaw_js_get_global` against the class's *plain* name --
+///    nothing had ever bound that bare global for a Fallback
+///    (QuickJS-NG-backed) class before (unlike a real N-API module's
+///    export lookup, a different, already-working mechanism) -- fixed
+///    by also capturing the bare name in `generate_module_init`'s glue,
+///    reusing the exact same read-`module.exports`-with-a-`default`-
+///    fallback expression the `$value$` getter above already uses.
+/// 3. Once the receiver *was* found, its own static methods were still
+///    missing: the generic "copy every `module.exports` property onto
+///    `globalThis`" bootstrap glue `.bind()`s every function-typed
+///    property to preserve `this` for a *stateful namespace object*'s
+///    methods (real example: joi's `Root.string()`) -- but a bound
+///    function is a genuinely different function object carrying none
+///    of the original's own properties, silently dropping every
+///    `static` method a real class has (non-enumerable by spec, so
+///    invisible to a plain property copy too). Fixed by a shared
+///    `__thaw_bind_preserving_statics` helper (`platform_globals/
+///    runtime.js`) that binds *and* copies every own property
+///    descriptor (enumerable or not) from the original onto the bound
+///    wrapper, used everywhere a package export gets `.bind()`-captured.
+#[test]
+fn a_non_constructible_classs_static_methods_and_bare_name_both_work() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-non-constructible-class-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("time-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Clock {\n\
+             private constructor();\n\
+             static fromEpoch(ms: number): Clock;\n\
+             static readonly EPOCH: string;\n\
+             toISOString(): string;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "class Clock {\n\
+             constructor(iso) { this._iso = iso; }\n\
+             static fromEpoch(ms) { return new Clock('epoch:' + ms); }\n\
+             toISOString() { return this._iso; }\n\
+         }\n\
+         Clock.EPOCH = '1970-01-01';\n\
+         module.exports = { Clock };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Clock } from "time-kit";
+function main(): void {
+    const clock = Clock.fromEpoch(123);
+    console.log(clock.toISOString());
+    console.log(Clock.EPOCH);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "epoch:123\n1970-01-01\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A package whose *only* export is a class (no top-level function at
 /// all) still gets its `bundle.js` loaded and its exports bound to
 /// `globalThis` -- see `fallback_class_is_constructible_via_new`'s doc
