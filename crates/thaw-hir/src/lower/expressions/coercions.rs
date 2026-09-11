@@ -899,6 +899,36 @@ impl<'a> FnLowerer<'a> {
                     vec![string],
                 ))
             }
+            // Real JS's own `ToNumber`: `Number(null) === 0`,
+            // `Number(undefined) === NaN` -- these differ from each
+            // other, so a shared fallback can't collapse them. Without
+            // these two arms, any context that reaches this function
+            // with a bare `Null`/`Undefined`-typed operand (relational
+            // comparison, `new Date(...)`'s argument coercion, ...)
+            // crashed outright at build time instead of just answering
+            // per real JS semantics -- confirmed empirically for `5 <
+            // undefined`. `value` itself is still evaluated (via
+            // `wrap_call_argument_bindings`) rather than discarded
+            // outright, preserving any side effect a statically
+            // `Null`/`Undefined`-typed expression might still have
+            // (e.g. a function call whose declared return type is
+            // `null`).
+            HirType::Null => {
+                let name = format!("__thaw_number_coerce_null_{}", self.next_binding);
+                self.next_binding += 1;
+                self.wrap_call_argument_bindings(
+                    HirExpr::Lit(HirLit::F64(0.0)),
+                    &[(name, HirType::Null, value)],
+                )
+            }
+            HirType::Undefined => {
+                let name = format!("__thaw_number_coerce_undefined_{}", self.next_binding);
+                self.next_binding += 1;
+                self.wrap_call_argument_bindings(
+                    HirExpr::Lit(HirLit::F64(f64::NAN)),
+                    &[(name, HirType::Undefined, value)],
+                )
+            }
             other => Err(format!(
                 "numeric conversion is not defined for native type {other:?}"
             )),
