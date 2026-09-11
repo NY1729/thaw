@@ -1566,6 +1566,63 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// yup's own `object<C = AnyObject, S extends ObjectShape = {}>(spec?:
+/// S): ObjectSchema<...>`, called as `yup.object()` with zero
+/// arguments, used to fail outright ("cannot infer generic type
+/// parameter `S`") -- see
+/// `a_generic_fallback_functions_only_optional_parameter_can_be_omitted_
+/// entirely` (thaw-cli, network-free) for the isolated shape and root
+/// cause. Drives the real package end to end: `yup.object({...})` (the
+/// already-working, argument-given form) and `yup.object().shape({...})`
+/// (the previously-broken, zero-argument form, chained into `.shape`),
+/// plus a real async validation success and failure.
+#[test]
+fn registry_add_validates_with_real_yup_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-yup-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "yup").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        &source,
+        r#"import * as yup from "yup";
+async function main(): Promise<void> {
+    const schema = yup.object().shape({
+        email: yup.string().email().required(),
+        age: yup.number().min(0).required(),
+    });
+    const good = await schema.validate({ email: "a@b.com", age: 30 });
+    console.log(JSON.stringify(good));
+    try {
+        await schema.validate({ email: "not-an-email", age: -1 });
+        console.log("unreachable");
+    } catch (error: JsValue) {
+        console.log(typeof error.message);
+    }
+}
+"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["yup".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "{\"email\":\"a@b.com\",\"age\":30}\nstring\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// ajv's own entry `.d.ts` is `import AjvCore from "./core"; export
 /// declare class Ajv extends AjvCore { _addVocabularies(): void; ... }`
 /// -- `AjvCore` (`dist/core.d.ts`'s `export default class Ajv { ... }`,

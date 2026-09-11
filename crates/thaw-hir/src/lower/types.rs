@@ -1461,6 +1461,32 @@ fn infer_generic_type_tuple(
                 generic_interfaces,
                 &mut Vec::new(),
             )?
+        } else if signature.is_extern {
+            // A Fallback (`declare function`) signature -- ambient, no
+            // body of its own -- whose type parameter is neither
+            // inferrable from any argument, nor has a default or bound
+            // to fall back to. Real example: yup's own `object<C =
+            // AnyObject, S extends ObjectShape = {}>(spec?: S): ...`,
+            // called with zero arguments (`yup.object()`): `spec` being
+            // entirely *optional* means there's no argument to infer `S`
+            // from at all, and thaw-cli's own generated wrapper text
+            // (`crates/thaw-cli/src/registry_integration/
+            // dynamic_declarations.rs`) only ever preserves a
+            // constraint/default that's on a small, conservative
+            // reparseable-syntax whitelist -- an interface name like
+            // `ObjectShape`, or an object-literal default like `{}`,
+            // aren't on it, so by the time this function sees the
+            // signature, `S` is already bare, with neither a default nor
+            // constraint of its own to resolve. At runtime every
+            // Fallback call is fully JSON-marshaled regardless of what
+            // `S` resolves to, so `Dynamic` -- already an accepted
+            // resolution for a generic Fallback parameter elsewhere (its
+            // callers skip native-layout validation entirely once any
+            // resolved type is `Dynamic`) -- is a safe, precedented
+            // fallback here. Scoped to `is_extern` only: a user's own
+            // hand-written generic function reaching this point is a
+            // real ambiguity worth erroring on, not silently guessing.
+            HirType::Dynamic
         } else {
             return Err(format!(
                 "cannot infer generic type parameter `{name}` from this call (parameter {})",
