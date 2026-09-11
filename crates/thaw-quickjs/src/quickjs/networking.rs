@@ -657,6 +657,19 @@ pub(super) fn tls_finish(handle: u32) -> String {
         let mut value = Vec::new();
         Some(match stream.read_to_end(&mut value) {
             Ok(_) => format!("ok:{}", hex_encode(&value)),
+            // A peer that closes its TCP connection without first sending
+            // a TLS `close_notify` alert is extremely common in the wild
+            // (plenty of real HTTP servers do this after answering a
+            // `Connection: close` request) -- rustls deliberately surfaces
+            // it as `UnexpectedEof` rather than treating it as a clean EOF,
+            // to guard against a truncation attack. But by this point the
+            // caller already framed the response itself (`Content-Length`/
+            // chunked terminator), so whatever bytes were read before the
+            // error is exactly the complete response; only a genuine mid-
+            // stream failure should still be reported as an error.
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                format!("ok:{}", hex_encode(&value))
+            }
             Err(error) => format!("err:{error}"),
         })
     });
@@ -675,6 +688,10 @@ pub(super) fn tls_finish(handle: u32) -> String {
             let mut value = Vec::new();
             match stream.read_to_end(&mut value) {
                 Ok(_) => format!("ok:{}", hex_encode(&value)),
+                // See the matching client-side comment above.
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    format!("ok:{}", hex_encode(&value))
+                }
                 Err(error) => format!("err:{error}"),
             }
         })
