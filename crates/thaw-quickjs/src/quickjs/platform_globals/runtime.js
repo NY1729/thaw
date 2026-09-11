@@ -1,4 +1,34 @@
   globalThis.global = globalThis;
+  // Used by thaw-bridge's generated module-bootstrap glue
+  // (`crates/thaw-bridge/src/bridge/generation.rs`) wherever a package
+  // export gets `.bind()`-captured onto a bare/qualified global -- a
+  // plain `fn.bind(receiver)` was originally added so a *stateful
+  // namespace object*'s method keeps its receiver when called
+  // detached (real example: joi's `Root.string()`, handlebars'
+  // `registerHelper`), but a bound function is a genuinely different
+  // function object that carries none of the original's own
+  // properties -- for a real ES6 class/constructor export (real
+  // example: luxon's `DateTime`), that silently drops every static
+  // method (`DateTime.fromISO`, ...), since `static` methods are
+  // (correctly, per spec) non-enumerable own properties of the class
+  // itself, invisible to a plain `Object.assign`. This copies every
+  // own property descriptor (enumerable or not) from the original
+  // onto the bound wrapper, skipping the handful `Function.prototype.
+  // bind` already gives the wrapper its own, correct versions of
+  // (`length`/`name`/`prototype`) or that would throw if copied
+  // (`arguments`/`caller`, non-configurable on a bound function).
+  globalThis.__thaw_bind_preserving_statics = (fn, receiver) => {
+    if (typeof fn !== 'function') return fn;
+    const bound = fn.bind(receiver);
+    for (const prop of Object.getOwnPropertyNames(fn)) {
+      if (prop === 'length' || prop === 'name' || prop === 'prototype'
+        || prop === 'arguments' || prop === 'caller') continue;
+      try {
+        Object.defineProperty(bound, prop, Object.getOwnPropertyDescriptor(fn, prop));
+      } catch (error) { /* non-configurable on `fn` itself -- leave unset */ }
+    }
+    return bound;
+  };
   globalThis.__thaw_typeof_dynamic_value = value => typeof value;
   globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
