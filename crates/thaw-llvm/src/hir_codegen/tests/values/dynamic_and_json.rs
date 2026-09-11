@@ -423,6 +423,40 @@ fn a_missing_json_key_or_index_is_distinguishable_from_an_explicit_null() {
     );
 }
 
+/// A relational comparison (`<`/`>`/etc, `lower_relational`) against a
+/// statically `null`/`undefined`-typed operand used to crash at build
+/// time -- `coerce_primitive_to_number` had no arm for either type,
+/// only an `Err("numeric conversion is not defined for native type
+/// ...")` catch-all. Fixed by adding real JS's own `ToNumber` behavior
+/// directly (`Number(null) === 0`, `Number(undefined) === NaN` -- these
+/// differ from each other, so a shared fallback can't collapse them);
+/// found complementary to (but independent of) the `Json`/`JsValue`
+/// loose-equality fix, which only reaches this function for *other*
+/// type combinations. `alwaysNull()`'s side effect (the `console.log`)
+/// is still evaluated even though its coerced value is a compile-time
+/// constant.
+#[test]
+fn a_relational_comparison_against_null_or_undefined_coerces_instead_of_crashing() {
+    let source = r#"
+        function alwaysNull(): null {
+            console.log("called");
+            return null;
+        }
+        function alwaysUndefined(): undefined {
+            return undefined;
+        }
+        function main(): void {
+            console.log(5 < alwaysNull());
+            console.log(5 < alwaysUndefined());
+            console.log(alwaysNull() < 5);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "relational_null_undefined_coercion"),
+        "called\nfalse\nfalse\ncalled\ntrue\n"
+    );
+}
+
 #[test]
 fn stringifies_json_with_number_and_string_spacing() {
     let source = r#"
