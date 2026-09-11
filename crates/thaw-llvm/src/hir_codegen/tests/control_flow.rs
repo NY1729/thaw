@@ -107,6 +107,48 @@ fn compiles_do_while_with_continue_and_break() {
     assert_eq!(compile_and_run(source, "do_while"), "2\n3\n");
 }
 
+/// A `let`/`var` declared with no initializer at all used to be
+/// rejected unconditionally ("`x` needs an initializer"), regardless of
+/// its declared type -- a real, common pattern (real example: csv-
+/// parse's own streaming API, `let record; while ((record = parser.
+/// read()) !== null) { ... }`, mirroring Node's own `Readable` docs).
+/// Exercises the two cases that now work: no annotation at all
+/// (defaults to `Json`, matching how a bare `any`/`unknown` annotation
+/// already lowers) and an explicit annotation whose real-JS initial
+/// value (`undefined`) already has a well-defined encoding (`T |
+/// undefined`, via the existing `Optional` "absent" representation) --
+/// both assigned to only after their declaration, the exact real-world
+/// shape. A concrete scalar annotation with no such encoding (`let x:
+/// number;`) is still rejected -- see `thaw-hir`'s own `rejects_an_
+/// uninitialized_declaration_with_no_default_value`.
+#[test]
+fn compiles_uninitialized_declarations_assigned_later() {
+    let source = r#"
+        function main(): void {
+            let record;
+            let i = 0;
+            while (i < 3) {
+                record = i * 2;
+                i = i + 1;
+            }
+            console.log(record);
+
+            let maybeName: string | undefined;
+            console.log(maybeName === undefined);
+            maybeName = "assigned later";
+            console.log(maybeName);
+
+            var hoisted;
+            hoisted = "hoisted too";
+            console.log(hoisted);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "uninitialized_decl"),
+        "4\ntrue\nassigned later\nhoisted too\n"
+    );
+}
+
 #[test]
 fn compiles_switch_selection_default_fallthrough_and_break() {
     let source = r#"
