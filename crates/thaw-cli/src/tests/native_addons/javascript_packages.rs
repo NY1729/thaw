@@ -1680,3 +1680,63 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "true\nfalse\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// validator's real `.d.ts` declares several functions with a genuine
+/// union return type (`normalizeEmail(...): string | false`, among
+/// others) -- every build against the package failed outright ("typed
+/// dynamic return does not support Union([Str, Bool])"), even calling
+/// only a plain, non-union function like `isInt`, since every declared
+/// Fallback function in the package gets compiled unconditionally. See
+/// `a_fallback_functions_union_return_type_decodes_by_runtime_value_
+/// shape` (thaw-cli, network-free) for the isolated shape and root
+/// cause. Drives real validator end to end: a plain boolean-returning
+/// function, plus `normalizeEmail`'s own union return for both a
+/// normalizable and (matching real Node's own behavior for this
+/// input) a non-normalizable address.
+#[test]
+fn registry_add_validates_with_real_validator_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("thaw-cli-auto-validator-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "validator").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        &source,
+        r#"import validator from "validator";
+function main(): void {
+    console.log(validator.isInt("42"));
+    console.log(validator.isEmail("test@example.com"));
+    console.log(validator.normalizeEmail("Test@Example.com"));
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["validator".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\ntrue\ntest@example.com\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
