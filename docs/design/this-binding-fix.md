@@ -80,16 +80,17 @@ program's actual lookup path runs through (2), not (1) -- found by
 inspecting the compiled binary's embedded JS text directly with
 `strings` after (1) alone proved insufficient.
 
-## A separate bug found while verifying, not fixed here
+## A separate bug found while verifying, fixed separately
 
 Verifying joi's full `schema.validate(...)` flow against real input
 surfaced `result.error === undefined` returning `false` even when
-`typeof result.error` correctly reports `"undefined"`. This reproduces
-with a plain `JSON.parse(...)` result too -- nothing to do with joi or
-this fix, a pre-existing, general bug in equality comparison against
-the literal `undefined` for a dynamically-typed property. Left open for
-a future round; the pinned joi test below uses `typeof x ===
-"undefined"` instead, which is unaffected.
+`typeof result.error` correctly reports `"undefined"`. Unrelated to
+this-binding -- a pre-existing, general bug in equality comparison
+against the literal `undefined` for a live `JsValue`. Fixed in
+[[project_npm_interop_gaps_6]]'s follow-up, see
+`docs/design/dynamic-value-undefined-equality.md`. The pinned joi test
+below still uses `typeof x === "undefined"`, unaffected either way and
+left as-is.
 
 ## Verification
 

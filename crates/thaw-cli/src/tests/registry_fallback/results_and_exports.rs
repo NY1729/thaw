@@ -832,3 +832,93 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `value === undefined` (and `!==`, either operand order) for a live
+/// `JsValue` unconditionally returned `false` -- even when the value
+/// genuinely *is* `undefined` -- because `lower_optional_undefined_
+/// equality` had no arm at all for `(JsValue, Undefined)`, only ones for
+/// `Optional`/`Json`/`Nullable`/`Nullish`/`Union`; every call silently
+/// fell through to the catch-all "an operand's type is `Undefined` and
+/// nothing more specific matched -> `false`" arm at the bottom, without
+/// ever asking the live value what it actually is. Real trigger: joi's
+/// `schema.validate(...)` result -- `.error` is a real, absent property
+/// on a valid input's result object, and `result.error === undefined`
+/// (the documented way to check joi validated successfully) always
+/// came back `false`.
+///
+/// Fixed by asking the engine directly, the same way `typeof` on a
+/// `JsValue` already does (`__thaw_typeof_dynamic_value`): a new
+/// bootstrap-registered `__thaw_is_undefined_dynamic_value = value =>
+/// value === undefined` (`crates/thaw-quickjs/src/quickjs/
+/// platform_globals/runtime.js`), invoked through the same
+/// `callDynamicValueWithValue` mechanism.
+///
+/// Note: this only fixes a live `JsValue`. A plain `Json` value (e.g.
+/// from `JSON.parse`) still can't distinguish a genuinely missing key
+/// from an explicitly-`null` one -- `thaw_json_get`'s own missing-key
+/// fallback returns `Value::Null` for both, a separate, deeper,
+/// deliberately-scoped representational limitation (see the doc
+/// comment on `HirExpr::JsonSet` in `crates/thaw-hir/src/hir/ir.rs`),
+/// not fixed here.
+#[test]
+fn a_live_dynamic_values_property_compares_equal_to_undefined_when_actually_absent() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-dynamic-undefined-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("resultkit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        // Modeled on joi's own `validate(...): ValidationResult<TSchema>` --
+        // a generic, unresolvable interface collapses to a single opaque
+        // `JsValue` handle (round 6's kleur/joi fix broadened "every field
+        // opaque" to "*any* field opaque"; `error`'s bare-call-signature
+        // type is what makes it opaque here). A plain `any` return type
+        // resolves as `Json` instead, a different code path this test
+        // isn't after.
+        "export interface Callable { (): void; }\n\
+         export interface ValidationResult { error?: Callable; value: any; }\n\
+         export declare function makeResult(withError: boolean): ValidationResult;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeResult: function(withError) {\n\
+         \x20\x20var result = { value: 1 };\n\
+         \x20\x20if (withError) { result.error = 'boom'; }\n\
+         \x20\x20return result;\n\
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeResult } from "resultkit";
+function main(): void {
+    const good: JsValue = makeResult(false);
+    const bad: JsValue = makeResult(true);
+    console.log(good.error === undefined);
+    console.log(undefined === good.error);
+    console.log(good.error !== undefined);
+    console.log(bad.error === undefined);
+    console.log(bad.error !== undefined);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\ntrue\nfalse\nfalse\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
