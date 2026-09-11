@@ -204,6 +204,7 @@ fn generate_registry_shims(
         String,
         String,
         Vec<String>,
+        Vec<String>,
         Vec<(String, String)>,
         Vec<(String, String)>,
         Vec<(String, String, String, String)>,
@@ -1120,6 +1121,16 @@ fn generate_registry_shims(
             // same `loadScript` call also carries (`generation.rs`'s
             // `wrap_as_commonjs_module`), which never got a chance to
             // run either.
+            // Every class this package declares (constructible or not --
+            // a static-only class's methods are called as
+            // `ClassName.method(...)`, which resolves `ClassName` the
+            // same `thaw_js_get_global` way a constructor does). See
+            // `ModuleBundle::class_names`'s own doc comment for why a
+            // *default*-exported class specifically needs this (a named
+            // one already gets bound by the generic `module.exports` ->
+            // `globalThis` copy loop below).
+            let class_names: Vec<String> =
+                pkg.classes.iter().map(|class| class.name.clone()).collect();
             if !fallback_names.is_empty()
                 || pkg.native_addon.is_some()
                 || !pkg.classes.is_empty()
@@ -1129,6 +1140,7 @@ fn generate_registry_shims(
                     pkg.name.clone(),
                     bundle_js.clone(),
                     fallback_names,
+                    class_names,
                     qualified_aliases,
                     nested_namespace_aliases,
                     value_exports,
@@ -1140,11 +1152,12 @@ fn generate_registry_shims(
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()
         .map(
-            |(name, js, fallback_names, qualified_aliases, nested_namespace_aliases, value_exports)| {
+            |(name, js, fallback_names, class_names, qualified_aliases, nested_namespace_aliases, value_exports)| {
                 thaw_bridge::ModuleBundle {
                     package_name: name.as_str(),
                     js_source: js.as_str(),
                     fallback_names,
+                    class_names,
                     qualified_aliases,
                     nested_namespace_aliases,
                     value_exports,
