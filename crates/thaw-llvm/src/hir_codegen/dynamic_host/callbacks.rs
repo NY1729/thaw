@@ -1188,6 +1188,151 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok((object, key))
     }
 
+    /// Decodes a dynamic call's raw JSON result into a declared `Union`
+    /// return type -- real example: validator's own `normalizeEmail(...):
+    /// string | false`. Every member must be a plain scalar (`F64`/`Str`/
+    /// `Bool`/`Null`/`Undefined`); anything else (an object, array,
+    /// nested union, ...) still errors, matching this whole function's
+    /// pre-existing "not supported yet" behavior for those shapes. Picks
+    /// the member whose runtime JS-visible category the JSON value
+    /// actually has (via `thaw_json_typeof`/the napi-undefined sentinel
+    /// check, the same primitives already used elsewhere in this file --
+    /// `Null`/`Undefined` first, since `typeof null === "object"` would
+    /// otherwise be indistinguishable from a real object), not the
+    /// declared *order* -- a dynamic call's result is only ever known as
+    /// a raw JSON value at this point, so there is no compile-time
+    /// evidence to prefer one candidate member over another beyond what
+    /// the value itself reports.
+    fn compile_json_to_union_result(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        elements: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        for element in elements {
+            if !matches!(
+                element,
+                HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined
+            ) {
+                return Err(format!(
+                    "typed dynamic union return does not support member {element:?} yet"
+                ));
+            }
+        }
+        let function = self.current_function();
+        let union_type = self.basic_type(&HirType::Union(elements.to_vec()))?;
+        let result_slot = self
+            .builder
+            .build_alloca(union_type, "dynamic_union_result")
+            .map_err(|error| error.to_string())?;
+        let done = self.context.append_basic_block(function, "dynamic_union_done");
+        let is_undefined = self.compile_json_is_napi_undefined(json)?;
+        let is_null = self.compile_json_is_null_value(json)?;
+        let typeof_string = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_typeof").unwrap(),
+                &[json.into()],
+                "dynamic_union_typeof",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_typeof returned no value")?
+            .into_pointer_value();
+        let mut remaining: Option<inkwell::basic_block::BasicBlock<'ctx>> = None;
+        for (index, element) in elements.iter().enumerate() {
+            if let Some(block) = remaining {
+                self.builder.position_at_end(block);
+            }
+            let matches = match element {
+                HirType::Undefined => is_undefined,
+                HirType::Null => is_null,
+                HirType::F64 => self.compile_typeof_matches(typeof_string, "number")?,
+                HirType::Str => self.compile_typeof_matches(typeof_string, "string")?,
+                HirType::Bool => self.compile_typeof_matches(typeof_string, "boolean")?,
+                _ => unreachable!("checked above"),
+            };
+            let matched_block = self
+                .context
+                .append_basic_block(function, "dynamic_union_matched");
+            let next_block = self
+                .context
+                .append_basic_block(function, "dynamic_union_next");
+            self.builder
+                .build_conditional_branch(matches, matched_block, next_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(matched_block);
+            let native = self.compile_json_value_to_native(json, element)?;
+            let value = self.build_union_value(native, index, elements)?;
+            self.builder
+                .build_store(result_slot, value)
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(done)
+                .map_err(|error| error.to_string())?;
+            remaining = Some(next_block);
+        }
+        // Nothing matched (a value genuinely outside every declared
+        // member -- shouldn't happen for an honestly-typed package, but
+        // this function never panics/aborts elsewhere either): falls
+        // back to the *last* declared member, decoding the same raw
+        // value against it regardless of its actual runtime shape
+        // (matching every individual scalar decoder's own "degrade to a
+        // default instead of crashing" philosophy, `thaw-std`'s
+        // `json.rs`).
+        if let Some(block) = remaining {
+            self.builder.position_at_end(block);
+            let index = elements.len() - 1;
+            let native = self.compile_json_value_to_native(json, &elements[index])?;
+            let value = self.build_union_value(native, index, elements)?;
+            self.builder
+                .build_store(result_slot, value)
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(done)
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.position_at_end(done);
+        self.builder
+            .build_load(union_type, result_slot, "dynamic_union_value")
+            .map_err(|error| error.to_string())
+    }
+
+    /// `strcmp(typeof_string, expected) == 0` -- the same primitive
+    /// `compile_dynamic_prop_access` already uses to compare a runtime
+    /// key against a known name, reused here to compare `typeof`'s own
+    /// result against a known category name.
+    fn compile_typeof_matches(
+        &mut self,
+        typeof_string: PointerValue<'ctx>,
+        expected: &str,
+    ) -> Result<IntValue<'ctx>, String> {
+        let expected = self
+            .builder
+            .build_global_string_ptr(expected, "dynamic_union_typeof_expected")
+            .map_err(|error| error.to_string())?;
+        let comparison = self
+            .builder
+            .build_call(
+                self.module.get_function("strcmp").unwrap(),
+                &[typeof_string.into(), expected.as_pointer_value().into()],
+                "dynamic_union_typeof_compare",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("strcmp returned no value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                comparison,
+                comparison.get_type().const_zero(),
+                "dynamic_union_typeof_is_match",
+            )
+            .map_err(|error| error.to_string())
+    }
+
     fn compile_typed_dynamic_result(
         &mut self,
         json: BasicValueEnum<'ctx>,
@@ -1199,6 +1344,23 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json => Ok(json),
             HirType::Dictionary(_) => Ok(json),
+            // A real, declared union return -- e.g. validator's own
+            // `normalizeEmail(...): string | false`. Every member here
+            // must be a plain scalar (`F64`/`Str`/`Bool`/`Null`/
+            // `Undefined`) this function already knows how to decode
+            // individually just above/below -- `compile_json_to_union_
+            // result` picks the one the *runtime* JSON value's own
+            // JS-visible type actually matches (via `thaw_json_typeof`,
+            // the same primitive `compile_dynamic_prop_access` already
+            // uses to compare against a known set), not the compile-time
+            // declared shape, since a dynamic call's result is only ever
+            // known as a raw JSON value at this point. Found via
+            // validator: without this, *any* Fallback function declared
+            // with such a union return crashed the whole build outright
+            // (not just a call to it -- every declared Fallback function
+            // gets compiled unconditionally, whether the user's own code
+            // ever calls it or not).
+            HirType::Union(elements) => self.compile_json_to_union_result(json, elements),
             HirType::Optional(payload) => {
                 let (object, key) = self.compile_napi_optional_result_container(json)?;
                 self.compile_json_to_optional_field(object, key, json, payload, false)

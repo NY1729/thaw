@@ -1067,3 +1067,74 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function declared with a real union return type -- real
+/// example: validator's own `normalizeEmail(...): string | false` --
+/// used to crash the *entire build*, not just a call to it:
+/// `compile_typed_dynamic_result` (thaw-llvm) had no `HirType::Union`
+/// arm at all, and every declared Fallback function gets compiled
+/// unconditionally as part of the generated shim, whether the user's
+/// own code ever calls it or not. Confirmed via bisecting validator's
+/// real `.d.ts`: a program calling only `isInt` (a plain, non-union,
+/// single-declaration function) still failed to build, purely because
+/// `normalizeEmail` was *also* declared somewhere in the same package,
+/// with a union return the compiler couldn't handle.
+///
+/// Fixed generally: `compile_json_to_union_result` decodes a dynamic
+/// call's raw JSON result into a declared union by asking the *runtime*
+/// value what its own JS-visible type is (`thaw_json_typeof`, the same
+/// primitive `compile_dynamic_prop_access` already uses to compare a
+/// key against a known name) and picking the matching member -- there's
+/// no compile-time evidence to prefer one member over another for a
+/// value that's only ever known as raw JSON at this point. Scoped to
+/// members that are plain scalars (`F64`/`Str`/`Bool`/`Null`/
+/// `Undefined`); anything else still errors, unchanged from before.
+#[test]
+fn a_fallback_functions_union_return_type_decodes_by_runtime_value_shape() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-union-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("unionkit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function maybeNormalize(input: string): string | false;\n\
+         export declare function unrelated(input: string): boolean;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = {\n\
+         \x20\x20maybeNormalize: function(s) { return s.length > 0 ? s.toUpperCase() : false; },\n\
+         \x20\x20unrelated: function(s) { return s === \"x\"; }\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { maybeNormalize, unrelated } from "unionkit";
+function main(): void {
+    console.log(maybeNormalize("hello"));
+    console.log(maybeNormalize(""));
+    console.log(unrelated("x"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "HELLO\nfalse\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
