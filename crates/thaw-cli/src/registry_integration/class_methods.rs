@@ -2270,7 +2270,7 @@ fn rewrite_external_class_methods_with_static(
                     // candidate's declared parameter types -- identical
                     // pattern to the static/instance-method branches
                     // above, just with no receiver to splice in.
-                    let selected = self
+                    let scored_candidates = self
                         .functions
                         .iter()
                         .filter(|(candidate_name, _, min_arity, max_arity, _, _)| {
@@ -2292,14 +2292,73 @@ fn rewrite_external_class_methods_with_static(
                             }
                             Some((score, candidate))
                         })
-                        .reduce(|best, candidate| {
-                            if candidate.0 > best.0 {
-                                candidate
-                            } else {
-                                best
+                        .collect::<Vec<_>>();
+                    // When every same-arity candidate ties at score 0
+                    // (no argument's type could be checked against any
+                    // of them at all -- an untyped/`Json`/`as any`-cast
+                    // value), picking one unconditionally is only safe
+                    // when the tied candidates are *actually*
+                    // interchangeable for this call. Two ways that
+                    // holds:
+                    // - One of them declares only opaque `Json`/
+                    //   `JsValue` parameters -- a type that's never
+                    //   coerced into anything more specific regardless
+                    //   of the argument's real shape, so it's a
+                    //   universally safe representative for the whole
+                    //   tied set no matter how many other, differently
+                    //   -typed candidates also tie here (zod's
+                    //   `string(params?): ZodString` alongside its own
+                    //   generic `string<T extends string>(params?):
+                    //   $ZodType<T,T>`; lodash's four same-arity-range
+                    //   `filter` overloads; pino's own `.d.ts`, which
+                    //   happens to bundle its overloads twice).
+                    // - Failing that, every tied candidate declares the
+                    //   exact same parameter types as every other --
+                    //   picking any one of several truly identical
+                    //   declarations changes nothing.
+                    // Only when neither holds -- a tied pair's declared
+                    // types genuinely disagree on a *native scalar*
+                    // parameter with no opaque escape (`ms`'s `(value:
+                    // number, options?): string` vs `(value:
+                    // StringValue): number`, disjoint at the one
+                    // parameter both share) -- does picking either one
+                    // force a real, possibly-lossy coercion decision
+                    // with no basis for it; that's deferred instead,
+                    // falling through to whatever the name's default
+                    // binding already is (a `typeof`-checking runtime
+                    // dispatcher for a union-dispatched name like `ms`,
+                    // or the ordinary first-overload-wins default
+                    // otherwise).
+                    let selected = if scored_candidates.len() > 1
+                        && scored_candidates.iter().all(|(score, _)| *score == 0)
+                    {
+                        let opaque = scored_candidates.iter().find(|(_, candidate)| {
+                            candidate.4.iter().all(|ty| {
+                                matches!(ty, thaw_hir::HirType::Json | thaw_hir::HirType::JsValue)
+                            })
+                        });
+                        match opaque {
+                            Some((_, candidate)) => Some(*candidate),
+                            None => {
+                                let first_types = &scored_candidates[0].1.4;
+                                scored_candidates
+                                    .iter()
+                                    .all(|(_, candidate)| &candidate.4 == first_types)
+                                    .then(|| scored_candidates[0].1)
                             }
-                        })
-                        .map(|(_, candidate)| candidate);
+                        }
+                    } else {
+                        scored_candidates
+                            .into_iter()
+                            .reduce(|best, candidate| {
+                                if candidate.0 > best.0 {
+                                    candidate
+                                } else {
+                                    best
+                                }
+                            })
+                            .map(|(_, candidate)| candidate)
+                    };
                     if let Some((_, symbol, _, _, _, generic)) = selected {
                         let annotated = generic.as_ref().is_some_and(|generic| {
                             annotate_generic_callback_arguments(
