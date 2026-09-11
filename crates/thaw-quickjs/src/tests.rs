@@ -1220,6 +1220,43 @@ fn intl_number_format_and_list_format_match_real_node() {
     );
 }
 
+/// `thaw_js_get_global`'s dotted-path support (added for `new Intl.
+/// DateTimeFormat(...)` -- see `constructs_a_namespaced_global_value_
+/// via_new`, thaw-llvm) tries `name` as a single, literal global
+/// property *first*, falling back to a nested-property walk on `.` only
+/// when no such literal global exists. Regression coverage for a real
+/// bug this exact ordering fixes: a first attempt split on every `.`
+/// unconditionally, which broke looking up any *literal* global whose
+/// own name contains a `.` (real example: a runtime key derived from a
+/// package literally named `socket.io`) -- confirmed to crash real
+/// `socket.io-client`'s own `io(...)` factory call at runtime
+/// ("invalid JavaScript value handle 0") before this fix.
+#[test]
+fn get_global_prefers_a_literal_dotted_name_over_a_nested_property_path() {
+    assert_eq!(
+        load("globalThis['a.b'] = 'literal'; globalThis.Namespaced = { Inner: 'nested' };"),
+        1
+    );
+    let literal = CString::new("a.b").unwrap();
+    let literal_handle = thaw_js_get_global(literal.as_ptr());
+    assert_ne!(literal_handle, 0);
+    assert_eq!(
+        unsafe { CStr::from_ptr(thaw_js_handle_to_string(literal_handle)) }
+            .to_str()
+            .unwrap(),
+        "literal"
+    );
+    let nested = CString::new("Namespaced.Inner").unwrap();
+    let nested_handle = thaw_js_get_global(nested.as_ptr());
+    assert_ne!(nested_handle, 0);
+    assert_eq!(
+        unsafe { CStr::from_ptr(thaw_js_handle_to_string(nested_handle)) }
+            .to_str()
+            .unwrap(),
+        "nested"
+    );
+}
+
 #[test]
 fn retains_and_calls_a_callable_javascript_value() {
     assert_eq!(

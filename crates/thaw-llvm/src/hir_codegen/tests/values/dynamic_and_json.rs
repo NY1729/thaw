@@ -458,6 +458,35 @@ fn json_stringify_omits_or_nulls_a_nested_undefined_value() {
     );
 }
 
+/// `new <Namespace>.<Class>(...)` -- a namespaced global constructor
+/// (real example: `new Intl.DateTimeFormat(...)`, needed for the `Intl`
+/// polyfill) used to fail to compile at all ("only `new Promise<T>(...)`
+/// is supported"): thaw-hir's special-cased list of constructible
+/// globals (`TextEncoder`/`AbortController`/typed arrays/...) only ever
+/// matched a bare `Expr::Ident` callee, never `Expr::Member` -- so a
+/// namespaced one fell straight through to the Promise-only fallback.
+/// Fixed by reusing the exact same `getDynamicValue`/
+/// `constructDynamicValue` mechanism those already use, just with a
+/// dotted name (`"Intl.DateTimeFormat"`); `thaw_js_get_global`
+/// (`crates/thaw-quickjs/src/quickjs/api.rs`) now walks nested object
+/// properties for a dotted path instead of only a single flat global
+/// lookup.
+#[test]
+fn constructs_a_namespaced_global_value_via_new() {
+    let source = r#"
+        function main(): void {
+            const dtf: JsValue = new Intl.DateTimeFormat("en-US", {
+                year: "numeric", month: "2-digit", day: "2-digit", timeZone: "UTC"
+            } as JsValue);
+            console.log(dtf.format(new Date("2024-07-04T16:30:45.000Z")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "constructs_namespaced_global"),
+        "07/04/2024\n"
+    );
+}
+
 /// A relational comparison (`<`/`>`/etc, `lower_relational`) against a
 /// statically `null`/`undefined`-typed operand used to crash at build
 /// time -- `coerce_primitive_to_number` had no arm for either type,
