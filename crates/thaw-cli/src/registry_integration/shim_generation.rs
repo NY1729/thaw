@@ -19,6 +19,7 @@ fn generate_registry_shims(
 ) -> Result<RegistryShims, String> {
     let observed_arities = observed_member_call_arities(user_source)?;
     let observed_identifier_arities = observed_identifier_call_arities(user_source)?;
+    let observed_bare_member_objects = observed_bare_member_object_identifiers(user_source)?;
     let mut observed_function_arities = observed_identifier_arities.clone();
     for (name, arities) in &observed_arities {
         observed_function_arities
@@ -1065,69 +1066,77 @@ fn generate_registry_shims(
             }
         }
         if let Some(bundle_js) = &pkg.bundle_js {
-            // A class with no public constructor (real example: luxon's
-            // `DateTime`/`Duration`/`Interval`, each `private
-            // constructor(...)`, only ever built via static factories
-            // like `DateTime.fromISO(...)`) never gets a `class_targets`
-            // entry (`generate_napi_class_constructors` -- which is what
-            // populates it -- bails out immediately on `!class.
-            // constructible`, by design: `new DateTime()` really
-            // shouldn't compile). Its *static methods* still work fine
-            // regardless (`static_class_method_rewrites`, a separate,
-            // unconditional per-class loop above, rewrites a call
-            // expression's callee text directly), but the bare class
-            // *name* itself -- needed for a non-call use, e.g. reading
-            // a static property (`DateTime.DATE_FULL`) or passing the
-            // class value itself around -- had nothing to fall back on
-            // but the type-only `JsValue` alias every exported class
-            // name also gets (`type_only_exports`), which is a *type*,
-            // not a value: using it as an identifier failed with
-            // "unknown variable". Fixed by treating such a class exactly
-            // like any other named package value: bound via the same
-            // `$value$`-keyed runtime getter mechanism as a `Str`/`F64`/
-            // `JsValue` constant export (below), reading the *real*
-            // class value straight off the bundle's own live JS exports.
-            let mut non_constructible_class_names: std::collections::HashSet<String> = pkg
-                .values
-                .iter()
-                .map(|value| value.name.clone())
-                .collect();
-            let non_constructible_classes = pkg
+            // `class_targets` (populated by `generate_napi_class_
+            // constructors`, above) exists to drive `class_rewrites` --
+            // rewriting a `new ClassName(...)` call site's callee
+            // directly -- and nothing else; a bare, non-`new` use of
+            // the class name (a static method call's own callee,
+            // reading/writing a static property, passing the class
+            // value itself around) needs a real *value* binding
+            // instead, which `class_targets`'s own symbol can't serve
+            // as (it names a constructor-invoking `declare function`,
+            // not a value). Two real bugs found getting exactly this
+            // shape (luxon's `Settings.defaultLocale = "en-US"`, a
+            // plain static property *assignment*) to actually build
+            // and run correctly:
+            // - A class with no public constructor (`private
+            //   constructor(...)`, real example: luxon's `DateTime`/
+            //   `Duration`/`Interval`) never gets a `class_targets`
+            //   entry at all (`generate_napi_class_constructors` bails
+            //   out on `!class.constructible`, correctly -- `new
+            //   DateTime()` really shouldn't compile), so its bare name
+            //   fell back to the type-only `JsValue` alias every
+            //   exported class also gets -- fine as a *type*, not a
+            //   *value*: "unknown variable `__thaw_type_luxon_
+            //   DateTime`".
+            // - A class *with* a public constructor but never actually
+            //   `new`-called anywhere (luxon's own `Settings`, a purely
+            //   static utility class with no explicit constructor at
+            //   all -- `constructible` defaults to `true`, so `class_
+            //   targets` gets a real, if pointless, zero-arg-
+            //   constructor-invoking entry) had its bare name resolve
+            //   to *that* symbol instead -- a `declare function`
+            //   reference used as a plain property-assignment target
+            //   isn't a value at all in thaw's type system: "function
+            //   value `...$new$Settings$arity0` needs a monomorphic
+            //   native implementation".
+            // Both fixed the same way: bound via the same `$value$`-
+            // keyed runtime getter mechanism a `Str`/`F64`/`JsValue`
+            // constant export already uses, reading the *real* class
+            // value straight off the bundle's own live JS exports --
+            // and (below) preferred over `class_targets`'s own symbol
+            // for `package_exports`'s bare-identifier mapping
+            // specifically, leaving `class_rewrites`'s own `new
+            // ClassName(...)` handling completely untouched (it doesn't
+            // consult `package_exports` at all).
+            //
+            // Scoped to a class the user's own source actually
+            // references as a bare member-expression object anywhere
+            // (`observed_bare_member_object_identifiers` -- a plain AST
+            // walk over every `Expr::Member`, so a method call's own
+            // callee, a property read, and an assignment target are all
+            // covered uniformly) and deduplicated by name. Both matter:
+            // unscoped, this bound a purely type-level helper class
+            // with no real runtime counterpart at all to a value that
+            // reads back `undefined` (real example: socket.io's own
+            // `StrictEventEmitter`, never referenced directly by name
+            // in real user code); undeduplicated, a class name appearing
+            // more than once in `pkg.classes` (declaration merging, or
+            // the same class re-exported under its own name from more
+            // than one `.d.ts` file thaw-registry's flattening
+            // concatenates -- real examples: yaml's `NodeBase`,
+            // socket.io's `StrictEventEmitter` again) emitted the exact
+            // same `declare function`/`let` pair twice, which the
+            // shim's own duplicate-binding check (rightly) rejects as a
+            // hard error.
+            let mut bare_value_class_names: std::collections::HashSet<String> =
+                pkg.values.iter().map(|value| value.name.clone()).collect();
+            let bare_value_classes = pkg
                 .classes
                 .iter()
                 .filter(|class| {
-                    !class_targets.contains_key(&(pkg.name.clone(), class.name.clone()))
-                        // Scoped to a class actually needed as a bare-
-                        // identifier *value* -- i.e. one with at least
-                        // one static method actually called somewhere
-                        // (already registered in `static_class_method_
-                        // rewrites` by the unconditional per-class loop
-                        // above). A `.d.ts` can declare a class that's
-                        // purely a *type*-level helper with no real
-                        // runtime counterpart at all (real example:
-                        // socket.io's own `StrictEventEmitter`, a
-                        // generic base used only for typing event
-                        // overloads) -- binding *that* to a value would
-                        // read `undefined` off the bundle's exports and
-                        // silently misbehave wherever it's later used,
-                        // for no benefit (nothing calls a static method
-                        // on it, so the earlier "unknown variable" bug
-                        // this whole mechanism exists to fix never
-                        // applied to it in the first place).
-                        && static_class_method_rewrites
-                            .iter()
-                            .any(|(_, rewrite_class, ..)| rewrite_class == &class.name)
-                        // A class name can appear more than once in
-                        // `pkg.classes` (declaration merging, or the
-                        // same class re-exported under its own name
-                        // from more than one `.d.ts` file thaw-
-                        // registry's flattening concatenates) --
-                        // without deduplicating here, each occurrence
-                        // would independently emit the exact same
-                        // `declare function`/`let` pair, which the
-                        // shim's own duplicate-binding check (rightly)
-                        // rejects as a hard error.
-                        && non_constructible_class_names.insert(class.name.clone())
+                    observed_bare_member_objects.contains(&class.name)
+                        && bare_value_class_names.insert(class.name.clone())
                 })
                 .map(|class| thaw_bridge::DtsValue {
                     name: class.name.clone(),
@@ -1137,7 +1146,7 @@ fn generate_registry_shims(
             let value_exports = pkg
                 .values
                 .iter()
-                .chain(non_constructible_classes.iter())
+                .chain(bare_value_classes.iter())
                 .filter_map(|value| {
                     let dynamic;
                     let ty = match &value.ty {
@@ -1330,12 +1339,21 @@ fn generate_registry_shims(
             package_exports.insert(name.clone(), target.clone());
         }
         for class in &pkg.classes {
-            if let Some(target) = class_targets.get(&(pkg.name.clone(), class.name.clone())) {
+            // A value binding (see `bare_value_classes` above) always
+            // wins over `class_targets`'s constructor-invocation symbol
+            // for this bare-identifier mapping specifically: the two
+            // are never both meant for the same use (a `new ClassName
+            // (...)` call site never consults `package_exports` at all
+            // -- that's `class_rewrites`'s own, separate job, untouched
+            // here), and a class observed as a bare member-object
+            // (luxon's `Settings.defaultLocale = ...`) needs the real
+            // live value, never the constructor symbol, even when the
+            // class also happens to be constructible.
+            if let Some(target) = value_targets.get(&(pkg.name.clone(), class.name.clone())) {
                 package_exports.insert(class.name.clone(), target.clone());
-            } else if let Some(target) = value_targets.get(&(pkg.name.clone(), class.name.clone()))
+            } else if let Some(target) =
+                class_targets.get(&(pkg.name.clone(), class.name.clone()))
             {
-                // A non-constructible class (see `non_constructible_
-                // classes` above) -- bound as a plain value instead.
                 package_exports.insert(class.name.clone(), target.clone());
             }
         }
