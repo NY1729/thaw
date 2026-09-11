@@ -1131,3 +1131,99 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `ky` is the first real package exercised in this suite that reaches
+/// `globalThis.fetch` purely through a *member expression*
+/// (`globalThis.fetch.bind(globalThis)`) rather than a bare `fetch(...)`
+/// call -- `uses_global_fetch`'s AST visitor (thaw-registry's
+/// `module_transform.rs`) only ever matched a bound identifier, so ky's
+/// own bundle never triggered bundling `node:https`/`node:http` (and
+/// thus never got a `globalThis.fetch` at all): `ky.get(url).json()`
+/// failed with "fetch is not a function" one level up. Fixed by also
+/// matching `globalThis.fetch`/`self.fetch`/`window.fetch`/`global.
+/// fetch` member accesses.
+///
+/// A real `https://` request additionally exposed two more general
+/// gaps once fetch itself worked: (1) thaw-cli's `source_uses_tls`
+/// (build.rs) is a blind substring scan for `__thaw_tls_` over the
+/// generated shim text, but any bundle at or above 1KB gets gzip+
+/// base64'd into an opaque blob first (`encode_embedded_script`),
+/// hiding the marker inside any real (usually much larger) package --
+/// so TLS silently never got linked and every `https://` fetch failed
+/// with an opaque "TLS support is not linked"; and (2) rustls
+/// surfaces a peer that closes its TCP connection without sending a
+/// TLS `close_notify` alert (extremely common in the wild) as
+/// `UnexpectedEof` rather than a clean read, even though the response
+/// itself was already framed correctly by `Content-Length`/chunked
+/// encoding. Both fixed generally: `generate_module_init` (thaw-bridge)
+/// now re-emits whichever markers a bundle's *raw* source contains as
+/// plain uncompressed comment text before compressing it, and
+/// `tls_finish` (thaw-quickjs) now treats `UnexpectedEof` as a clean
+/// close. A third gap -- the fetch polyfill's own `Content-Encoding: br`
+/// support needs thaw-quickjs's optional Brotli decoder, but the
+/// literal word "brotli"/"Brotli" never appears anywhere in the shim or
+/// a typical bundle (only the short code `'br'` does), so `source_uses_
+/// brotli` never fired for *any* real Brotli response, including a
+/// plain `https://example.com/` request through Cloudflare -- fixed by
+/// having the fetch polyfill's own source note that it uses Brotli
+/// decompression in plain text.
+#[test]
+fn registry_add_fetches_over_http_and_https_with_real_ky_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-ky-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "ky@2.1.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = conn.read(&mut buf).unwrap();
+        let body = r#"{"ok":true,"n":42}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        conn.write_all(response.as_bytes()).unwrap();
+    });
+
+    std::fs::write(
+        &source,
+        format!(
+            r#"import ky from "ky";
+async function main(): Promise<void> {{
+    const data: {{ ok: boolean; n: number }} = await ky.get("http://127.0.0.1:{port}/data.json").json();
+    console.log(data.ok);
+    console.log(data.n);
+    // A real Cloudflare-fronted site: exercises the fetch polyfill's
+    // real TLS handshake (not the mock server above) and Brotli
+    // response decompression together, not just plain local HTTP.
+    const text: string = await ky.get("https://example.com/").text();
+    console.log(text.length > 0);
+    console.log(text.includes("Example Domain"));
+}}"#
+        ),
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["ky".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    server.join().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\n42\ntrue\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
