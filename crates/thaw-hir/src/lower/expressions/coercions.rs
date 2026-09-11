@@ -821,6 +821,36 @@ impl<'a> FnLowerer<'a> {
                     Box::new(rhs.clone()),
                     payload.as_ref().clone(),
                 )),
+                // `x == undefined`/`x == null` (either operand order) for
+                // a plain `Json`/`JsValue` value -- real JS's loose-
+                // equality-against-`null`-or-`undefined` rule: true iff
+                // the value itself is nullish, no other coercion applies.
+                // Before this arm, both fell through to this function's
+                // final fallback (`coerce_primitive_to_number` on both
+                // operands), which has no case for a bare `HirType::
+                // Undefined`/`Null` literal operand and errors outright
+                // ("numeric conversion is not defined for native type
+                // Undefined") -- a real, empirically-confirmed build-time
+                // crash for e.g. `JSON.parse('{}').missingKey ==
+                // undefined`, not just a wrong runtime answer.
+                (HirType::Json, HirType::Null) | (HirType::Json, HirType::Undefined) => {
+                    Some(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                        vec![lhs.clone()],
+                    ))
+                }
+                (HirType::Null, HirType::Json) | (HirType::Undefined, HirType::Json) => {
+                    Some(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                        vec![rhs.clone()],
+                    ))
+                }
+                (HirType::JsValue, HirType::Null) | (HirType::JsValue, HirType::Undefined) => {
+                    Some(self.dynamic_value_is_nullish(lhs.clone()))
+                }
+                (HirType::Null, HirType::JsValue) | (HirType::Undefined, HirType::JsValue) => {
+                    Some(self.dynamic_value_is_nullish(rhs.clone()))
+                }
                 _ => None,
             };
         if let Some(check) = nullish_check {
@@ -967,6 +997,13 @@ impl<'a> FnLowerer<'a> {
                 (HirType::Undefined, HirType::JsValue) => {
                     Some(self.dynamic_value_is_undefined(rhs))
                 }
+                // Same story as the `Undefined` case just above, for
+                // `null` instead: a live value that's genuinely `null`
+                // otherwise fell through to the blanket `(HirType::Null,
+                // _) | (_, HirType::Null) => false` catch-all further
+                // down, unconditionally wrong.
+                (HirType::JsValue, HirType::Null) => Some(self.dynamic_value_is_null(lhs)),
+                (HirType::Null, HirType::JsValue) => Some(self.dynamic_value_is_null(rhs)),
                 (HirType::Nullable(payload), HirType::Null) => Some(HirExpr::NullableIsNone(
                     Box::new(lhs),
                     payload.as_ref().clone(),
@@ -1035,18 +1072,47 @@ impl<'a> FnLowerer<'a> {
         Ok(result)
     }
 
-    /// `value === undefined`/`undefined === value` for a live `JsValue`.
-    /// See the call site's comment (`lower_optional_undefined_equality`).
-    fn dynamic_value_is_undefined(&mut self, value: HirExpr) -> HirExpr {
+    /// Asks the live QuickJS engine a yes/no question about a `JsValue`
+    /// by calling one of the small bootstrap-registered globals in
+    /// `crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js`
+    /// (`__thaw_typeof_dynamic_value`'s siblings), the same way `typeof`
+    /// on a `JsValue` already does. Shared by `dynamic_value_is_undefined`/
+    /// `dynamic_value_is_null`/`dynamic_value_is_nullish` below -- see
+    /// their call sites (`lower_optional_undefined_equality`/
+    /// `lower_loose_equality`) for why each is needed.
+    fn dynamic_value_check(&mut self, global: &str, value: HirExpr) -> HirExpr {
         let callable = HirExpr::Call(
             Box::new(HirExpr::Var("getDynamicValue".into())),
-            vec![HirExpr::Lit(HirLit::Str(
-                "__thaw_is_undefined_dynamic_value".into(),
-            ))],
+            vec![HirExpr::Lit(HirLit::Str(global.into()))],
         );
         HirExpr::JsonAsBool(Box::new(HirExpr::Call(
             Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
             vec![callable, value],
         )))
+    }
+
+    /// `value === undefined`/`undefined === value` for a live `JsValue`.
+    /// See the call site's comment (`lower_optional_undefined_equality`).
+    fn dynamic_value_is_undefined(&mut self, value: HirExpr) -> HirExpr {
+        self.dynamic_value_check("__thaw_is_undefined_dynamic_value", value)
+    }
+
+    /// `value === null`/`null === value` for a live `JsValue`. Sibling
+    /// gap to `dynamic_value_is_undefined`, found while fixing the
+    /// `Json`-side missing-key-vs-null distinction: `cb423ffb` added a
+    /// `(JsValue, Undefined)` arm but no `(JsValue, Null)` one, so a
+    /// live value that's genuinely `null` still fell through to the
+    /// blanket "an operand's type is `Null` and nothing more specific
+    /// matched -> `false`" catch-all.
+    fn dynamic_value_is_null(&mut self, value: HirExpr) -> HirExpr {
+        self.dynamic_value_check("__thaw_is_null_dynamic_value", value)
+    }
+
+    /// `value == undefined`/`value == null` (either order) for a live
+    /// `JsValue` -- real JS's own loose-equality-against-`null`-or-
+    /// `undefined` rule ("nullish", full stop, no other coercion
+    /// applies). See `lower_loose_equality`'s call site.
+    fn dynamic_value_is_nullish(&mut self, value: HirExpr) -> HirExpr {
+        self.dynamic_value_check("__thaw_is_nullish_dynamic_value", value)
     }
 }

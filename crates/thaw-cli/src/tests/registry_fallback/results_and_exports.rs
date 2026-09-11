@@ -853,13 +853,14 @@ function main(): void {
 /// platform_globals/runtime.js`), invoked through the same
 /// `callDynamicValueWithValue` mechanism.
 ///
-/// Note: this only fixes a live `JsValue`. A plain `Json` value (e.g.
-/// from `JSON.parse`) still can't distinguish a genuinely missing key
-/// from an explicitly-`null` one -- `thaw_json_get`'s own missing-key
-/// fallback returns `Value::Null` for both, a separate, deeper,
-/// deliberately-scoped representational limitation (see the doc
-/// comment on `HirExpr::JsonSet` in `crates/thaw-hir/src/hir/ir.rs`),
-/// not fixed here.
+/// Note: this originally only fixed a live `JsValue`, leaving the same
+/// symptom open for a plain `Json` value (e.g. from `JSON.parse`) as a
+/// separate, deeper gap -- since fixed too, see
+/// `a_missing_json_key_or_index_is_distinguishable_from_an_explicit_null`
+/// (`thaw-llvm`) and the sibling `JsValue === null`/loose-equality gaps
+/// closed alongside it, covered by
+/// `a_live_dynamic_values_property_compares_equal_to_null_or_via_loose_equality`
+/// below.
 #[test]
 fn a_live_dynamic_values_property_compares_equal_to_undefined_when_actually_absent() {
     let dir = std::env::temp_dir().join(format!(
@@ -919,6 +920,81 @@ function main(): void {
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
         "true\ntrue\nfalse\nfalse\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Two sibling gaps found while fixing the `Json`-side missing-key-vs-
+/// `null` distinction: (1) `value === null`/`null === value` for a live
+/// `JsValue` was *also* still broken -- the fix above added a
+/// `(JsValue, Undefined)` arm to `lower_optional_undefined_equality` but
+/// no `(JsValue, Null)` one, so a live value that's genuinely `null`
+/// still fell through to the blanket "false" catch-all; (2) `value ==
+/// undefined`/`value == null` (loose equality, either operand order) for
+/// a live `JsValue` crashed at *build time* -- `lower_loose_equality`
+/// had no `JsValue`-aware arm at all, falling through to
+/// `coerce_primitive_to_number`, which errors outright on a bare
+/// `Undefined`/`Null` operand. Both fixed the same way as the strict-
+/// undefined case: ask the live engine directly, via two more small
+/// bootstrap globals (`__thaw_is_null_dynamic_value`,
+/// `__thaw_is_nullish_dynamic_value`), reusing the exact
+/// `callDynamicValueWithValue` mechanism.
+#[test]
+fn a_live_dynamic_values_property_compares_equal_to_null_or_via_loose_equality() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-dynamic-null-loose-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("resultkit2");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Callable { (): void; }\n\
+         export interface ValidationResult { error?: Callable; nothing?: Callable; value: any; }\n\
+         export declare function makeResult(withError: boolean): ValidationResult;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeResult: function(withError) {\n\
+         \x20\x20var result = { value: 1 };\n\
+         \x20\x20if (withError) { result.error = 'boom'; } else { result.nothing = null; }\n\
+         \x20\x20return result;\n\
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeResult } from "resultkit2";
+function main(): void {
+    const good: JsValue = makeResult(false);
+    const bad: JsValue = makeResult(true);
+    console.log(good.error === null);
+    console.log(good.error !== null);
+    console.log(good.error == null);
+    console.log(good.error == undefined);
+    console.log(good.nothing === null);
+    console.log(good.nothing === undefined);
+    console.log(good.nothing == undefined);
+    console.log(bad.error === null);
+    console.log(bad.error == null);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "false\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\nfalse\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

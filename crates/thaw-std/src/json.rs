@@ -19,16 +19,19 @@
 //! object (`napi_undefined_value`/`is_napi_undefined`), not plain JSON
 //! `null` -- keeping "the key is absent" and "the key is present with
 //! an explicit `null`" distinguishable the way real JS's `undefined`
-//! and `null` are, all the way through `typeof`/truthiness/`String()`/
-//! `===`/`==`/`JSON.stringify`. One conversion is deliberately *not*
-//! sentinel-aware: `Number()`/`thaw_json_as_number` still gives `0.0`
-//! for a missing key (real JS: `NaN`), to avoid rippling into arithmetic
-//! results for existing code that already relies on this default -- one
-//! resulting, pre-existing (not newly introduced) inconsistency this
-//! leaves is that `missing == 0` still reads `true` (real JS: `false`),
-//! since `==` against a *number* is ordinary numeric equality, not the
-//! null-or-undefined-aware equality `==` against `null`/`undefined`
-//! itself gets.
+//! and `null` are, through `typeof`/truthiness/`String()`/`===`/`==`.
+//! Two things are deliberately *not* sentinel-aware, both documented at
+//! their own definition: `Number()`/`thaw_json_as_number` still gives
+//! `0.0` for a missing key (real JS: `NaN`), to avoid rippling into
+//! arithmetic results for existing code that already relies on this
+//! default (one resulting, pre-existing, not-newly-introduced
+//! inconsistency this leaves: `missing == 0` still reads `true`, real
+//! JS: `false`); and `ordered_json`/`filtered_json` (backing
+//! `JSON.stringify`) don't omit/null a *nested* sentinel value the way
+//! real `JSON.stringify` treats a real `undefined` -- that function is
+//! also load-bearing for unrelated internal argument/result marshaling
+//! that needs the sentinel's exact shape preserved, so touching it
+//! isn't safe here (see `ordered_json`'s own doc comment).
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -81,39 +84,36 @@ fn ordered_object_fields(fields: &serde_json::Map<String, Value>) -> Vec<(&Strin
         .collect()
 }
 
-/// Matches real `JSON.stringify`'s own asymmetry between an object
-/// property and an array element whose value is the napi-undefined
-/// sentinel: `JSON.stringify({a: undefined})` omits `"a"` entirely,
-/// while `JSON.stringify([1, undefined, 3])` keeps the slot but writes
-/// `null` in it. Without this, a sentinel value re-inserted into a
-/// fresh object/array (e.g. `const v = obj.missingKey; other.field =
-/// v;`) would serialize as its own raw JSON shape
-/// (`{"$__thaw_napi_undefined$":true}`) instead. The bare top-level
-/// case (the value handed to `JSON.stringify` *itself* is the
-/// sentinel, not nested) is left alone -- real JS returns actual
-/// `undefined` there, which doesn't fit this function's always-a-string
-/// return; a narrow, pre-existing rough edge, not addressed here.
+// NOTE: `ordered_json` deliberately does NOT special-case the
+// napi-undefined sentinel (e.g. to omit a sentinel-valued object field
+// or null a sentinel-valued array element the way real `JSON.stringify`
+// treats a real `undefined`) -- an earlier version of this fix did, but
+// `thaw_json_stringify` (which this function backs) is not only reached
+// by user-facing `JSON.stringify(...)` calls: it's *also* the mechanism
+// several dynamic-call argument/result marshaling paths use internally
+// to serialize a value (often nested inside a fresh single-element
+// array, e.g. `compile_set_dynamic_property_json`,
+// `crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs`)
+// before handing it to the live QuickJS engine, whose own deserializer
+// specifically looks for the sentinel's exact shape to revive a real
+// `undefined` argument. Omitting/nulling it here would silently corrupt
+// that unrelated, pervasive mechanism instead -- confirmed by a real
+// regression in existing tests (`a_bare_undefined_literal_can_be_
+// passed_as_a_dynamic_call_argument` and its `Optional`-typed sibling,
+// `crates/thaw-cli/src/tests/registry_fallback/classes_and_values.rs`)
+// when this was tried. So a *nested* sentinel value's `JSON.stringify`
+// treatment stays as it always has been (its own raw JSON shape leaks
+// through) -- a real, pre-existing rough edge, left open; see
+// `docs/design/dynamic-value-undefined-equality.md`.
 fn ordered_json(value: &Value) -> Value {
     match value {
         Value::Object(fields) => Value::Object(
             ordered_object_fields(fields)
                 .into_iter()
-                .filter(|(_, value)| !is_napi_undefined(value))
                 .map(|(key, value)| (key.clone(), ordered_json(value)))
                 .collect(),
         ),
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| {
-                    if is_napi_undefined(item) {
-                        Value::Null
-                    } else {
-                        ordered_json(item)
-                    }
-                })
-                .collect(),
-        ),
+        Value::Array(items) => Value::Array(items.iter().map(ordered_json).collect()),
         other => other.clone(),
     }
 }
@@ -195,33 +195,21 @@ fn string_array(array: *const u8) -> Vec<String> {
     keys
 }
 
-/// Same object-vs-array sentinel handling as `ordered_json`, for the
-/// keys-list-filtered variant of stringify.
 fn filtered_json(value: &Value, keys: &[String]) -> Value {
     match value {
         Value::Object(fields) => Value::Object(
             keys.iter()
                 .filter_map(|key| {
-                    fields.get(key).and_then(|value| {
-                        if is_napi_undefined(value) {
-                            None
-                        } else {
-                            Some((key.clone(), filtered_json(value, keys)))
-                        }
-                    })
+                    fields
+                        .get(key)
+                        .map(|value| (key.clone(), filtered_json(value, keys)))
                 })
                 .collect(),
         ),
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|value| {
-                    if is_napi_undefined(value) {
-                        Value::Null
-                    } else {
-                        filtered_json(value, keys)
-                    }
-                })
+                .map(|value| filtered_json(value, keys))
                 .collect(),
         ),
         other => other.clone(),
@@ -1402,30 +1390,6 @@ mod tests {
         assert_eq!(unsafe { thaw_json_is_null(oob) }, 0);
         assert_eq!(unsafe { thaw_json_is_nullish(oob) }, 1);
         assert_eq!(read_c_string(unsafe { thaw_json_typeof(oob) }), "undefined");
-    }
-
-    #[test]
-    fn stringify_omits_a_missing_derived_field_but_nulls_a_missing_derived_array_element() {
-        let source = parse(r#"{"a": 1}"#);
-        let missing_key = CString::new("nope").unwrap();
-        let missing = thaw_json_get(source, missing_key.as_ptr());
-
-        // Re-inserted as an object field: matches real
-        // `JSON.stringify({kept: 1, dropped: undefined})` -> `dropped`
-        // vanishes entirely.
-        let object = thaw_json_object_new();
-        let kept_key = CString::new("kept").unwrap();
-        thaw_json_object_set_number(object, kept_key.as_ptr(), 1.0);
-        let dropped_key = CString::new("dropped").unwrap();
-        thaw_json_object_set_json(object, dropped_key.as_ptr(), missing);
-        assert_eq!(read_c_string(thaw_json_stringify(object)), r#"{"kept":1}"#);
-
-        // Re-inserted as an array element: matches real
-        // `JSON.stringify([1, undefined, 3])` -> the slot survives as
-        // `null`.
-        let array = parse("[1, 2, 3]");
-        unsafe { thaw_json_index_set(array, 1.0, std::ptr::null(), missing) };
-        assert_eq!(read_c_string(thaw_json_stringify(array)), "[1,null,3]");
     }
 
     #[test]

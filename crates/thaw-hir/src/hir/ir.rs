@@ -179,11 +179,20 @@ pub enum HirExpr {
     /// by `wrap_native_value_as_json`, which uses this node to encode a
     /// *standalone* value (not a real object literal's own field, where
     /// omission would be correct) as its own temporary object's one
-    /// field, then reads that same field straight back out: omitting it
-    /// there would make the read-back see a plain *missing* key (which
-    /// `thaw_json_get` reports as JSON `null`), silently turning a real
-    /// `undefined` argument into `null` -- wrong for something like
-    /// zod's own `ZodUndefined`, which rejects `null`.
+    /// field, then reads that same field straight back out. Historically
+    /// this was the *only* way to preserve a real `undefined`'s identity
+    /// through a `Json` round-trip -- `thaw_json_get` (thaw-std) used to
+    /// report a plain missing key as bare JSON `null` too, so omitting
+    /// the key here would have silently turned a real `undefined`
+    /// argument into `null`, wrong for something like zod's own
+    /// `ZodUndefined`, which rejects `null`. `thaw_json_get` now
+    /// synthesizes the same sentinel for a genuinely missing key on its
+    /// own, so the two `preserve_undefined` branches converge for this
+    /// particular round-trip either way -- this flag (and the plumbing
+    /// behind it) stays, since it's still what makes the *native*-value
+    /// encoding step choose to write the sentinel in the first place,
+    /// rather than omitting the field, before `thaw_json_get` is ever
+    /// involved at all.
     JsonSet(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>, HirType, bool),
     JsonIndexSet(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>),
     /// Deletes a runtime-keyed JSON/dictionary property and returns `true`.
