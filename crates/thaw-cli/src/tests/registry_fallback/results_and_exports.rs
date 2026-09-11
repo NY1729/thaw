@@ -760,3 +760,75 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "<World>\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `this`-dependent method on a default-exported *stateful* namespace
+/// object used to lose its receiver entirely -- real examples: joi's
+/// `declare const Joi: Joi.Root`, whose `Root.string()`/`.object()`/etc
+/// are real instance methods needing `this === root` (joi's own
+/// `internals.generate(this, ...)` asserts "Must be invoked on a Joi
+/// instance" otherwise); handlebars' `Handlebars.registerHelper(...)`,
+/// which reads `this.helpers`. `extract_interface_method_decls` treats
+/// every such interface method exactly like a real free function
+/// (correct for zod's `z.string()`, which has no `this` dependency at
+/// all) and extracts it into a detached, package-level Fallback
+/// function, invoked later as a bare, receiverless `thaw_js_call(name,
+/// args)` -- silently dropping the live object the method was declared
+/// on. Fixed generally in the JS glue code two separate binding
+/// mechanisms in `crates/thaw-bridge/src/bridge/generation.rs` both
+/// go through: the `module.exports` -> `globalThis` copy loop in
+/// `wrap_as_commonjs_module`, and the `qualified_aliases` capture
+/// snippet in `generate_module_init` -- both now `.bind()` a function
+/// value to `module.exports` (its own original owner) before handing it
+/// off, so a genuinely stateless function (the vast majority of real
+/// packages' methods, e.g. lodash's `_.chunk`) is unaffected, while a
+/// `this`-dependent one keeps working. Requires *both* fixes together:
+/// this package's `count()` reads `this.value`, and either binding
+/// mechanism alone (found via inspecting the compiled binary's embedded
+/// JS text with `strings`) left the other path still receiverless.
+#[test]
+fn a_stateful_namespace_objects_method_keeps_its_receiver_when_extracted() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-this-binding-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("statekit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "interface StateKit { count(): number; }\n\
+         declare const kit: StateKit;\n\
+         export = kit;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "var root = { value: 42 };\n\
+         root.count = function() {\n\
+         \x20\x20if (!this || this.value === undefined) throw new Error('this is broken');\n\
+         \x20\x20return this.value;\n\
+         };\n\
+         module.exports = root;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import kit from "statekit";
+function main(): void {
+    console.log(kit.count());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
