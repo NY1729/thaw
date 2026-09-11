@@ -1845,3 +1845,90 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// luxon end to end: `DateTime.fromISO(...)` (no explicit `locale` --
+/// this polyfill always renders English regardless of what locale
+/// string luxon itself requests, so real luxon's own default already
+/// matches without needing `Settings.defaultLocale` set explicitly;
+/// found while writing this test that `Settings.defaultLocale = "en-
+/// US"` itself crashes the build entirely -- "needs a monomorphic
+/// native implementation" against a synthesized `$new$Settings$arity0`
+/// symbol, i.e. a *static property assignment* misclassified as a
+/// *constructor* call. A real, separate, general bug, but outside this
+/// effort's scope -- noted in `docs/design/intl-polyfill.md` as a
+/// follow-up, not chased down here), `.setZone("America/New_York")`
+/// across a real DST boundary (July vs. January -- confirms `jiff`'s
+/// bundled tzdata, not a hand-rolled DST rule), `.toFormat(...)`,
+/// `.toLocaleString(DateTime.DATE_FULL)`, `.toLocaleString(DateTime.
+/// DATETIME_FULL)`, and `.diff(...).toHuman()`. Fixed timestamps
+/// throughout (never `DateTime.now()`), so this is fully deterministic.
+/// See `docs/design/intl-polyfill.md` for the full writeup -- this is
+/// the capstone test for that whole effort, exercising the native
+/// `jiff`-backed timezone engine, the JS `Intl.DateTimeFormat`/
+/// `NumberFormat`/`ListFormat` polyfill, and three separate general
+/// compiler/bridge bugs found getting a real, non-constructible-class
+/// package's static factory methods (`DateTime.fromISO`) to work at all.
+#[test]
+fn registry_add_computes_and_formats_real_luxon_datetimes_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-luxon-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "luxon").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        &source,
+        r#"import { DateTime } from "luxon";
+function main(): void {
+    const summer = DateTime.fromISO("2024-07-04T16:30:45.000Z", { zone: "utc" });
+    console.log(summer.toISO());
+    const ny = summer.setZone("America/New_York");
+    console.log(ny.toISO());
+    console.log(ny.offset);
+    const winter = DateTime.fromISO("2024-01-04T16:30:45.000Z", { zone: "utc" }).setZone("America/New_York");
+    console.log(winter.toISO());
+    console.log(winter.offset);
+    console.log(summer.toFormat("yyyy-MM-dd HH:mm:ss"));
+    console.log(summer.toLocaleString(DateTime.DATE_FULL));
+    console.log(ny.toLocaleString(DateTime.DATETIME_FULL));
+    const later: JsValue = summer.plus({ days: 3 });
+    console.log(later.diff(summer, "days").toHuman());
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["luxon".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2024-07-04T16:30:45.000Z\n\
+         2024-07-04T12:30:45.000-04:00\n\
+         -240\n\
+         2024-01-04T11:30:45.000-05:00\n\
+         -300\n\
+         2024-07-04 16:30:45\n\
+         July 4, 2024\n\
+         July 4, 2024 at 12:30 PM EDT\n\
+         3 days\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
