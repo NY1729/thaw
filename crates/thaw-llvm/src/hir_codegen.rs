@@ -759,9 +759,29 @@ impl<'ctx> HirCompiler<'ctx> {
             .enumerate()
             .map(|(index, arg)| {
                 let outer = self.compiling_quickjs_dynamic_arguments;
+                // A bare pointer-typed parameter slot (`Json`/`Dictionary`/
+                // `Object`/`Array`/`Tuple`) can carry a nested `JsValue`
+                // needing this same placeholder mechanism, so those
+                // already enable it -- but so can a *struct*-typed slot
+                // (`Optional`/`Nullable`/`Nullish`/`Union`, this codegen's
+                // own tagged representation for all of them), whose
+                // payload is exactly one of those pointer-typed shapes
+                // once unwrapped. Real example: joi's `object(schema?:
+                // T)` (`schema`'s declared type is `Optional(Json)` once
+                // its unresolved generic `T` falls back), called with an
+                // object literal that itself nests a `JsValue` field
+                // (`Joi.object({ name: Joi.string() })`) -- the argument's
+                // own top-level LLVM type is a struct (the `Optional` tag
+                // + payload), never a bare pointer, so this flag never
+                // used to get enabled for it at all, and the nested field
+                // failed outright. Enabling it a little more broadly than
+                // strictly necessary here is harmless: it only permits
+                // `compile_dynamic_value_placeholder` to run if actually
+                // reached, never changes what a value that doesn't need
+                // it compiles to.
                 if param_types
                     .get(index)
-                    .is_some_and(|ty| ty.is_pointer_type())
+                    .is_some_and(|ty| ty.is_pointer_type() || ty.is_struct_type())
                 {
                     self.compiling_quickjs_dynamic_arguments = true;
                 }
