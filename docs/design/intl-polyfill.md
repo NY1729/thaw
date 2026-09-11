@@ -109,10 +109,10 @@ real Node for every unit/style/count combination, not guessed.
 `Intl.ListFormat` does plain English `"a"`/`"a and b"`/`"a, b, and c"`
 joining (no narrow/short/long distinction worth modeling for English).
 
-## Three general compiler/bridge bugs found and fixed getting luxon's
-own `DateTime.fromISO(...)` to actually run
+## Four general compiler/bridge bugs found and fixed getting luxon's
+own `DateTime.fromISO(...)` and `Settings.defaultLocale` to actually run
 
-None of these are Intl-specific; all three are general gaps any package
+None of these are Intl-specific; all four are general gaps any package
 with the same shape can hit.
 
 1. **`new <Namespace>.<Class>(...)` didn't compile at all**
@@ -151,7 +151,7 @@ with the same shape can hit.
    or a static property read, failed to build: "unknown variable
    `__thaw_type_luxon_DateTime`"). Fixed by treating such a class like
    any other named package value once `class_targets` has nothing for
-   it (`shim_generation.rs`'s `non_constructible_classes`): bound via
+   it (`shim_generation.rs`'s `bare_value_classes`): bound via
    the exact same `$value$`-keyed runtime-getter mechanism a `Str`/
    `F64`/`JsValue` constant export already uses (confirmed pre-existing
    and already working via a direct synthetic test, `constant-kit`),
@@ -184,6 +184,35 @@ with the same shape can hit.
    (`platform_globals/runtime.js`) that binds *and* copies every own
    property descriptor (enumerable or not) from the original onto the
    bound wrapper, used at every `.bind()` call site in `generation.rs`.
+4. **A constructible-but-never-`new`'d class's bare-identifier value
+   binding was shadowed by its own unused constructor symbol.** Found
+   after bug 2 above shipped: luxon's `Settings` is a purely static
+   config object with *no* declared constructor at all (unlike
+   `DateTime`/`Duration`/`Interval`, which all declare `private
+   constructor(...)`) -- so `constructible` defaults to `true`, and
+   `generate_napi_class_constructors`'s fallback path happily synthesizes
+   a placeholder zero-arg constructor (`$new$Settings$arity0`) and a
+   real `class_targets` entry for it, even though nothing ever calls
+   `new Settings()`. `package_exports`'s class-name mapping preferred
+   `class_targets` unconditionally, so `Settings`'s bare name resolved
+   to that placeholder constructor symbol instead of a usable value --
+   and since the Fallback (non-N-API) branch never generates a static
+   property *setter* at all (only the N-API branch does), `Settings.
+   defaultLocale = "en-US"` was never text-rewritten away first either;
+   it reached thaw-hir raw, with `Settings` resolved to an
+   unrecognizable constructor-invoking symbol: "needs a monomorphic
+   native implementation" against `$new$Settings$arity0`. Fixed by
+   broadening bug 2's mechanism to cover *every* exported class (not
+   just non-constructible ones), scoped by a new, more general AST walk
+   (`observed_bare_member_object_identifiers`, `shim_support.rs` --
+   every `Expr::Member`, so a property read, an assignment target, and a
+   method call's own callee are all covered uniformly) rather than the
+   narrower "has an observed static method call" check bug 2 used, and
+   making `package_exports` prefer this value binding over `class_
+   targets`'s constructor symbol whenever both exist. `class_targets`/
+   `class_rewrites`'s own, separate `new ClassName(...)` support is
+   completely untouched -- a `new` call site never consults `package_
+   exports` at all.
 
 ## Verified end to end against real luxon@3.7.2
 
@@ -191,10 +220,14 @@ with the same shape can hit.
 DST boundary (July vs. January, confirmed via `jiff`'s bundled tzdata,
 not a hand-rolled rule -- `-04:00`/`EDT` vs. `-05:00`/`EST`),
 `.toFormat(...)`, `.toLocaleString(DateTime.DATE_FULL)`, `.toLocaleString
-(DateTime.DATETIME_FULL)`, and `.diff(...).toHuman()` -- every result
-matches real Node running the same luxon version for the same fixed
-instants exactly (given `Settings.defaultLocale = "en-US"`, matching
-this polyfill's own English-only scope).
+(DateTime.DATETIME_FULL)`, `.diff(...).toHuman()`, and `Settings.
+defaultLocale = "en-US"` (a bare static property assignment, bug 4
+above) -- every result matches real Node running the same luxon version
+for the same fixed instants exactly (this polyfill always renders
+English regardless of what locale string luxon itself requests, so
+setting `Settings.defaultLocale` doesn't actually change any of this
+test's output -- it's exercised here purely to cover bug 4, not because
+luxon's own results depend on it).
 
 ## Tests
 
@@ -208,8 +241,10 @@ this polyfill's own English-only scope).
 - `crates/thaw-cli/src/tests/registry_fallback/classes_and_values.rs`:
   `a_non_constructible_classs_static_methods_and_bare_name_both_work`
   (network-free synthetic registry package, mimicking luxon's `DateTime`
-  shape exactly -- covers bugs 2 and 3 above).
+  shape exactly -- covers bugs 2 and 3 above); `a_constructible_but_
+  never_newed_class_can_have_its_static_property_assigned` (mimicking
+  luxon's `Settings` shape -- covers bug 4 above).
 - `crates/thaw-cli/src/tests/native_addons/javascript_packages.rs`: a
   real luxon pinned integration test (`THAW_RUN_NPM_INTEGRATION=1`-
   gated), using fixed historical dates (never `DateTime.now()`, for
-  determinism).
+  determinism), including `Settings.defaultLocale = "en-US"` (bug 4).

@@ -702,6 +702,47 @@ fn observed_identifier_call_arities(
     Ok(finder.arities)
 }
 
+/// Every bare identifier used as the object of *any* member expression
+/// anywhere in `source` (`Expr::Member`, visited generically -- so this
+/// covers a plain property read, an assignment target
+/// (`AssignTarget::Simple(SimpleAssignTarget::Member(..))` still parses
+/// as a `MemberExpr` on the AST side), and a method-call callee alike,
+/// with no need to special-case any of those separately). Used to decide
+/// whether an exported class needs a real bare-identifier *value*
+/// binding at all (real example: luxon's `Settings.defaultLocale =
+/// "en-US"` -- a plain static property *assignment*, not a method call,
+/// so `static_class_method_rewrites` alone doesn't see it) -- scoping to
+/// what the user's own source actually references by name avoids
+/// binding a purely type-level helper class with no real runtime
+/// counterpart at all (real example: socket.io's own
+/// `StrictEventEmitter`, never referenced directly by name in real user
+/// code) to a value that would silently read back `undefined`.
+fn observed_bare_member_object_identifiers(
+    source: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Expr, MemberExpr};
+
+    #[derive(Default)]
+    struct Finder {
+        names: std::collections::HashSet<String>,
+    }
+
+    impl Visit for Finder {
+        fn visit_member_expr(&mut self, member: &MemberExpr) {
+            if let Expr::Ident(object) = member.obj.as_ref() {
+                self.names.insert(object.sym.to_string());
+            }
+            member.visit_children_with(self);
+        }
+    }
+
+    let module = thaw_parser::parse_typescript(source)?;
+    let mut finder = Finder::default();
+    module.visit_with(&mut finder);
+    Ok(finder.names)
+}
+
 /// The name a package's own bundled `.d.ts` binds as its "default"
 /// export, when there's a single unambiguous one -- `export = x;`
 /// (CommonJS-style, the original shape this covered), but also either
