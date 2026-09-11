@@ -1374,3 +1374,128 @@ async function main(): Promise<void> {{
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `this`-dependent method on joi's default-exported, stateful `Joi`
+/// namespace object used to crash outright: `Root.string()`/`.object()`/
+/// etc are real instance methods, and joi's own internal
+/// `internals.generate(this, ...)` asserts `this === root` ("Must be
+/// invoked on a Joi instance"). `extract_interface_method_decls` treats
+/// every interface method the same way regardless of whether the real
+/// implementation depends on `this` (correct for zod's free functions,
+/// silently wrong here), extracting it into a detached, receiverless
+/// global Fallback function. Fixed generally by `.bind()`ing a copied
+/// function value to its own original owner in the two JS-glue binding
+/// mechanisms (`crates/thaw-bridge/src/bridge/generation.rs`) --  see
+/// `a_stateful_namespace_objects_method_keeps_its_receiver_when_extracted`
+/// (network-free, synthetic) for the isolated shape. This drives real
+/// joi's full validation flow end to end: a nested schema built from
+/// `Joi.object({ ..., name: Joi.string()... })` (also exercises the
+/// `Optional`-wrapped dynamic-argument fix, `build_call_with`), a valid
+/// and an invalid input.
+///
+/// Note: `result.error === undefined`-style equality against the
+/// literal `undefined` for a dynamic (`Json`/`JsValue`) property whose
+/// value genuinely is `undefined` is a separate, pre-existing bug (also
+/// reproduces with a plain `JSON.parse(...)`, nothing joi- or
+/// this-binding-specific) -- not fixed here, so this test uses
+/// `typeof x === "undefined"` instead, which is unaffected.
+#[test]
+fn registry_add_validates_with_real_joi_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-joi-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "joi").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        &source,
+        r#"import Joi from "joi";
+function main(): void {
+    const schema = Joi.object({
+        name: Joi.string().min(2).max(10).required(),
+        age: Joi.number().integer().min(0).required(),
+    });
+    const good = schema.validate({ name: "Alice", age: 30 });
+    console.log(typeof good.error === "undefined");
+    console.log(JSON.stringify(good.value));
+    const bad = schema.validate({ name: "A", age: -1 });
+    console.log(typeof bad.error !== "undefined");
+}
+"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["joi".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\n{\"name\":\"Alice\",\"age\":30}\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The same `this`-dependent-method gap, on handlebars: `Handlebars.
+/// registerHelper(...)` reads `this.helpers` and used to fail with
+/// "cannot read property 'helpers' of undefined" for exactly the same
+/// reason as joi's `Root.string()` above (`Handlebars.compile(...)`
+/// itself, by contrast, was already fine -- not `this`-sensitive
+/// internally). Drives a registered custom helper through a real
+/// `{{#each}}` block plus an unrelated `{{#if}}` block, end to end.
+#[test]
+fn registry_add_registers_helpers_with_real_handlebars_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-handlebars-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "handlebars").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        &source,
+        r#"import Handlebars from "handlebars";
+function main(): void {
+    Handlebars.registerHelper("upper", (value: string) => value.toUpperCase());
+    const template = Handlebars.compile("{{#each items}}{{upper this}} {{/each}}");
+    console.log(template({ items: ["a", "b", "c"] }));
+    const cond = Handlebars.compile("{{#if flag}}yes{{else}}no{{/if}}");
+    console.log(cond({ flag: true }));
+    console.log(cond({ flag: false }));
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["handlebars".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "A B C \nyes\nno\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

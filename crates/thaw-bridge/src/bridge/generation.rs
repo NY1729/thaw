@@ -527,6 +527,27 @@ pub struct ModuleBundle<'a> {
 /// ...) silently never reached `globalThis` at all before this fix,
 /// even though none of them have anything to do with `undefined`
 /// itself.
+///
+/// The same copy loop also `.bind()`s each copied *function* value to
+/// `module.exports` (its own original owner) before handing it to
+/// `globalThis`, rather than copying the bare reference. Most real
+/// packages' exported "methods" don't actually read `this` at all (real
+/// example: lodash's `declare const _: LoDashStatic` -- `_.chunk(...)`'s
+/// own implementation is a plain, `this`-free function, unaffected
+/// either way), so this changes nothing for them. But some genuinely
+/// do -- real example: joi's `declare const Joi: Joi.Root`, whose
+/// `Root.string()`/`.object()`/etc are real instance methods needing
+/// `this` to equal the live `root` object joi's own internal
+/// `internals.generate(this, ...)` asserts on (`Must be invoked on a Joi
+/// instance`); same shape for handlebars' `Handlebars.registerHelper`,
+/// which reads `this.helpers`. Every such method gets pulled out of its
+/// owning object and rebound to `globalThis` under its own bare name
+/// (`extract_interface_method_decls`'s whole point, matching
+/// `thaw_bridge::classify_all`'s "package-level Fallback function"
+/// model) -- without `.bind()`, calling it later as a bare global
+/// function (`thaw_js_call("string", args)`) permanently loses its
+/// receiver, exactly the way copying `const f = obj.method` and calling
+/// bare `f()` always does in plain JS.
 fn wrap_as_commonjs_module(
     js_source: &str,
     fallback_names: &[String],
@@ -660,7 +681,7 @@ fn wrap_as_commonjs_module(
          }}\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
-         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ if (typeof globalThis[k] === 'undefined') globalThis[k] = module.exports[k]; }} catch (e) {{}} }} }}\n\
+         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ if (typeof globalThis[k] === 'undefined') globalThis[k] = typeof module.exports[k] === 'function' ? module.exports[k].bind(module.exports) : module.exports[k]; }} catch (e) {{}} }} }}\n\
          {bind_nested_namespaces}\
          {bind_default_exports}\
          }};\n\
@@ -774,8 +795,16 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             // already binds `globalThis.{bare_name} = module.exports`
             // directly for exactly that case, with no corresponding
             // property to read here instead.
+            // `.bind()`s a function value to `globalThis.module.exports`
+            // before capturing it, for the same reason the `module.
+            // exports` -> `globalThis` copy loop above does -- this
+            // reads the very same `module.exports.{bare_name}` property,
+            // just under this package's own qualified key instead of the
+            // bare name, and needs the receiver preserved for exactly
+            // the same real packages (joi's `Root.string()`, handlebars'
+            // `registerHelper`).
             let capture_js = format!(
-                "if (typeof globalThis.module !== 'undefined' && globalThis.module && typeof globalThis.module.exports !== 'undefined' && globalThis.module.exports !== null && typeof globalThis.module.exports.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports.{bare_name}; }} else if (typeof globalThis.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.{bare_name}; }}",
+                "if (typeof globalThis.module !== 'undefined' && globalThis.module && typeof globalThis.module.exports !== 'undefined' && globalThis.module.exports !== null && typeof globalThis.module.exports.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = typeof globalThis.module.exports.{bare_name} === 'function' ? globalThis.module.exports.{bare_name}.bind(globalThis.module.exports) : globalThis.module.exports.{bare_name}; }} else if (typeof globalThis.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.{bare_name}; }}",
                 escape_ts_string_literal(qualified_key),
                 escape_ts_string_literal(qualified_key)
             );
