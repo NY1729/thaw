@@ -1499,3 +1499,127 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// bcryptjs's real entry `.d.ts` (`umd/index.d.ts`) is just `import *
+/// as bcrypt from "./types.js"; export = bcrypt; export as namespace
+/// bcrypt;` -- every one of its actual functions (`hashSync`,
+/// `compareSync`, ...) lives in the sibling `types.d.ts`, which
+/// thaw-registry never inlined: it discards every individual `.d.ts`
+/// source file except the one flattened `package.d.ts` it writes out,
+/// and had no handling for a namespace import (`import * as X from
+/// "./y"`) reexported wholesale via `export = X;` (as opposed to
+/// `import X = require("./y")`, or `X` being declared directly in the
+/// entry file, both already handled). Every call against the package
+/// failed to build ("call to unknown function `bcrypt.hashSync`").
+/// Fixed generally in thaw-registry's declaration flattening -- see
+/// `installed_package_inlines_a_namespace_import_reexported_via_export_
+/// assignment` (thaw-registry, network-free) for the isolated shape;
+/// this drives the real package end to end, exercising both the sync
+/// and async (`Promise`-returning) forms of the same function.
+#[test]
+fn registry_add_hashes_and_compares_passwords_with_real_bcryptjs_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-bcryptjs-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "bcryptjs").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        &source,
+        r#"import bcrypt from "bcryptjs";
+async function main(): Promise<void> {
+    const hash = bcrypt.hashSync("password123", 10);
+    console.log(typeof hash);
+    console.log(bcrypt.compareSync("password123", hash));
+    console.log(bcrypt.compareSync("wrong", hash));
+    const asyncHash = await bcrypt.hash("secret", 10);
+    console.log(await bcrypt.compare("secret", asyncHash));
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["bcryptjs".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "string\ntrue\nfalse\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// ajv's own entry `.d.ts` is `import AjvCore from "./core"; export
+/// declare class Ajv extends AjvCore { _addVocabularies(): void; ... }`
+/// -- `AjvCore` (`dist/core.d.ts`'s `export default class Ajv { ... }`,
+/// essentially ajv's *entire* real API: `compile`, `validate`,
+/// `addSchema`, ...) lived in a file thaw-registry otherwise discards,
+/// never inlined into the flattened `package.d.ts`. Every call against
+/// `new Ajv().compile(...)` (or any other inherited method) failed
+/// outright ("call to undeclared function `validate`"), even though
+/// `new Ajv()` itself and the 3 methods the entry file adds directly
+/// worked fine. Fixed generally in thaw-registry's declaration
+/// flattening -- see
+/// `installed_package_inlines_a_default_imported_class_used_as_an_extends_base`
+/// (thaw-registry, network-free) for the isolated shape; this drives
+/// the real package end to end, compiling and running a real JSON
+/// Schema against both a valid and an invalid input.
+#[test]
+fn registry_add_validates_json_schemas_with_real_ajv_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-ajv-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "ajv").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        &source,
+        r#"import Ajv from "ajv";
+function main(): void {
+    const ajv = new Ajv();
+    const validate = ajv.compile({
+        type: "object",
+        properties: {
+            name: { type: "string" },
+            age: { type: "number" },
+        },
+        required: ["name", "age"],
+    });
+    console.log(validate({ name: "Alice", age: 30 }));
+    console.log(validate({ name: "Bob" }));
+}
+"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["ajv".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\nfalse\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
