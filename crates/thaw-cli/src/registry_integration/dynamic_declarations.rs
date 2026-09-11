@@ -737,7 +737,7 @@ fn union_overload_dispatch_declaration(
     package: &str,
     name: &str,
     overloads: &[&thaw_bridge::DtsFunction],
-) -> Option<(String, String)> {
+) -> Option<(String, String, Vec<FallbackFunctionOverloadRewrite>)> {
     struct Candidate<'a> {
         symbol: String,
         category: &'static str,
@@ -745,6 +745,7 @@ fn union_overload_dispatch_declaration(
         param_type: thaw_hir::HirType,
         ret_type: thaw_hir::HirType,
         extra_params: Vec<(&'a str, thaw_hir::HirType, bool)>,
+        source: &'a thaw_bridge::DtsFunction,
     }
 
     let empty_arities = std::collections::BTreeSet::new();
@@ -800,6 +801,7 @@ fn union_overload_dispatch_declaration(
                 param_type: param_type.clone(),
                 ret_type: ret_type.clone(),
                 extra_params,
+                source: function,
             },
         ));
     }
@@ -891,7 +893,34 @@ fn union_overload_dispatch_declaration(
         }
     }
     declarations.push_str("}\n");
-    Some((dispatcher, declarations))
+    // Each candidate's own typed symbol (already declared above, as
+    // part of `declarations`) is also a legitimate argument-shape
+    // rewrite target: the dispatcher's own declared type is a Union
+    // (both its parameter and its return, e.g. `ms`'s `string | number`
+    // in and out) since a runtime `typeof` check can't be reflected in
+    // a static signature, but a real call site whose argument shape
+    // statically matches one specific overload can be rewritten
+    // straight to that overload's own precisely-typed symbol instead --
+    // narrowing `const n: number = ms("2 days")` to a real `number`
+    // rather than a `string | number` real callers can't assign
+    // anywhere without a cast. `class_methods.rs`'s rewrite pass
+    // already picks the best-matching candidate per call site by arity
+    // and `overload_type_score`; the dispatcher call above stays as the
+    // unconditional fallback for anything that pass doesn't recognize.
+    let rewrites = candidates
+        .iter()
+        .map(|(_, candidate)| {
+            (
+                name.to_string(),
+                candidate.symbol.clone(),
+                candidate.source.required_params,
+                candidate.source.params.len(),
+                dts_function_param_hir_types(candidate.source),
+                None,
+            )
+        })
+        .collect();
+    Some((dispatcher, declarations, rewrites))
 }
 
 /// Builds a plain forwarding wrapper under `bare_name` (the Fallback
