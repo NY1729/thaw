@@ -698,3 +698,65 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A live `JsValue` nested inside an object-literal argument passed to
+/// a Fallback function whose *matching* parameter is *optional* -- real
+/// example: joi's `object(schema?: T)` (`schema`'s declared type renders
+/// `Optional(Json)` once its unresolved generic `T` falls back), called
+/// as `Joi.object({ name: Joi.string() })`, the exact pattern already
+/// supported for zod's `z.object({ name: z.string() })` -- used to fail
+/// outright with "a dynamic (JsValue) value can only be passed as an
+/// argument to another QuickJS-backed dynamic call". `build_call_with`
+/// (an ordinary compiled call to the generated typed wrapper) only
+/// enabled that placeholder mechanism when a parameter's *LLVM* type was
+/// a bare pointer -- but `Optional`/`Nullable`/`Nullish`/`Union` are this
+/// codegen's own tagged *struct* representations, never bare pointers at
+/// the top level even when the payload itself is pointer-shaped, so an
+/// *optional* Json-ish parameter never triggered it the way a required
+/// one already did. Fixed generally in `build_call_with` (also enable
+/// the flag for a struct-typed parameter slot).
+#[test]
+fn a_dynamic_value_nests_inside_an_object_literal_passed_to_an_optional_parameter() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-optional-dynamic-arg-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("schema-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Callable { (value: string): string; }\n\
+         export declare function str(): Callable;\n\
+         export declare function schema(shape?: any): any;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = {\n\
+         \x20\x20str: function() { return function(value) { return '<' + value + '>'; }; },\n\
+         \x20\x20schema: function(shape) { return shape && shape.name ? shape.name('World') : 'empty'; }\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { str, schema } from "schema-kit";
+function main(): void {
+    console.log(schema({ name: str() }));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "<World>\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
