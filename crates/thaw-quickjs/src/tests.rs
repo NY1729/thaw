@@ -1081,6 +1081,42 @@ fn crypto_aes_256_cbc_round_trips() {
     assert_eq!(call("cipherStreaming", "[]"), "[32,16,48]");
 }
 
+/// `KeyObject`/`createSecretKey`/`createPrivateKey`/`createPublicKey`,
+/// added for jsonwebtoken's own real-world sign/verify flow: real
+/// `sign.js`/`verify.js` both do `secret instanceof KeyObject`, then (for
+/// any plain string/Buffer secret) normalize it via a `createPrivateKey`/
+/// `createPublicKey` attempt that's *expected* to fail for a symmetric
+/// (HMAC) secret, falling back to `createSecretKey`. A transitive
+/// dependency (`jwa`) separately feature-detects `typeof
+/// crypto.createPublicKey === 'function'` before trusting *any*
+/// `KeyObject` at all -- including the symmetric one this shim supports --
+/// so `createPrivateKey`/`createPublicKey` must exist and be callable
+/// (honestly throwing, since this shim has no RSA/ECDSA/PEM support at
+/// all) even though nothing here successfully calls them for the
+/// symmetric case.
+#[test]
+fn crypto_key_object_and_secret_key_support_hmac_normalization() {
+    assert_eq!(
+        load(
+            "function keyObjectHelpers() {\n\
+               const secretKey = __thaw_crypto_module.createSecretKey(Buffer.from('key'));\n\
+               const isKeyObject = secretKey instanceof __thaw_crypto_module.KeyObject;\n\
+               const type = secretKey.type;\n\
+               const viaHmac = __thaw_crypto_module.createHmac('sha256', secretKey).update('The quick brown fox jumps over the lazy dog').digest('hex');\n\
+               const supportsKeyObjects = typeof __thaw_crypto_module.createPublicKey === 'function';\n\
+               let privateKeyThrew = false;\n\
+               try { __thaw_crypto_module.createPrivateKey('not-a-real-key'); } catch (error) { privateKeyThrew = true; }\n\
+               return [isKeyObject, type, viaHmac, supportsKeyObjects, privateKeyThrew];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("keyObjectHelpers", "[]"),
+        r#"[true,"secret","f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",true,true]"#
+    );
+}
+
 #[test]
 fn retains_and_calls_a_callable_javascript_value() {
     assert_eq!(
