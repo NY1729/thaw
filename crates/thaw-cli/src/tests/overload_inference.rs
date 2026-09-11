@@ -75,6 +75,70 @@ fn selects_fallback_function_overloads_with_the_same_arity_by_argument_type() {
     );
 }
 
+/// Two different `--use`d packages that both export an *overloaded*
+/// Fallback function of the exact same bare name (real example: `csv-
+/// parse` and `csv-parse/sync`, both `parse`) used to have their
+/// overload candidates matched together indiscriminately, purely by
+/// bare name -- a bare `parse(...)` call site could score-match
+/// *either* package's own overload set, silently invoking whichever one
+/// happened to win, regardless of which package the call's own `parse`
+/// identifier was actually imported from. Every Fallback function
+/// (colliding or not) already carries a second, package-qualified-alias
+/// candidate alongside its bare one (`{sanitized-package}_{name}`, real
+/// shim_generation.rs behavior mirrored here) -- confirms `rewrite_
+/// fallback_function_overloads` now prefers *that* candidate whenever
+/// the call's own identifier can be traced back to one specific package
+/// via a plain `import { name } from "package"` statement (parsed
+/// directly out of `source`, not passed in separately), rather than
+/// matching the bare name against every colliding package's candidates
+/// at once.
+#[test]
+fn selects_fallback_function_overloads_from_the_correct_colliding_package() {
+    let source = "import { parse } from \"pkg-a\";\nimport { parse as parseB } from \"pkg-b\";\nparse({ x: 1 });";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[
+            (
+                "parse".into(),
+                "__parse_a_object".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Json],
+                None,
+            ),
+            (
+                "pkg_a_parse".into(),
+                "__parse_a_object".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Json],
+                None,
+            ),
+            (
+                "parse".into(),
+                "__parse_b_wrong".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Json],
+                None,
+            ),
+            (
+                "pkg_b_parse".into(),
+                "__parse_b_wrong".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Json],
+                None,
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        rewritten,
+        "import { parse } from \"pkg-a\";\nimport { parse as parseB } from \"pkg-b\";\n__parse_a_object({ x: 1 });"
+    );
+}
+
 #[test]
 fn selects_same_arity_external_method_overloads_by_argument_type() {
     let source = "const box = new NativeBox(1); const n = 42; const s = \"hello\"; box.set(n); box.set(s); box.set(7); box.set(\"world\");";

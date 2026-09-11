@@ -45,10 +45,11 @@ fn rewrite_external_class_methods_with_static(
     use thaw_parser::ast::{
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
         Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
-        Function, Lit, MemberProp, NewExpr, Pat, Prop, PropName, PropOrSpread,
-        ReturnStmt, SimpleAssignTarget, Stmt, SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind,
-        TsLit, TsType, TsTypeAliasDecl, TsTypeElement, TsTypeOperatorOp,
-        TsUnionOrIntersectionType, UnaryOp, VarDeclarator, WhileStmt,
+        Function, ImportSpecifier, Lit, MemberProp, ModuleDecl, ModuleItem, NewExpr, Pat, Prop,
+        PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt, SwitchStmt, TryStmt,
+        TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsType, TsTypeAliasDecl,
+        TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType, UnaryOp, VarDeclarator,
+        WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
@@ -1693,6 +1694,10 @@ fn rewrite_external_class_methods_with_static(
         classes: &'a [ClassConstructorRewrite],
         factories: &'a [FactoryClassRewrite],
         functions: &'a [FallbackFunctionOverloadRewrite],
+        /// Local bound name -> source package, for a plain named import
+        /// (`import { parse } from "csv-parse"`) -- see the bare-call
+        /// `Expr::Ident` branch below for why this exists.
+        imported_from: std::collections::HashMap<String, String>,
         methods: &'a [ClassMethodRewrite],
         method_contexts: &'a [ClassMethodContext],
         static_methods: &'a [StaticClassMethodRewrite],
@@ -2270,11 +2275,57 @@ fn rewrite_external_class_methods_with_static(
                     // candidate's declared parameter types -- identical
                     // pattern to the static/instance-method branches
                     // above, just with no receiver to splice in.
+                    //
+                    // `self.functions` is a flat, whole-program list --
+                    // every `--use`d package's own overloaded Fallback
+                    // functions land in it side by side, matched here
+                    // purely by bare name with no awareness of which
+                    // package a given call's own identifier actually
+                    // came from. Two different packages exporting an
+                    // overloaded function of the exact same name (real
+                    // example: `csv-parse` and `csv-parse/sync`, both
+                    // export an overloaded `parse`) used to have their
+                    // candidates matched together indiscriminately -- a
+                    // bare `parse(...)` call site could score-match
+                    // *either* package's overload, silently invoking the
+                    // wrong package's real implementation depending on
+                    // scoring/arity happenstance, not which package the
+                    // call's own `parse` identifier was actually bound
+                    // to via `import { parse } from "..."`. Every
+                    // Fallback function already gets a package-qualified
+                    // alias candidate here too (`{sanitized-package}_
+                    // {name}`, unconditionally, not just when a name
+                    // collides -- see `shim_generation.rs`'s own
+                    // `qualified_by_package`), so when this call's own
+                    // identifier is known (via `self.imported_from`,
+                    // built from the source's own `import { X } from
+                    // "pkg"` statements) to have come from one specific
+                    // package, candidates are narrowed to just that
+                    // package's own alias first -- falling back to the
+                    // unscoped bare-name match unchanged whenever the
+                    // name isn't a traceable named import at all (a
+                    // package-local declaration, or genuinely only one
+                    // package ever declares it, the overwhelmingly
+                    // common case).
+                    let qualified_name = self
+                        .imported_from
+                        .get(name.sym.as_str())
+                        .map(|package| format!("{}_{}", sanitize_identifier(package), name.sym));
+                    let has_qualified_candidates = qualified_name.as_ref().is_some_and(|qualified| {
+                        self.functions
+                            .iter()
+                            .any(|(candidate_name, ..)| candidate_name == qualified)
+                    });
+                    let match_name: &str = if has_qualified_candidates {
+                        qualified_name.as_deref().unwrap()
+                    } else {
+                        name.sym.as_str()
+                    };
                     let scored_candidates = self
                         .functions
                         .iter()
                         .filter(|(candidate_name, _, min_arity, max_arity, _, _)| {
-                            candidate_name == name.sym.as_str()
+                            candidate_name == match_name
                                 && call.args.len() >= *min_arity
                                 && call.args.len() <= *max_arity
                         })
@@ -2399,7 +2450,7 @@ fn rewrite_external_class_methods_with_static(
                             for (candidate_name, _, min_arity, max_arity, _, generic) in
                                 self.functions.iter()
                             {
-                                if candidate_name != name.sym.as_str()
+                                if candidate_name != match_name
                                     || call.args.len() < *min_arity
                                     || call.args.len() > *max_arity
                                 {
@@ -2625,6 +2676,20 @@ fn rewrite_external_class_methods_with_static(
     }
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
+    let mut imported_from: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        let Some(package) = import.src.value.as_str() else {
+            continue;
+        };
+        for specifier in &import.specifiers {
+            if let ImportSpecifier::Named(named) = specifier {
+                imported_from.insert(named.local.sym.to_string(), package.to_string());
+            }
+        }
+    }
     let mut named_declarations = NamedTypeDeclarationFinder::default();
     module.visit_with(&mut named_declarations);
     let mut named_types = std::collections::HashMap::new();
@@ -2675,6 +2740,7 @@ fn rewrite_external_class_methods_with_static(
         classes,
         factories,
         functions,
+        imported_from,
         methods,
         method_contexts,
         static_methods,
