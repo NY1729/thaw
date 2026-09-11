@@ -152,7 +152,9 @@ fn dts_source_with_reexported_functions(
     entry_path: &Path,
     entry_source: &str,
 ) -> Result<String, String> {
-    use thaw_parser::ast::{ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
+    use thaw_parser::ast::{
+        Decl, ExportSpecifier, Expr, ModuleDecl, ModuleExportName, ModuleItem, Stmt,
+    };
 
     let module = thaw_parser::parse_typescript(entry_source)?;
     let mut output = entry_source.to_string();
@@ -406,6 +408,58 @@ fn dts_source_with_reexported_functions(
     {
         output.push('\n');
         output.push_str(&snippet);
+    }
+    if let Some(target_path) = export_assignment_namespace_import_target(entry_path, &module) {
+        let mut visited_types = std::collections::BTreeSet::new();
+        for snippet in all_reexported_type_declarations(&target_path, &mut visited_types)? {
+            output.push('\n');
+            output.push_str(&snippet);
+        }
+        let mut visited = std::collections::BTreeSet::new();
+        for (_, snippet) in all_reexported_function_declarations(&target_path, &mut visited)? {
+            output.push('\n');
+            output.push_str(&snippet);
+        }
+    }
+    // A locally declared class whose `extends` clause names a plain
+    // default-imported base (`import AjvCore from "./core"; export
+    // declare class Ajv extends AjvCore { ... }`) -- the base class's
+    // own declaration lives entirely in another file thaw-registry
+    // otherwise discards. Real example: ajv's own entry `.d.ts`, whose
+    // `AjvCore` base (`dist/core.d.ts`'s default-exported `Ajv` class)
+    // declares essentially the entire real API (`compile`, `validate`,
+    // `addSchema`, ...) -- without inlining it, only the 3 methods the
+    // entry file adds directly were ever reachable. Reuses
+    // `reexported_class_or_interface_declarations`'s existing
+    // (same-file) class-inheritance resolution in thaw-bridge
+    // downstream: once the base class's own text is present in the
+    // flattened output under the alias name the entry file's `extends`
+    // clause expects, that resolution already works unmodified.
+    for item in &module.body {
+        let class = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+                Decl::Class(class) => Some(class),
+                _ => None,
+            },
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) => Some(class),
+            _ => None,
+        };
+        let Some(class) = class else { continue };
+        let Some(Expr::Ident(base)) = class.class.super_class.as_deref() else {
+            continue;
+        };
+        let Some((target_path, target_name)) = named_import_targets.get(base.sym.as_str()) else {
+            continue;
+        };
+        let mut declarations =
+            reexported_class_or_interface_declarations(target_path, target_name)?;
+        if let Some(first) = declarations.first_mut() {
+            *first = rename_declared_function(std::mem::take(first), base.sym.as_ref());
+        }
+        for snippet in declarations {
+            output.push('\n');
+            output.push_str(&snippet);
+        }
     }
     Ok(output)
 }
@@ -1368,6 +1422,57 @@ fn import_equals_targets(
         .collect()
 }
 
+/// The relative path a top-level `import * as NAME from "./y"` (a
+/// namespace import, ES-module style -- distinct from `import_equals_
+/// targets`'s `import Name = require("./y")`) resolves to, but only
+/// when `module`'s own top-level `export = NAME;` names that exact
+/// import's local binding -- i.e. the whole file's declared shape *is*
+/// another file's namespace, wholesale, with nothing declared locally
+/// at all. Real example: bcryptjs's `umd/index.d.ts`: `import * as
+/// bcrypt from "./types.js"; export = bcrypt; export as namespace
+/// bcrypt;` -- every one of bcryptjs's actual functions (`hashSync`,
+/// `compareSync`, ...) lives in the sibling `types.d.ts`, never
+/// otherwise reachable, since thaw-registry discards every individual
+/// `.d.ts` source file except the one flattened `package.d.ts` it
+/// writes out. Without this, an entry `.d.ts` shaped this way flattens
+/// to just the three lines above -- no functions, no types, nothing --
+/// and every call against the package fails to build ("call to unknown
+/// function"). Returns `None` for the unrelated, much more common case
+/// where `export = X;` names something declared directly in the entry
+/// file itself (joi's `declare const Joi: Joi.Root; export = Joi;`),
+/// which already works today since the whole file's own text is kept.
+fn export_assignment_namespace_import_target(
+    entry_path: &Path,
+    module: &thaw_parser::ast::Module,
+) -> Option<PathBuf> {
+    use thaw_parser::ast::{Expr, ImportSpecifier, ModuleDecl, ModuleItem};
+
+    let exported_name = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref() {
+            Expr::Ident(ident) => Some(ident.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    })?;
+    module.body.iter().find_map(|item| {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            return None;
+        };
+        if import.type_only {
+            return None;
+        }
+        let source = import.src.value.as_str()?;
+        import.specifiers.iter().find_map(|specifier| {
+            let ImportSpecifier::Namespace(namespace) = specifier else {
+                return None;
+            };
+            (namespace.local.sym.as_ref() == exported_name)
+                .then(|| declaration_reexport_path(entry_path, source))
+                .flatten()
+        })
+    })
+}
+
 /// The `(target_path, name_in_target)` each *ordinary* ES import
 /// (`import { X } from "./y"`, `import { X as Local } from "./y"`, or a
 /// default import `import Local from "./y"`) in `module` resolves to,
@@ -1492,6 +1597,54 @@ fn reexported_class_or_interface_declarations_inner(
 
     let mut declarations = Vec::new();
     let mut superclass = None;
+    // `name == "default"` (the same sentinel `named_import_targets`
+    // stores for a plain default import, `import AjvCore from
+    // "./core";`) means "whatever class `path` exports as its default,
+    // regardless of its own declared identifier" -- there's at most one
+    // per module, so no name-matching is needed at all, unlike every
+    // other case this function handles. Real example: ajv's own `dist/
+    // core.d.ts`: `export default class Ajv { compile(...): ...;
+    // validate(...): ...; ... }`, extended by the *entry* file's
+    // `export declare class Ajv extends AjvCore { ... }` -- every one
+    // of `AjvCore`'s own methods used to be completely unreachable,
+    // since nothing followed that default import to find them. Returned
+    // under the class's own real identifier (`Ajv`, not `"default"`,
+    // which isn't a valid identifier to splice into a declaration) --
+    // the caller (`dts_source_with_reexported_functions`) renames it to
+    // the local alias its own `extends` clause actually names.
+    if name == "default" {
+        for item in &module.body {
+            let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default_decl)) = item else {
+                continue;
+            };
+            let thaw_parser::ast::DefaultDecl::Class(class_expr) = &default_decl.decl else {
+                continue;
+            };
+            if class_expr.ident.is_none() {
+                continue;
+            }
+            superclass = class_expr.class.super_class.as_deref().and_then(|expr| match expr {
+                thaw_parser::ast::Expr::Ident(ident) => Some(ident.sym.to_string()),
+                _ => None,
+            });
+            let snippet = source_map.span_to_snippet(default_decl.span()).map_err(|error| {
+                format!("failed to read default class declaration in `{}`: {error:?}", path.display())
+            })?;
+            declarations.push(snippet.replacen("export default ", "export declare ", 1));
+        }
+        if let Some(superclass) = superclass {
+            if let Some((target_path, target_name)) =
+                named_import_targets(path, &module).get(&superclass)
+            {
+                declarations.extend(reexported_class_or_interface_declarations_inner(
+                    target_path,
+                    target_name,
+                    visited,
+                )?);
+            }
+        }
+        return Ok(declarations);
+    }
     for item in &module.body {
         let declaration = match item {
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(declaration)) => Some(&declaration.decl),
