@@ -232,6 +232,7 @@ fn generates_load_script_call_per_bundle() {
             package_name: "left-pad",
             js_source: "function pad(s) { return s; }",
             fallback_names: &[],
+            class_names: &[],
             qualified_aliases: &[],
             nested_namespace_aliases: &[],
             value_exports: &[],
@@ -240,6 +241,7 @@ fn generates_load_script_call_per_bundle() {
             package_name: "is-odd",
             js_source: "function isOdd(n) { return n % 2 === 1; }",
             fallback_names: &[],
+            class_names: &[],
             qualified_aliases: &[],
             nested_namespace_aliases: &[],
             value_exports: &[],
@@ -261,6 +263,7 @@ fn escapes_quotes_and_newlines_in_bundled_source() {
         package_name: "pkg",
         js_source: "function f() {\n  return \"a\\b\";\n}",
         fallback_names: &[],
+        class_names: &[],
         qualified_aliases: &[],
         nested_namespace_aliases: &[],
         value_exports: &[],
@@ -279,6 +282,7 @@ fn large_module_init_compresses_embedded_javascript() {
         package_name: "large-package",
         js_source: &source,
         fallback_names: &[],
+        class_names: &[],
         qualified_aliases: &[],
         nested_namespace_aliases: &[],
         value_exports: &[],
@@ -288,12 +292,26 @@ fn large_module_init_compresses_embedded_javascript() {
     assert!(!init.contains(&source));
 }
 
+/// `p-queue`'s actual published shape: `module.exports = PQueue;
+/// module.exports.default = PQueue;` (a default-exported class, `for
+/// (var k in module.exports)` never sees a property literally named
+/// `"PQueue"` -- only the class's own static properties, e.g.
+/// `default`). `class_names` binds the global the same
+/// `bind_default_export` snippet a default-exported *function* already
+/// gets via `fallback_names`.
+#[test]
+fn wraps_a_default_exported_class_and_binds_its_name() {
+    let js_source = "function PQueue(options) { this.size = 0; }\nmodule.exports = PQueue;\nmodule.exports.default = PQueue;";
+    let wrapped = wrap_as_commonjs_module(js_source, &[], &["PQueue".to_string()], &[]);
+    assert!(wrapped.contains("globalThis.PQueue = module.exports;"));
+}
+
 #[test]
 fn wraps_real_commonjs_source_and_binds_default_export() {
     // The exact shape of left-pad's actual published `index.js`:
     // `module.exports = leftPad;`, no named exports object.
     let js_source = "module.exports = function leftPad(str) { return str; };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["leftPad".to_string()], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &["leftPad".to_string()], &[], &[]);
     assert!(wrapped.contains("globalThis.module = { exports: {} };"));
     assert!(wrapped.contains("globalThis.require ="));
     assert!(wrapped.contains(js_source));
@@ -302,7 +320,7 @@ fn wraps_real_commonjs_source_and_binds_default_export() {
 
 #[test]
 fn native_class_proxies_retain_js_properties_and_release_native_handles() {
-    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[]);
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[]);
     assert!(wrapped.contains("__thaw_napi_proxy_finalizers.register(proxy"));
     assert!(wrapped.contains("'release_handle'"));
     assert!(wrapped.contains("Reflect.set(_, name, value, receiver)"));
@@ -322,7 +340,7 @@ fn binds_esm_default_export_under_the_fallback_name() {
     use std::ffi::{CStr, CString};
 
     let js_source = "module.exports.__esModule = true;\nmodule.exports.default = function escapeIt(s) { return '[' + s + ']'; };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["escapeIt".to_string()], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &["escapeIt".to_string()], &[], &[]);
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
@@ -357,7 +375,7 @@ fn a_key_that_cannot_bind_to_globalthis_does_not_block_later_exports() {
 
     let js_source = "module.exports.undefined = function() { return 'nope'; };\n\
                       module.exports.after = function(s) { return '[' + s + ']'; };";
-    let wrapped = wrap_as_commonjs_module(js_source, &["after".to_string()], &[]);
+    let wrapped = wrap_as_commonjs_module(js_source, &["after".to_string()], &[], &[]);
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
@@ -385,6 +403,7 @@ fn bare_global_function_bundle_is_unaffected_by_commonjs_wrapping() {
         "function greet(name) { return 'hi, ' + name; }",
         &["greet".to_string()],
         &[],
+        &[],
     );
     assert!(wrapped.contains("function greet(name) { return 'hi, ' + name; }"));
     // Not wrapped in an extra IIFE/function around the source itself.
@@ -405,6 +424,7 @@ fn guarded_buffer_reference_does_not_throw() {
     let wrapped = wrap_as_commonjs_module(
             "module.exports = function checkBuffer(x) { return (Buffer && Buffer.isBuffer(x)) || false; };",
             &["checkBuffer".to_string()],
+            &[],
             &[],
         );
 
@@ -440,6 +460,7 @@ fn unguarded_url_prototype_access_does_not_throw() {
         "module.exports = function getIt() { return typeof URL.prototype; };",
         &["getIt".to_string()],
         &[],
+        &[],
     );
 
     let source = CString::new(wrapped).unwrap();
@@ -471,6 +492,7 @@ fn unguarded_process_global_reference_does_not_throw() {
              };",
             &["readIt".to_string()],
             &[],
+            &[],
         );
 
     let source = CString::new(wrapped).unwrap();
@@ -499,6 +521,7 @@ fn generated_module_init_round_trips_through_real_lowering() {
         package_name: "greeter",
         js_source: "function greet(){return 'hi';}",
         fallback_names: &fallback_names,
+        class_names: &[],
         qualified_aliases: &[],
         nested_namespace_aliases: &[],
         value_exports: &[],
@@ -537,6 +560,7 @@ fn generate_module_init_captures_qualified_aliases_right_after_load() {
             package_name: "qs",
             js_source: "module.exports = { stringify: function(x) { return 'qs:' + x; } };",
             fallback_names: &qs_fallback,
+            class_names: &[],
             qualified_aliases: &qs_aliases,
             nested_namespace_aliases: &[],
             value_exports: &[],
@@ -545,6 +569,7 @@ fn generate_module_init_captures_qualified_aliases_right_after_load() {
             package_name: "@hapi/hoek",
             js_source: "module.exports = { stringify: function(x) { return 'hoek:' + x; } };",
             fallback_names: &hoek_fallback,
+            class_names: &[],
             qualified_aliases: &hoek_aliases,
             nested_namespace_aliases: &[],
             value_exports: &[],
