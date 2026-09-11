@@ -170,6 +170,59 @@ fn events_builtin_runs_event_emitter_through_commonjs_require() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+/// A real, common pattern real Node's own `EventEmitter.prototype`
+/// supports (and pino's logger actually uses,
+/// `Object.setPrototypeOf(prototype, EventEmitter.prototype)` in its own
+/// `lib/proto.js`, no `EventEmitter.call(this)` anywhere): mixing the
+/// prototype onto a plain object and never running the constructor, so
+/// `this._events` is never initialized by it. `.on()`/`.once()`/etc.
+/// already self-heal (`addEventListener` lazily creates `_events`), but
+/// every *other* method used to assume `_events` already existed --
+/// `.emit()` before any listener was ever added crashed with `cannot
+/// read property '<event>' of undefined` instead of behaving like "no
+/// listeners registered" (real Node's own behaviour).
+#[test]
+fn events_builtin_tolerates_a_never_initialized_mixin() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_events_uninitialized_mixin");
+    fs::write(
+        dir.join("index.js"),
+        "var EventEmitter = require('events');\n\
+         var prototype = { greet: function () { return 'hi'; } };\n\
+         Object.setPrototypeOf(prototype, EventEmitter.prototype);\n\
+         module.exports = function () {\n\
+         \x20 var mixin = Object.create(prototype);\n\
+         \x20 var emitted = mixin.emit('level-change', 1);\n\
+         \x20 var count = mixin.listenerCount('level-change');\n\
+         \x20 var names = mixin.eventNames();\n\
+         \x20 var listeners = mixin.listeners('level-change');\n\
+         \x20 mixin.removeAllListeners();\n\
+         \x20 mixin.removeAllListeners('level-change');\n\
+         \x20 mixin.off('level-change', function () {});\n\
+         \x20 return [mixin.greet(), emitted, count, names.length, listeners.length];\n\
+         };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_events_uninitialized_mixin_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUninitializedMixin = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseUninitializedMixin").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["hi",false,0,0,0]"#);
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 #[test]
 fn events_builtin_emits_listener_metadata_and_error_monitor() {
     use std::ffi::{CStr, CString};

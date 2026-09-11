@@ -202,6 +202,63 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// pino's logger is `Object.setPrototypeOf(prototype, EventEmitter.
+/// prototype)` (its own `lib/proto.js`) -- a mixin that never calls
+/// `EventEmitter.call(this)`, so `this._events` is never initialized by
+/// the constructor. Setting the logger's level (`pino()` does this
+/// during construction) calls `this.emit('level-change', ...)` before
+/// any `.on()` could have lazily created `_events` -- every
+/// `EventEmitter.prototype` method except `.on()`/`.once()`/etc. used to
+/// assume `_events` already existed, so this crashed outright:
+/// `cannot read property 'level-change' of undefined`. Fixed generally
+/// in thaw-registry's `node:events` builtin (every method now tolerates
+/// a missing `_events`, matching real Node); this test drives the real
+/// package end to end -- construction, top-level logging, a child
+/// logger, and structured data -- not just the isolated mixin shape.
+#[test]
+fn registry_add_logs_with_real_pino_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-pino-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "pino@9.5.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import pino from "pino";
+function main(): void {
+    const logger = pino();
+    logger.info("hello");
+    const child = logger.child({ module: "test" });
+    child.warn("careful");
+    logger.info({ a: 1 }, "with data");
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["pino".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // Each line is a real pino JSON log record; time/hostname vary, so
+    // check the stable fields rather than an exact match.
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let mut lines = stdout.lines();
+    assert!(lines.next().unwrap().contains(r#""level":30"#));
+    assert!(lines.next().unwrap().contains(r#""level":40"#));
+    let with_data = lines.next().unwrap();
+    assert!(with_data.contains(r#""a":1"#));
+    assert!(with_data.contains(r#""msg":"with data""#));
+    assert_eq!(lines.next(), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_add_builds_and_runs_a_real_esm_package_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
