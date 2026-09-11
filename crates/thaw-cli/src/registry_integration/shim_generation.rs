@@ -1065,9 +1065,79 @@ fn generate_registry_shims(
             }
         }
         if let Some(bundle_js) = &pkg.bundle_js {
+            // A class with no public constructor (real example: luxon's
+            // `DateTime`/`Duration`/`Interval`, each `private
+            // constructor(...)`, only ever built via static factories
+            // like `DateTime.fromISO(...)`) never gets a `class_targets`
+            // entry (`generate_napi_class_constructors` -- which is what
+            // populates it -- bails out immediately on `!class.
+            // constructible`, by design: `new DateTime()` really
+            // shouldn't compile). Its *static methods* still work fine
+            // regardless (`static_class_method_rewrites`, a separate,
+            // unconditional per-class loop above, rewrites a call
+            // expression's callee text directly), but the bare class
+            // *name* itself -- needed for a non-call use, e.g. reading
+            // a static property (`DateTime.DATE_FULL`) or passing the
+            // class value itself around -- had nothing to fall back on
+            // but the type-only `JsValue` alias every exported class
+            // name also gets (`type_only_exports`), which is a *type*,
+            // not a value: using it as an identifier failed with
+            // "unknown variable". Fixed by treating such a class exactly
+            // like any other named package value: bound via the same
+            // `$value$`-keyed runtime getter mechanism as a `Str`/`F64`/
+            // `JsValue` constant export (below), reading the *real*
+            // class value straight off the bundle's own live JS exports.
+            let mut non_constructible_class_names: std::collections::HashSet<String> = pkg
+                .values
+                .iter()
+                .map(|value| value.name.clone())
+                .collect();
+            let non_constructible_classes = pkg
+                .classes
+                .iter()
+                .filter(|class| {
+                    !class_targets.contains_key(&(pkg.name.clone(), class.name.clone()))
+                        // Scoped to a class actually needed as a bare-
+                        // identifier *value* -- i.e. one with at least
+                        // one static method actually called somewhere
+                        // (already registered in `static_class_method_
+                        // rewrites` by the unconditional per-class loop
+                        // above). A `.d.ts` can declare a class that's
+                        // purely a *type*-level helper with no real
+                        // runtime counterpart at all (real example:
+                        // socket.io's own `StrictEventEmitter`, a
+                        // generic base used only for typing event
+                        // overloads) -- binding *that* to a value would
+                        // read `undefined` off the bundle's exports and
+                        // silently misbehave wherever it's later used,
+                        // for no benefit (nothing calls a static method
+                        // on it, so the earlier "unknown variable" bug
+                        // this whole mechanism exists to fix never
+                        // applied to it in the first place).
+                        && static_class_method_rewrites
+                            .iter()
+                            .any(|(_, rewrite_class, ..)| rewrite_class == &class.name)
+                        // A class name can appear more than once in
+                        // `pkg.classes` (declaration merging, or the
+                        // same class re-exported under its own name
+                        // from more than one `.d.ts` file thaw-
+                        // registry's flattening concatenates) --
+                        // without deduplicating here, each occurrence
+                        // would independently emit the exact same
+                        // `declare function`/`let` pair, which the
+                        // shim's own duplicate-binding check (rightly)
+                        // rejects as a hard error.
+                        && non_constructible_class_names.insert(class.name.clone())
+                })
+                .map(|class| thaw_bridge::DtsValue {
+                    name: class.name.clone(),
+                    ty: thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
+                })
+                .collect::<Vec<_>>();
             let value_exports = pkg
                 .values
                 .iter()
+                .chain(non_constructible_classes.iter())
                 .filter_map(|value| {
                     let dynamic;
                     let ty = match &value.ty {
@@ -1261,6 +1331,11 @@ fn generate_registry_shims(
         }
         for class in &pkg.classes {
             if let Some(target) = class_targets.get(&(pkg.name.clone(), class.name.clone())) {
+                package_exports.insert(class.name.clone(), target.clone());
+            } else if let Some(target) = value_targets.get(&(pkg.name.clone(), class.name.clone()))
+            {
+                // A non-constructible class (see `non_constructible_
+                // classes` above) -- bound as a plain value instead.
                 package_exports.insert(class.name.clone(), target.clone());
             }
         }

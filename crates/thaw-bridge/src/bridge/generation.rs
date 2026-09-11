@@ -681,7 +681,7 @@ fn wrap_as_commonjs_module(
          }}\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
-         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ if (typeof globalThis[k] === 'undefined') globalThis[k] = typeof module.exports[k] === 'function' ? module.exports[k].bind(module.exports) : module.exports[k]; }} catch (e) {{}} }} }}\n\
+         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ if (typeof globalThis[k] === 'undefined') globalThis[k] = typeof module.exports[k] === 'function' ? globalThis.__thaw_bind_preserving_statics(module.exports[k], module.exports) : module.exports[k]; }} catch (e) {{}} }} }}\n\
          {bind_nested_namespaces}\
          {bind_default_exports}\
          }};\n\
@@ -761,6 +761,34 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
                 "    loadScript(\"{}\");\n",
                 escape_ts_string_literal(&getter_source)
             ));
+            // Also capture the *bare* name directly (not just the
+            // getter function above, keyed by the qualified runtime
+            // key) -- needed for a non-constructible class's own
+            // static method call (`compile_typed_napi_method`,
+            // `crates/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs`):
+            // its receiver is looked up via `thaw_js_get_global`
+            // against the class's plain, unqualified name (the same
+            // way any other named global is looked up), since a
+            // static method has no instance to carry its own live
+            // handle. Real example: luxon's `DateTime.fromISO(...)`
+            // (`DateTime` has a `private constructor`, so it's a
+            // Fallback class with no constructor-based binding at
+            // all) -- this used to fail at runtime ("Error converting
+            // from js 'undefined' into type 'function'") since
+            // nothing ever bound `globalThis.DateTime` for a
+            // bundle.js/QuickJS-NG-backed package (unlike a real
+            // N-API module, whose export object is looked up by name
+            // through a different, already-working mechanism).
+            let bare_capture_js = format!(
+                "if (typeof globalThis.{export_name} === 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"{}\") ? globalThis.module.exports[\"{}\"] : globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"default\") ? globalThis.module.exports.default : globalThis.module.exports; }}",
+                escape_ts_string_literal(export_name),
+                escape_ts_string_literal(export_name),
+                escape_ts_string_literal(export_name),
+            );
+            out.push_str(&format!(
+                "    loadScript(\"{}\");\n",
+                escape_ts_string_literal(&bare_capture_js)
+            ));
         }
         // Captured immediately, before any later package's own
         // `loadScript` can overwrite the bare name -- see
@@ -804,7 +832,7 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             // the same real packages (joi's `Root.string()`, handlebars'
             // `registerHelper`).
             let capture_js = format!(
-                "if (typeof globalThis.module !== 'undefined' && globalThis.module && typeof globalThis.module.exports !== 'undefined' && globalThis.module.exports !== null && typeof globalThis.module.exports.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = typeof globalThis.module.exports.{bare_name} === 'function' ? globalThis.module.exports.{bare_name}.bind(globalThis.module.exports) : globalThis.module.exports.{bare_name}; }} else if (typeof globalThis.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.{bare_name}; }}",
+                "if (typeof globalThis.module !== 'undefined' && globalThis.module && typeof globalThis.module.exports !== 'undefined' && globalThis.module.exports !== null && typeof globalThis.module.exports.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = typeof globalThis.module.exports.{bare_name} === 'function' ? globalThis.__thaw_bind_preserving_statics(globalThis.module.exports.{bare_name}, globalThis.module.exports) : globalThis.module.exports.{bare_name}; }} else if (typeof globalThis.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.{bare_name}; }}",
                 escape_ts_string_literal(qualified_key),
                 escape_ts_string_literal(qualified_key)
             );
