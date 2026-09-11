@@ -989,3 +989,148 @@ fn joins_try_catch_paths_and_applies_finally_to_every_exit() {
     assert!(rewritten.contains("finalized = 7; __set_number(box, finalized)"));
     assert!(rewritten.ends_with("__set_number(box, finalized);"));
 }
+
+/// Two same-arity overloads whose shared parameter position declares
+/// genuinely different *native scalar* types (real example: `ms`'s
+/// `(value: number, options?): string` vs `(value: StringValue):
+/// number`) are a real conflict when no argument's type can be
+/// determined at all -- picking either one forces a possibly-lossy
+/// coercion decision with no basis for it, so the call is left
+/// unrewritten instead of guessing.
+#[test]
+fn defers_a_same_arity_tie_between_conflicting_scalar_overloads() {
+    let source = "describe(untyped);";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[
+            (
+                "describe".into(),
+                "__describe_number".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::F64],
+                None,
+            ),
+            (
+                "describe".into(),
+                "__describe_string".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Str],
+                None,
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(rewritten, "describe(untyped);");
+}
+
+/// Two same-arity overloads that only differ through an opaque
+/// `Json`/`JsValue` parameter -- one that's never actually coerced
+/// into anything more specific either way -- are safely
+/// interchangeable even with no argument type information at all (real
+/// example: zod's `string(params?): ZodString` alongside its own
+/// generic `string<T extends string>(params?): $ZodType<T,T>`, and
+/// pino's `pino(...)`, whose own `.d.ts` bundles the exact same
+/// overload twice): picking the first one, matching the ordinary tie
+/// rule, calls the same real underlying JS function with the same
+/// untouched value regardless of which one is chosen.
+#[test]
+fn rewrites_a_same_arity_tie_between_opaque_overloads() {
+    let source = "describe(); describe(untyped);";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[
+            (
+                "describe".into(),
+                "__describe_first".into(),
+                0,
+                1,
+                vec![thaw_hir::HirType::Json],
+                None,
+            ),
+            (
+                "describe".into(),
+                "__describe_second".into(),
+                0,
+                1,
+                vec![thaw_hir::HirType::Json],
+                None,
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        rewritten,
+        "__describe_first(); __describe_first(untyped);"
+    );
+}
+
+/// A tied pair where only *one* side is opaque still prefers that
+/// side: calling it never actually depends on the argument's real
+/// type, so it's a universally safe representative for the whole tied
+/// set regardless of what its scalar-typed sibling declares (unlike
+/// two *different* scalar types tying with no opaque escape at all,
+/// which do defer -- see `defers_a_same_arity_tie_between_conflicting_
+/// scalar_overloads`).
+#[test]
+fn rewrites_a_same_arity_tie_between_a_scalar_and_an_opaque_overload() {
+    let source = "describe(untyped);";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[
+            (
+                "describe".into(),
+                "__describe_number".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::F64],
+                None,
+            ),
+            (
+                "describe".into(),
+                "__describe_opaque".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Json],
+                None,
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(rewritten, "__describe_opaque(untyped);");
+}
+
+/// The same unresolvable argument does *not* block a rewrite when only
+/// one overload matches by arity at all -- there is nothing else it
+/// could be, so this isn't a guess the way choosing among several
+/// same-arity candidates would be (matches `selects_fallback_function_
+/// overloads_by_arity_range`'s arity-only disambiguation, just with an
+/// unknown argument type instead of a known one).
+#[test]
+fn rewrites_a_sole_arity_match_even_when_the_argument_type_is_unknown() {
+    let source = "makeId(untyped);";
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[
+            (
+                "makeId".into(),
+                "__makeId_default".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::F64],
+                None,
+            ),
+            (
+                "makeId".into(),
+                "__makeId_buffer".into(),
+                2,
+                2,
+                vec![thaw_hir::HirType::F64, thaw_hir::HirType::F64],
+                None,
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(rewritten, "__makeId_default(untyped);");
+}
