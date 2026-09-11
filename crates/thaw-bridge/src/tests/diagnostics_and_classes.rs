@@ -83,7 +83,12 @@ fn extracts_class_constructors_methods_properties_and_overloads() {
         .filter(|method| method.name == "run")
         .collect::<Vec<_>>();
     assert_eq!(runs.len(), 2);
-    assert!(runs.iter().all(|method| method.return_instance_class.is_none()));
+    // A fluent `run(...): this` return now records the enclosing class
+    // as its instance-return type (chainable `JsValue` handle), the same
+    // as an explicit `static verbose(): Database` does.
+    assert!(runs
+        .iter()
+        .all(|method| method.return_instance_class.as_deref() == Some("Database")));
     assert_eq!(
         database
             .methods
