@@ -220,13 +220,30 @@ fn generate_registry_shims(
     let mut jit_targets = std::collections::HashSet::new();
     let mut jit_fallback_reasons = JitFallbackReasons::new();
     // Names `union_overload_dispatch_declaration` already claims with a
-    // runtime `typeof`-based dispatcher -- correctly handled already, so
-    // the argument-shape-scoring loop below must skip them rather than
-    // building a redundant (and less capable, since it can't discriminate
-    // by real value at runtime the way `typeof` can) compile-time rewrite
-    // for the same name.
+    // runtime `typeof`-based dispatcher. The argument-shape-scoring loop
+    // below (which drives each overload through `typed_dynamic_
+    // declaration` a second time, with the call site's *observed*
+    // arities) must still skip them -- doing that over again would
+    // re-declare the very same symbols `union_overload_dispatch_
+    // declaration` already emitted, this time under a possibly
+    // different symbol name (arities can change the suffix), which is
+    // how an overload's own wrapper (and the omitted-parameter-mask
+    // signature thaw-hir's own pipeline derives from it) went missing
+    // at link time the one time this guard was removed instead of
+    // fixed properly. `union_overload_dispatch_declaration` return its
+    // *own* per-overload rewrite candidates instead (`union_dispatch_
+    // overload_rewrites` below), reusing the exact symbols it already
+    // declared: a real call site whose argument shape statically
+    // matches one overload gets rewritten straight to that overload's
+    // own precisely-typed symbol, narrowing away from the dispatcher's
+    // necessarily Union-typed signature (real case: `ms`'s `(value:
+    // number, options?): string` vs `(value: string): number` --
+    // without this, `const n: number = ms("2 days")` fails to type-
+    // check against the dispatcher's `string | number` return type even
+    // though the runtime dispatch itself has always worked correctly).
     let mut union_dispatched_names: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
+    let mut union_dispatch_overload_rewrites: Vec<FallbackFunctionOverloadRewrite> = Vec::new();
     let mut fallback_function_overload_rewrites: Vec<FallbackFunctionOverloadRewrite> = Vec::new();
     let mut class_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
@@ -620,12 +637,13 @@ fn generate_registry_shims(
                 .iter()
                 .filter(|f| f.name == name)
                 .collect::<Vec<_>>();
-            if let Some((symbol, declaration)) =
+            if let Some((symbol, declaration, rewrites)) =
                 union_overload_dispatch_declaration(&pkg.name, name, &overloads)
             {
                 shim.push_str(&declaration);
                 typed_targets.insert((pkg.name.clone(), name.to_string()), symbol);
                 union_dispatched_names.insert((pkg.name.clone(), name.to_string()));
+                union_dispatch_overload_rewrites.extend(rewrites);
             }
         }
         // Names for which `typed_dynamic_bare_alias` below actually
@@ -936,6 +954,22 @@ fn generate_registry_shims(
                 let mut candidate = candidate;
                 candidate.0 = qualified.alias.clone();
                 fallback_function_overload_rewrites.push(candidate);
+            }
+        }
+        // Added separately from `package_overloads` above (which
+        // explicitly excludes a union-dispatched name from ever
+        // reaching the bare-name rewrite list): these already reuse
+        // `union_overload_dispatch_declaration`'s own symbols, so
+        // there's no duplicate-declaration risk here to guard against.
+        for candidate in union_dispatch_overload_rewrites.drain(..) {
+            fallback_function_overload_rewrites.push(candidate.clone());
+            if let Some(qualified) = qualified
+                .iter()
+                .find(|qualified| qualified.name == candidate.0)
+            {
+                let mut aliased = candidate;
+                aliased.0 = qualified.alias.clone();
+                fallback_function_overload_rewrites.push(aliased);
             }
         }
         if pkg.native_addon.is_some() && pkg.bundle_js.is_none() {
