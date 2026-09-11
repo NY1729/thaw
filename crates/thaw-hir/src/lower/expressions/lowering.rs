@@ -1779,6 +1779,55 @@ impl<'a> FnLowerer<'a> {
                         });
                     }
                 }
+                // A namespaced global constructor (`new Intl.
+                // DateTimeFormat(...)`, etc) -- unlike the bare-
+                // identifier globals above, this callee is an
+                // `Expr::Member`, not `Expr::Ident`, so it never
+                // reaches the special-cased list above at all. Reuses
+                // the exact same `getDynamicValue`/`constructDynamicValue`
+                // mechanism, just with a dotted name (`"Intl.
+                // DateTimeFormat"`) that `thaw_js_get_global`
+                // (`crates/thaw-quickjs/src/quickjs/api.rs`) resolves by
+                // walking nested object properties instead of a single
+                // flat global lookup.
+                if let Expr::Member(member) = new_expr.callee.as_ref() {
+                    if let (Expr::Ident(namespace), MemberProp::Ident(class)) =
+                        (member.obj.as_ref(), &member.prop)
+                    {
+                        let qualified = format!("{}.{}", namespace.sym, class.sym);
+                        if matches!(
+                            qualified.as_str(),
+                            "Intl.DateTimeFormat" | "Intl.NumberFormat" | "Intl.ListFormat"
+                        ) {
+                            let args = new_expr.args.as_deref().unwrap_or_default();
+                            if args.iter().any(|argument| argument.spread.is_some()) {
+                                return Err(format!(
+                                    "`new {qualified}()` does not support spread arguments"
+                                ));
+                            }
+                            let values = args
+                                .iter()
+                                .map(|argument| {
+                                    let value = self.lower_expr_with_expected_type(
+                                        &argument.expr,
+                                        Some(&HirType::JsValue),
+                                    )?;
+                                    self.coerce_to_declared(&HirType::Json, value)
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            let values = self
+                                .coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+                            let constructor = HirExpr::Call(
+                                Box::new(HirExpr::Var("getDynamicValue".into())),
+                                vec![HirExpr::Lit(HirLit::Str(qualified))],
+                            );
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("constructDynamicValue".into())),
+                                vec![constructor, values],
+                            ));
+                        }
+                    }
+                }
                 self.lower_promise_new(new_expr)
             }
 

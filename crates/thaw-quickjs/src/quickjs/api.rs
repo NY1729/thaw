@@ -523,9 +523,44 @@ pub extern "C" fn thaw_js_run_until_native_resolved(promise: *const c_void) {
 pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
     let name = to_str(name);
     with_active_or_context(|ctx| {
-        let Ok(value) = ctx.globals().get::<_, Value>(name.as_str()) else {
+        // The whole `name` as a single, literal global property first --
+        // this is the *only* lookup that existed before, and must stay
+        // that way: some real package names contain a literal `.` of
+        // their own (e.g. `socket.io`), so a runtime key derived from one
+        // (a qualified alias, `pkg::$value$name`, ...) can itself contain
+        // a `.` that was never meant as a namespace separator. Only if
+        // no such literal global exists does a `.` in `name` get treated
+        // as a nested-property path (`"Intl.DateTimeFormat"` -- needed
+        // for `new <Namespace>.<Class>(...)`, thaw-hir's own lowering
+        // for this constructs exactly this dotted string) -- `Intl`
+        // itself is a real global, but `"Intl.DateTimeFormat"` never is.
+        // A plain property lookup for a missing key succeeds with
+        // `Value::Undefined` rather than erroring (ordinary JS property
+        // access semantics) -- so a name that's genuinely only reachable
+        // via the nested-path walk below (`"Intl.DateTimeFormat"`, no
+        // literal global by that exact dotted name) must *not* stop here
+        // just because this lookup "succeeded".
+        if let Ok(value) = ctx.globals().get::<_, Value>(name.as_str()) {
+            if !value.is_undefined() {
+                return retain_value(&ctx, value).unwrap_or(0);
+            }
+        }
+        let mut segments = name.split('.');
+        let Some(first) = segments.next() else {
             return 0;
         };
+        let Ok(mut value) = ctx.globals().get::<_, Value>(first) else {
+            return 0;
+        };
+        for segment in segments {
+            let Some(object) = value.as_object() else {
+                return 0;
+            };
+            let Ok(next) = object.get::<_, Value>(segment) else {
+                return 0;
+            };
+            value = next;
+        }
         retain_value(&ctx, value).unwrap_or(0)
     })
 }
