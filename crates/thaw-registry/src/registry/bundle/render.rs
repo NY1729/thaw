@@ -113,6 +113,23 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     );
 
     if modules.iter().any(|module| module.key == "node:http") {
+        // This fetch polyfill decompresses a `Content-Encoding: br`
+        // response through `DecompressionStream('br')` unconditionally
+        // (real servers send Brotli-encoded bodies often -- e.g. any
+        // Cloudflare-fronted site -- once we ask for it via
+        // `Accept-Encoding`, which this shim always does below) even
+        // though the literal word "brotli"/"Brotli" never otherwise
+        // appears anywhere in this shim or in a typical package's own
+        // bundled source (only the short code `'br'` does). thaw-cli's
+        // `source_uses_brotli` (build.rs) is a blind substring scan for
+        // that literal word to decide whether to compile thaw-quickjs's
+        // optional Brotli decoder in at all -- so without this comment,
+        // a real `br`-compressed response silently gets a stubbed-out
+        // decoder no matter how large or small the package bundle is.
+        // Found via ky's real HTTPS traffic to a Cloudflare-fronted
+        // site (nothing to do with ky itself -- any fetch of a Brotli-
+        // compressing server hits this).
+        out.push_str("// uses brotli decompression ('br' content-encoding)\n");
         out.push_str(
             r#"if (typeof globalThis.fetch !== 'function') {
   globalThis.fetch = function(input, init) {

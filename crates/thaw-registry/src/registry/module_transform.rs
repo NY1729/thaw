@@ -193,6 +193,25 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
             }
         }
 
+        // A bare `fetch` reference (`visit_ident` above) misses the very
+        // common cross-platform-compatible pattern of reaching it off a
+        // known global object instead -- `globalThis.fetch(...)`, or
+        // ky's own `globalThis.fetch.bind(globalThis)` -- because a
+        // member expression's property is a distinct AST node from a
+        // bound identifier reference, so `visit_ident` never sees
+        // `fetch` there at all. Found via ky, whose own bundle never
+        // requires `node:http` itself and never references bare
+        // `fetch`, so it silently got no fetch shim and no bundled
+        // `node:https`/`node:http` to back one.
+        fn visit_member_expr(&mut self, member: &MemberExpr) {
+            if property_name(&member.prop).as_deref() == Some("fetch")
+                && matches!(member.obj.as_ref(), Expr::Ident(identifier) if matches!(identifier.sym.as_ref(), "globalThis" | "self" | "window" | "global"))
+            {
+                self.uses_global_fetch = true;
+            }
+            member.visit_children_with(self);
+        }
+
         fn visit_call_expr(&mut self, call: &CallExpr) {
             if matches!(
                 &call.callee,
