@@ -388,6 +388,41 @@ fn reads_and_writes_json_with_runtime_string_keys() {
     );
 }
 
+/// A genuinely missing `Json` key/index used to be indistinguishable
+/// from an explicit `null` -- `thaw_json_get`/`thaw_json_index` fell
+/// back to plain `Value::Null` either way. Fixed in `thaw-std` (a new
+/// `$__thaw_napi_undefined$`-tagged sentinel, matching the one already
+/// used for native-callback argument marshaling) and wired through here
+/// (`==`/`!=` against `null`/`undefined` used to be a build-time crash,
+/// not just a wrong answer -- `lower_loose_equality` had no `Json`-aware
+/// arm at all).
+#[test]
+fn a_missing_json_key_or_index_is_distinguishable_from_an_explicit_null() {
+    let source = r#"
+        function main(): void {
+            const obj: Json = JSON.parse("{\"a\":1,\"n\":null}");
+            console.log(obj.n === null);
+            console.log(obj.n === undefined);
+            console.log(obj.b === null);
+            console.log(obj.b === undefined);
+            console.log(obj.n == null);
+            console.log(obj.n == undefined);
+            console.log(obj.b == null);
+            console.log(obj.b == undefined);
+            console.log(typeof obj.b);
+            console.log(String(obj.b));
+
+            const arr: Json = JSON.parse("[1,2]");
+            console.log(arr[99] === undefined);
+            console.log(arr[99] == null);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_missing_key_vs_null"),
+        "true\nfalse\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\nundefined\nundefined\ntrue\ntrue\n"
+    );
+}
+
 #[test]
 fn stringifies_json_with_number_and_string_spacing() {
     let source = r#"

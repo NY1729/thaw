@@ -1293,6 +1293,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "JSON undefined check operand")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_is_nullish" => {
+                        let [value] = args.as_slice() else {
+                            return Err("JSON nullish check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "JSON nullish check operand")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_json_typeof" => return Ok(HirType::Str),
                     "__thaw_json_object_is"
                     | "__thaw_json_object_is_number"

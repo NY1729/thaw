@@ -176,9 +176,26 @@ impl<'ctx> HirCompiler<'ctx> {
         nullable: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let present = if nullable {
+            // `Nullable`'s tagged representation only has two states --
+            // a real payload, or "null" -- with nothing to represent a
+            // genuinely *missing* key/index as (unlike `Nullish`, which
+            // has a separate `undefined` state below). Since `thaw_
+            // json_get`/`thaw_json_index` (thaw-std) now distinguish
+            // "missing" from real `null` at the `Json` representation
+            // level (a fresh `$__thaw_napi_undefined$`-tagged sentinel,
+            // not `Value::Null`), a strict null check alone would treat
+            // that sentinel as "present" and try to decode it as a real
+            // payload value -- garbage (e.g. `0` for a numeric payload)
+            // instead of the closest available state, "null". Treat
+            // either one as absent.
             let is_null = self.compile_json_is_null_value(json)?;
+            let is_undefined = self.compile_json_is_napi_undefined(json)?;
+            let is_absent = self
+                .builder
+                .build_or(is_null, is_undefined, "json_nullable_absent")
+                .map_err(|error| error.to_string())?;
             self.builder
-                .build_not(is_null, "json_nullable_present")
+                .build_not(is_absent, "json_nullable_present")
                 .map_err(|error| error.to_string())?
         } else {
             let has_own = self

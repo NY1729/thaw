@@ -252,6 +252,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     "json_is_null",
                 );
             }
+            "__thaw_json_is_nullish" => {
+                return self.compile_i8_predicate_call(
+                    "thaw_json_is_nullish",
+                    args,
+                    "json_is_nullish",
+                );
+            }
             "__thaw_json_is_undefined" => {
                 let [value] = args else {
                     return Err("JSON undefined check expects one operand".into());

@@ -749,6 +749,36 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var("__thaw_json_is_null".into())),
             vec![HirExpr::Var(raw_name.clone())],
         );
+        // For a `Nullable` dictionary value (no separate `undefined`
+        // state -- unlike `Nullish` below), a genuinely-missing key
+        // must also map to "none". `typed_dictionary_read`'s `Nullable`
+        // arm calls this unconditionally, with no surrounding `has_own`
+        // check the way the `Nullish` arm has -- so `raw` (a `JsonKey`
+        // read) is now the `$__thaw_napi_undefined$` sentinel, not bare
+        // `null`, whenever the key was never actually present at all
+        // (`thaw_json_get`, thaw-std). A strict `is_null`-only check
+        // would treat that sentinel as "present" and decode it as a real
+        // payload value -- garbage (e.g. `0` for a numeric payload)
+        // instead of the closest available state, "null". The `Nullish`
+        // case, by contrast, is only ever reached after its own caller
+        // already confirmed `has_own` -- so a stored sentinel there is a
+        // rarer, pre-existing, genuinely-present marshaled-`undefined`
+        // value, not a missing key; deliberately left as `is_null`-only,
+        // unaffected either way by this fix.
+        let is_none = if nullish {
+            is_null
+        } else {
+            let is_undefined = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                vec![HirExpr::Var(raw_name.clone())],
+            );
+            HirExpr::Conditional(
+                Box::new(is_null),
+                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                Box::new(is_undefined),
+                HirType::Bool,
+            )
+        };
         let value = Self::dictionary_value_from_json(HirExpr::Var(raw_name.clone()), payload)?;
         let (none, some) = if nullish {
             (
@@ -775,7 +805,7 @@ impl<'a> FnLowerer<'a> {
                 }],
                 result_type,
                 Box::new(HirExpr::Block(vec![HirStmt::If(
-                    is_null,
+                    is_none,
                     vec![HirStmt::Return(Some(none))],
                     vec![HirStmt::Return(Some(some))],
                 )])),
