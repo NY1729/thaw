@@ -899,6 +899,74 @@ fn installed_package_inlines_a_default_imported_class_used_as_an_extends_base() 
 }
 
 #[test]
+fn installed_package_inlines_a_node_builtin_class_used_as_a_namespace_qualified_extends_base() {
+    // The namespace-qualified counterpart to the default-import case
+    // above (`installed_package_inlines_a_default_imported_class_used_
+    // as_an_extends_base`): a locally declared class whose `extends`
+    // clause names a *namespace-imported Node builtin's* class
+    // (`import * as stream from "stream"; export declare class Parser
+    // extends stream.Transform { ... }`) -- the base class's own
+    // declaration doesn't live in a file thaw-registry ever fetches at
+    // all; it's one of thaw's own synthetic ambient declarations for a
+    // Node builtin module. Real example: csv-parse's own `Parser
+    // extends stream.Transform`, whose consumer needs `.read()` --
+    // declared only on `stream`'s own `Readable` (`Transform`'s own
+    // ancestor), not `Transform` itself. Without inlining `Transform`
+    // (and transitively `Duplex`/`Readable`, following the *builtin's
+    // own* `extends` chain), every one of those inherited methods failed
+    // to compile ("call to unknown function").
+    let scratch = temp_registry("installed-dts-namespace-builtin-extends-scratch");
+    let registry = temp_registry("installed-dts-namespace-builtin-extends-registry");
+    let package = scratch.join("node_modules/stream-kit9");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"stream-kit9","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import * as stream from 'stream';\n\
+         export declare class Parser extends stream.Transform {\n\
+         \x20\x20constructor(options: any);\n\
+         }\n\
+         export declare function parse(options: any): Parser;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { parse: function(options) { return {}; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "stream-kit9").unwrap();
+    let declarations = resolve(&registry, "stream-kit9").unwrap().dts_source;
+    assert!(
+        declarations.contains("class Transform extends Duplex"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("class Duplex extends Readable"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("class Readable") && declarations.contains("read(size?: number): Json"),
+        "{declarations}"
+    );
+    // `Parser`'s own `extends stream.Transform` clause is untouched --
+    // thaw-bridge's `parse_dts_classes` resolves the actual member
+    // inheritance from here (covered directly, without needing a real
+    // registry package, by `expands_members_inherited_through_a_
+    // namespace_qualified_extends` in thaw-bridge's own test suite).
+    assert!(
+        declarations.contains("class Parser extends stream.Transform"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_import_equals_reexports() {
     // `import Name = require("./path")` (a TS import-equals declaration)
     // followed by a *local* `export { Name as exported };` (no `from`

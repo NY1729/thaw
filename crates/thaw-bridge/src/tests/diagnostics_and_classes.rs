@@ -343,6 +343,38 @@ fn expands_inherited_external_class_members() {
         .any(|property| property.name == "id"));
 }
 
+/// A namespace-qualified `extends` clause (`class Parser extends stream.
+/// Transform { ... }`, real example: csv-parse's own `Parser`, `import *
+/// as stream from "stream"`) used to inherit nothing at all -- `extends`
+/// was only ever derived from a bare `Expr::Ident` super-class
+/// expression, never a qualified `Expr::Member` one, so `Transform`'s
+/// own members (declared elsewhere in the same flattened source, same
+/// as any other same-file extends) were silently unreachable regardless
+/// of whether `Transform` itself was ever found. This is the thaw-bridge
+/// half of the fix; the other half (thaw-registry inlining a Node
+/// builtin's own class declaration into a third-party package's
+/// flattened `.d.ts` when its `extends` clause references one) is
+/// exercised end to end by `thaw-cli`'s `registry_fallback` tests and
+/// the real csv-parse pinned integration test.
+#[test]
+fn expands_members_inherited_through_a_namespace_qualified_extends() {
+    let classes = parse_dts_classes(
+        r#"export class Transform {
+                read(size?: number): any;
+                write(chunk: any): boolean;
+            }
+            export class Parser extends stream.Transform {
+                constructor(options: any);
+                parse(): void;
+            }"#,
+    )
+    .unwrap();
+    let parser = classes.iter().find(|class| class.name == "Parser").unwrap();
+    assert!(parser.methods.iter().any(|method| method.name == "read"));
+    assert!(parser.methods.iter().any(|method| method.name == "write"));
+    assert!(parser.methods.iter().any(|method| method.name == "parse"));
+}
+
 #[test]
 fn excludes_inaccessible_external_class_members_and_constructors() {
     let classes = parse_dts_classes(
