@@ -1227,3 +1227,70 @@ async function main(): Promise<void> {{
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `ms`'s two `.d.ts` overloads -- `(value: number, options?: {long:
+/// boolean}): string` and `(value: ms.StringValue): number` -- are
+/// type-disjoint only by their shared first argument's runtime `typeof`
+/// (both really call the same JS function, which already does this
+/// exact dispatch internally), so `union_overload_dispatch_declaration`
+/// merges them into one `typeof`-checking dispatcher instead of the
+/// ordinary "first overload wins" rule silently picking just one
+/// (`shim_generation.rs`). That alone made every *runtime* call work,
+/// but the dispatcher's own declared type is necessarily a `string |
+/// number` union in and out (nothing about a `typeof` check is visible
+/// to the static type system) -- so `const n: number = ms("2 days")`
+/// failed to type-check even though the call itself was correct.
+///
+/// Fixed by having the argument-shape-scoring rewrite pass (already
+/// used for e.g. uuid's arity-disjoint overloads) also apply to a
+/// union-dispatched name: `union_overload_dispatch_declaration` now
+/// returns its own already-declared per-overload symbols as rewrite
+/// candidates too, so a call site whose argument statically matches
+/// one overload (a number literal, a string literal, or a variable
+/// with a known `number`/`string` type) gets rewritten straight to
+/// that overload's own precisely-typed symbol -- narrowing the result
+/// to a real `number`/`string` instead of the dispatcher's union type.
+/// A call whose argument type genuinely isn't known statically still
+/// falls through to the original `typeof`-checking dispatcher
+/// unchanged.
+#[test]
+fn registry_add_narrows_real_ms_overloads_by_argument_shape_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-ms-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "ms@2.1.3").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import ms from "ms";
+function main(): void {
+    const n: number = ms("2 days");
+    console.log(n);
+    const s: string = ms(120000);
+    console.log(s);
+    const long: string = ms(120000, { long: true });
+    console.log(long);
+    const value: string = "3 hours";
+    const h: number = ms(value);
+    console.log(h);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["ms".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "172800000\n2m\n2 minutes\n10800000\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
