@@ -1846,28 +1846,31 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// luxon end to end: `DateTime.fromISO(...)` (no explicit `locale` --
-/// this polyfill always renders English regardless of what locale
-/// string luxon itself requests, so real luxon's own default already
-/// matches without needing `Settings.defaultLocale` set explicitly;
-/// found while writing this test that `Settings.defaultLocale = "en-
-/// US"` itself crashes the build entirely -- "needs a monomorphic
-/// native implementation" against a synthesized `$new$Settings$arity0`
-/// symbol, i.e. a *static property assignment* misclassified as a
-/// *constructor* call. A real, separate, general bug, but outside this
-/// effort's scope -- noted in `docs/design/intl-polyfill.md` as a
-/// follow-up, not chased down here), `.setZone("America/New_York")`
-/// across a real DST boundary (July vs. January -- confirms `jiff`'s
-/// bundled tzdata, not a hand-rolled DST rule), `.toFormat(...)`,
-/// `.toLocaleString(DateTime.DATE_FULL)`, `.toLocaleString(DateTime.
+/// luxon end to end: `DateTime.fromISO(...)`, `Settings.defaultLocale =
+/// "en-US"` (a bare static property *assignment* -- this polyfill
+/// always renders English regardless of what locale string luxon
+/// itself requests, so real luxon's own output doesn't actually change
+/// either way; this line originally crashed the build entirely --
+/// "needs a monomorphic native implementation" against a synthesized
+/// `$new$Settings$arity0` symbol, a static property assignment on a
+/// constructible-but-never-`new`'d class misresolving to its
+/// constructor's own symbol -- see `a_constructible_but_never_newed_
+/// class_can_have_its_static_property_assigned` in `tests/registry_
+/// fallback/classes_and_values.rs` for the isolated regression test and
+/// full root-cause writeup), `.setZone("America/New_York")` across a
+/// real DST boundary (July vs. January -- confirms `jiff`'s bundled
+/// tzdata, not a hand-rolled DST rule), `.toFormat(...)`, `.
+/// toLocaleString(DateTime.DATE_FULL)`, `.toLocaleString(DateTime.
 /// DATETIME_FULL)`, and `.diff(...).toHuman()`. Fixed timestamps
 /// throughout (never `DateTime.now()`), so this is fully deterministic.
 /// See `docs/design/intl-polyfill.md` for the full writeup -- this is
 /// the capstone test for that whole effort, exercising the native
 /// `jiff`-backed timezone engine, the JS `Intl.DateTimeFormat`/
-/// `NumberFormat`/`ListFormat` polyfill, and three separate general
-/// compiler/bridge bugs found getting a real, non-constructible-class
-/// package's static factory methods (`DateTime.fromISO`) to work at all.
+/// `NumberFormat`/`ListFormat` polyfill, and general compiler/bridge
+/// bugs found getting a real, non-constructible-class package's static
+/// factory methods (`DateTime.fromISO`) and a constructible-but-never-
+/// `new`'d class's static property assignment (`Settings.
+/// defaultLocale`) to work at all.
 #[test]
 fn registry_add_computes_and_formats_real_luxon_datetimes_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -1882,8 +1885,9 @@ fn registry_add_computes_and_formats_real_luxon_datetimes_when_enabled() {
 
     std::fs::write(
         &source,
-        r#"import { DateTime } from "luxon";
+        r#"import { DateTime, Settings } from "luxon";
 function main(): void {
+    Settings.defaultLocale = "en-US";
     const summer = DateTime.fromISO("2024-07-04T16:30:45.000Z", { zone: "utc" });
     console.log(summer.toISO());
     const ny = summer.setZone("America/New_York");

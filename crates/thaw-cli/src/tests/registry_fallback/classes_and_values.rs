@@ -102,7 +102,7 @@ function main(): void {
 ///    the same `$value$`-keyed runtime-getter mechanism a `Str`/`F64`/
 ///    `JsValue` constant export already uses, reading the *real* class
 ///    value straight off the bundle's own live JS exports
-///    (`shim_generation.rs`'s `non_constructible_classes`).
+///    (`shim_generation.rs`'s `bare_value_classes`).
 /// 2. A static method call's own receiver (`compile_typed_napi_method`,
 ///    `crates/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs`) is looked
 ///    up via `thaw_js_get_global` against the class's *plain* name --
@@ -236,6 +236,93 @@ function main(): void {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&result.stdout), "Widget:hi\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A class with **no explicit constructor at all** (real example:
+/// luxon's `Settings` -- a purely static config object never meant to
+/// be `new`'d, but with no `private constructor()` marking it as such,
+/// so `constructible` defaults to `true` the same as any ordinary
+/// class), used only as a bare identifier -- here, as a static property
+/// *assignment* target (`Config.defaultLocale = "en-US"`), the shape
+/// that crashed real luxon's `Settings.defaultLocale = "en-US"` with
+/// "needs a monomorphic native implementation" against a synthesized
+/// `$new$Config$arity0` symbol.
+///
+/// Root cause: `generate_napi_class_constructors`'s fallback path
+/// synthesizes a placeholder zero-arg constructor for ANY constructible
+/// class with no declared constructor overloads (reasonable in
+/// isolation -- *some* real classes with no explicit constructor really
+/// are meant to be `new`'d bare) and that placeholder's own symbol
+/// lands in `class_targets`, which `package_exports`'s class-name
+/// mapping used unconditionally -- so a class like this never got a
+/// chance at a real value binding at all, even though nothing ever
+/// calls `new Config()`. The Fallback (non-N-API) branch also never
+/// generates a static property *setter* at all (only the N-API branch
+/// does), so the assignment was never text-rewritten away first either
+/// -- it reached thaw-hir raw, with `Config` resolved to the unusable
+/// constructor symbol.
+///
+/// Fixed by making `package_exports` always prefer a genuine `$value$`-
+/// keyed value binding over `class_targets`'s constructor symbol
+/// whenever the class is observed anywhere in the user's own source as
+/// a bare member-object identifier (`observed_bare_member_object_
+/// identifiers`, an AST walk over every `Expr::Member` -- a property
+/// read, an assignment target, and a method call's own callee all parse
+/// the same way) -- regardless of whether the class also happens to be
+/// constructible. `class_targets`/`class_rewrites`'s own, separate
+/// `new ClassName(...)` support is completely untouched by this: a
+/// `new` call site never consults `package_exports` at all, so this
+/// class remaining (uselessly) constructible doesn't matter.
+#[test]
+fn a_constructible_but_never_newed_class_can_have_its_static_property_assigned() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-static-property-assign-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("config-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Config {\n\
+             static defaultLocale: string;\n\
+             static describe(): string;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "class Config {\n\
+             static describe() { return 'locale:' + Config.defaultLocale; }\n\
+         }\n\
+         Config.defaultLocale = 'en-US';\n\
+         module.exports = { Config };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Config } from "config-kit";
+function main(): void {
+    Config.defaultLocale = "ja-JP";
+    console.log(Config.describe());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "locale:ja-JP\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
