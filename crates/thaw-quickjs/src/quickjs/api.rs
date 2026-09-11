@@ -349,10 +349,24 @@ fn resolve_value_impl<'js>(
     // `Ok(None)` instead of a real JS `undefined` value that a direct
     // `String` conversion would just fail on. That case is not rare here:
     // it's exactly what a genuinely `void`-returning (or otherwise
-    // undefined-returning) Fallback function's real result looks like --
-    // `null` is the universal placeholder every typed decoder on the
-    // other side already tolerates (a `Void`-declared return, notably,
-    // never even inspects the JSON it's handed).
+    // undefined-returning) Fallback function's real result looks like.
+    //
+    // Substituted with the same `$__thaw_napi_undefined$`-tagged sentinel
+    // object native-callback argument marshaling already uses for a real
+    // `undefined` (`compile_napi_undefined_json`, thaw-llvm), not bare
+    // `null` -- every typed decoder that actually cares about the
+    // distinction (`Optional`/`Nullable`/`Nullish`/`Union`, and, since
+    // this session's earlier `Json`-representation fix, `thaw_json_
+    // typeof`/`as_bool`/`as_string` too) already recognizes this exact
+    // shape and reports "genuinely undefined" correctly; one that
+    // doesn't care (`Void`, which never inspects the JSON it's handed;
+    // `Bool`, already falsy for either shape) is unaffected either way.
+    // Previously: a Fallback function declared to return `T | undefined`
+    // whose real JS implementation actually returned `undefined` was
+    // always misread back as `null` (or, worse, as a mis-decoded `T`)
+    // on the native side -- real example: any `Optional`-returning
+    // package function, found via a synthetic reproduction while fixing
+    // validator's union-return crash.
     let stringify: Function = ctx
         .globals()
         .get("__thaw_json_safe_stringify")
@@ -360,7 +374,9 @@ fn resolve_value_impl<'js>(
     stringify
         .call::<_, Option<String>>((result,))
         .map_err(|e| format!("failed to JSON-encode the result: {e}"))
-        .map(|value| value.unwrap_or_else(|| "null".to_string()))
+        .map(|value| {
+            value.unwrap_or_else(|| r#"{"$__thaw_napi_undefined$":true}"#.to_string())
+        })
 }
 
 fn finish_with_platform_events<'js>(
@@ -1247,11 +1263,19 @@ pub extern "C" fn thaw_js_set_property_json_result(
             .call((args_json.as_str(), reviver))
             .map_err(|error| error.to_string())?;
         let value: Value = args.get(0).map_err(|error| error.to_string())?;
+        // Same substitution as `resolve_value_impl`'s own, and for the
+        // same reason: a genuinely `undefined` assigned value (e.g. one
+        // just revived from the `$__thaw_napi_undefined$` sentinel by
+        // `__thaw_json_date_reviver` when parsing `args_json` above)
+        // can't be `JSON.stringify`d at all -- reporting it back as
+        // plain `null` would make `obj.prop = someOptionalNone` (an
+        // assignment expression, which evaluates to the assigned value)
+        // indistinguishable from assigning a real `null`.
         let returned = ctx
             .json_stringify(value.clone())
             .map_err(|error| error.to_string())?
             .map(|value| value.to_string().unwrap_or_default())
-            .unwrap_or_else(|| "null".into());
+            .unwrap_or_else(|| r#"{"$__thaw_napi_undefined$":true}"#.to_string());
         object.set(name.as_str(), value).map_err(|error| match error {
             rquickjs::Error::Exception => describe_exception(&ctx),
             error => error.to_string(),
