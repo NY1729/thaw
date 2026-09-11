@@ -338,7 +338,7 @@ fn registry_add_generates_and_parses_uuids_with_real_uuid_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
-        r#"import { v4, validate, version, parse, stringify } from "uuid";
+        r#"import { v4, validate, version, parse, stringify, NIL, MAX } from "uuid";
 function main(): void {
     const id: string = v4();
     console.log(validate(id));
@@ -352,6 +352,16 @@ function main(): void {
 
     const filled: JsValue = v4(undefined, bytes as JsValue);
     console.log(filled);
+
+    // `NIL`/`MAX` -- barrel re-exports of another file's own default
+    // export, itself a bare literal-typed constant, not a function
+    // (`export { default as NIL } from './nil.js'`, `declare const
+    // _default: "000...0"; export default _default;`). Regression
+    // coverage for a gap where thaw-registry's install-time `.d.ts`
+    // flattening never resolved a *value* default re-export, only a
+    // function one -- "`uuid` has no export named `NIL`" at build time.
+    console.log(NIL);
+    console.log(MAX);
 }"#,
     )
     .unwrap();
@@ -383,6 +393,14 @@ function main(): void {
     assert_ne!(
         filled_line, "107,167,184,16,157,173,17,209,128,180,0,192,79,212,48,200",
         "buffer wasn't actually filled with random bytes by the buffer-output overload"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("00000000-0000-0000-0000-000000000000")
+    );
+    assert_eq!(
+        lines.next(),
+        Some("ffffffff-ffff-ffff-ffff-ffffffffffff")
     );
     assert_eq!(lines.next(), None);
     let _ = std::fs::remove_dir_all(dir);

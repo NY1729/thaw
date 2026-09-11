@@ -1291,6 +1291,51 @@ fn reexported_function_declarations(
                             )?);
                         }
                     }
+                    // A bare data *constant*, not a function -- real
+                    // example: uuid's own `dist/nil.js`'s `.d.ts`:
+                    // `declare const _default: "00000000-0000-0000-
+                    // 0000-000000000000"; export default _default;`
+                    // (one file per constant, re-exported under a real
+                    // name -- `NIL`/`MAX` -- via a barrel file's `export
+                    // { default as NIL } from './nil.js'`). The `declare
+                    // const` statement itself is never directly
+                    // exported (only indirectly, via this separate
+                    // `export default <ident>;`), so its own snippet
+                    // carries no `export` keyword -- fine, since
+                    // `thaw_bridge::parse_dts_values` (which reads the
+                    // flattened result this eventually becomes part of)
+                    // already recognizes a bare ambient `declare const`
+                    // exactly like every other ambient `.d.ts`
+                    // declaration. `rename_declared_function` (this
+                    // snippet's only caller, when `exported != original`)
+                    // already handles the `"const "` keyword generically.
+                    for item in &module.body {
+                        let ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Var(var_decl))) =
+                            item
+                        else {
+                            continue;
+                        };
+                        for declarator in &var_decl.decls {
+                            let thaw_parser::ast::Pat::Ident(binding) = &declarator.name else {
+                                continue;
+                            };
+                            if binding.id.sym.as_ref() != resolved {
+                                continue;
+                            }
+                            let Some(annotation) = &binding.type_ann else {
+                                continue;
+                            };
+                            if !matches!(
+                                annotation.type_ann.as_ref(),
+                                thaw_parser::ast::TsType::TsLitType(_)
+                            ) {
+                                continue;
+                            }
+                            declarations.push(source_map.span_to_snippet(var_decl.span()).map_err(
+                                |error| format!("failed to read declaration for `{resolved}`: {error:?}"),
+                            )?);
+                        }
+                    }
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default_decl)) => {
                     if let thaw_parser::ast::DefaultDecl::Fn(fn_expr) = &default_decl.decl {
