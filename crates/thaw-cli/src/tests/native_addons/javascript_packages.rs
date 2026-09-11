@@ -1740,3 +1740,90 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// jsonwebtoken end to end: `sign`/`verify` via both the named-import
+/// (`import { sign, verify }`) and default-import/namespace
+/// (`import jwt from "jsonwebtoken"; jwt.sign(...)`) call forms, an
+/// `expiresIn` option, and a wrong-secret verification failure whose
+/// caught `JsonWebTokenError`'s `.name` and `.message` must both match
+/// real Node exactly. Exercises three real, general bugs found and fixed
+/// together while getting this package to build and run correctly:
+/// - An overload-dispatch tie-break comparing candidates' *entire*
+///   declared parameter vectors instead of just the slots a call site
+///   actually provides, which silently misrouted `verify(token, secret)`
+///   (2 args) to an overload requiring 3 (`class_methods.rs`).
+/// - `node:crypto` missing `KeyObject`/`createSecretKey`/
+///   `createPrivateKey`/`createPublicKey` altogether, needed by
+///   jsonwebtoken's (and its `jws`/`jwa` dependencies') own real HMAC
+///   key-normalization and feature-detection logic (`buffer_crypto.js`,
+///   `resolution.rs`).
+/// - A registry function returning `JsValue` (matching `verify`'s
+///   `JwtPayload | string` union return type) losing a caught custom
+///   `Error` subclass's `.name` entirely -- always reporting plain
+///   `"Error"` -- because its call convention's exception path
+///   (`invoke_raw`) never tagged it, unlike every other call convention
+///   (`api.rs`).
+#[test]
+fn registry_add_signs_and_verifies_real_jsonwebtokens_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-jsonwebtoken-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "jsonwebtoken").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        &source,
+        r#"import jwt from "jsonwebtoken";
+import { sign, verify } from "jsonwebtoken";
+function main(): void {
+    const token = jwt.sign({ userId: 42 }, "my-secret", { expiresIn: "1h" });
+    const decoded: JsValue = jwt.verify(token, "my-secret");
+    console.log(decoded.userId);
+    console.log(typeof decoded.iat);
+    console.log(typeof decoded.exp);
+
+    const token2 = sign({ role: "admin" }, "another-secret");
+    const decoded2: JsValue = verify(token2, "another-secret");
+    console.log(decoded2.role);
+
+    try {
+        jwt.verify(token, "wrong-secret");
+        console.log("unreachable");
+    } catch (error: JsValue) {
+        console.log(error.message);
+        console.log(error.name);
+    }
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["jsonwebtoken".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "42\nnumber\nnumber\nadmin\ninvalid signature\nJsonWebTokenError\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
