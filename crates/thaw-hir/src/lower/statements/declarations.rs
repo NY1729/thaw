@@ -31,6 +31,54 @@ impl<'a> FnLowerer<'a> {
         for decl in &var_decl.decls {
             if let Pat::Ident(binding) = &decl.name {
                 let name = binding.id.sym.to_string();
+                // A declaration with no initializer at all (`let record;`,
+                // or `let record: SomeType;`) used to be rejected
+                // outright, regardless of its declared type -- a real,
+                // common pattern (real example: csv-parse's own streaming
+                // API, `let record; while ((record = parser.read()) !==
+                // null) { ... }`, mirroring Node's own `Readable` docs).
+                // Supported here for exactly the cases where a `let`'s
+                // real-JS initial value (`undefined`) has a well-defined
+                // representation in the declared native type: no
+                // annotation at all (defaults to `Json`, matching how a
+                // bare `any`/`unknown` annotation already lowers -- an
+                // untyped local is exactly that in spirit), or an
+                // annotation whose type already has an existing "absent"
+                // encoding (`Json`'s NAPI-undefined sentinel, `JsValue`,
+                // `Optional`/`Nullable`/`Nullish`, a union with an
+                // `undefined` member -- all via the same `coerce_to_
+                // declared` machinery an ordinary `let x: T = someValue`
+                // already funnels through, just fed a literal `undefined`
+                // instead). A concrete scalar/aggregate annotation with no
+                // such encoding (`let x: number;`) still can't produce a
+                // real default value and is rejected -- honestly matching
+                // real, strict TypeScript's own "variable is used before
+                // being assigned" diagnostic for the same shape.
+                if decl.init.is_none() {
+                    let annotated = binding
+                        .type_ann
+                        .as_ref()
+                        .map(|annotation| {
+                            lower_ts_type(
+                                &annotation.type_ann,
+                                self.interfaces,
+                                self.generic_interfaces,
+                            )
+                        })
+                        .transpose()?;
+                    let ty = annotated.unwrap_or(HirType::Json);
+                    let value = self
+                        .coerce_to_declared(&ty, HirExpr::Lit(HirLit::Undefined))
+                        .map_err(|error| {
+                            format!(
+                                "`{name}` needs an initializer (its declared type `{ty:?}` has \
+                                 no default value: {error})"
+                            )
+                        })?;
+                    let hir_name = self.bind_local(&name, ty.clone());
+                    statements.push(HirStmt::Let(hir_name, ty, value));
+                    continue;
+                }
                 let init = decl
                     .init
                     .as_deref()
