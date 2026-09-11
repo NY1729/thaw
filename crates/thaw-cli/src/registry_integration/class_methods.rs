@@ -2332,18 +2332,43 @@ fn rewrite_external_class_methods_with_static(
                     let selected = if scored_candidates.len() > 1
                         && scored_candidates.iter().all(|(score, _)| *score == 0)
                     {
+                        // Only the parameter slots this *call* actually
+                        // supplies matter for "are these tied candidates
+                        // interchangeable" -- comparing the full declared
+                        // parameter list (as the two checks below used to)
+                        // wrongly disqualifies two candidates whose
+                        // *shared, provided* prefix is identical/opaque
+                        // just because they cover different *arity
+                        // ranges* and so have different-length parameter
+                        // vectors. Real example: jsonwebtoken's own
+                        // `verify`, whose 2-arg call matched several
+                        // same-scoring overloads spanning both a (2, 3)
+                        // and a (2, 4) arity range -- the trailing
+                        // `options`/`callback` parameter neither candidate
+                        // was actually given is irrelevant to whether
+                        // they're interchangeable for *this* call, but
+                        // comparing whole-vector equality treated the
+                        // extra, unsupplied slot as a real mismatch and
+                        // fell through with nothing selected at all,
+                        // leaving the call to whatever the first-overload
+                        // default's own (needlessly stricter) arity
+                        // happened to require.
+                        let provided = call.args.len();
+                        fn relevant(types: &[thaw_hir::HirType], provided: usize) -> &[thaw_hir::HirType] {
+                            &types[..provided.min(types.len())]
+                        }
                         let opaque = scored_candidates.iter().find(|(_, candidate)| {
-                            candidate.4.iter().all(|ty| {
+                            relevant(&candidate.4, provided).iter().all(|ty| {
                                 matches!(ty, thaw_hir::HirType::Json | thaw_hir::HirType::JsValue)
                             })
                         });
                         match opaque {
                             Some((_, candidate)) => Some(*candidate),
                             None => {
-                                let first_types = &scored_candidates[0].1.4;
+                                let first_types = relevant(&scored_candidates[0].1.4, provided);
                                 scored_candidates
                                     .iter()
-                                    .all(|(_, candidate)| &candidate.4 == first_types)
+                                    .all(|(_, candidate)| relevant(&candidate.4, provided) == first_types)
                                     .then(|| scored_candidates[0].1)
                             }
                         }
