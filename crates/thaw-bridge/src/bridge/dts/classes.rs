@@ -199,14 +199,23 @@ fn type_property_name(key: &Expr) -> Option<String> {
     }
 }
 
-fn named_return_type(annotation: Option<&swc_ecma_ast::TsTypeAnn>) -> Option<String> {
-    let TsType::TsTypeRef(reference) = annotation?.type_ann.as_ref() else {
-        return None;
-    };
-    Some(match &reference.type_name {
-        TsEntityName::Ident(name) => name.sym.to_string(),
-        TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
-    })
+fn named_return_type(
+    annotation: Option<&swc_ecma_ast::TsTypeAnn>,
+    self_name: &str,
+) -> Option<String> {
+    match annotation?.type_ann.as_ref() {
+        // A fluent `this` return -- `name(str): this` on commander's
+        // `Command`, and every builder API like it. It's the same class,
+        // so route it through the existing named-instance-return path
+        // (`return_instance_class` -> a `JsValue` handle, chainable) the
+        // same as an explicit `foo(): Command` would.
+        TsType::TsThisType(_) => Some(self_name.to_string()),
+        TsType::TsTypeRef(reference) => Some(match &reference.type_name {
+            TsEntityName::Ident(name) => name.sym.to_string(),
+            TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
+        }),
+        _ => None,
+    }
 }
 
 fn index_signature_value(signature: &swc_ecma_ast::TsIndexSignature) -> Result<&TsType, String> {
@@ -740,7 +749,7 @@ fn lower_dts_class(
                     }
                 }
                 let rest_param = function.rest_param;
-                let return_instance_class = named_return_type(method.function.return_type.as_deref());
+                let return_instance_class = named_return_type(method.function.return_type.as_deref(), name);
                 methods.push(DtsMethod {
                     name: function.name,
                     params,
@@ -776,7 +785,7 @@ fn lower_dts_class(
                     TsFnOrConstructorType::TsFnType(function),
                 )) = property.type_ann.as_ref().map(|annotation| annotation.type_ann.as_ref())
                 {
-                    let return_instance_class = named_return_type(Some(&function.type_ann));
+                    let return_instance_class = named_return_type(Some(&function.type_ann), name);
                     let function = lower_dts_fn_type(
                         &property_name,
                         function,
