@@ -81,6 +81,57 @@ function main(): void {
 /// session's two chained-call fixes; only UTC-based formatting is
 /// asserted (never a local-time token) so this doesn't depend on the
 /// host's time zone.
+/// `date-fns@4`'s tree-shakeable functions are generic on their result
+/// date: `parseISO<DateType extends Date, ResultDate extends Date =
+/// DateType>(argument: string, ...): ResultDate`, and `addDays` /
+/// `differenceInDays` similarly. `ResultDate` appears only in the
+/// return position -- nothing infers it, and the flattened shim drops
+/// its `= DateType` default -- so the call used to fail
+/// `cannot infer generic type parameter ResultDate`.
+/// `infer_generic_type_tuple` now falls back to a type parameter's
+/// `extends` bound (`Date`) when it has neither an inferred value nor a
+/// default.
+#[test]
+fn registry_add_computes_dates_with_real_date_fns_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-date-fns-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "date-fns@4.1.0").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { format, addDays, differenceInDays, parseISO, isAfter } from "date-fns";
+function main(): void {
+    const d = parseISO("2026-01-15T00:00:00Z");
+    const later = addDays(d, 10);
+    console.log(format(later, "yyyy-MM-dd"));
+    console.log(differenceInDays(later, d));
+    console.log(isAfter(later, d));
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["date-fns".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).env("TZ", "UTC").output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2026-01-25\n10\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_add_formats_dates_with_dayjs_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {

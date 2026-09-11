@@ -1421,6 +1421,14 @@ fn infer_generic_type_tuple(
     }
     let mut types = Vec::with_capacity(signature.generic_type_params.len());
     let mut substitution = HashMap::new();
+    let empty_constraints = Vec::new();
+    let constraints = if signature.generic_type_constraints.len()
+        == signature.generic_type_params.len()
+    {
+        &signature.generic_type_constraints
+    } else {
+        &empty_constraints
+    };
     for ((name, default), index) in signature
         .generic_type_params
         .iter()
@@ -1432,6 +1440,22 @@ fn infer_generic_type_tuple(
         } else if let Some(default) = default {
             resolve_ts_type_with_substitution(
                 default,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            )?
+        } else if let Some(Some(constraint)) = constraints.get(index) {
+            // A type parameter that isn't inferrable from any argument
+            // and has no default, but *does* have an upper bound
+            // (`<ResultDate extends Date>` -- real example: date-fns's
+            // `parseISO`, `addDays`, whose result generic is bounded by
+            // `Date` and appears only in the return position). Fall back
+            // to that bound rather than erroring: for a Fallback function
+            // the result is `Json`/`JsValue` at runtime regardless, and
+            // the bound is the most precise static type available.
+            resolve_ts_type_with_substitution(
+                constraint,
                 &substitution,
                 interfaces,
                 generic_interfaces,
