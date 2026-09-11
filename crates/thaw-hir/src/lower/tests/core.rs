@@ -180,6 +180,44 @@ fn rejects_missing_parameter_type_annotation() {
     assert!(error.contains("at bytes"));
 }
 
+/// A `let`/`var` with no initializer at all used to be rejected
+/// unconditionally, regardless of its declared type -- see `thaw-llvm`'s
+/// `compiles_uninitialized_declarations_assigned_later` for the real-
+/// world motivating case (csv-parse's own streaming API) and the
+/// end-to-end runtime behavior. Here: an untyped bare declaration
+/// lowers to a real `Json`-typed `undefined` (the same encoding a
+/// normal `let x: any = undefined` already produces), and a scalar
+/// annotation with no default representation (`number`) is rejected
+/// with a clear, specific reason rather than the old unconditional
+/// message.
+#[test]
+fn lowers_an_untyped_uninitialized_declaration_as_undefined_json() {
+    let program = lower(
+        r#"
+        function main(): void {
+            let record;
+            record = 1;
+        }
+        "#,
+    );
+    let f = &program.functions[0];
+    let HirStmt::Let(_, ty, _) = &f.body[0] else {
+        panic!("expected a `let` statement, got {:?}", f.body[0]);
+    };
+    assert_eq!(*ty, HirType::Json);
+}
+
+#[test]
+fn rejects_an_uninitialized_declaration_with_no_default_value() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { let x: number; console.log(x); }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("`x` needs an initializer"));
+    assert!(error.contains("declared type `F64` has no default value"));
+}
+
 #[test]
 fn infers_unannotated_parameters_from_call_sites() {
     let program = lower(

@@ -1936,3 +1936,79 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Real csv-parse's `csv-parse/sync` entry point (`parse(input,
+/// options)` returning an array directly -- a subpath export, needs
+/// `--use csv-parse/sync` specifically, not just `csv-parse`, matching
+/// `drizzle-orm/sqlite-core`'s own precedent). Found and fixed while
+/// exploring this package's *other* entry point, the main `csv-parse`
+/// streaming API (`parse(options)` returning a `Transform` stream,
+/// consumed via `.on("readable", ...)`/`.read()`/`.on("end", ...)`, the
+/// shape Node's own docs recommend): `let record;` declared with no
+/// initializer at all, later assigned inside the `while ((record =
+/// parser.read()) !== null)` loop condition (Node's own documented
+/// idiom) -- a real, general, non-csv-parse-specific gap (`thaw-hir`'s
+/// `lower_var_decl` rejected *any* uninitialized declaration outright,
+/// regardless of declared type); see `thaw-llvm`'s `compiles_
+/// uninitialized_declarations_assigned_later` for the synthetic,
+/// network-free regression test and full root-cause writeup.
+///
+/// The streaming API itself is *not* exercised end to end here: `Parser`
+/// (`csv-parse`'s own class) `extends stream.Transform` from Node's
+/// `stream` module, which thaw's registry has no ambient type
+/// information for at all (no `@types/node` flattening) -- so `.read()`/
+/// `.write()`/`.pipe()`/etc., all inherited from that unresolvable base,
+/// are invisible to thaw's type checker ("call to unknown function
+/// `parser.read`"). A real, separate, and substantially larger gap
+/// (modeling enough of Node's `stream.Readable`/`Transform`/`Duplex`
+/// surface, or a general "unresolvable external base -> fall back to
+/// fully dynamic method dispatch" rule) -- noted here, not chased down.
+#[test]
+fn registry_add_parses_csv_with_real_csv_parse_sync_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-csv-parse-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "csv-parse").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { parse } from "csv-parse/sync";
+
+function main(): void {
+    const records = parse("a,b,c\n1,2,3\n4,5,6\n", { columns: true });
+    console.log(JSON.stringify(records));
+    console.log(records.length);
+    console.log(records[0].a);
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["csv-parse/sync".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[{\"a\":\"1\",\"b\":\"2\",\"c\":\"3\"},{\"a\":\"4\",\"b\":\"5\",\"c\":\"6\"}]\n\
+         2\n\
+         1\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
