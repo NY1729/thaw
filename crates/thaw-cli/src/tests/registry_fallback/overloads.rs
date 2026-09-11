@@ -723,3 +723,67 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Two `.d.ts` overloads spanning *different, overlapping* arity ranges
+/// (real-world example: jsonwebtoken's own `verify(token, secretOrKey,
+/// options?)` -- arity `(2, 3)` -- alongside its own `verify(token,
+/// secretOrKey, options?, callback?)` -- arity `(2, 4)`), where a 2-argument
+/// call's arguments can't be scored against either overload at all (one
+/// argument's type isn't tracked, matching the extremely common `const x =
+/// someDynamicCall(); f(x, ...)` shape; the other is declared `Json`, which
+/// always scores 0 regardless of the actual argument). Regression coverage
+/// for a bug where the "are these tied candidates interchangeable" tie-break
+/// compared each candidate's *entire* declared parameter vector -- including
+/// trailing parameters neither candidate was actually given -- so two
+/// candidates whose *provided* parameter slots agree exactly still failed
+/// the check purely because their *total* arity differs, leaving `selected
+/// = None` and falling through to the first-declared overload's own arity
+/// requirement (here, a 3-argument-minimum overload that must be listed
+/// first for `.d.ts` overload resolution's own "first overload wins"
+/// default to pick it) instead of either 2-argument-accepting one.
+#[test]
+fn overlapping_arity_ranges_tie_break_only_compares_provided_argument_slots() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-overlapping-arity-tie-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("verify-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function verifyLike(token: string, secret: Json, options: Json): string;\n\
+         export declare function verifyLike(token: string, secret: Json, options?: Json): string;\n\
+         export declare function verifyLike(token: string, secret: Json, options?: Json, callback?: Json): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.verifyLike = function(token, secret) {\n\
+             return token + ':' + secret;\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { verifyLike } from "verify-kit";
+function main(): void {
+    const raw: Json = JSON.parse('{"token":"abc"}');
+    const token = raw.token;
+    console.log(verifyLike(token, "shh"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "abc:shh\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
