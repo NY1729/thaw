@@ -166,6 +166,36 @@
     return name;
   };
   const randomBytesSync = size => Buffer.from(__thaw_crypto_random_hex(Number(size)), 'hex');
+  // A minimal stand-in for real Node's `crypto.KeyObject` -- thaw's own
+  // crypto shim has no asymmetric-key support at all (no
+  // `createPrivateKey`/`createPublicKey`), but real packages commonly do
+  // `x instanceof KeyObject` purely to tell a wrapped key apart from a
+  // plain string/Buffer secret -- real example: jsonwebtoken's own
+  // `sign.js`/`verify.js`, `secretOrPrivateKey instanceof KeyObject`.
+  // Without *something* named `KeyObject` reachable here, that check
+  // threw outright ("invalid 'instanceof' right operand" -- the
+  // right-hand side of `instanceof` was `undefined`), aborting every
+  // call regardless of the key's actual shape.
+  //
+  // `type`/`export()` mirror real `KeyObject`'s own shape closely enough
+  // for the *symmetric* (HMAC) case real packages actually exercise
+  // through this: jsonwebtoken's own fallback chain, real Node's
+  // `createPrivateKey(secret)` throwing on a plain HMAC secret (thaw
+  // doesn't implement it at all -- calling it throws "not a function",
+  // caught the same way) then `createSecretKey(secret)` succeeding and
+  // producing a `KeyObject` whose `.type` must read back `"secret"` for
+  // the rest of jsonwebtoken's own logic to accept it. No support for a
+  // real asymmetric key (`type: "private"/"public"`) -- out of scope,
+  // matching this crypto shim's existing lack of RSA/ECDSA/EC support.
+  class KeyObject {
+    constructor(type, material) {
+      this.type = type;
+      this._material = material;
+    }
+    export() {
+      return Buffer.from(this._material);
+    }
+  }
   class Hash {
     constructor(algorithm) { this.algorithm = normalizeHashAlgorithm(algorithm); this._chunks = []; this._digested = false; }
     update(data, encoding) {
@@ -181,7 +211,10 @@
     copy() { const copied = new Hash(this.algorithm); copied._chunks = this._chunks.map(chunk => Buffer.from(chunk)); return copied; }
   }
   class Hmac extends Hash {
-    constructor(algorithm, key) { super(algorithm); this._key = Buffer.from(key); }
+    constructor(algorithm, key) {
+      super(algorithm);
+      this._key = Buffer.from(key instanceof KeyObject ? key.export() : key);
+    }
     digest(encoding) {
       if (this._digested) throw new Error('Digest already called');
       this._digested = true;
@@ -296,11 +329,29 @@
   }
   const createCipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, false);
   const createDecipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, true);
+  const createSecretKey = key => new KeyObject('secret', Buffer.from(key));
+  // Real Node's `createPrivateKey`/`createPublicKey` -- unimplemented,
+  // matching this crypto shim's existing lack of RSA/ECDSA/EC support
+  // (no PEM/DER parsing at all). Existing as real, callable *functions*
+  // that honestly throw (rather than not existing at all) still matters:
+  // several real packages feature-detect asymmetric-key support via
+  // `typeof crypto.createPublicKey === 'function'` before ever calling
+  // it -- real example: `jwa` (a `jsonwebtoken` dependency), which
+  // otherwise silently rejects a *symmetric* `KeyObject` too (the one
+  // case this shim does support, via `createSecretKey`) because it
+  // assumes a JS engine with no `createPublicKey` at all has no
+  // `KeyObject` concept whatsoever.
+  const createPrivateKey = () => {
+    throw new Error('createPrivateKey is not supported (no asymmetric-key support)');
+  };
+  const createPublicKey = () => {
+    throw new Error('createPublicKey is not supported (no asymmetric-key support)');
+  };
   const cryptoModule = {
     createHash: algorithm => new Hash(algorithm),
     createHmac: (algorithm, key) => new Hmac(algorithm, key),
     createCipheriv, createDecipheriv, Cipheriv,
-    Hash, Hmac, pbkdf2Sync, scrypt, scryptSync, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
+    Hash, Hmac, KeyObject, createSecretKey, createPrivateKey, createPublicKey, pbkdf2Sync, scrypt, scryptSync, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
     timingSafeEqual, getHashes: () => ['sha256', 'sha512']
   };
   const subtle = {
