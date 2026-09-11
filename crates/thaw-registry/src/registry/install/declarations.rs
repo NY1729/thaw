@@ -153,7 +153,7 @@ fn dts_source_with_reexported_functions(
     entry_source: &str,
 ) -> Result<String, String> {
     use thaw_parser::ast::{
-        Decl, ExportSpecifier, Expr, ModuleDecl, ModuleExportName, ModuleItem, Stmt,
+        Decl, ExportSpecifier, Expr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem, Stmt,
     };
 
     let module = thaw_parser::parse_typescript(entry_source)?;
@@ -435,6 +435,28 @@ fn dts_source_with_reexported_functions(
     // downstream: once the base class's own text is present in the
     // flattened output under the alias name the entry file's `extends`
     // clause expects, that resolution already works unmodified.
+    // A namespace import of a Node builtin (`import * as stream from
+    // "stream";`), used only for its *specifier* below -- collected
+    // once up front rather than re-scanning `module.body` inside the
+    // loop for every class.
+    let namespace_import_specifiers: std::collections::HashMap<String, String> = module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+                return None;
+            };
+            import.specifiers.iter().find_map(|specifier| {
+                let thaw_parser::ast::ImportSpecifier::Namespace(namespace) = specifier else {
+                    return None;
+                };
+                Some((
+                    namespace.local.sym.to_string(),
+                    import.src.value.to_string_lossy().into_owned(),
+                ))
+            })
+        })
+        .collect();
     for item in &module.body {
         let class = match item {
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
@@ -445,23 +467,118 @@ fn dts_source_with_reexported_functions(
             _ => None,
         };
         let Some(class) = class else { continue };
-        let Some(Expr::Ident(base)) = class.class.super_class.as_deref() else {
-            continue;
-        };
-        let Some((target_path, target_name)) = named_import_targets.get(base.sym.as_str()) else {
-            continue;
-        };
-        let mut declarations =
-            reexported_class_or_interface_declarations(target_path, target_name)?;
-        if let Some(first) = declarations.first_mut() {
-            *first = rename_declared_function(std::mem::take(first), base.sym.as_ref());
-        }
-        for snippet in declarations {
-            output.push('\n');
-            output.push_str(&snippet);
+        match class.class.super_class.as_deref() {
+            Some(Expr::Ident(base)) => {
+                let Some((target_path, target_name)) =
+                    named_import_targets.get(base.sym.as_str())
+                else {
+                    continue;
+                };
+                let mut declarations =
+                    reexported_class_or_interface_declarations(target_path, target_name)?;
+                if let Some(first) = declarations.first_mut() {
+                    *first = rename_declared_function(std::mem::take(first), base.sym.as_ref());
+                }
+                for snippet in declarations {
+                    output.push('\n');
+                    output.push_str(&snippet);
+                }
+            }
+            // The same shape, but the base is namespace-qualified
+            // (`stream.Transform`) rather than a bare imported
+            // identifier -- real example: csv-parse's own `Parser
+            // extends stream.Transform`. Unlike the case above, the
+            // base class's declaration doesn't live in a file thaw
+            // fetched at all; it's one of thaw's own synthetic
+            // ambient declarations for a Node builtin module
+            // (`resolve_builtin`, already used for a top-level `--use
+            // node:stream`, reused here read-only for its `.d.ts`
+            // text). Extracted from that in-memory string (not a file
+            // on disk, hence a dedicated helper rather than
+            // `reexported_class_or_interface_declarations`), following
+            // the base's own `extends` chain transitively within that
+            // same string (e.g. `Transform extends Duplex extends
+            // Readable`) so every inherited method is reachable, not
+            // just the immediate base's own.
+            Some(Expr::Member(member)) => {
+                let Expr::Ident(namespace) = member.obj.as_ref() else {
+                    continue;
+                };
+                let MemberProp::Ident(base_name) = &member.prop else {
+                    continue;
+                };
+                let Some(specifier) = namespace_import_specifiers.get(namespace.sym.as_str())
+                else {
+                    continue;
+                };
+                let Ok(builtin) = resolve_builtin(specifier) else {
+                    continue;
+                };
+                let declarations = builtin_class_and_ancestor_declarations(
+                    &builtin.dts_source,
+                    base_name.sym.as_ref(),
+                    &mut std::collections::BTreeSet::new(),
+                )?;
+                for snippet in declarations {
+                    output.push('\n');
+                    output.push_str(&snippet);
+                }
+            }
+            _ => continue,
         }
     }
     Ok(output)
+}
+
+/// The namespace-qualified-extends counterpart to
+/// `reexported_class_or_interface_declarations_inner`: extracts a class
+/// declaration by name, and (transitively) its own ancestors, from an
+/// in-memory Node-builtin `.d.ts` string (`resolve_builtin`'s own
+/// output) rather than a file on disk -- a builtin's synthetic
+/// declaration is self-contained (no further external imports to
+/// follow), so this only ever needs to look within `dts_source` itself.
+fn builtin_class_and_ancestor_declarations(
+    dts_source: &str,
+    name: &str,
+    visited: &mut std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    use thaw_parser::ast::{Decl, Expr, ModuleDecl, ModuleItem};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    if !visited.insert(name.to_string()) {
+        return Ok(Vec::new());
+    }
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(dts_source)?;
+    let mut declarations = Vec::new();
+    let mut superclass = None;
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) = item else {
+            continue;
+        };
+        let Decl::Class(class) = &export.decl else {
+            continue;
+        };
+        if class.ident.sym.as_ref() != name {
+            continue;
+        }
+        superclass = class.class.super_class.as_deref().and_then(|expr| match expr {
+            Expr::Ident(ident) => Some(ident.sym.to_string()),
+            _ => None,
+        });
+        let snippet = source_map.span_to_snippet(class.span()).map_err(|error| {
+            format!("failed to read builtin class declaration `{name}`: {error:?}")
+        })?;
+        declarations.push(snippet);
+        break;
+    }
+    if let Some(superclass) = superclass {
+        declarations.extend(builtin_class_and_ancestor_declarations(
+            dts_source,
+            &superclass,
+            visited,
+        )?);
+    }
+    Ok(declarations)
 }
 
 fn all_reexported_type_declarations(

@@ -677,11 +677,33 @@ fn lower_dts_class(
             })
             .collect::<Vec<_>>()
     };
+    // A namespace-qualified base (`class Parser extends stream.
+    // Transform { ... }`, real example: csv-parse's own `Parser`,
+    // `import * as stream from "stream"`) matched nothing here at all
+    // before -- `declared` (below) is keyed by plain class name, built
+    // purely from this same flattened source, so `Parser`'s inherited
+    // members (`.read()`, `.write()`, `.pipe()`, ... -- everything
+    // `stream.Transform` itself declares) were silently dropped, not
+    // just "not found": a call to any of them failed to compile
+    // ("call to unknown function `parser.read`") since thaw's type
+    // system never even *attempted* to resolve `stream.Transform`,
+    // regardless of whether `Transform`'s own declaration was
+    // available anywhere. Fixed by extracting just the property name
+    // (`Transform`) and matching it the same way a bare-identifier
+    // extends already does -- `declared.get("Transform")` finds a
+    // match once thaw-registry's own declaration-flattening (see
+    // `dts_source_with_reexported_functions`'s handling of this same
+    // shape) inlines the referenced builtin's class declaration into
+    // the flattened output under that plain name.
     let extends = class
         .super_class
         .as_deref()
         .and_then(|super_class| match super_class {
             Expr::Ident(name) => Some(name.sym.to_string()),
+            Expr::Member(member) => match &member.prop {
+                MemberProp::Ident(name) => Some(name.sym.to_string()),
+                _ => None,
+            },
             _ => None,
         });
     let mut constructors = Vec::new();
