@@ -1138,3 +1138,75 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function whose real JS implementation genuinely returns
+/// `undefined` used to have that result marshaled back indistinguishably
+/// from a real `null` (`resolve_value_impl`, `crates/thaw-quickjs/src/
+/// quickjs/api.rs`, substituted the literal text `"null"` whenever
+/// `JSON.stringify` reported the result as unrepresentable -- exactly
+/// what a genuine `undefined` looks like). For an `Optional`-typed
+/// declared return (`T | undefined`), this meant a function's own
+/// documented "absent" case was silently indistinguishable from an
+/// explicit `null`, and reported the wrong `typeof`. Fixed by
+/// substituting the same `$__thaw_napi_undefined$`-tagged sentinel
+/// object native-callback argument marshaling already uses for a real
+/// `undefined`, instead of bare `null` -- every decoder that actually
+/// distinguishes the two already recognizes it. Also covers a union
+/// return mixing `null` and `undefined` as separate members (found
+/// while verifying the fix, alongside `normalizeEmail`-style union
+/// returns).
+#[test]
+fn a_fallback_functions_genuinely_undefined_return_value_is_distinguishable_from_null() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-undefined-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("optkit2");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function maybeGet(input: string): string | undefined;\n\
+         export declare function maybeThing(input: string): string | number | boolean | null | undefined;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = {\n\
+         \x20\x20maybeGet: function(s) { return s.length > 0 ? s : undefined; },\n\
+         \x20\x20maybeThing: function(s) {\n\
+         \x20\x20\x20\x20if (s === \"null\") return null;\n\
+         \x20\x20\x20\x20return undefined;\n\
+         \x20\x20}\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { maybeGet, maybeThing } from "optkit2";
+function main(): void {
+    console.log(maybeGet("hi"));
+    console.log(maybeGet(""));
+    console.log(typeof maybeGet(""));
+    console.log(maybeThing("null"));
+    console.log(maybeThing("undef"));
+    console.log(typeof maybeThing("undef"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "hi\nundefined\nundefined\nnull\nundefined\nundefined\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

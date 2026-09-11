@@ -116,7 +116,15 @@ fn standalone_event_loop_ignores_only_unreferenced_timers() {
     );
     thaw_js_run_event_loop();
     assert_eq!(call("readUnrefValue", "[]"), "0");
-    assert_eq!(call("refTimer", "[]"), "null");
+    // `refTimer` has no explicit `return`, so its real result is a
+    // genuine JS `undefined` -- reported as the same napi-undefined
+    // sentinel every other genuinely-undefined dynamic-call result now
+    // marshals as, not bare `null` (see `result_abi_marshals_a_
+    // genuinely_undefined_return_value_distinctly_from_null`).
+    assert_eq!(
+        call("refTimer", "[]"),
+        r#"{"$__thaw_napi_undefined$":true}"#
+    );
     thaw_js_run_event_loop();
     assert_eq!(call("readUnrefValue", "[]"), "42");
 }
@@ -1171,6 +1179,44 @@ fn result_abi_separates_success_from_javascript_exceptions() {
     assert!(failed.value.is_null());
     let error = unsafe { CStr::from_ptr(failed.error) }.to_string_lossy();
     assert!(error.contains("kaboom"), "{error}");
+}
+
+/// A JS function that genuinely returns `undefined` used to have that
+/// result marshaled back as bare JSON `null` -- indistinguishable from
+/// a real `null`, since `JSON.stringify(undefined)` returns actual JS
+/// `undefined`, which `resolve_value_impl` used to substitute a literal
+/// `"null"` for. Every typed decoder that actually distinguishes the
+/// two (`Optional`/`Nullable`/`Nullish`/`Union`, and `thaw_json_typeof`/
+/// `as_bool`/`as_string`) already recognizes the same
+/// `$__thaw_napi_undefined$`-tagged sentinel native-callback argument
+/// marshaling uses for a real `undefined` -- fixed by substituting that
+/// sentinel here too, instead of `null`.
+#[test]
+fn result_abi_marshals_a_genuinely_undefined_return_value_distinctly_from_null() {
+    assert_eq!(
+        load(
+            "function getUndefined() { return undefined; }\n\
+             function getNull() { return null; }"
+        ),
+        1
+    );
+    let args = CString::new("[]").unwrap();
+
+    let undefined_name = CString::new("getUndefined").unwrap();
+    let result = thaw_js_call_result(undefined_name.as_ptr(), args.as_ptr());
+    assert!(result.error.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result.value) }.to_str().unwrap(),
+        r#"{"$__thaw_napi_undefined$":true}"#
+    );
+
+    let null_name = CString::new("getNull").unwrap();
+    let result = thaw_js_call_result(null_name.as_ptr(), args.as_ptr());
+    assert!(result.error.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result.value) }.to_str().unwrap(),
+        "null"
+    );
 }
 
 #[test]
