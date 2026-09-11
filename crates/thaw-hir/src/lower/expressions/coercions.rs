@@ -943,6 +943,30 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
                     vec![rhs],
                 )),
+                // A live `JsValue` (a real QuickJS handle, e.g. `const x:
+                // JsValue = someDynamicCall()`) has no equivalent of the
+                // `Json` case above's `$__thaw_napi_undefined$` sentinel
+                // tag to check locally -- there's no local representation
+                // of "undefined" to compare against at all, only the live
+                // handle itself. Ask the engine directly instead, the same
+                // way `typeof` on a `JsValue` already does
+                // (`__thaw_typeof_dynamic_value`, just above in this same
+                // file's `UnaryOp::TypeOf` handling): round-trip through a
+                // tiny bootstrap-registered JS function
+                // (`__thaw_is_undefined_dynamic_value`) via
+                // `callDynamicValueWithValue`, decoding its boolean result.
+                // Without this arm, the call fell through to the catch-all
+                // `(_, HirType::Undefined) => false` below -- unconditionally
+                // wrong for a live value that genuinely is `undefined` (real
+                // trigger: joi's `schema.validate(...)` result, whose
+                // `.error` field on a valid input is a real absent/
+                // `undefined` property read off a live handle).
+                (HirType::JsValue, HirType::Undefined) => {
+                    Some(self.dynamic_value_is_undefined(lhs))
+                }
+                (HirType::Undefined, HirType::JsValue) => {
+                    Some(self.dynamic_value_is_undefined(rhs))
+                }
                 (HirType::Nullable(payload), HirType::Null) => Some(HirExpr::NullableIsNone(
                     Box::new(lhs),
                     payload.as_ref().clone(),
@@ -1011,4 +1035,18 @@ impl<'a> FnLowerer<'a> {
         Ok(result)
     }
 
+    /// `value === undefined`/`undefined === value` for a live `JsValue`.
+    /// See the call site's comment (`lower_optional_undefined_equality`).
+    fn dynamic_value_is_undefined(&mut self, value: HirExpr) -> HirExpr {
+        let callable = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(
+                "__thaw_is_undefined_dynamic_value".into(),
+            ))],
+        );
+        HirExpr::JsonAsBool(Box::new(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+            vec![callable, value],
+        )))
+    }
 }

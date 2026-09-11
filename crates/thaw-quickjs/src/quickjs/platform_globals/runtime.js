@@ -1,5 +1,6 @@
   globalThis.global = globalThis;
   globalThis.__thaw_typeof_dynamic_value = value => typeof value;
+  globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   const timers = new Map();
   const normalizeDelay = value => {
     const number = Number(value);
