@@ -20,18 +20,24 @@
 //! `null` -- keeping "the key is absent" and "the key is present with
 //! an explicit `null`" distinguishable the way real JS's `undefined`
 //! and `null` are, through `typeof`/truthiness/`String()`/`===`/`==`.
-//! Two things are deliberately *not* sentinel-aware, both documented at
-//! their own definition: `Number()`/`thaw_json_as_number` still gives
-//! `0.0` for a missing key (real JS: `NaN`), to avoid rippling into
-//! arithmetic results for existing code that already relies on this
-//! default (one resulting, pre-existing, not-newly-introduced
-//! inconsistency this leaves: `missing == 0` still reads `true`, real
-//! JS: `false`); and `ordered_json`/`filtered_json` (backing
-//! `JSON.stringify`) don't omit/null a *nested* sentinel value the way
-//! real `JSON.stringify` treats a real `undefined` -- that function is
-//! also load-bearing for unrelated internal argument/result marshaling
-//! that needs the sentinel's exact shape preserved, so touching it
-//! isn't safe here (see `ordered_json`'s own doc comment).
+//! One thing is deliberately *not* sentinel-aware, documented at its own
+//! definition: `Number()`/`thaw_json_as_number` still gives `0.0` for a
+//! missing key (real JS: `NaN`), to avoid rippling into arithmetic
+//! results for existing code that already relies on this default (one
+//! resulting, pre-existing, not-newly-introduced inconsistency this
+//! leaves: `missing == 0` still reads `true`, real JS: `false`).
+//!
+//! User-facing `JSON.stringify(...)` *does* omit/null a nested sentinel
+//! value the way real `JSON.stringify` treats a real `undefined`
+//! (`ordered_json_omitting_undefined`/`filtered_json_omitting_undefined`,
+//! reached via `thaw_json_stringify_public` and its `_number_space`/
+//! `_string_space`/`_keys*` siblings) -- but the *plain* `thaw_json_
+//! stringify` (no `_public` suffix) deliberately stays unaware: it's also
+//! load-bearing for unrelated internal argument/result marshaling that
+//! needs the sentinel's exact shape preserved verbatim, so giving it the
+//! same omitting behavior would silently corrupt that mechanism instead
+//! (see `ordered_json`'s own doc comment for the full story, including
+//! the earlier attempt and regression that led to this split).
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -101,10 +107,10 @@ fn ordered_object_fields(fields: &serde_json::Map<String, Value>) -> Vec<(&Strin
 // regression in existing tests (`a_bare_undefined_literal_can_be_
 // passed_as_a_dynamic_call_argument` and its `Optional`-typed sibling,
 // `crates/thaw-cli/src/tests/registry_fallback/classes_and_values.rs`)
-// when this was tried. So a *nested* sentinel value's `JSON.stringify`
-// treatment stays as it always has been (its own raw JSON shape leaks
-// through) -- a real, pre-existing rough edge, left open; see
-// `docs/design/dynamic-value-undefined-equality.md`.
+// when this was tried. `thaw_json_stringify_public` (below) is the
+// sentinel-aware sibling that's actually safe to use for a real
+// `JSON.stringify(...)` call, precisely because it's reached *only*
+// from there -- see its own doc comment.
 fn ordered_json(value: &Value) -> Value {
     match value {
         Value::Object(fields) => Value::Object(
@@ -114,6 +120,80 @@ fn ordered_json(value: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(items) => Value::Array(items.iter().map(ordered_json).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Like `ordered_json`, but matches real `JSON.stringify`'s own treatment
+/// of a genuinely `undefined` *nested* value: an object field whose value
+/// is the napi-undefined sentinel is omitted entirely (`JSON.stringify({a:
+/// 1, b: undefined})` -> `{"a":1}`), and an array element that's the
+/// sentinel is replaced with `null` (`JSON.stringify([1, undefined, 3])`
+/// -> `[1,null,3]`) -- JS's own real object-vs-array asymmetry for
+/// `undefined`. Only ever called from `thaw_json_stringify_public` and
+/// the other user-facing `JSON.stringify` variants
+/// (`stringify_with_indent`/`filtered_json_omitting_undefined`), never
+/// from the internal marshaling paths that need the sentinel preserved
+/// verbatim -- see `ordered_json`'s own doc comment for why those two
+/// audiences can't share one implementation. The bare top-level case (the
+/// `JSON.stringify` argument itself, not nested, *is* the sentinel) is
+/// deliberately left alone here too: real JS returns actual `undefined`
+/// there, which doesn't fit this function's always-a-string ABI -- a
+/// narrow, pre-existing, unworsened rough edge.
+fn ordered_json_omitting_undefined(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            ordered_object_fields(fields)
+                .into_iter()
+                .filter(|(_, value)| !is_napi_undefined(value))
+                .map(|(key, value)| (key.clone(), ordered_json_omitting_undefined(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    if is_napi_undefined(item) {
+                        Value::Null
+                    } else {
+                        ordered_json_omitting_undefined(item)
+                    }
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Sentinel-aware sibling of `filtered_json`, for the same reason
+/// `ordered_json_omitting_undefined` exists alongside `ordered_json` --
+/// backs `JSON.stringify(value, [keys])`/`JSON.stringify(value, [keys],
+/// space)`, both exclusively user-facing call forms.
+fn filtered_json_omitting_undefined(value: &Value, keys: &[String]) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            keys.iter()
+                .filter_map(|key| {
+                    let value = fields.get(key)?;
+                    if is_napi_undefined(value) {
+                        return None;
+                    }
+                    Some((key.clone(), filtered_json_omitting_undefined(value, keys)))
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    if is_napi_undefined(item) {
+                        Value::Null
+                    } else {
+                        filtered_json_omitting_undefined(item, keys)
+                    }
+                })
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -128,6 +208,18 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
 pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
     stringify_value(&ordered_json(value), &[])
+}
+
+/// The user-facing `JSON.stringify(value)` (no replacer/space) entry
+/// point -- distinct from `thaw_json_stringify` precisely because that
+/// one is *also* used internally for argument/result marshaling and
+/// can't safely gain sentinel-omitting behavior (see its doc comment).
+/// This one omits/nulls a nested napi-undefined sentinel the way real
+/// `JSON.stringify` treats a real `undefined`.
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_public(value: *mut Value) -> *const c_char {
+    let value = unsafe { &*value };
+    stringify_value(&ordered_json_omitting_undefined(value), &[])
 }
 
 #[no_mangle]
@@ -176,7 +268,7 @@ fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
 
 fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
     let value = unsafe { &*value };
-    stringify_value(&ordered_json(value), indent)
+    stringify_value(&ordered_json_omitting_undefined(value), indent)
 }
 
 fn string_array(array: *const u8) -> Vec<String> {
@@ -195,31 +287,10 @@ fn string_array(array: *const u8) -> Vec<String> {
     keys
 }
 
-fn filtered_json(value: &Value, keys: &[String]) -> Value {
-    match value {
-        Value::Object(fields) => Value::Object(
-            keys.iter()
-                .filter_map(|key| {
-                    fields
-                        .get(key)
-                        .map(|value| (key.clone(), filtered_json(value, keys)))
-                })
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|value| filtered_json(value, keys))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
 fn stringify_with_keys(value: *mut Value, keys: *const u8, indent: &[u8]) -> *const c_char {
     let value = unsafe { &*value };
     let keys = string_array(keys);
-    stringify_value(&filtered_json(value, &keys), indent)
+    stringify_value(&filtered_json_omitting_undefined(value, &keys), indent)
 }
 
 #[no_mangle]
@@ -1398,6 +1469,90 @@ mod tests {
         let text = read_c_string(thaw_json_stringify(value));
         let reparsed: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(reparsed, serde_json::json!({"a": 1, "b": [true, false]}));
+    }
+
+    /// Builds the native `[len: i64][ptr: *const c_char; len]` layout
+    /// `string_array` (backing `thaw_json_stringify_keys*`) expects,
+    /// leaking each key's `CString` for the test's duration.
+    fn encode_string_array(keys: &[&str]) -> *const u8 {
+        let pointers: Vec<*const c_char> = keys
+            .iter()
+            .map(|key| CString::new(*key).unwrap().into_raw() as *const c_char)
+            .collect();
+        let mut bytes = (keys.len() as i64).to_ne_bytes().to_vec();
+        for pointer in pointers {
+            bytes.extend_from_slice(&(pointer as usize as u64).to_ne_bytes());
+        }
+        Box::leak(bytes.into_boxed_slice()).as_ptr()
+    }
+
+    /// User-facing `JSON.stringify` (the `_public` entry points) matches
+    /// real JS's own object-vs-array asymmetry for a nested genuinely
+    /// `undefined` value (here, a real napi-undefined sentinel obtained
+    /// exactly the way a missing key produces one): an object field
+    /// holding it is omitted entirely, an array element holding it comes
+    /// back as `null` -- at any nesting depth, and unaffected by whether
+    /// a `keys`/`indent` filter is also in play. The *plain*
+    /// `thaw_json_stringify` (no `_public` suffix, still used internally
+    /// for argument/result marshaling) must keep leaking the sentinel's
+    /// raw JSON shape completely unchanged -- that's the whole reason
+    /// the two functions are split apart in the first place.
+    #[test]
+    fn public_stringify_omits_or_nulls_a_nested_undefined_sentinel() {
+        let empty = parse("{}");
+        let missing_key = CString::new("nope").unwrap();
+        let sentinel = thaw_json_get(empty, missing_key.as_ptr());
+
+        let object = thaw_json_object_new();
+        thaw_json_object_set_number(object, CString::new("a").unwrap().as_ptr(), 1.0);
+        thaw_json_object_set_json(object, CString::new("b").unwrap().as_ptr(), sentinel);
+        thaw_json_object_set_number(object, CString::new("c").unwrap().as_ptr(), 3.0);
+
+        assert_eq!(
+            read_c_string(thaw_json_stringify_public(object)),
+            r#"{"a":1,"c":3}"#
+        );
+        assert_eq!(
+            read_c_string(thaw_json_stringify_number_space(object, 2.0)),
+            "{\n  \"a\": 1,\n  \"c\": 3\n}"
+        );
+        let key_array = encode_string_array(&["a", "b", "c"]);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_keys(object, key_array)),
+            r#"{"a":1,"c":3}"#
+        );
+
+        // The plain (non-`_public`) function is completely unaffected --
+        // it still leaks the sentinel's own raw shape, exactly as
+        // before this fix, since internal marshaling relies on that.
+        assert_eq!(
+            read_c_string(thaw_json_stringify(object)),
+            r#"{"a":1,"b":{"$__thaw_napi_undefined$":true},"c":3}"#
+        );
+
+        let array = thaw_json_array_new();
+        thaw_json_array_push_number(array, 1.0);
+        thaw_json_array_push_json(array, sentinel);
+        thaw_json_array_push_number(array, 3.0);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_public(array)),
+            "[1,null,3]"
+        );
+        assert_eq!(
+            read_c_string(thaw_json_stringify(array)),
+            r#"[1,{"$__thaw_napi_undefined$":true},3]"#
+        );
+
+        // Nested two levels deep, still correctly omitted.
+        let outer = thaw_json_object_new();
+        let inner = thaw_json_object_new();
+        thaw_json_object_set_number(inner, CString::new("y").unwrap().as_ptr(), 2.0);
+        thaw_json_object_set_json(inner, CString::new("x").unwrap().as_ptr(), sentinel);
+        thaw_json_object_set_json(outer, CString::new("nested").unwrap().as_ptr(), inner);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_public(outer)),
+            r#"{"nested":{"y":2}}"#
+        );
     }
 
     #[test]
