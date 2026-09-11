@@ -1268,6 +1268,34 @@ fn result_abi_preserves_javascript_error_names() {
     assert!(error.starts_with("\u{1}AssertionError\u{1}"), "{error:?}");
 }
 
+/// Regression coverage for a bug where `invoke_raw` (backing
+/// `thaw_js_call_handle_handle_result` -- calling a live, retained
+/// function *value* whose own result also stays a retained handle, used
+/// whenever a registry function's declared return type is `JsValue`,
+/// real-world example: jsonwebtoken's own `verify(token, secret)`) used
+/// the untagged `describe_exception` instead of `describe_tagged_exception`
+/// -- unlike `thaw_js_call_result`'s own `describe_host_exception`, already
+/// covered by `result_abi_preserves_javascript_error_names` above -- so a
+/// caught custom `Error` subclass's `.name` was silently discarded and
+/// always defaulted to plain `"Error"` on this call convention specifically,
+/// even though the same fix already existed for calls by name.
+#[test]
+fn handle_call_result_abi_preserves_javascript_error_names() {
+    assert_eq!(
+        load(
+            "globalThis.fail = () => { const error = new Error('no'); error.name = 'AssertionError'; throw error; };"
+        ),
+        1
+    );
+    let name = CString::new("fail").unwrap();
+    let handle = thaw_js_get_global(name.as_ptr());
+    assert_ne!(handle, 0);
+    let args = CString::new("[]").unwrap();
+    let failed = thaw_js_call_handle_handle_result(handle, args.as_ptr(), true);
+    let error = unsafe { CStr::from_ptr(failed.error) }.to_string_lossy();
+    assert!(error.starts_with("\u{1}AssertionError\u{1}"), "{error:?}");
+}
+
 #[test]
 fn syntax_error_fails_to_load_instead_of_crashing() {
     assert_eq!(load("function( this is not valid js"), 0);

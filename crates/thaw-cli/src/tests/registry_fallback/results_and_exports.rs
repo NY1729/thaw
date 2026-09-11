@@ -1210,3 +1210,79 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A registry function whose declared return type is `JsValue` (matching
+/// any real-world return type ambiguous enough to fall back to it, e.g.
+/// jsonwebtoken's own `verify(token, secret)`, whose 2-argument overload
+/// returns a `JwtPayload | string` union) compiles its call through a
+/// different native call convention than one returning plain, JSON-
+/// decodable data: the result itself stays a live retained handle
+/// (`thaw_js_call_handle_handle_result` / `invoke_raw`), rather than a
+/// plain call by name (`thaw_js_call_result` / `invoke_impl`). Regression
+/// coverage for a bug where that handle-result call convention's exception
+/// path (`describe_exception`) never tagged the thrown value's `.name` at
+/// all -- unlike every other call convention already used elsewhere in
+/// this file -- so a caught custom `Error` subclass always reported
+/// `.name === "Error"` even though `.message` came through untouched.
+/// Confirmed via jsonwebtoken itself: a caught wrong-secret
+/// `JsonWebTokenError`'s `.name` read back as plain `"Error"` before this
+/// fix (matching real Node exactly afterward).
+#[test]
+fn a_jsvalue_returning_calls_thrown_custom_error_keeps_its_name() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-jsvalue-call-error-name-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("errkit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function boom(input: string): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "var MyOldStyleError = function (message) {\n\
+         \x20\x20Error.call(this, message);\n\
+         \x20\x20if (Error.captureStackTrace) { Error.captureStackTrace(this, this.constructor); }\n\
+         \x20\x20this.name = 'MyOldStyleError';\n\
+         \x20\x20this.message = message;\n\
+         };\n\
+         MyOldStyleError.prototype = Object.create(Error.prototype);\n\
+         MyOldStyleError.prototype.constructor = MyOldStyleError;\n\
+         module.exports.boom = function() {\n\
+         \x20\x20throw new MyOldStyleError('custom boom');\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { boom } from "errkit";
+function main(): void {
+    try {
+        const result = boom("x");
+        console.log(result);
+    } catch (error: JsValue) {
+        console.log(error.message);
+        console.log(error.name);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "custom boom\nMyOldStyleError\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
