@@ -21,6 +21,7 @@ cbc = { version = "0.1", features = ["alloc"] }
 flate2 = "1"
 getrandom = "0.2"
 httlib-huffman = "0.3.4"
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 libc = "0.2"
 rquickjs = "0.12.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }

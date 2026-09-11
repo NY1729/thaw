@@ -821,6 +821,17 @@ fn ensure_context() {
                         .expect("failed to create JavaScript TLS listener closer");
                 let os_info_function = Function::new(ctx.clone(), os_info_json)
                     .expect("failed to create JavaScript OS information source");
+                // Backs `Intl.DateTimeFormat` (`platform_globals/intl.js`) --
+                // the one native primitive needed to compute a real,
+                // DST-aware IANA timezone offset/breakdown for a given
+                // instant. See `quickjs/intl.rs`'s own doc comment.
+                let intl_zoned_parts_function = Function::new(
+                    ctx.clone(),
+                    |tz_name: String, timestamp_ms: f64| {
+                        intl_zoned_parts_json(&tz_name, timestamp_ms)
+                    },
+                )
+                .expect("failed to create JavaScript Intl timezone source");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -839,6 +850,9 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_crypto_cipher_hex", cipher_hex)
                     .expect("failed to install JavaScript cipher function");
+                ctx.globals()
+                    .set("__thaw_intl_zoned_parts", intl_zoned_parts_function)
+                    .expect("failed to install JavaScript Intl timezone source");
                 ctx.globals()
                     .set("__thaw_hpack_huffman_encode", hpack_huffman_encode)
                     .expect("failed to install HPACK Huffman encoder");

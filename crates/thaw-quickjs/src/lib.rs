@@ -511,6 +511,8 @@ fn os_info_json() -> String {
 
 include!("quickjs/processes.rs");
 
+include!("quickjs/intl.rs");
+
 #[cfg(unix)]
 static PENDING_PROCESS_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
