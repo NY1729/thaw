@@ -423,6 +423,41 @@ fn a_missing_json_key_or_index_is_distinguishable_from_an_explicit_null() {
     );
 }
 
+/// `JSON.stringify` matches real JS's own object-vs-array asymmetry for
+/// a nested genuinely `undefined` value: an object field holding one
+/// (here, a missing-key-derived value re-inserted elsewhere) is omitted
+/// entirely, an array element holding one comes back as `null` -- at any
+/// nesting depth, and whether or not a replacer-array/indent argument is
+/// also given. Previously left as a deliberate rough edge (`thaw_json_
+/// stringify` is also load-bearing for unrelated internal argument/
+/// result marshaling that needs the sentinel's raw shape preserved, so
+/// it couldn't safely gain this behavior itself) -- fixed by splitting
+/// off a `thaw_json_stringify_public` sibling used only by the real,
+/// user-facing `JSON.stringify` call, leaving the original function and
+/// every internal marshaling path that depends on it untouched.
+#[test]
+fn json_stringify_omits_or_nulls_a_nested_undefined_value() {
+    let source = r#"
+        function main(): void {
+            const raw: Json = JSON.parse("{\"a\":1}");
+            const missing = raw.b;
+            const obj: Json = { a: 1, b: missing, c: 3 };
+            console.log(JSON.stringify(obj));
+            console.log(JSON.stringify(obj, null, 2));
+            console.log(JSON.stringify(obj, ["a", "b", "c"]));
+
+            const arr: Json = [1, missing, 3];
+            console.log(JSON.stringify(arr));
+
+            console.log(JSON.stringify({ nested: { x: missing, y: 2 } }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_omits_undefined"),
+        "{\"a\":1,\"c\":3}\n{\n  \"a\": 1,\n  \"c\": 3\n}\n{\"a\":1,\"c\":3}\n[1,null,3]\n{\"nested\":{\"y\":2}}\n"
+    );
+}
+
 /// A relational comparison (`<`/`>`/etc, `lower_relational`) against a
 /// statically `null`/`undefined`-typed operand used to crash at build
 /// time -- `coerce_primitive_to_number` had no arm for either type,

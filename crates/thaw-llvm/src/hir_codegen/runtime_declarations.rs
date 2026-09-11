@@ -175,6 +175,15 @@ impl<'ctx> HirCompiler<'ctx> {
             json_stringify_type,
             Some(Linkage::External),
         );
+        // Sentinel-omitting sibling used for the *user-facing* bare
+        // `JSON.stringify(value)` call only -- see its own doc comment
+        // in `thaw-std/src/json.rs` for why it can't share `thaw_json_
+        // stringify` itself with the internal marshaling paths.
+        self.module.add_function(
+            "thaw_json_stringify_public",
+            json_stringify_type,
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_json_callback_error",
             i8_ptr.fn_type(&[i8_ptr.into()], false),

@@ -25,7 +25,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_single_arg_call("thaw_json_parse", args, "JSON.parse")
             }
             "JSON.stringify" => {
-                return self.compile_single_arg_call("thaw_json_stringify", args, "JSON.stringify")
+                // The `_public` variant omits/nulls a nested napi-
+                // undefined sentinel the way real `JSON.stringify`
+                // treats a real `undefined` -- safe here specifically
+                // *because* this is the real, user-facing call, unlike
+                // the internal argument/result marshaling paths that
+                // still use the plain `thaw_json_stringify` and need the
+                // sentinel preserved verbatim.
+                return self.compile_single_arg_call(
+                    "thaw_json_stringify_public",
+                    args,
+                    "JSON.stringify",
+                )
             }
             "__thaw_json_typeof" => {
                 return self.compile_single_arg_call("thaw_json_typeof", args, "JSON typeof")
