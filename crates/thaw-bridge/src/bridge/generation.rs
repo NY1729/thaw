@@ -37,6 +37,73 @@ pub fn shadows_a_thaw_literal_identifier(name: &str) -> bool {
     matches!(name, "undefined" | "NaN" | "Infinity")
 }
 
+/// A real JS/TS reserved word: syntactically invalid as a bare
+/// identifier no matter what, unlike `shadows_a_thaw_literal_identifier`'s
+/// names above (those parse fine as an identifier; they're skipped for a
+/// semantic reason instead). A real npm package can still export a
+/// property *named* one of these (`obj.in`, `obj.default` are ordinary,
+/// valid member accesses -- only a standalone identifier position is
+/// restricted), so this only needs to gate a *bare* top-level
+/// declaration/reference thaw-cli would otherwise emit under the literal
+/// name -- the properly-typed, mangled symbol and the package-qualified
+/// alias (`pkg_name`, e.g. `joi_in`) remain unaffected either way. Found
+/// via joi's `Root.in(ref, options?): Reference` (`Joi.in(...)`, a real,
+/// documented part of its API): thaw-cli's own generated `function
+/// in(ref: string, options?: Json): JsValue { ... }` bare-alias
+/// declaration failed to parse as thaw-hir source at all -- `in` is
+/// reserved there for exactly the same reason it is in plain JS/TS
+/// (`for...in`, the `in` operator).
+pub fn is_reserved_js_identifier(name: &str) -> bool {
+    matches!(
+        name,
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "implements"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "interface"
+            | "let"
+            | "new"
+            | "null"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "return"
+            | "static"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+    )
+}
+
 pub fn effective_classifications(
     functions: &[DtsFunction],
     native_lib_available: bool,
@@ -188,7 +255,7 @@ pub fn generate_shim(
                 if qualified_entry.is_some_and(|q| q.suppress_bare) {
                     continue;
                 }
-                if shadows_a_thaw_literal_identifier(&function) {
+                if shadows_a_thaw_literal_identifier(&function) || is_reserved_js_identifier(&function) {
                     continue;
                 }
                 out.push_str(&format!("// Fallback (QuickJS-NG): {reason}\n"));

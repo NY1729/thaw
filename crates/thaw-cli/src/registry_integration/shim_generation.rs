@@ -756,8 +756,14 @@ fn generate_registry_shims(
                     // -- see `shadows_a_thaw_literal_identifier`'s own doc
                     // comment -- but the qualified alias above is unaffected
                     // either way, so the name stays reachable through it.
+                    // A real JS/TS reserved word (`in`, real example:
+                    // joi's `Root.in(ref, options?): Reference`) is
+                    // skipped for a third reason -- see `is_reserved_js_
+                    // identifier`'s own doc comment -- again leaving the
+                    // qualified alias as the only way to reach it.
                     if !colliding.contains(&function.name)
                         && !thaw_bridge::shadows_a_thaw_literal_identifier(&function.name)
+                        && !thaw_bridge::is_reserved_js_identifier(&function.name)
                     {
                         if let Some(alias) = typed_dynamic_bare_alias(
                             &function.name,
