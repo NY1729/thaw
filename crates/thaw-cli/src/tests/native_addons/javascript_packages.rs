@@ -1941,34 +1941,33 @@ function main(): void {
 /// options)` returning an array directly -- a subpath export, needs
 /// `--use csv-parse/sync` specifically, not just `csv-parse`, matching
 /// `drizzle-orm/sqlite-core`'s own precedent). Found and fixed while
-/// exploring this package's *other* entry point, the main `csv-parse`
-/// streaming API (`parse(options)` returning a `Transform` stream,
-/// consumed via `.on("readable", ...)`/`.read()`/`.on("end", ...)`, the
-/// shape Node's own docs recommend): `let record;` declared with no
-/// initializer at all, later assigned inside the `while ((record =
-/// parser.read()) !== null)` loop condition (Node's own documented
-/// idiom) -- a real, general, non-csv-parse-specific gap (`thaw-hir`'s
-/// `lower_var_decl` rejected *any* uninitialized declaration outright,
-/// regardless of declared type); see `thaw-llvm`'s `compiles_
-/// uninitialized_declarations_assigned_later` for the synthetic,
-/// network-free regression test and full root-cause writeup.
+/// exploring this package's *other* entry point (see the streaming test
+/// below): `let record;` declared with no initializer at all, later
+/// assigned inside a `while ((record = parser.read()) !== null)` loop
+/// condition (Node's own documented idiom) -- a real, general (non-csv-
+/// parse-specific) gap: `thaw-hir`'s `lower_var_decl` rejected *any*
+/// uninitialized declaration outright, regardless of declared type. See
+/// `thaw-llvm`'s `compiles_uninitialized_declarations_assigned_later`
+/// for the synthetic, network-free regression test and full root-cause
+/// writeup.
 ///
-/// The streaming API itself is *not* exercised end to end here: `Parser`
-/// (`csv-parse`'s own class) `extends stream.Transform` from Node's
-/// `stream` module, which thaw's registry has no ambient type
-/// information for at all (no `@types/node` flattening) -- so `.read()`/
-/// `.write()`/`.pipe()`/etc., all inherited from that unresolvable base,
-/// are invisible to thaw's type checker ("call to unknown function
-/// `parser.read`"). A real, separate, and substantially larger gap
-/// (modeling enough of Node's `stream.Readable`/`Transform`/`Duplex`
-/// surface, or a general "unresolvable external base -> fall back to
-/// fully dynamic method dispatch" rule) -- noted here, not chased down.
+/// Deliberately its own test, not combined with the streaming test
+/// below in one file: importing `csv-parse` and `csv-parse/sync`
+/// together, each providing a same-named bare top-level `parse`
+/// function (one aliased, one not), was found to compile *inconsistently
+/// depending on `--use` order* -- one order builds and runs correctly,
+/// the other silently miscompiles a later call's argument type
+/// ("argument 1 ... expected JsValue" against a value that was actually
+/// the *other* package's own return value). A real, general, and
+/// separate gap (two different packages exporting a same-named bare
+/// function, order-dependent) -- found while writing exactly this kind
+/// of combined test, not chased down here; noted for a future session.
 #[test]
 fn registry_add_parses_csv_with_real_csv_parse_sync_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-csv-parse-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-csv-parse-sync-{}", std::process::id()));
     let registry = dir.join("modules");
     thaw_registry::add(&registry, "csv-parse").unwrap();
     let source = dir.join("main.ts");
@@ -2009,6 +2008,116 @@ function main(): void {
         "[{\"a\":\"1\",\"b\":\"2\",\"c\":\"3\"},{\"a\":\"4\",\"b\":\"5\",\"c\":\"6\"}]\n\
          2\n\
          1\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Real csv-parse's main, more idiomatic entry point: the real
+/// streaming API (`parse(options)` returning a `Transform` stream,
+/// consumed via `.on("readable", ...)`/`.read()`/`.on("end", ...)`, the
+/// shape Node's own docs recommend). `Parser` (`csv-parse`'s own class)
+/// `extends stream.Transform` from Node's `stream` module (`import *
+/// as stream from "stream"`) -- a namespace-qualified `extends` clause
+/// never inherited anything at all (`thaw-bridge`'s `extends`
+/// derivation only ever matched a bare `Expr::Ident` super-class, never
+/// a qualified `Expr::Member` one), and even once it did, `stream.
+/// Transform`'s own declaration was nowhere to be found (thaw-
+/// registry's declaration-flattening never resolved a Node builtin
+/// referenced from *within* a third-party package's own `.d.ts`, only
+/// when `--use`d directly by the user) -- so every inherited method
+/// (`.read()`, `.write()`, `.pipe()`, ...) failed to compile ("call to
+/// unknown function `parser.read`"). Fixed on both sides: `extends` now
+/// also derives a name from a qualified super-class expression
+/// (`thaw-bridge`'s `parse_dts_classes`, see its own `expands_members_
+/// inherited_through_a_namespace_qualified_extends` test), and thaw-
+/// registry now inlines a namespace-imported Node builtin's class
+/// declaration (and transitively its own ancestors) the same way it
+/// already inlines a same-package cross-file `extends` base (see
+/// `installed_package_inlines_a_node_builtin_class_used_as_a_namespace_
+/// qualified_extends_base`) -- plus enriching the `stream` builtin's
+/// own ambient declaration itself with the widely-used methods
+/// (`.read()`, `.write()`, `.end()`, `.destroy()`, ...) and a real
+/// `Readable`/`Duplex extends Readable`/`Transform extends Duplex`/
+/// `PassThrough extends Transform` hierarchy matching the real,
+/// already-fully-implemented JS runtime (`registry/builtins/streams/
+/// core.rs`) it was missing entirely.
+///
+/// Deliberately uses `let record = parser.read(); while (record !==
+/// null) { ...; record = parser.read(); }` rather than Node's other
+/// common idiom, `let record; while ((record = parser.read()) !==
+/// null))` -- and prints each record via `JSON.stringify` rather than
+/// accumulating them in an array. Found while writing this test: a
+/// `JsValue` (what a Fallback/QuickJS-dispatched method call like
+/// `.read()` actually returns at runtime, regardless of its own `.d.ts`
+/// return type) doesn't properly widen into an already-`Json`-typed
+/// slot outside of a dynamic-call *argument* (where `compile_dynamic_
+/// value_placeholder`'s own detection already handles exactly this).
+/// Both of the idiom's `Json`-typed alternatives -- the bare `let
+/// record;` declaration this session's own `[[project_npm_interop_
+/// gaps_9]]` fix defaults to `Json`, then reassigned from a `JsValue`,
+/// and separately pushing a `JsValue` into an already-`Json`-typed
+/// `array.push()` -- crash or fail to compile. A real, general,
+/// separate gap; a first attempt at a general fix (widening `expect_
+/// type`'s own `Json`/`JsValue` compatibility, mirroring `coerce_to_
+/// declared`'s existing call-argument pass-through) compiled but
+/// segfaulted at runtime -- reverted, not chased further here; noted
+/// for a future session. The idiom used here sidesteps it entirely:
+/// `record`'s own declared type comes from its *initializer* (`parser.
+/// read()`, so `JsValue`, an exact match every reassignment and read
+/// site downstream can already handle) rather than defaulting to
+/// `Json` first.
+#[test]
+fn registry_add_parses_csv_with_real_csv_parses_streaming_api_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-csv-parse-stream-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "csv-parse").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { parse } from "csv-parse";
+
+function main(): void {
+    const parser = parse({ columns: true });
+    let count = 0;
+    parser.on("readable", function () {
+        let record = parser.read();
+        while (record !== null) {
+            console.log(JSON.stringify(record));
+            count = count + 1;
+            record = parser.read();
+        }
+    });
+    parser.on("error", function (err: any) {
+        console.log("error: " + err.message);
+    });
+    parser.on("end", function () {
+        console.log(count);
+    });
+    parser.write("x,y\n7,8\n9,10\n");
+    parser.end();
+}
+"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["csv-parse".to_string()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "{\"x\":\"7\",\"y\":\"8\"}\n{\"x\":\"9\",\"y\":\"10\"}\n2\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
