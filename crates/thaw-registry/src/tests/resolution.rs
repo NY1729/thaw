@@ -715,6 +715,125 @@ fn installed_package_carries_a_self_referential_namespace_alias_from_a_transitiv
 }
 
 #[test]
+fn installed_package_inlines_a_namespace_import_reexported_via_export_assignment() {
+    // `import * as X from "./y"; export = X;` -- the whole entry file's
+    // declared shape *is* another file's namespace, wholesale, with
+    // nothing declared locally at all. Real example: bcryptjs's own
+    // `umd/index.d.ts`: `import * as bcrypt from "./types.js"; export =
+    // bcrypt; export as namespace bcrypt;` -- every one of bcryptjs's
+    // actual functions (`hashSync`, `compareSync`, ...) lives in the
+    // sibling `types.d.ts`, never otherwise reachable, since
+    // thaw-registry discards every individual `.d.ts` source file
+    // except the one flattened `package.d.ts` it writes out. Without
+    // this, the flattened output was just those three lines -- no
+    // functions, nothing -- and every call against the package failed
+    // to build ("call to unknown function").
+    let scratch = temp_registry("installed-dts-export-assignment-namespace-scratch");
+    let registry = temp_registry("installed-dts-export-assignment-namespace-registry");
+    let package = scratch.join("node_modules/case-kit7");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"case-kit7","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import * as caseKit from './impl.js';\n\
+         export = caseKit;\n\
+         export as namespace caseKit;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("impl.d.ts"),
+        "export declare function greet(name: string): string;\n\
+         export interface Options { loud?: boolean; }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { greet: function(name) { return 'hi ' + name; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "case-kit7").unwrap();
+    let declarations = resolve(&registry, "case-kit7").unwrap().dts_source;
+    assert!(
+        declarations.contains("export declare function greet(name: string): string;"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("export interface Options { loud?: boolean; }")
+            || declarations.contains("export interface Options {\n  loud?: boolean;\n}"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
+fn installed_package_inlines_a_default_imported_class_used_as_an_extends_base() {
+    // A locally declared class whose `extends` clause names a plain
+    // default-imported base (`import CoreClass from "./core"; export
+    // declare class Derived extends CoreClass { ... }`) -- the base
+    // class's own declaration lives entirely in another file
+    // thaw-registry otherwise discards. Real example: ajv's own entry
+    // `.d.ts`: `import AjvCore from "./core"; export declare class Ajv
+    // extends AjvCore { _addVocabularies(): void; ... }`, `./core.d.ts`
+    // itself just `export default class Ajv { compile(...): ...;
+    // validate(...): ...; ... }` -- essentially ajv's entire real API.
+    // Without inlining it, only the 3 methods the entry file adds
+    // directly were ever reachable; every call against the rest failed
+    // outright ("call to undeclared function").
+    let scratch = temp_registry("installed-dts-default-import-extends-scratch");
+    let registry = temp_registry("installed-dts-default-import-extends-registry");
+    let package = scratch.join("node_modules/case-kit8");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"case-kit8","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import CoreThing from './core.js';\n\
+         export declare class Thing extends CoreThing {\n\
+         \x20\x20extra(): string;\n\
+         }\n\
+         export default Thing;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("core.d.ts"),
+        "export default class Thing {\n\
+         \x20\x20base(): string;\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = function Thing() {\n\
+         \x20\x20this.base = function() { return 'base'; };\n\
+         \x20\x20this.extra = function() { return 'extra'; };\n\
+         };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "case-kit8").unwrap();
+    let declarations = resolve(&registry, "case-kit8").unwrap().dts_source;
+    assert!(
+        declarations.contains("class Thing extends CoreThing"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("class CoreThing") && declarations.contains("base(): string;"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_import_equals_reexports() {
     // `import Name = require("./path")` (a TS import-equals declaration)
     // followed by a *local* `export { Name as exported };` (no `from`
