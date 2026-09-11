@@ -638,3 +638,63 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+/// A Fallback function whose real name is a JS/TS reserved word --
+/// real example: joi's `Root.in(ref: string, options?: ReferenceOptions):
+/// Reference` (`Joi.in(...)`, a real, documented part of its API) --
+/// used to crash thaw-cli's own shim generation outright: the generated
+/// `function in(ref: string, options?: Json): JsValue { ... }` bare-alias
+/// declaration failed to parse as thaw-hir source ("Expected ident"),
+/// since `in` is reserved there for the same reason it is in plain
+/// JS/TS. A property access (`pkg.in(...)`) is fine syntactically; only
+/// the *bare*, unqualified identifier thaw-cli emits for the untyped/
+/// typed bare-name binding isn't. Fixed generally via `is_reserved_js_
+/// identifier` -- the package-qualified alias stays reachable
+/// (`registry_in(...)`, exercised here through `rewrite_qualified_calls`
+/// via the package's own qualifier).
+#[test]
+fn a_reserved_word_fallback_function_name_stays_reachable_through_its_qualified_alias() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-reserved-word-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("reflike-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "interface Reflike { in(ref: string, options?: string): string; }\n\
+         declare const reflike: Reflike;\n\
+         export = reflike;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { in: function(ref, options) { return '[' + ref + (options ? (':' + options) : '') + ']'; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import reflike from "reflike-kit";
+function main(): void {
+    console.log(reflike.in("value"));
+    console.log(reflike.in("value", "opt"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[value]\n[value:opt]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
