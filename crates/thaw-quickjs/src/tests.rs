@@ -1280,6 +1280,45 @@ fn crypto_der_and_passphrase_protected_key_import_interoperate_with_real_openssl
     );
 }
 
+/// RSA `publicEncrypt`/`privateDecrypt` -- PKCS1v15 and OAEP (default)
+/// padding. Decrypts ciphertexts produced by real OpenSSL for both
+/// schemes (proving cross-implementation correctness of the actual RSA
+/// math, since RSA encryption's own randomized padding means a fixed
+/// expected-ciphertext comparison isn't meaningful the other
+/// direction), then round-trips thaw's own `publicEncrypt` output back
+/// through `privateDecrypt` for both padding schemes too.
+#[test]
+fn crypto_rsa_encrypt_and_decrypt_interoperate_with_real_openssl() {
+    assert_eq!(
+        load(
+            "function rsaPrivateKey() { return '-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCUL37AkzIH5rjG\\npZh4Kim6Xbv/yQqtJ+Tt/yK1csBwIO2Gt9PA1dPi4FAjkIk8pLD57pDQO8MQP7eu\\nB/K3vpoqNeUCMEJY0ZeQYdRU9saBJTH7yzopljcdbKTe4peT0Dcfp1mJmL19s4RN\\nd/oz1ZNHMBEZ1Xfx/ODc6gLgZkYNKeOXr6Fjc8zRxnId6q3O9/QXkt+jz4a1a/Gh\\nrMT9E0CKY+QBKuqc+20epfegcZckBJBTixlUFuYOIrCOh6kkwuYBQpkeNq2STDPW\\n8HtMjduKvh2a9JGE42Gdwolq5JMPlv04I0fA5pRNEYOa9aitp4L5B03ekoX6xCaW\\neavOj/UzAgMBAAECggEAF9VFuRpTfyLUEBr9GUKKwI8n1/1RKsVSVBbnUbCZk88v\\n9K1nMMoTUJeMPBQYhnjkf+YnQ16BQoFE/QgJORU+PVC6uu3hFeDr1Axv9pRUG9xM\\nHDe07JBc3+4j3DcsctkXrI8hXviCbY+sVTtZMfIFRHtOHM4RAwoNbmpyuP2qAZ6+\\n5mNXRj4YFBhu+kSRf8fhEirmSnPJmFnc2if+A0OV2Dex0nsCm/qxTO+AcKzWUSAB\\n2c/FahmtjXb73vZrTaO1EYJkP7HEl2M9SLJux+VkkVmeq/5XEcAnMg1pGdgRj2+H\\n1Br59BH3p0bk84bPqjoHFtQSq4YqtUwCpXaJBzJDaQKBgQDLeg8gjaBIMCqiznrb\\nX3TPeQzA92cTmpjc713ZlsKNXuWSoxTb12P94bLEV2iqMkl/LzuFnUJivaF3rMvc\\n/2SVPgRluB0xWYb0btQImL+ELyiNvl1H8OeJy223Ow4togfW0iYvUOtcwi8kTe/m\\n4DWQa7pZpaxjYugKq8bl6eioSQKBgQC6b7yDwoVj6WbJ9lNgCLgnU301GB7Cybfc\\nrW4pN3mPgkI+B9V//Lp8hSYSsxpQwPQ6Rtgpw5pdkY6ua9xDWLMGQZYaL8GhmJmc\\nho/l7OOX7oSGHqbtSMK7m2D5HPlrt+BDWHQHX95e0j02mOnxhq3xBn164XTj3Cyy\\nEtEF5YuJmwKBgQC1gFRcClkN64EsppgqdNSCeQzqWAVnFEEE2rPRcsxqRFrt2XCy\\nxUfZYGkRAJNJNgAfZidnAScFYvfUA5v5rwquoZpUjc3khmJ+SRnz7STwqQw4m7Uj\\nhf1TCdX9Wr1D8UOi2OPc0waPQFvCu46iWB8Pizi33LOQF9q6Ig4SafrxmQKBgCbR\\nDtHsFTO5K8KO+8r55cWiV2ZPkFAECbjzjwUb3L5pY3tgzC3qo7U7T7MDAU6g7fiY\\nOXdwl1o17RwZrvGCrTt3OlZXbRxFFm6Fgb5gdP50FbmK9jxfMtQ2xJj5VGD+Fr5O\\n01GZv0XExiPw8HxuCxcsv8Fu4ZRzigbFbimpIkVTAoGASsv6qCjPGzMygvPkh80p\\ngn8ulNxSfekhhhiuWevPoAsUfJgrCuGmQN7uAxDm4pfTRTR+SrNFqSR70UDZykKY\\ntTKrnvNIiUHNtNZBFvnbmiE4NBP4vGS09dftIUo0luMJCHfFlBySAclkoIkIq8kd\\nSOKNyXbBeMijLpWo3JwVmkY=\\n-----END PRIVATE KEY-----\\n'; }\n\
+             function rsaPublicKey() { return '-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlC9+wJMyB+a4xqWYeCop\\nul27/8kKrSfk7f8itXLAcCDthrfTwNXT4uBQI5CJPKSw+e6Q0DvDED+3rgfyt76a\\nKjXlAjBCWNGXkGHUVPbGgSUx+8s6KZY3HWyk3uKXk9A3H6dZiZi9fbOETXf6M9WT\\nRzARGdV38fzg3OoC4GZGDSnjl6+hY3PM0cZyHeqtzvf0F5Lfo8+GtWvxoazE/RNA\\nimPkASrqnPttHqX3oHGXJASQU4sZVBbmDiKwjoepJMLmAUKZHjatkkwz1vB7TI3b\\nir4dmvSRhONhncKJauSTD5b9OCNHwOaUTRGDmvWoraeC+QdN3pKF+sQmlnmrzo/1\\nMwIDAQAB\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function opensslDecryptOaep() {\n\
+               const cipher = Buffer.from('45ea8547c345aa265034f3e7c48246361a91115c2b58a9795292485f836ca110a2e6e7c27e1bd47d8210edb5f0edab91e9832e85b07ab474255ea50d291a90f2f480c67cf553709cf30872b2905066a554b2700bfdf617772c586d02146845e8402d1961bccc72bf08f600b56ad561995f87d9b62021b01496b95a7161c91a8dcc6325221ab3cc085185dd6b5d91d8d258704643992dd8f530d259e1c300767efc45be7851352c7eb82291659b5a92da345ec0a2f60e402e2fabe43e11aa3e44082fed7a1740a974989a34ff6b0a6559f551dc0aec981fc1dac0c7b724129944ce9efdb5f6ea980441479390a3b7e05b6b7ccce6237ebe5c61d0d1e1afd31f48', 'hex');\n\
+               return __thaw_crypto_module.privateDecrypt(rsaPrivateKey(), cipher).toString();\n\
+             }\n\
+             function opensslDecryptPkcs1() {\n\
+               const cipher = Buffer.from('0b68b51512114dbd3fe6f4049138f04033cc9b56a5c4609bc8bf51b26f4b653499a18a144343b983f0fccdb1933e9bd04f24f63bbe908d5f8dc3d8f90defbf55fb2284db690ee81d99605e6106cf7f9aa211188cddcf3dceabf4f6d6279a7b3e1d680d1e5751c94985f9d32b44d5b8117e16acf636bb5d17600c4b1f5967bb73d430cd792a3df78aebc474322fd3e48567326252864bd285c540857d12b08f6f2300a2cd33fb58bcc0d47e5d1f58096c70968eb70ec7333e0ccce450df9f89c62da27e5488911278a374cd0d400d1f113492fdfdee1d782968cbf49da7f72843f5cc38f8e14cc31123c106ce5345df967c925f7b139bae21c9b5979574aec262', 'hex');\n\
+               return __thaw_crypto_module.privateDecrypt({ key: rsaPrivateKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PADDING }, cipher).toString();\n\
+             }\n\
+             function thawRoundTripOaep() {\n\
+               const cipher = __thaw_crypto_module.publicEncrypt(rsaPublicKey(), Buffer.from('round trip oaep'));\n\
+               return __thaw_crypto_module.privateDecrypt(rsaPrivateKey(), cipher).toString();\n\
+             }\n\
+             function thawRoundTripPkcs1() {\n\
+               const options = { key: rsaPublicKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PADDING };\n\
+               const cipher = __thaw_crypto_module.publicEncrypt(options, Buffer.from('round trip pkcs1'));\n\
+               return __thaw_crypto_module.privateDecrypt({ key: rsaPrivateKey(), padding: __thaw_crypto_module.constants.RSA_PKCS1_PADDING }, cipher).toString();\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(call("opensslDecryptOaep", "[]"), r#""secret message""#);
+    assert_eq!(call("opensslDecryptPkcs1", "[]"), r#""secret message""#);
+    assert_eq!(call("thawRoundTripOaep", "[]"), r#""round trip oaep""#);
+    assert_eq!(call("thawRoundTripPkcs1", "[]"), r#""round trip pkcs1""#);
+}
+
 /// `Intl.DateTimeFormat` -- the practical, English/Latin-numeral-only
 /// polyfill (`docs/design/intl-polyfill.md`) added for real luxon, whose
 /// entire timezone system is built on exactly this shape (real luxon's
