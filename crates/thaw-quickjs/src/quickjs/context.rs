@@ -1031,6 +1031,14 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl number formatter");
                 #[cfg(feature = "intl")]
+                let intl_list_format_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, kind: String, style: String, items_json: String| {
+                        intl_list_format(&locale, &kind, &style, &items_json)
+                    },
+                )
+                .expect("failed to create JavaScript Intl list formatter");
+                #[cfg(feature = "intl")]
                 let intl_datetime_format_parts_function = Function::new(
                     ctx.clone(),
                     |locale: String, options_json: String, zoned_parts_json: String| {
@@ -1145,6 +1153,10 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_number_format", intl_number_format_function)
                     .expect("failed to install JavaScript Intl number formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_list_format", intl_list_format_function)
+                    .expect("failed to install JavaScript Intl list formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set(

@@ -524,6 +524,9 @@ include!("quickjs/intl_datetime.rs");
 #[cfg(feature = "intl")]
 include!("quickjs/intl_number.rs");
 
+#[cfg(feature = "intl")]
+include!("quickjs/intl_list.rs");
+
 include!("quickjs/asymmetric_crypto.rs");
 
 #[cfg(unix)]
