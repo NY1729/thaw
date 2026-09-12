@@ -1007,6 +1007,10 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl timezone source");
                 #[cfg(feature = "intl")]
+                let intl_locale_parse_function =
+                    Function::new(ctx.clone(), |tag: String| intl_locale_parse_json(&tag))
+                        .expect("failed to create JavaScript Intl locale parser");
+                #[cfg(feature = "intl")]
                 let intl_locale_resolve_function =
                     Function::new(ctx.clone(), |tag: String| intl_locale_resolve_json(&tag))
                         .expect("failed to create JavaScript Intl locale resolver");
@@ -1014,6 +1018,10 @@ fn ensure_context() {
                 let intl_locale_maximize_function =
                     Function::new(ctx.clone(), |tag: String| intl_locale_maximize_json(&tag))
                         .expect("failed to create JavaScript Intl locale maximizer");
+                #[cfg(feature = "intl")]
+                let intl_locale_minimize_function =
+                    Function::new(ctx.clone(), |tag: String| intl_locale_minimize_json(&tag))
+                        .expect("failed to create JavaScript Intl locale minimizer");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -1103,12 +1111,20 @@ fn ensure_context() {
                     .expect("failed to install JavaScript Intl timezone source");
                 #[cfg(feature = "intl")]
                 ctx.globals()
+                    .set("__thaw_intl_locale_parse", intl_locale_parse_function)
+                    .expect("failed to install JavaScript Intl locale parser");
+                #[cfg(feature = "intl")]
+                ctx.globals()
                     .set("__thaw_intl_locale_resolve", intl_locale_resolve_function)
                     .expect("failed to install JavaScript Intl locale resolver");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_locale_maximize", intl_locale_maximize_function)
                     .expect("failed to install JavaScript Intl locale maximizer");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_locale_minimize", intl_locale_minimize_function)
+                    .expect("failed to install JavaScript Intl locale minimizer");
                 ctx.globals()
                     .set("__thaw_hpack_huffman_encode", hpack_huffman_encode)
                     .expect("failed to install HPACK Huffman encoder");

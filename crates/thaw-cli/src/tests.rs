@@ -67,6 +67,56 @@ fn prepared_runtime_variants_have_stable_names() {
     );
 }
 
+/// `new Intl.Locale(...)` -- a dotted-namespace `new` expression --
+/// compiles via thaw-hir's dotted-constructible allow-list
+/// (`crates/thaw-hir/src/lower/expressions/lowering.rs`, extended
+/// alongside `Intl.DateTimeFormat`/`NumberFormat`/`ListFormat` for M3 of
+/// docs/design/intl-polyfill.md's "Real CLDR data via icu4x" plan), and
+/// the resulting binary really links `thaw-quickjs` with the `intl`
+/// feature on (`source_uses_intl` detects the literal `Intl.Locale` in
+/// this program's own source) -- an end-to-end build, not just a
+/// compile-time check, since the feature-detection and the actual
+/// `Intl.Locale` class only come together at this level, not in
+/// thaw-llvm's simpler `compile_and_run` test harness (which always
+/// builds thaw-quickjs with default features only).
+#[test]
+fn compiles_and_runs_a_program_that_constructs_intl_locale() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-intl-locale-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "function main(): void {\n\
+           const locale = new Intl.Locale('ja', { calendar: 'japanese' });\n\
+           console.log(locale.baseName, locale.toString(), locale.language);\n\
+         }\n",
+    )
+    .unwrap();
+    build(
+        &input,
+        &output,
+        &[],
+        &[],
+        &[],
+        &directory.join("registry"),
+        &[],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "ja ja-u-ca-japanese ja\n"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 #[test]
 fn install_uses_the_project_directory() {
     let command = npm_install_command(Path::new("web"));

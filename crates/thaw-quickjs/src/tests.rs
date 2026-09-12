@@ -1729,6 +1729,68 @@ fn intl_locale_resolves_curated_and_uncurated_tags_without_throwing() {
     );
 }
 
+/// `Intl.Locale` (M3) -- constructor (plain tag, tag + `calendar`/
+/// `numberingSystem` options overriding any existing `-u-` extension),
+/// `baseName`/`toString()`/getters, and `maximize()`/`minimize()`
+/// (preserving the original's own Unicode extension keywords). Every
+/// case cross-checked against real Node's own `Intl.Locale` output.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_locale_class_matches_real_node() {
+    assert_eq!(
+        load(
+            "function baseNameAndProps(tag, opts) {\n\
+               const l = new Intl.Locale(tag, opts);\n\
+               return [l.baseName, l.toString(), l.language, l.script ?? null, l.region ?? null, l.calendar ?? null, l.numberingSystem ?? null];\n\
+             }\n\
+             function plainJaJp() { return baseNameAndProps('ja-JP'); }\n\
+             function withCalendarAndNumberingSystemOptions() {\n\
+               return baseNameAndProps('th', { calendar: 'buddhist', numberingSystem: 'thai' });\n\
+             }\n\
+             function deAt() { return baseNameAndProps('de-AT'); }\n\
+             function malformedTagThrowsRangeError() {\n\
+               try { new Intl.Locale('not a locale'); return 'no-throw'; }\n\
+               catch (error) { return error instanceof RangeError; }\n\
+             }\n\
+             function missingTagThrowsTypeError() {\n\
+               try { new Intl.Locale(); return 'no-throw'; }\n\
+               catch (error) { return error instanceof TypeError; }\n\
+             }\n\
+             function maximizePreservesExtension() {\n\
+               const max = new Intl.Locale('ja', { calendar: 'japanese' }).maximize();\n\
+               return [max.baseName, max.toString(), max.calendar];\n\
+             }\n\
+             function minimizePreservesExtension() {\n\
+               const min = new Intl.Locale('ja-Jpan-JP', { calendar: 'japanese' }).minimize();\n\
+               return [min.baseName, min.toString(), min.calendar];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("plainJaJp", "[]"),
+        r#"["ja-JP","ja-JP","ja",null,"JP",null,null]"#
+    );
+    assert_eq!(
+        call("withCalendarAndNumberingSystemOptions", "[]"),
+        r#"["th","th-u-ca-buddhist-nu-thai","th",null,null,"buddhist","thai"]"#
+    );
+    assert_eq!(
+        call("deAt", "[]"),
+        r#"["de-AT","de-AT","de",null,"AT",null,null]"#
+    );
+    assert_eq!(call("malformedTagThrowsRangeError", "[]"), "true");
+    assert_eq!(call("missingTagThrowsTypeError", "[]"), "true");
+    assert_eq!(
+        call("maximizePreservesExtension", "[]"),
+        r#"["ja-Jpan-JP","ja-Jpan-JP-u-ca-japanese","japanese"]"#
+    );
+    assert_eq!(
+        call("minimizePreservesExtension", "[]"),
+        r#"["ja","ja-u-ca-japanese","japanese"]"#
+    );
+}
+
 /// `thaw_js_get_global`'s dotted-path support (added for `new Intl.
 /// DateTimeFormat(...)` -- see `constructs_a_namespaced_global_value_
 /// via_new`, thaw-llvm) tries `name` as a single, literal global

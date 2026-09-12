@@ -1831,7 +1831,10 @@ impl<'a> FnLowerer<'a> {
                         let qualified = format!("{}.{}", namespace.sym, class.sym);
                         if matches!(
                             qualified.as_str(),
-                            "Intl.DateTimeFormat" | "Intl.NumberFormat" | "Intl.ListFormat"
+                            "Intl.DateTimeFormat"
+                                | "Intl.NumberFormat"
+                                | "Intl.ListFormat"
+                                | "Intl.Locale"
                         ) {
                             let args = new_expr.args.as_deref().unwrap_or_default();
                             if args.iter().any(|argument| argument.spread.is_some()) {
