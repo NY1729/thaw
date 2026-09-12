@@ -213,6 +213,92 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A native closure argument whose body `await`s another *held `JsValue`*
+/// (not a named `callDynamic*`/method-call form) in **non-tail**
+/// position, with no explicit `return` -- exactly the shape of a real
+/// hono middleware, `async (c, next) => { ...; await next(); }`. Found
+/// while investigating hono's `HandlerInterface` scope boundary: this
+/// used to fail to *build at all* with `lambda `__thaw_lambda_N` does
+/// not return a value on all paths`.
+///
+/// Root cause: `await`ing an arbitrary held `JsValue` (invoking `next()`
+/// itself lowers to a `callDynamicValue` call, then `await`ing *that*
+/// result) was not in `lowering.rs`'s `resolves_at_dynamic_boundary`
+/// allowlist -- unlike `callDynamic`/`callDynamicMethod`/etc, which
+/// *were* already recognized as synchronous FFI round-trips needing no
+/// real suspension. So the closure kept a genuine `HirExpr::Await` node
+/// in a non-tail position, forcing the "must really suspend, compile as
+/// a raw `Promise`-typed block" path (`functions.rs`) -- but `thaw-llvm`
+/// correctly determines this closure never actually needs frame-split
+/// codegen (nothing here is a *known* suspend source), so it falls
+/// through to plain codegen, which finds no explicit return against the
+/// non-`Void` declared type. Fixed by adding `callDynamicValue` (and its
+/// `Handle`/`Mixed`/`WithValue` siblings) to the same allowlist as the
+/// named dynamic-call forms, since invoking a held `JsValue` is exactly
+/// as synchronous as those.
+///
+/// `next` logging *after* `mw`'s own synchronous "before" log, in the
+/// right order, confirms the statement after the non-tail `await`
+/// genuinely executes (not just "doesn't crash").
+#[test]
+fn an_async_closure_argument_can_await_a_held_js_value_in_non_tail_position_with_no_explicit_return(
+) {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-async-next-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("middleware-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeHolder(): Holder;\n\
+         interface Holder {\n\
+         \x20\x20\x20\x20runMiddleware(mw: (c: JsValue, next: JsValue) => Promise<void>): void;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeHolder: function() { \
+         return { \
+         runMiddleware: function(mw) { \
+         var next = function() { console.log('next called'); }; \
+         mw({}, next); \
+         } \
+         }; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeHolder } from "middleware-kit";
+function main(): void {
+    const holder: JsValue = makeHolder();
+    holder.runMiddleware(async (c: JsValue, next: JsValue) => {
+        console.log("before");
+        await next();
+    });
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "before\nnext called\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A native closure passed as an argument to an *ordinary top-level
 /// Fallback function call* -- not a method call on a `JsValue` receiver
 /// (the shape the three tests above cover, `holder.check(pred)`). Real-
