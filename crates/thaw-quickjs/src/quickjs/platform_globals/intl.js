@@ -354,5 +354,120 @@
     }
   }
 
-  globalThis.Intl = { DateTimeFormat, NumberFormat, ListFormat };
+  // `Intl.Locale` -- real BCP-47 identity backed by `icu4x`
+  // (`intl_locale.rs`, docs/design/intl-polyfill.md's "Real CLDR data
+  // via icu4x" section). Only defined when the `intl` Cargo feature is
+  // compiled in (`__thaw_intl_locale_parse` exists) -- a program that
+  // never references `Intl.Locale`/`PluralRules`/`Collator`/`Segmenter`/
+  // `RelativeTimeFormat` doesn't link `thaw-icu-data` at all
+  // (`crates/thaw-cli/src/build.rs`'s `source_uses_intl`), so this class
+  // simply doesn't exist for it -- matching real `Intl.Locale` not
+  // existing at all is the wrong shape (it always exists in real Node),
+  // but no program can observe the difference unless it actually names
+  // `Intl.Locale`, which is exactly what turns the feature on.
+  if (typeof __thaw_intl_locale_parse === 'function') {
+    class Locale {
+      constructor(tag, options) {
+        if (tag === undefined || tag === null) {
+          throw new TypeError("First argument to Intl.Locale constructor can't be empty or missing");
+        }
+        const base = tag instanceof Locale ? tag.toString() : String(tag);
+        const opts = options || {};
+        const overrides = [];
+        if (opts.calendar !== undefined) overrides.push(`ca-${opts.calendar}`);
+        if (opts.numberingSystem !== undefined) overrides.push(`nu-${opts.numberingSystem}`);
+        if (opts.collation !== undefined) overrides.push(`co-${opts.collation}`);
+        // A `-u-` Unicode extension always starts a new subtag boundary
+        // right after language/script/region/variants and right before
+        // any `-x-` private-use section -- stripping from the first
+        // `-u-` onward and re-appending is enough for the common case
+        // (a plain tag with at most one `-u-` extension); real Node's
+        // own semantics let explicit options fully replace whatever the
+        // tag itself specified, confirmed against real Node.
+        let effectiveTag = base;
+        if (overrides.length > 0) {
+          const unicodeExtensionStart = effectiveTag.search(/-u(-|$)/);
+          const withoutExtension =
+            unicodeExtensionStart === -1 ? effectiveTag : effectiveTag.slice(0, unicodeExtensionStart);
+          effectiveTag = `${withoutExtension}-u-${overrides.join('-')}`;
+        }
+        const parsed = JSON.parse(__thaw_intl_locale_parse(effectiveTag));
+        if (!parsed.valid) throw new RangeError(`Invalid language tag: ${tag}`);
+        this._language = parsed.language;
+        this._script = parsed.script;
+        this._region = parsed.region;
+        this._calendar = parsed.calendar;
+        this._numberingSystem = parsed.numberingSystem;
+        this._collation = parsed.collation;
+      }
+
+      get language() {
+        return this._language;
+      }
+
+      get script() {
+        return this._script === null ? undefined : this._script;
+      }
+
+      get region() {
+        return this._region === null ? undefined : this._region;
+      }
+
+      get calendar() {
+        return this._calendar === null ? undefined : this._calendar;
+      }
+
+      get numberingSystem() {
+        return this._numberingSystem === null ? undefined : this._numberingSystem;
+      }
+
+      get collation() {
+        return this._collation === null ? undefined : this._collation;
+      }
+
+      get baseName() {
+        let name = this._language;
+        if (this._script) name += `-${this._script}`;
+        if (this._region) name += `-${this._region}`;
+        return name;
+      }
+
+      toString() {
+        let name = this.baseName;
+        const extension = [];
+        if (this._calendar) extension.push(`ca-${this._calendar}`);
+        if (this._numberingSystem) extension.push(`nu-${this._numberingSystem}`);
+        if (this._collation) extension.push(`co-${this._collation}`);
+        if (extension.length > 0) name += `-u-${extension.join('-')}`;
+        return name;
+      }
+
+      // `maximize()`/`minimize()` preserve the original instance's own
+      // Unicode extension keywords (confirmed against real Node) --
+      // only the language/script/region subtags themselves transform.
+      _withTransformedSubtags(transformed) {
+        const result = Object.create(Locale.prototype);
+        result._language = transformed.language;
+        result._script = transformed.script;
+        result._region = transformed.region;
+        result._calendar = this._calendar;
+        result._numberingSystem = this._numberingSystem;
+        result._collation = this._collation;
+        return result;
+      }
+
+      maximize() {
+        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_maximize(this.baseName)));
+      }
+
+      minimize() {
+        return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_minimize(this.baseName)));
+      }
+    }
+
+    globalThis.Intl = globalThis.Intl || {};
+    globalThis.Intl.Locale = Locale;
+  }
+
+  globalThis.Intl = Object.assign({ DateTimeFormat, NumberFormat, ListFormat }, globalThis.Intl);
 })();
