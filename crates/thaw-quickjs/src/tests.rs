@@ -2267,3 +2267,51 @@ fn intl_datetime_dispatches_non_gregorian_calendars_matching_real_node() {
         .unwrap()
     );
 }
+
+/// Real multi-locale `Intl.NumberFormat` (M6 of docs/design/
+/// intl-polyfill.md's "Real CLDR data via icu4x" plan) --
+/// `intl_number.rs`'s `__thaw_intl_number_format`, replacing the
+/// previous fixed comma-grouping/Latin-digit rendering for any curated
+/// locale. Every case cross-checked against real Node: real non-Latin
+/// digits (`bn`, `ar-SA`, the latter also with its own Arabic thousands
+/// separator, not a comma), a narrow-no-break-space grouping separator
+/// (`fr` -- a genuine CLDR value here, not the M4 NNBSP artifact), and
+/// `th`'s own real CLDR default staying plain Latin digits (confirming
+/// this isn't "assume every non-Latin-script locale uses non-Latin
+/// digits").
+#[cfg(feature = "intl")]
+#[test]
+fn intl_number_format_matches_real_node_for_curated_non_english_locales() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, value) {\n\
+               return new Intl.NumberFormat(locale, opts).format(value);\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 show('de-DE', {}, 1234567.891),\n\
+                 show('fr', {}, 1234567.891),\n\
+                 show('bn', {}, 12345),\n\
+                 show('th', {}, 12345),\n\
+                 show('ar-SA', {}, 12345),\n\
+                 show('de-DE', {useGrouping:false}, 1234567.891),\n\
+                 show('en-US', {}, 1234567.891),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "1.234.567,891",
+            "1\u{202f}234\u{202f}567,891",
+            "১২,৩৪৫",
+            "12,345",
+            "١٢٬٣٤٥",
+            "1234567,891",
+            "1,234,567.891",
+        ])
+        .unwrap()
+    );
+}
