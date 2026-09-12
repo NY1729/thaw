@@ -1667,6 +1667,68 @@ fn intl_number_format_and_list_format_match_real_node() {
     );
 }
 
+/// `__thaw_intl_locale_resolve`/`__thaw_intl_locale_maximize` (M2 of
+/// `docs/design/intl-polyfill.md`'s "Real CLDR data via icu4x" plan) --
+/// real BCP-47 resolution against `thaw-icu-data`'s curated locale list,
+/// gated behind the `intl` Cargo feature (default off, so this test only
+/// runs with `--features intl`; see `crates/thaw-cli/src/build.rs`'s
+/// `source_uses_intl`). Cross-checked against real Node's own
+/// `Intl.Locale`/`.maximize()` output for both curated tags and
+/// deliberately-uncurated ones, to prove the fallback chain (exact ->
+/// language+region -> language+script -> bare language -> `en-US`)
+/// degrades the way this file's own doc comment describes rather than
+/// throwing.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_locale_resolves_curated_and_uncurated_tags_without_throwing() {
+    assert_eq!(
+        load(
+            "function resolve(tag) {\n\
+               return JSON.parse(__thaw_intl_locale_resolve(tag));\n\
+             }\n\
+             function maximize(tag) {\n\
+               return JSON.parse(__thaw_intl_locale_maximize(tag));\n\
+             }\n\
+             function curated() {\n\
+               return [resolve('ja-JP'), resolve('de-CH'), resolve('zh-Hant-TW')];\n\
+             }\n\
+             function uncuratedFallsBackGracefully() {\n\
+               // 'de-AT' isn't itself curated, but 'de' is -- language\n\
+               // match should win over falling all the way back to en-US.\n\
+               return resolve('de-AT');\n\
+             }\n\
+             function unknownLanguageFallsBackToEnUs() {\n\
+               // A well-formed but wholly unrecognized language subtag.\n\
+               return resolve('zz-Zzzz-ZZ');\n\
+             }\n\
+             function malformedTagIsInvalid() {\n\
+               return resolve('not a locale');\n\
+             }\n\
+             function likelySubtags() {\n\
+               return [maximize('ja'), maximize('zh-TW'), maximize('en')];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("curated", "[]"),
+        r#"[{"valid":true,"locale":"ja","language":"ja","script":null,"region":null,"calendar":"gregory","numberingSystem":"latn","collation":null},{"valid":true,"locale":"de","language":"de","script":null,"region":null,"calendar":"gregory","numberingSystem":"latn","collation":null},{"valid":true,"locale":"zh-Hant","language":"zh","script":"Hant","region":null,"calendar":"gregory","numberingSystem":"latn","collation":null}]"#
+    );
+    assert_eq!(
+        call("uncuratedFallsBackGracefully", "[]"),
+        r#"{"valid":true,"locale":"de","language":"de","script":null,"region":null,"calendar":"gregory","numberingSystem":"latn","collation":null}"#
+    );
+    assert_eq!(
+        call("unknownLanguageFallsBackToEnUs", "[]"),
+        r#"{"valid":true,"locale":"en-US","language":"en","script":null,"region":"US","calendar":"gregory","numberingSystem":"latn","collation":null}"#
+    );
+    assert_eq!(call("malformedTagIsInvalid", "[]"), r#"{"valid":false}"#);
+    assert_eq!(
+        call("likelySubtags", "[]"),
+        r#"[{"valid":true,"language":"ja","script":"Jpan","region":"JP"},{"valid":true,"language":"zh","script":"Hant","region":"TW"},{"valid":true,"language":"en","script":"Latn","region":"US"}]"#
+    );
+}
+
 /// `thaw_js_get_global`'s dotted-path support (added for `new Intl.
 /// DateTimeFormat(...)` -- see `constructs_a_namespaced_global_value_
 /// via_new`, thaw-llvm) tries `name` as a single, literal global

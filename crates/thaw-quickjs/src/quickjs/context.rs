@@ -1006,6 +1006,14 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript Intl timezone source");
+                #[cfg(feature = "intl")]
+                let intl_locale_resolve_function =
+                    Function::new(ctx.clone(), |tag: String| intl_locale_resolve_json(&tag))
+                        .expect("failed to create JavaScript Intl locale resolver");
+                #[cfg(feature = "intl")]
+                let intl_locale_maximize_function =
+                    Function::new(ctx.clone(), |tag: String| intl_locale_maximize_json(&tag))
+                        .expect("failed to create JavaScript Intl locale maximizer");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -1093,6 +1101,14 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_zoned_parts", intl_zoned_parts_function)
                     .expect("failed to install JavaScript Intl timezone source");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_locale_resolve", intl_locale_resolve_function)
+                    .expect("failed to install JavaScript Intl locale resolver");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_locale_maximize", intl_locale_maximize_function)
+                    .expect("failed to install JavaScript Intl locale maximizer");
                 ctx.globals()
                     .set("__thaw_hpack_huffman_encode", hpack_huffman_encode)
                     .expect("failed to install HPACK Huffman encoder");
