@@ -588,6 +588,60 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript key-pair generation function");
+                let crypto_diffie_hellman = Function::new(
+                    ctx.clone(),
+                    |private_pem: String, public_pem: String| {
+                        crypto_diffie_hellman_hex(&private_pem, &public_pem)
+                            .map(|secret| hex_encode(&secret))
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "diffieHellman input",
+                                    "a matching pair of EC or X25519 keys",
+                                    error,
+                                )
+                            })
+                    },
+                )
+                .expect("failed to create JavaScript Diffie-Hellman function");
+                let crypto_ecdh_generate_keys = Function::new(ctx.clone(), |curve: String| {
+                    crypto_ecdh_generate_keys_hex(&curve).map_err(|error| {
+                        rquickjs::Error::new_from_js_message(
+                            "ECDH curve",
+                            "a supported EC curve name",
+                            error,
+                        )
+                    })
+                })
+                .expect("failed to create JavaScript ECDH key-generation function");
+                let crypto_ecdh_public_from_private = Function::new(
+                    ctx.clone(),
+                    |curve: String, private_key_hex: String| {
+                        crypto_ecdh_public_from_private_hex(&curve, &private_key_hex).map_err(
+                            |error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "ECDH private key",
+                                    "a valid raw EC private key",
+                                    error,
+                                )
+                            },
+                        )
+                    },
+                )
+                .expect("failed to create JavaScript ECDH public-key-derivation function");
+                let crypto_ecdh_compute_secret = Function::new(
+                    ctx.clone(),
+                    |curve: String, private_key_hex: String, public_key_hex: String| {
+                        crypto_ecdh_compute_secret_hex(&curve, &private_key_hex, &public_key_hex)
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "ECDH computeSecret input",
+                                    "a valid raw EC private key and peer public key",
+                                    error,
+                                )
+                            })
+                    },
+                )
+                .expect("failed to create JavaScript ECDH computeSecret function");
                 let hpack_huffman_encode = Function::new(ctx.clone(), |value: String| {
                     let mut output = Vec::new();
                     httlib_huffman::encode(&hex_decode(&value), &mut output)
@@ -1012,6 +1066,30 @@ fn ensure_context() {
                         crypto_generate_key_pair,
                     )
                     .expect("failed to install JavaScript key-pair generation function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_diffie_hellman_hex",
+                        crypto_diffie_hellman,
+                    )
+                    .expect("failed to install JavaScript Diffie-Hellman function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_ecdh_generate_keys_hex",
+                        crypto_ecdh_generate_keys,
+                    )
+                    .expect("failed to install JavaScript ECDH key-generation function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_ecdh_public_from_private_hex",
+                        crypto_ecdh_public_from_private,
+                    )
+                    .expect("failed to install JavaScript ECDH public-key-derivation function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_ecdh_compute_secret_hex",
+                        crypto_ecdh_compute_secret,
+                    )
+                    .expect("failed to install JavaScript ECDH computeSecret function");
                 ctx.globals()
                     .set("__thaw_intl_zoned_parts", intl_zoned_parts_function)
                     .expect("failed to install JavaScript Intl timezone source");
