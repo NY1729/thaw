@@ -529,6 +529,56 @@
       } catch (error) { callback(error); }
     });
   };
+  // `crypto.diffieHellman({privateKey, publicKey})` -- the modern,
+  // `KeyObject`-based one-shot key-agreement API real Node itself
+  // recommends over the classic `ECDH` class below. Both keys must be
+  // the same key-agreement type: a matching EC curve, or both X25519
+  // (`generateKeyPairSync('x25519')`); RSA/Ed25519 keys aren't
+  // key-agreement keys and are rejected (see `crypto_diffie_hellman_
+  // hex`, `asymmetric_crypto.rs`).
+  const diffieHellman = ({ privateKey, publicKey }) => {
+    const { pem: privatePem } = parseAsymmetricKeyMaterial(privateKey);
+    const { pem: publicPem } = parseAsymmetricKeyMaterial(publicKey);
+    return Buffer.from(__thaw_crypto_diffie_hellman_hex(privatePem, publicPem), 'hex');
+  };
+  // `crypto.createECDH(curveName)` -- the classic, raw-byte EC-only
+  // key-agreement API (no `KeyObject`/PEM involved at all, unlike
+  // `diffieHellman` above -- it exchanges raw SEC1 point/scalar bytes
+  // end to end, matching real Node exactly). `curveName` accepts both
+  // Node/JOSE's own names and the common OpenSSL aliases (see
+  // `normalize_curve_name`, `asymmetric_crypto.rs`). X25519 has no
+  // classic `ECDH` form in real Node either -- use `diffieHellman` +
+  // `generateKeyPairSync('x25519')` for that.
+  class ECDH {
+    constructor(curveName) { this.curveName = curveName; }
+    generateKeys(encoding, format) {
+      const generated = JSON.parse(__thaw_crypto_ecdh_generate_keys_hex(this.curveName));
+      this._privateKeyHex = generated.privateKeyHex;
+      this._publicKeyHex = generated.publicKeyHex;
+      return this.getPublicKey(encoding, format);
+    }
+    setPrivateKey(privateKey, encoding) {
+      this._privateKeyHex = Buffer.from(privateKey, encoding).toString('hex');
+      this._publicKeyHex = __thaw_crypto_ecdh_public_from_private_hex(this.curveName, this._privateKeyHex);
+    }
+    getPrivateKey(encoding) {
+      const value = Buffer.from(this._privateKeyHex, 'hex');
+      return encoding === undefined ? value : value.toString(encoding);
+    }
+    getPublicKey(encoding) {
+      const value = Buffer.from(this._publicKeyHex, 'hex');
+      return encoding === undefined ? value : value.toString(encoding);
+    }
+    computeSecret(otherPublicKey, inputEncoding, outputEncoding) {
+      const publicKeyHex = Buffer.from(otherPublicKey, inputEncoding).toString('hex');
+      const value = Buffer.from(
+        __thaw_crypto_ecdh_compute_secret_hex(this.curveName, this._privateKeyHex, publicKeyHex),
+        'hex'
+      );
+      return outputEncoding === undefined ? value : value.toString(outputEncoding);
+    }
+  }
+  const createECDH = curveName => new ECDH(curveName);
   const cryptoModule = {
     createHash: algorithm => new Hash(algorithm),
     createHmac: (algorithm, key) => new Hmac(algorithm, key),
@@ -536,6 +586,7 @@
     Hash, Hmac, KeyObject, createSecretKey, createPrivateKey, createPublicKey, pbkdf2Sync, scrypt, scryptSync, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
     Sign, Verify, createSign, createVerify, sign, verify, publicEncrypt, privateDecrypt,
     generateKeyPairSync, generateKeyPair,
+    diffieHellman, ECDH, createECDH,
     constants: { RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING },
     timingSafeEqual, getHashes: () => ['sha256', 'sha512']
   };
