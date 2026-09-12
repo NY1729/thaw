@@ -241,6 +241,17 @@ function main(): void {
 /// scalar type at all (see `a_dynamic_method_calls_json_result_decodes_
 /// into_a_declared_scalar_type` in `registry_modules.rs` for the
 /// synthetic, network-free reproduction).
+///
+/// Also covers a real hono **middleware chain** (`app.use(path, async
+/// (c, next) => { ...; await next(); })` followed by a handler on the
+/// same path) with route-param extraction (`c.req.param('id')`) --
+/// previously part of hono's `HandlerInterface` scope boundary write-up,
+/// but the actual blocker turned out to be a narrower general compiler
+/// bug (a non-tail `await` of a held `JsValue`, i.e. the middleware's
+/// `next()` continuation, failed to build at all) fixed alongside this
+/// test; see `an_async_closure_argument_can_await_a_held_js_value_in_
+/// non_tail_position_with_no_explicit_return` in `callbacks.rs` for the
+/// synthetic, network-free reproduction and full root-cause writeup.
 #[test]
 fn registry_add_routes_and_serves_a_real_hono_app_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -267,6 +278,20 @@ async function main(): Promise<void> {
     console.log(resB.status);
     const bodyB: string = await resB.text();
     console.log(bodyB);
+
+    const appC = new Hono();
+    appC.use('/users/:id', async (c, next) => {
+        console.log('mw ran');
+        await next();
+    });
+    appC.get('/users/:id', (c) => {
+        const id = c.req.param('id');
+        return c.text('user ' + id);
+    });
+    const resC: JsValue = appC.request('/users/42');
+    console.log(resC.status);
+    const bodyC: string = await resC.text();
+    console.log(bodyC);
 }"#,
     )
     .unwrap();
@@ -280,7 +305,7 @@ async function main(): Promise<void> {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "200\n200\nhello again\n"
+        "200\n200\nhello again\nmw ran\n200\nuser 42\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
