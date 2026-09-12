@@ -1417,7 +1417,27 @@ impl<'a> FnLowerer<'a> {
                                         | "callDynamicHandle"
                                         | "callDynamicMethod"
                                         | "callDynamicMethodHandle"
-                                        | "callDynamicMethodHandleRaw"))
+                                        | "callDynamicMethodHandleRaw"
+                                        // Invoking an arbitrary already-held
+                                        // `JsValue` (e.g. a Hono middleware's
+                                        // `next()` continuation) is the same
+                                        // synchronous FFI round-trip as the
+                                        // named-call forms above -- omitting
+                                        // these left `await next()` wrapped
+                                        // in a genuine `HirExpr::Await`,
+                                        // which `thaw-llvm`'s closure codegen
+                                        // can neither prove suspends (it
+                                        // isn't a known frame-async source)
+                                        // nor compile as a plain synchronous
+                                        // statement, so a non-tail-position
+                                        // `await next()` inside an async
+                                        // closure failed to build at all
+                                        // ("does not return a value on all
+                                        // paths").
+                                        | "callDynamicValue"
+                                        | "callDynamicValueHandle"
+                                        | "callDynamicValueMixed"
+                                        | "callDynamicValueWithValue"))
                     ) || matches!(
                         &value,
                         HirExpr::DynamicCall(signature, _)
