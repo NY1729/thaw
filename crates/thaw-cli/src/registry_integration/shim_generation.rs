@@ -29,6 +29,12 @@ fn generate_registry_shims(
     }
     let mut resolved = Vec::new();
     for name in use_packages {
+        // Scopes `Buffer`/`Uint8Array` -> `HirType::Bytes` classification
+        // (see `thaw_bridge::allow_native_bytes_type`'s doc comment) to
+        // this one package's `.d.ts` processing below -- only ever `true`
+        // for a hand-authored ambient builtin, never a real npm package.
+        let _native_bytes_type_guard =
+            thaw_bridge::allow_native_bytes_type(name.starts_with("node:"));
         let package = if name.starts_with("node:") {
             thaw_registry::resolve_builtin(name)?
         } else {

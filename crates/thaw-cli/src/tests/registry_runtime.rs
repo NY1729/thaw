@@ -1320,6 +1320,20 @@ function main(): void {
 /// (NUL, a non-UTF-8 lead byte, 'A', a bare continuation byte) survives
 /// the round trip exactly, and the handler-computed length / checksum
 /// prove the individual byte values arrived intact.
+///
+/// `bytes` has no explicit type annotation -- the ambient `node:http`
+/// `.d.ts` itself now declares `bodyBytes(): Uint8Array` (previously
+/// `number[]`, since making thaw-bridge's `classify_ts_type` resolve
+/// `Uint8Array` at all used to reroute *every* npm package's own
+/// `Uint8Array` parameters into native marshaling and break Fallback
+/// codegen for them -- fixed by scoping that resolution to only thaw's
+/// own ambient builtin `.d.ts` text via `thaw_bridge::
+/// allow_native_bytes_type`, never a real npm package's), so this
+/// specifically exercises that the ambient declaration's own inferred
+/// type is correct end to end, not just that a `Uint8Array`-annotated
+/// local coerces from whatever `bodyBytes()` returns (which already
+/// worked before this fix too, since `Bytes` and `Array(F64)` share a
+/// layout and coerce freely either way).
 #[test]
 fn node_http_round_trips_a_binary_body_as_first_class_bytes() {
     let dir = std::env::temp_dir().join(format!(
@@ -1333,7 +1347,7 @@ fn node_http_round_trips_a_binary_body_as_first_class_bytes() {
         r#"import { createServer } from "node:http";
 function main(): void {
     const server = createServer((request, response): void => {
-        const bytes: Uint8Array = request.bodyBytes();
+        const bytes = request.bodyBytes();
         let sum: number = 0;
         for (const value of bytes) {
             sum = sum + value;
