@@ -1319,6 +1319,64 @@ fn crypto_rsa_encrypt_and_decrypt_interoperate_with_real_openssl() {
     assert_eq!(call("thawRoundTripPkcs1", "[]"), r#""round trip pkcs1""#);
 }
 
+/// `generateKeyPairSync`/`generateKeyPair` for RSA/EC/Ed25519 -- every
+/// freshly generated keypair signs and verifies correctly, and every
+/// `privateKeyEncoding`/`publicKeyEncoding` output shape (an actual
+/// `KeyObject` when omitted -- real Node's own default -- a PEM
+/// string, or raw DER bytes) round-trips back through
+/// `createPrivateKey`/`createPublicKey`. A 512-bit RSA modulus keeps
+/// this fast; real usage should always use 2048+ (not enforced here,
+/// matching this shim's existing "no validation beyond what the
+/// underlying crypto call itself performs" style).
+#[test]
+fn crypto_generates_rsa_ec_and_ed25519_key_pairs_that_round_trip() {
+    assert_eq!(
+        load(
+            "function signAndVerify(priv, pub) {\n\
+               const sig = __thaw_crypto_module.createSign('sha256').update('generated key test').sign(priv, 'hex');\n\
+               return __thaw_crypto_module.createVerify('sha256').update('generated key test').verify(pub, sig, 'hex');\n\
+             }\n\
+             function rsaKeyObjectRoundTrip() {\n\
+               const { publicKey, privateKey } = __thaw_crypto_module.generateKeyPairSync('rsa', { modulusLength: 512 });\n\
+               return [publicKey instanceof __thaw_crypto_module.KeyObject, privateKey instanceof __thaw_crypto_module.KeyObject, publicKey.asymmetricKeyType, privateKey.asymmetricKeyType, signAndVerify(privateKey, publicKey)];\n\
+             }\n\
+             function ecPemRoundTrip() {\n\
+               const { publicKey, privateKey } = __thaw_crypto_module.generateKeyPairSync('ec', { namedCurve: 'P-256', publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });\n\
+               const isPem = typeof publicKey === 'string' && publicKey.indexOf('-----BEGIN PUBLIC KEY-----') === 0 && typeof privateKey === 'string' && privateKey.indexOf('-----BEGIN PRIVATE KEY-----') === 0;\n\
+               const priv = __thaw_crypto_module.createPrivateKey(privateKey);\n\
+               const pub = __thaw_crypto_module.createPublicKey(publicKey);\n\
+               return [isPem, priv.asymmetricKeyType, priv.asymmetricKeyDetails.namedCurve, signAndVerify(priv, pub)];\n\
+             }\n\
+             function ed25519DerRoundTrip() {\n\
+               const { publicKey, privateKey } = __thaw_crypto_module.generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'der' }, privateKeyEncoding: { type: 'pkcs8', format: 'der' } });\n\
+               const isBuffer = publicKey instanceof Buffer && privateKey instanceof Buffer;\n\
+               const priv = __thaw_crypto_module.createPrivateKey({ key: privateKey, format: 'der' });\n\
+               const pub = __thaw_crypto_module.createPublicKey({ key: publicKey, format: 'der' });\n\
+               return [isBuffer, priv.asymmetricKeyType, signAndVerify(priv, pub)];\n\
+             }\n\
+             async function asyncGeneration() {\n\
+               const [publicKey, privateKey] = await new Promise((resolve, reject) => {\n\
+                 __thaw_crypto_module.generateKeyPair('ed25519', {}, (error, pub, priv) => {\n\
+                   if (error) reject(error); else resolve([pub, priv]);\n\
+                 });\n\
+               });\n\
+               return [publicKey instanceof __thaw_crypto_module.KeyObject, signAndVerify(privateKey, publicKey)];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("rsaKeyObjectRoundTrip", "[]"),
+        r#"[true,true,"rsa","rsa",true]"#
+    );
+    assert_eq!(call("ecPemRoundTrip", "[]"), r#"[true,"ec","P-256",true]"#);
+    assert_eq!(
+        call("ed25519DerRoundTrip", "[]"),
+        r#"[true,"ed25519",true]"#
+    );
+    assert_eq!(call("asyncGeneration", "[]"), "[true,true]");
+}
+
 /// `Intl.DateTimeFormat` -- the practical, English/Latin-numeral-only
 /// polyfill (`docs/design/intl-polyfill.md`) added for real luxon, whose
 /// entire timezone system is built on exactly this shape (real luxon's
