@@ -23,11 +23,18 @@ getrandom = "0.2"
 httlib-huffman = "0.3.4"
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 libc = "0.2"
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+p384 = { version = "0.13", features = ["ecdsa", "pem"] }
+pkcs1 = { version = "0.7", features = ["pem"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
 rquickjs = "0.12.2"
+rsa = { version = "0.9", features = ["sha2", "pem", "getrandom"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+sec1 = { version = "0.7", features = ["pem"] }
 serde_json = "1"
-sha1 = "0.10"
-sha2 = "0.10"
+signature = "2"
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.10", features = ["oid"] }
 scrypt = "0.11"
 webpki-roots = { version = "1.0", optional = true }
 wasmi = { version = "1.1.0", optional = true }
