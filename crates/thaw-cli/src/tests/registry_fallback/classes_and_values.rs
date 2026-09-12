@@ -989,3 +989,104 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function declared to return `Json` (real example: csv-
+/// parse's own `Readable.read(): Json`) whose *real* runtime return
+/// value -- despite the declared type -- is an opaque, live `JsValue`
+/// handle (any Fallback/QuickJS-dispatched call's own actual result,
+/// regardless of what its own `.d.ts` return type says), used in
+/// Node's own documented idiom for draining a value repeatedly:
+/// `let record; while ((record = next()) !== null) { ... }`.
+///
+/// `HirType::Json` and `HirType::JsValue` have different native
+/// layouts (an opaque pointer to a boxed `serde_json::Value` vs. a
+/// plain `i64` handle) -- assigning the latter into an already-`Json`-
+/// typed slot (here, a bare `let record;`, defaulting to `Json`) used
+/// to leave the raw handle bits in place while claiming the slot was a
+/// real `Json` value: undetected by the assignment itself, and a
+/// segfault the moment anything later treated it as a real `Json`
+/// pointer. A first general fix (widening `expect_type`'s own `Json`/
+/// `JsValue` compatibility check) segfaulted at runtime and was
+/// reverted; the real fix wraps a `JsValue` reaching a `Json`-declared
+/// slot as a genuine `Json` value instead (`HirExpr::JsValueAsJson`,
+/// the same `{"__thaw_js_handle_id__": <id>}` placeholder object
+/// `compile_dynamic_value_placeholder` already builds for a `JsValue`
+/// crossing into a dynamic call's own argument list) -- except when
+/// the live value turns out, at runtime, to genuinely *be* `null` or
+/// `undefined` (checked via the same live-engine query `dynamic_value_
+/// is_null`/`_undefined` already use for a `JsValue === null`/
+/// `undefined` comparison elsewhere), in which case the real `Json`
+/// literal is produced instead: `record !== null` needs to actually
+/// observe `true` termination, not compare a wrapped placeholder
+/// object (never `===` a literal `null`) forever -- an infinite loop,
+/// not a crash, but just as wrong, and what the very first working
+/// version of this fix produced before this case was added.
+///
+/// A value that turns out to be a genuine live object is only proven
+/// non-crashing here (`typeof record === "object"`), not proven to
+/// still carry its real, live data through `JSON.stringify`/`console.
+/// log` -- an accepted, honest scope boundary (declaring such a slot
+/// `JsValue` instead works correctly and keeps the value fully live;
+/// see the real csv-parse pinned test's own doc comment for why its
+/// streaming test uses that shape instead of this one).
+#[test]
+fn a_fallback_functions_json_declared_return_value_that_is_actually_a_live_jsvalue_can_be_null() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-fallback-json-declared-jsvalue-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("read-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function readNext(): Json;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "var __readNextCount = 0;\n\
+         function readNext() {\n\
+         \x20\x20__readNextCount++;\n\
+         \x20\x20if (__readNextCount === 1) return { value: 'first' };\n\
+         \x20\x20if (__readNextCount === 2) return { value: 'second' };\n\
+         \x20\x20if (__readNextCount === 3) return undefined;\n\
+         \x20\x20return null;\n\
+         }\n\
+         module.exports.readNext = readNext;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { readNext } from "read-kit";
+function main(): void {
+    let objectCount = 0;
+    let record;
+    while ((record = readNext()) !== null) {
+        if (record === undefined) {
+            console.log("undefined");
+            continue;
+        }
+        objectCount = objectCount + 1;
+        console.log(typeof record);
+    }
+    console.log(objectCount);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "object\nobject\nundefined\n2\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

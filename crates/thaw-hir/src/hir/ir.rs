@@ -139,6 +139,37 @@ pub enum HirExpr {
     ObjectLit(Vec<(Symbol, HirExpr)>),
     /// A runtime-keyed homogeneous object backed by thaw-std's JSON value.
     JsonObjectLit(Vec<(Symbol, HirExpr)>, HirType),
+    /// Wraps a live `JsValue` (an opaque, permanent id into QuickJS's own
+    /// retained-value table) as a genuine `Json` value -- there is no
+    /// direct `Json` representation of "a live JS object", so this
+    /// encodes it as the same `{"__thaw_js_handle_id__": <id>}`
+    /// placeholder object `compile_dynamic_value_placeholder` already
+    /// builds for a `JsValue` crossing into a dynamic call's own JSON
+    /// argument array; the QuickJS-side JSON reviver (`dates.js`)
+    /// splices the real live value back in the moment this placeholder
+    /// gets JSON-parsed there, the same way it already does for a
+    /// `Date`. Unlike that call-argument-only path (gated on
+    /// `compiling_quickjs_dynamic_arguments`, since nothing reads the
+    /// placeholder back on the far end anywhere else), this node exists
+    /// specifically for `coerce_to_declared`'s `Json`-declared branch:
+    /// a `JsValue`-actual value reaching a plain `Json`-typed slot
+    /// (a local variable, an array element, an object field, ...) needs
+    /// a real, valid `Json`-typed *value* -- `HirType::Json` and
+    /// `HirType::JsValue` have different native layouts (an opaque
+    /// pointer to a boxed `serde_json::Value` vs. a plain `i64` handle),
+    /// so simply passing the raw handle through unchanged (as the call-
+    /// argument path's own placeholder builder can, since the LLVM-level
+    /// encoding happens right there before anything treats the operand
+    /// as a real `Json` pointer) produced a real value whose own
+    /// inferred type stayed `JsValue` while the slot's declared type
+    /// said `Json` -- undetected by a `let`/`const` declaration (nothing
+    /// re-validates a coerced initializer's own type against the
+    /// variable's declared one), and a segfault the moment anything
+    /// later dereferenced the raw handle bits as if they were a real
+    /// `Json` pointer. This node's own `infer_expr_type` is `Json`
+    /// (matching what it actually, genuinely produces), so both the
+    /// re-validation gap and the segfault are closed at once.
+    JsValueAsJson(Box<HirExpr>),
     /// Allocates a fixed-shape object and initializes every field to its
     /// native zero value before the reference escapes. Constructors use this
     /// to establish instance identity before executing `this.field = ...`.

@@ -375,6 +375,7 @@ fn erase_expr(expr: &mut HirExpr) {
         }
         HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
-        | HirExpr::JsonAsBool(value) => erase_expr(value),
+        | HirExpr::JsonAsBool(value)
+        | HirExpr::JsValueAsJson(value) => erase_expr(value),
     }
 }
