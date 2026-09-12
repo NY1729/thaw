@@ -1031,6 +1031,20 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl number formatter");
                 #[cfg(feature = "intl")]
+                let intl_collator_compare_function = Function::new(
+                    ctx.clone(),
+                    |locale: String,
+                     sensitivity: String,
+                     ignore_punctuation: bool,
+                     numeric: bool,
+                     case_first: String,
+                     a: String,
+                     b: String| {
+                        intl_collator_compare(&locale, &sensitivity, ignore_punctuation, numeric, &case_first, &a, &b)
+                    },
+                )
+                .expect("failed to create JavaScript Intl collator");
+                #[cfg(feature = "intl")]
                 let intl_plural_category_function = Function::new(
                     ctx.clone(),
                     |locale: String, kind: String, digits: String| {
@@ -1161,6 +1175,10 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_number_format", intl_number_format_function)
                     .expect("failed to install JavaScript Intl number formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_collator_compare", intl_collator_compare_function)
+                    .expect("failed to install JavaScript Intl collator");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_plural_category", intl_plural_category_function)

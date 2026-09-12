@@ -588,14 +588,55 @@
     }
   }
 
-  // `Intl.Locale`/`Intl.PluralRules` are only ever *publicly exposed*
-  // when the native primitives actually exist (see each class's own doc
-  // comment above) -- the class declarations themselves stay
-  // unconditional.
+  // `Intl.Collator` (M9) -- entirely new. `usage: 'search'` isn't
+  // supported (falls back to plain `'sort'` behavior, see
+  // `intl_collator.rs`'s own doc comment).
+  class Collator {
+    constructor(locale, options) {
+      const opts = options || {};
+      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this._sensitivity = ['base', 'accent', 'case', 'variant'].includes(opts.sensitivity)
+        ? opts.sensitivity
+        : 'variant';
+      this._ignorePunctuation = Boolean(opts.ignorePunctuation);
+      this._numeric = Boolean(opts.numeric);
+      this._caseFirst = opts.caseFirst === 'upper' || opts.caseFirst === 'lower' ? opts.caseFirst : 'false';
+    }
+
+    compare(a, b) {
+      return __thaw_intl_collator_compare(
+        this.locale,
+        this._sensitivity,
+        this._ignorePunctuation,
+        this._numeric,
+        this._caseFirst,
+        String(a),
+        String(b),
+      );
+    }
+
+    resolvedOptions() {
+      return {
+        locale: this.locale,
+        usage: 'sort',
+        sensitivity: this._sensitivity,
+        ignorePunctuation: this._ignorePunctuation,
+        numeric: this._numeric,
+        caseFirst: this._caseFirst,
+        collation: 'default',
+      };
+    }
+  }
+
+  // `Intl.Locale`/`Intl.PluralRules`/`Intl.Collator` are only ever
+  // *publicly exposed* when the native primitives actually exist (see
+  // each class's own doc comment above) -- the class declarations
+  // themselves stay unconditional.
   if (typeof __thaw_intl_locale_parse === 'function') {
     globalThis.Intl = globalThis.Intl || {};
     globalThis.Intl.Locale = Locale;
     globalThis.Intl.PluralRules = PluralRules;
+    globalThis.Intl.Collator = Collator;
   }
 
   globalThis.Intl = Object.assign({ DateTimeFormat, NumberFormat, ListFormat }, globalThis.Intl);

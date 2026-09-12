@@ -2406,3 +2406,43 @@ fn intl_plural_rules_matches_real_node() {
         .unwrap()
     );
 }
+
+/// `Intl.Collator` (M9, entirely new capability) -- real collation
+/// order and `sensitivity`/`numeric`/`ignorePunctuation` options, cross-
+/// checked against real Node: Swedish's å sorting after z (its real
+/// alphabet position), `sensitivity: 'base'` making case/accent
+/// differences compare equal, `sensitivity: 'case'` keeping case
+/// significant while accents stay insensitive, `numeric: true` making
+/// "img2" < "img10" numerically rather than lexicographically, and
+/// `ignorePunctuation` making "a,b" and "ab" compare equal.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_collator_matches_real_node() {
+    assert_eq!(
+        load(
+            "function sign(n) { return n < 0 ? -1 : n > 0 ? 1 : 0; }\n\
+             function cmp(locale, opts, a, b) {\n\
+               return sign(new Intl.Collator(locale, opts).compare(a, b));\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 cmp('de', {}, 'a', 'ä'),\n\
+                 cmp('de', {}, 'ä', 'z'),\n\
+                 cmp('sv', {}, 'a', 'å'),\n\
+                 cmp('sv', {}, 'å', 'z'),\n\
+                 cmp('en', { sensitivity: 'base' }, 'a', 'A'),\n\
+                 cmp('en', { sensitivity: 'base' }, 'e', 'é'),\n\
+                 cmp('en', { sensitivity: 'case' }, 'a', 'A'),\n\
+                 cmp('en', { numeric: true }, 'img2', 'img10'),\n\
+                 cmp('en', {}, 'img2', 'img10'),\n\
+                 cmp('en', { ignorePunctuation: true }, 'a,b', 'ab'),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[-1, -1, -1, 1, 0, 0, -1, -1, 1, 0]).unwrap()
+    );
+}

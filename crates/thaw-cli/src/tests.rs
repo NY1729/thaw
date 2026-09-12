@@ -71,7 +71,7 @@ fn prepared_runtime_variants_have_stable_names() {
 /// namespace `new` expressions -- compile via thaw-hir's dotted-
 /// constructible allow-list (`crates/thaw-hir/src/lower/expressions/
 /// lowering.rs`, extended alongside `Intl.DateTimeFormat`/
-/// `NumberFormat`/`ListFormat` for M3/M8 of docs/design/
+/// `NumberFormat`/`ListFormat` for M3/M8/M9 of docs/design/
 /// intl-polyfill.md's "Real CLDR data via icu4x" plan), and the
 /// resulting binary really links `thaw-quickjs` with the `intl` feature
 /// on (`source_uses_intl` detects the literal class names in this
@@ -95,6 +95,8 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
            console.log(locale.baseName, locale.toString(), locale.language);\n\
            const plurals = new Intl.PluralRules('ar');\n\
            console.log(plurals.select(3));\n\
+           const collator = new Intl.Collator('en');\n\
+           console.log(collator.compare('a', 'b') < 0);\n\
          }\n",
     )
     .unwrap();
@@ -116,7 +118,7 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "ja ja-u-ca-japanese ja\nfew\n"
+        "ja ja-u-ca-japanese ja\nfew\ntrue\n"
     );
     let _ = std::fs::remove_dir_all(directory);
 }
