@@ -564,6 +564,21 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript asymmetric decrypt function");
+                let crypto_generate_key_pair = Function::new(
+                    ctx.clone(),
+                    |key_type: String, modulus_bits_or_curve: String| {
+                        crypto_generate_key_pair_json(&key_type, &modulus_bits_or_curve).map_err(
+                            |error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "generateKeyPair input",
+                                    "valid key type/options",
+                                    error,
+                                )
+                            },
+                        )
+                    },
+                )
+                .expect("failed to create JavaScript key-pair generation function");
                 let hpack_huffman_encode = Function::new(ctx.clone(), |value: String| {
                     let mut output = Vec::new();
                     httlib_huffman::encode(&hex_decode(&value), &mut output)
@@ -982,6 +997,12 @@ fn ensure_context() {
                         crypto_asymmetric_decrypt,
                     )
                     .expect("failed to install JavaScript asymmetric decrypt function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_generate_key_pair_json",
+                        crypto_generate_key_pair,
+                    )
+                    .expect("failed to install JavaScript key-pair generation function");
                 ctx.globals()
                     .set("__thaw_intl_zoned_parts", intl_zoned_parts_function)
                     .expect("failed to install JavaScript Intl timezone source");

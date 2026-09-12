@@ -473,12 +473,60 @@
     const oaepDigest = resolveEncryptionPadding(key);
     return Buffer.from(__thaw_crypto_asymmetric_decrypt_hex(pem, oaepDigest, Buffer.from(buffer).toString('hex')), 'hex');
   };
+  // A PEM block is just base64(DER) wrapped in `-----BEGIN/END-----`
+  // header/footer lines with fixed-width line wrapping -- no crypto
+  // needed to recover the raw DER bytes, just strip the non-base64
+  // lines and decode.
+  const pemToDer = pem => Buffer.from(
+    pem.split('\n').filter(line => line && !line.startsWith('-----')).join(''),
+    'base64'
+  );
+  // `generateKeyPairSync(type, options)` / `generateKeyPair(type,
+  // options, callback)` -- `type` is `'rsa'`/`'ec'`/`'ed25519'`;
+  // `options.modulusLength` (RSA) or `options.namedCurve` (EC, either
+  // Node/JOSE's own names or the common OpenSSL aliases) picks the key
+  // size/curve. `options.privateKeyEncoding`/`publicKeyEncoding`
+  // (`{type, format}`) control the return shape per half: omitted -> a
+  // real `KeyObject` (matching real Node's own default); `format:
+  // 'pem'` -> the PEM string as-is; `format: 'der'` -> raw DER bytes as
+  // a `Buffer`. Always produces PKCS8 (private)/SPKI (public) --
+  // a `type: 'pkcs1'`/`'sec1'` request is not honored, and a custom
+  // `publicExponent` for RSA is not supported (always 65537), matching
+  // this shim's existing practical-subset style.
+  const encodeGeneratedKeyHalf = (pem, isPrivate, encoding) => {
+    if (!encoding) {
+      const info = JSON.parse(__thaw_crypto_import_key_json(Buffer.from(pem).toString('hex'), false, ''));
+      return new KeyObject(isPrivate ? 'private' : 'public', pem, info);
+    }
+    return encoding.format === 'der' ? pemToDer(pem) : pem;
+  };
+  const generateKeyPairSync = (type, options) => {
+    options = options || {};
+    const arg = type === 'rsa' ? String(options.modulusLength)
+      : type === 'ec' ? options.namedCurve
+      : '';
+    const generated = JSON.parse(__thaw_crypto_generate_key_pair_json(type, arg || ''));
+    return {
+      publicKey: encodeGeneratedKeyHalf(generated.publicPem, false, options.publicKeyEncoding),
+      privateKey: encodeGeneratedKeyHalf(generated.privatePem, true, options.privateKeyEncoding)
+    };
+  };
+  const generateKeyPair = (type, options, callback) => {
+    if (typeof options === 'function') { callback = options; options = {}; }
+    queueMicrotask(() => {
+      try {
+        const result = generateKeyPairSync(type, options);
+        callback(null, result.publicKey, result.privateKey);
+      } catch (error) { callback(error); }
+    });
+  };
   const cryptoModule = {
     createHash: algorithm => new Hash(algorithm),
     createHmac: (algorithm, key) => new Hmac(algorithm, key),
     createCipheriv, createDecipheriv, Cipheriv,
     Hash, Hmac, KeyObject, createSecretKey, createPrivateKey, createPublicKey, pbkdf2Sync, scrypt, scryptSync, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
     Sign, Verify, createSign, createVerify, sign, verify, publicEncrypt, privateDecrypt,
+    generateKeyPairSync, generateKeyPair,
     constants: { RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING },
     timingSafeEqual, getHashes: () => ['sha256', 'sha512']
   };
