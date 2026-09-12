@@ -2166,3 +2166,63 @@ fn a_function_reached_via_a_two_level_property_chain_calls_correctly_when_captur
     );
     assert_eq!(call("nested_chain_capture", "[]"), "49");
 }
+
+/// Real multi-locale `Intl.DateTimeFormat` (M4 of docs/design/
+/// intl-polyfill.md's "Real CLDR data via icu4x" plan) --
+/// `intl_datetime.rs`'s `__thaw_intl_datetime_format_parts`, replacing
+/// the previous fixed English/Latin-numeral rendering for any curated
+/// locale. Every case cross-checked against real Node's own output for
+/// the same locale/options/instant, including a locale with real
+/// non-Latin digits (`ar-SA`, Arabic-Indic) and a locale whose default
+/// hour cycle differs from `en-US`'s (`de-DE`, h23) -- confirming both
+/// come from icu4x's own locale-derived defaults, not anything this
+/// polyfill hardcodes per locale.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_format_matches_real_node_for_curated_non_english_locales() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, epochMs) {\n\
+               return new Intl.DateTimeFormat(locale, opts).format(new Date(epochMs));\n\
+             }\n\
+             function all() {\n\
+               const t = Date.parse('2024-07-04T16:30:45.000Z');\n\
+               return [\n\
+                 show('ja-JP', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
+                 show('ja-JP', {year:'numeric',month:'2-digit',day:'2-digit',timeZone:'UTC'}, t),\n\
+                 show('ja-JP', {weekday:'long',timeZone:'UTC'}, t),\n\
+                 show('de-DE', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
+                 show('de-DE', {hour:'numeric',minute:'numeric',timeZone:'UTC'}, t),\n\
+                 show('fr', {weekday:'long',year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
+                 show('ar-SA', {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'}, t),\n\
+                 show('en-US', {hour:'numeric',timeZone:'UTC'}, t),\n\
+                 show('en-US', {hour:'numeric',hour12:false,timeZone:'UTC'}, t),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "2024年7月4日",
+            "2024/07/04",
+            "木曜日",
+            "4. Juli 2024",
+            "16:30",
+            "jeudi 4 juillet 2024",
+            "٤ يوليو ٢٠٢٤",
+            // A genuine, narrow CLDR-data-version artifact, not a bug:
+            // the vendored icu4x CLDR (48.2.1) renders U+202F (narrow
+            // no-break space) between the hour and the day period for
+            // `en-US`, where the specific Node build used to
+            // cross-check this session (v22.22.2, bundled ICU 78) still
+            // renders a plain space. Every other case in this test
+            // (including a completely different script/digit set,
+            // `ar-SA`) matches real Node byte-for-byte.
+            "4\u{202f}PM",
+            "16",
+        ])
+        .unwrap()
+    );
+}

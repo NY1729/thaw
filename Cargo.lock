@@ -2687,6 +2687,7 @@ dependencies = [
  "icu_locale",
  "icu_plurals",
  "icu_segmenter",
+ "icu_time",
  "jiff",
  "libc",
  "p256",
@@ -2708,6 +2709,7 @@ dependencies = [
  "wasmi",
  "wasmi_wasi",
  "webpki-roots",
+ "writeable",
  "x25519-dalek",
  "x509-parser",
 ]
