@@ -343,6 +343,88 @@ pub unsafe extern "C" fn thaw_bytes_write(
 }
 
 #[no_mangle]
+/// `buf.readBigInt64LE(offset)` / `buf.readBigUInt64BE(offset)` &c. --
+/// the full-precision 64-bit sibling of `thaw_bytes_read`: an `f64`
+/// return can only exactly represent 53 bits of integer, so this
+/// returns the raw bit pattern as a genuine `i64` instead of routing
+/// through `decode_scalar`'s `f64` path. Signed (`BigInt64`) and
+/// unsigned (`BigUInt64`) share the exact same bit pattern here --
+/// Thaw's `HirType::I64` is always a signed 64-bit integer (no
+/// separate unsigned native type), so a `BigUInt64` value `>= 2^63`
+/// round-trips correctly through `Buffer` but displays as negative via
+/// `.toString()`/`console.log`, a deliberate, documented practical-
+/// subset limitation (see `docs/design/byte-buffers.md`) rather than a
+/// silent miscalculation. Out-of-range offset reads as `0`, matching
+/// `thaw_bytes_read`'s own convention.
+///
+/// # Safety
+///
+/// `buf` must be null or point to a Thaw array of `f64` element slots.
+pub unsafe extern "C" fn thaw_bytes_read_i64(buf: *const u8, offset: f64, le: f64) -> i64 {
+    let Some(bytes) = (unsafe { read_byte_array(buf) }) else {
+        return 0;
+    };
+    if !(offset.is_finite() && offset >= 0.0) {
+        return 0;
+    }
+    let offset = offset as usize;
+    if offset + 8 > bytes.len() {
+        return 0;
+    }
+    let mut le_bytes = [0u8; 8];
+    for index in 0..8 {
+        le_bytes[index] = if le != 0.0 {
+            bytes[offset + index]
+        } else {
+            bytes[offset + 8 - 1 - index]
+        };
+    }
+    i64::from_le_bytes(le_bytes)
+}
+
+#[no_mangle]
+/// `buf.writeBigInt64LE(value, offset)` &c. -- the full-precision
+/// 64-bit sibling of `thaw_bytes_write`; see `thaw_bytes_read_i64`'s
+/// doc comment for why this takes/returns a real `i64` instead of
+/// routing `value` through `encode_scalar`'s `f64` path. Returns
+/// `offset + 8` (Node's contract); an out-of-range offset is a no-op.
+///
+/// # Safety
+///
+/// `buf` must be null or point to a writable Thaw array of `f64` slots.
+pub unsafe extern "C" fn thaw_bytes_write_i64(
+    buf: *mut u8,
+    offset: f64,
+    value: i64,
+    le: f64,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(buf) }) else {
+        return offset;
+    };
+    if !(offset.is_finite() && offset >= 0.0) {
+        return offset;
+    }
+    let offset = offset as usize;
+    if offset + 8 > length {
+        return (offset + 8) as f64;
+    }
+    let encoded = value.to_le_bytes();
+    for index in 0..8 {
+        let byte = if le != 0.0 {
+            encoded[index]
+        } else {
+            encoded[8 - 1 - index]
+        };
+        unsafe {
+            buf.add(8 + (offset + index) * 8)
+                .cast::<f64>()
+                .write_unaligned(f64::from(byte));
+        }
+    }
+    (offset + 8) as f64
+}
+
+#[no_mangle]
 /// `source.copy(target, targetStart, sourceStart, sourceEnd)` -- blits
 /// bytes into `target` in place, returning the count copied. Offsets are
 /// clamped to their buffers; a `sourceEnd` of `-1` means "the source

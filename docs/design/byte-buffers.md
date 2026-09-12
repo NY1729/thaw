@@ -174,6 +174,26 @@ Landed so far:
   lambda return with `infer_expr_type_inner`, so a `Bytes`-typed call
   whose args needed hoisting (`buf.slice(i, j)`, `Buffer.from(someVar)`)
   keeps its byte-buffer identity for a chained `.toString`.
+- Variable-width accessors -- `readUIntLE(offset, byteLength)` /
+  `readUIntBE` / `readIntLE` / `readIntBE` and their `write*`
+  counterparts, `byteLength` 1-6 as a real runtime argument (not a
+  name-derived constant). `bytes_variable_width_accessor` (thaw-hir
+  `dispatch.rs`) decodes `(signed, big-endian, write)`; the same
+  `thaw_bytes_read` / `thaw_bytes_write` do the work, `byteLength`
+  passed straight through as the `width` parameter.
+- `readBigInt64LE` / `readBigUInt64BE` &c. and their `write*`
+  counterparts -- always exactly 8 bytes, and the one accessor family
+  whose value is a genuine `HirType::I64` (a TS `bigint`) rather than
+  `F64`, which can only exactly represent 53 bits of integer.
+  `bytes_bigint_accessor` (thaw-hir `dispatch.rs`) recognizes the four
+  names; `thaw_bytes_read_i64` / `thaw_bytes_write_i64` (thaw-runtime
+  `bytes.rs`) do the work as a real `i64`, no `f64` round-trip. Signed
+  and unsigned share the exact same bit pattern (no separate `kind`
+  parameter, unlike the `F64`-typed accessors above): a `BigUInt64`
+  value `>= 2^63` round-trips through the buffer correctly but displays
+  as negative via `.toString()`/`console.log` -- thaw has no genuine
+  unsigned 64-bit type, so this is a deliberate, documented
+  practical-subset limitation, not a silent miscalculation.
 
 - `source.copy(target, targetStart?, sourceStart?, sourceEnd?)` --
   `thaw_bytes_copy`, blits into an existing `Bytes` target in place,
@@ -184,9 +204,7 @@ Landed so far:
   string decodes `utf8`, a number becomes one byte). A numeric needle
   still takes the plain `Array.indexOf` element path.
 
-Still speculative -- add when real code needs them, not before: the
-`readBigUInt64*` / `readBigInt64*` pair (thaw has no `BigInt`) and
-`readUIntLE(offset, byteLength)` / `readUIntBE`'s variable width.
+Still speculative -- add when real code needs them, not before:
 `request.on("data")` chunks stay lossy strings -- `request.bodyBytes()`
 is the binary path and covers the whole body at once.
 

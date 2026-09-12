@@ -154,8 +154,21 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::EnumReverseLookup(_, _) => Some(HirType::Optional(Box::new(HirType::Str))),
             HirExpr::ArrayLen(_) => Some(HirType::F64),
             HirExpr::Conditional(_, _, _, ty) => Some(ty.clone()),
-            HirExpr::BinOp(op, _, _) => Some(match op {
+            HirExpr::BinOp(op, left, right) => Some(match op {
                 BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::EqEqEq => HirType::Bool,
+                // A nested bigint expression (e.g. `-9223372036854775807n
+                // - 1n`, or any chained bigint arithmetic beyond a single
+                // literal/variable operand) previously fell through to
+                // `HirType::F64` unconditionally here, regardless of its
+                // real operand types -- this mirrors `compile_binop`'s own
+                // `I64`-vs-`F64` dispatch check just below, and thaw-hir's
+                // identical check in `lower/inference/types.rs`, so the
+                // three stay in agreement.
+                _ if self.expr_hir_type(left) == Some(HirType::I64)
+                    && self.expr_hir_type(right) == Some(HirType::I64) =>
+                {
+                    HirType::I64
+                }
                 _ => HirType::F64,
             }),
             HirExpr::ObjectLit(fields) => fields
@@ -202,6 +215,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "fetch"
                         | "__thaw_string_concat" => return Some(HirType::Str),
                         "__thaw_i64_to_string" => return Some(HirType::Str),
+                        "__thaw_bytes_read_i64" => return Some(HirType::I64),
                         "__thaw_symbol_new" => return Some(HirType::Symbol),
                         "__thaw_symbol_to_string" => return Some(HirType::Str),
                         "__thaw_symbol_key" => return Some(HirType::Str),
