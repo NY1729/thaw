@@ -1871,6 +1871,131 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// jsonwebtoken's RS256/ES256 (asymmetric) algorithms end to end --
+/// the other half of jsonwebtoken's real-world use left unattempted by
+/// the HS256 test above, added alongside `node:crypto`'s new RSA/ECDSA
+/// `createSign`/`createVerify` support (see
+/// `crypto_rsa_and_ecdsa_sign_and_verify_interoperate_with_real_openssl`
+/// in thaw-quickjs's own tests for the synthetic, network-free
+/// reproduction and full root-cause/interop writeup). `ecdsa-sig-
+/// formatter` (a real jsonwebtoken dependency, converts ES256's raw
+/// JOSE r||s signature format to/from the DER format `crypto.sign`/
+/// `.verify()` produce/consume) needed no changes at all -- confirming
+/// thaw's DER-by-default ECDSA signature encoding already matches real
+/// Node's own default. Output cross-checked against a real `node`
+/// run of the same jsonwebtoken version with the same keys/payloads.
+#[test]
+fn registry_add_signs_and_verifies_real_jsonwebtokens_with_rsa_and_ecdsa_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-jsonwebtoken-asymmetric-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "jsonwebtoken").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import jwt from "jsonwebtoken";
+
+const rsaPriv = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC6UuRDGp9ifSxK
+H3Ft7N9dxWRjj8slwx/+8dmXKdLTMgxQ+L4nDgE3cu2h1nzXsvnheG+ycqsAZwaB
+xvCLSqcBWZi772FVF7EnlLGY+sPaWSKn1NQFVsJ6AKm2vR0SFHjw71Eqpj6jdlal
+AZFoD9foCKgPdNiI8m2mar2K+6wLeXMQVxTe6a8IcdtO0+nPjEwzEvxsnI2+lp5n
++oiAYdAtyNU2SlenZFc5Jkl9a/X/AjmRrCmzz2kXhFZKwrHAri9wGNjsCqd3d7X+
+LHWdbpYYGe3NtQJPsm+XphXtmdZtIjudenDP1jHHzKLt32sFlXl9BaabyScb/t2s
+9a7Ybpx/AgMBAAECggEAPUaffRYXTrudwi6/Dgi1mNAe6MNUavHV5vFAvv7pL72o
+4UQ8vPlVGxg34F56pjFdDnKeQVCGvlYjhLCZUSXW8JG3si7Skrp872huU8I8gOWJ
+iSpsI+lZgegP6GIfWl/TOmFqDx2nQfjcG939JPz4431dT9/8imU3/F/kP/3uocLa
+T+yyC6bj4xHzXvQraP6CTwuP0hODJo8aOldxWAfJMjoMgyR6hecKaHKHwfWWymk3
+9LDAo2pcziQA4SItLKFfp+UbEVnhY+iKHo9jogTE+fsaSWfBGl8CnyM1MFgzfa30
+mNUO85XWatCPm1wA45W0IPVT1TjeEjPWliQes5tsYQKBgQDoXfwxD4HinK+fEnRZ
+KogyqTZs9/Qlwgl//dQd0NCyw1f0sX9p45eJiJGBtNZyjj1yxCXQLdFfP7C9LGL1
+QyRk/hpB96N45exY1skaVTvu0gP5cDi9F9IIiZRadbFihDWdaZWZGSstxeplZIv3
+G7wz8+sgTHLos9b+qlfihboLUQKBgQDNRhoDpnCnIyb9EkW2/uhKXHRlAlS/tt+o
+0fcNXnbi4eFQfMySZaaTzdAbaJij5vmzAPh3ehpOA9wE6DkPEQFWH7Je9TMQzjds
+grKjTbRPdwVbtPzpY+rwK1mNh+D+20iMTjgPcqu0XBJEznh/Ek8aDin97HVoSWrX
+EHUYWv6WzwKBgQDPSDfWE/1Lh3Zqsm2ztOs2Nhhk8HOM0yDiWi3EQyhIr1Vg5I3C
+idH+UCNsz0KVgilynWMV6CljjE8/Eb9dBn4K0VnfCud6y7AgN8nBgdMq4ZHGC8Ox
+evRTxVbfsyl/tmyVdUCMCBWqiWjk9eKdltI2jhpq/4dp6jOZjZ9EZQJnYQKBgAgp
+l3M5tRUQUsaRaXBDZp0+W+qAUzpkXTRrVPWVIgkXjkwTCldv71XFQ1czq44o6xjx
+GvA1TMJ5aNBRI6Ozu2ffTspz2Zn7eTy5Xb0co+TdCLuC0OO+82KldqQoGQxJT/M0
+UQpcNvOvDZLq2uPCqJ6SnZzZQDnrYXI311AmniUFAoGAVBccWnKbvxAMD94ssPgM
+EBuGLXBF+u9pqwZ5AdPUL456JgksTSAp/b3b6Q0irmo+v6kk0i8aXQ7E2LoItbrX
++umBB9JpXh/1tAuSUdhGN/xhnGjfyyLDv550UcIsOnbn+hPaeg8aNfL5RDXMj+b9
+LYdfAFK+TvGtUOa/KvRnUyA=
+-----END PRIVATE KEY-----
+`;
+const rsaPub = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAulLkQxqfYn0sSh9xbezf
+XcVkY4/LJcMf/vHZlynS0zIMUPi+Jw4BN3LtodZ817L54XhvsnKrAGcGgcbwi0qn
+AVmYu+9hVRexJ5SxmPrD2lkip9TUBVbCegCptr0dEhR48O9RKqY+o3ZWpQGRaA/X
+6AioD3TYiPJtpmq9ivusC3lzEFcU3umvCHHbTtPpz4xMMxL8bJyNvpaeZ/qIgGHQ
+LcjVNkpXp2RXOSZJfWv1/wI5kawps89pF4RWSsKxwK4vcBjY7Aqnd3e1/ix1nW6W
+GBntzbUCT7Jvl6YV7ZnWbSI7nXpwz9Yxx8yi7d9rBZV5fQWmm8knG/7drPWu2G6c
+fwIDAQAB
+-----END PUBLIC KEY-----
+`;
+const ecPriv = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIBHHSIG+RSibqO+M
+4l+Nk/fuDLFG3x4C2JoVtUztTDmhRANCAARMmQ50k+tTfnRHGqvMzW2QoV9tFeue
+wa7GiV/ihDolbPlS+EM5hw6EBbuRFQbZ6Lv3ikR1VhwafVQF9vmYBSfj
+-----END PRIVATE KEY-----
+`;
+const ecPub = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETJkOdJPrU350RxqrzM1tkKFfbRXr
+nsGuxolf4oQ6JWz5UvhDOYcOhAW7kRUG2ei794pEdVYcGn1UBfb5mAUn4w==
+-----END PUBLIC KEY-----
+`;
+
+function main(): void {
+    const tokenRs = jwt.sign({ userId: 42 }, rsaPriv, { algorithm: "RS256" });
+    const decodedRs: JsValue = jwt.verify(tokenRs, rsaPub, { algorithms: ["RS256"] });
+    console.log(decodedRs.userId);
+
+    const tokenEs = jwt.sign({ role: "admin" }, ecPriv, { algorithm: "ES256" });
+    const decodedEs: JsValue = jwt.verify(tokenEs, ecPub, { algorithms: ["ES256"] });
+    console.log(decodedEs.role);
+
+    try {
+        jwt.verify(tokenRs, ecPub, { algorithms: ["ES256"] });
+        console.log("unreachable");
+    } catch (error: JsValue) {
+        console.log(error.name);
+    }
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["jsonwebtoken".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "42\nadmin\nJsonWebTokenError\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// luxon end to end: `DateTime.fromISO(...)`, `Settings.defaultLocale =
 /// "en-US"` (a bare static property *assignment* -- this polyfill
 /// always renders English regardless of what locale string luxon
