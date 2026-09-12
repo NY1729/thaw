@@ -87,6 +87,22 @@
 //!    instead of `ThawIcuDataProvider` directly.
 //! 4. Copied `out_final/*.rs.data` and `out_final/mod.rs` into
 //!    `src/data/` verbatim (no hand edits).
+//! 5. (M4, same day) Building the actual `DateTimeFormatter` field-set
+//!    dispatch in `crates/thaw-quickjs/src/quickjs/intl_datetime.rs`
+//!    surfaced 4 more required markers the probe hadn't reached
+//!    (`DatetimePatternsTimeV1`/`DatetimePatternsGlueV1`/
+//!    `DatetimeNamesWeekdayV1`/`DatetimeNamesDayperiodV1` -- the probe
+//!    never exercised a *time*-inclusive or *weekday*/day-period-
+//!    inclusive field set). Added by re-running step 3 with those 4
+//!    names appended to the `--markers` list (this is exactly the
+//!    "manually re-add any marker reached only through a compiled_data-
+//!    style constructor" case from step 3's own note -- except here the
+//!    probe simply hadn't called that code path at all yet, not that it
+//!    used `compiled_data`). If a future milestone's real usage needs
+//!    still more markers, the fastest way to find out which is the same
+//!    as this: try building the real Rust code against the current
+//!    dataset and read the compiler's "trait not implemented" errors,
+//!    which name the exact missing marker type.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!
