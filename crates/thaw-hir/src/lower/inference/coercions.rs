@@ -137,16 +137,79 @@ impl<'a> FnLowerer<'a> {
             }
             // A `JsValue` (an opaque handle to a live QuickJS-retained
             // object, e.g. zod's `z.string()` returning a `ZodString`
-            // schema instance) has no JSON representation and so is left
-            // untouched here rather than routed through
-            // `wrap_native_value_as_json` -- thaw-llvm's dynamic-call
-            // argument marshaling (`compile_dynamic_value_placeholder` in
-            // json_bridge.rs) recognizes the resulting type mismatch
-            // (a `JsValue` value reaching a `Json`-declared slot) and
-            // threads the real handle to the call alongside the JSON args
-            // instead of trying to serialize it.
+            // schema instance) has no direct JSON representation. Wrapped
+            // via `HirExpr::JsValueAsJson` -- a real, valid `Json` value
+            // (the same `{"__thaw_js_handle_id__": <id>}` placeholder
+            // object `compile_dynamic_value_placeholder` already builds
+            // for a `JsValue` crossing into a dynamic call's own JSON
+            // argument array; the QuickJS-side reviver splices the real
+            // live value back in whenever this placeholder is later
+            // JSON-parsed there, same as it already does for a `Date`) --
+            // rather than left as the raw, unwrapped handle. `HirType::
+            // Json` and `HirType::JsValue` have different native layouts
+            // (an opaque pointer to a boxed `serde_json::Value` vs. a
+            // plain `i64` handle): simply returning `value` unchanged here
+            // produced a value whose own inferred type stayed `JsValue`
+            // while the declared slot said `Json` -- undetected by a
+            // `let`/`const` declaration (nothing re-validates a coerced
+            // initializer's own type against the variable's declared
+            // one), and a segfault the moment anything later dereferenced
+            // the raw handle bits as if they were a real `Json` pointer
+            // (real trigger: csv-parse's `parser.read(): Json` assigned
+            // to an already-`Json`-typed local, then passed to `Array.
+            // push`/`JSON.stringify`). thaw-llvm's own dynamic-call
+            // argument marshaling (`json_bridge.rs`'s own call sites)
+            // still separately detects a bare `JsValue` handle reaching a
+            // `Json`-declared parameter slot by LLVM value kind (an `i64`
+            // where a pointer is expected) and wraps it the same way --
+            // this node just does the identical wrapping earlier, at
+            // `coerce_to_declared` time, so every other consumer (not
+            // just a dynamic call's own argument list) gets a genuinely
+            // valid `Json` value too.
+            //
+            // A statically-`JsValue`-typed value can still turn out, at
+            // runtime, to genuinely *be* `null` or `undefined` (real
+            // trigger: `Readable.read(): Json`, whose real runtime
+            // result -- despite the declared type -- is `null` once the
+            // stream is exhausted, the exact value Node's own docs say
+            // to loop on: `while ((record = parser.read()) !== null)`).
+            // The placeholder-object encoding above is only correct for
+            // a genuinely live object; `null`/`undefined` need the real
+            // `Json` literal instead, or `record !== null` would never
+            // observe termination (a wrapped placeholder object is never
+            // `===` to a literal `null`) -- an infinite loop, not a
+            // crash, but just as wrong. Checked at runtime (the same
+            // live-engine query `dynamic_value_is_null`/`_undefined`
+            // already use for `JsValue === null`/`undefined` comparisons
+            // elsewhere) since nothing static can know which case a
+            // given call actually returns.
             if actual == HirType::JsValue {
-                return Ok(value);
+                let temp = format!("__thaw_json_wrap_source_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(temp.clone(), HirType::JsValue);
+                let null_json =
+                    self.wrap_native_value_as_json(HirExpr::Lit(HirLit::Null), HirType::Null)?;
+                let undefined_json = HirExpr::JsonObjectLit(
+                    vec![(
+                        "$__thaw_napi_undefined$".to_string(),
+                        HirExpr::Lit(HirLit::Bool(true)),
+                    )],
+                    HirType::Bool,
+                );
+                let is_null = self.dynamic_value_is_null(HirExpr::Var(temp.clone()));
+                let is_undefined = self.dynamic_value_is_undefined(HirExpr::Var(temp.clone()));
+                let body = HirExpr::Conditional(
+                    Box::new(is_null),
+                    Box::new(null_json),
+                    Box::new(HirExpr::Conditional(
+                        Box::new(is_undefined),
+                        Box::new(undefined_json),
+                        Box::new(HirExpr::JsValueAsJson(Box::new(HirExpr::Var(temp.clone())))),
+                        HirType::Json,
+                    )),
+                    HirType::Json,
+                );
+                return self.wrap_call_argument_bindings(body, &[(temp, HirType::JsValue, value)]);
             }
             // A real compiled (native) closure (e.g. `(n: number) => n >
             // 0` passed to zod's `z.number().refine(...)`) has no JSON

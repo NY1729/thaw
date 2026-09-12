@@ -325,6 +325,10 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonObjectLit(fields, element) => {
                 self.compile_json_object_lit(fields, element)
             }
+            HirExpr::JsValueAsJson(inner) => {
+                let handle = self.compile_expr(inner)?;
+                self.compile_dynamic_value_placeholder_unchecked(handle)
+            }
             HirExpr::ObjectAlloc(object_type) => self.compile_object_alloc(object_type),
             HirExpr::PropAccess(obj, object_ty, field) => {
                 let field_ty = self.field_type(object_ty, field)?;
