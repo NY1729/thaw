@@ -77,32 +77,52 @@ fn parse_body_plan(head: &str) -> BodyPlan {
     }
 }
 
-/// Decodes a `Transfer-Encoding: chunked` body (`<hex len>\r\n<bytes>\r\n`
-/// ..., ending at a zero-length chunk). Returns the decoded body and how
-/// many bytes of `bytes` it consumed (so a pipelined next request left
-/// after the terminator isn't swallowed). `None` if `bytes` doesn't yet
-/// contain a complete body, or is malformed.
-fn decode_chunked_body(bytes: &[u8]) -> Option<(Vec<u8>, usize)> {
-    let mut offset = 0;
+/// Decodes as many complete `Transfer-Encoding: chunked` chunks
+/// (`<hex len>\r\n<bytes>\r\n` ...) as are currently available in `bytes`,
+/// starting at `start` (how many bytes of `bytes` a previous call already
+/// consumed) -- unlike a naive "wait for the whole body" decoder, this can
+/// be called incrementally as more bytes arrive off the socket (real
+/// Node's own streaming behavior for a chunked body), returning whatever
+/// newly-complete chunks are available so far without needing the
+/// `0\r\n\r\n` terminator chunk to have arrived yet.
+///
+/// Returns `(newly-decoded bytes, new consumed offset, whether the
+/// terminator chunk was seen)`. `None` only for a genuinely malformed
+/// chunk header/trailer (not just "not enough data yet" -- that case
+/// returns `Some` with the terminated flag `false` and whatever was
+/// decoded so far, which may be empty).
+fn decode_chunked_body_incremental(bytes: &[u8], start: usize) -> Option<(Vec<u8>, usize, bool)> {
+    let mut offset = start;
     let mut body = Vec::new();
     loop {
         let rest = &bytes[offset..];
-        let line_end = rest.windows(2).position(|pair| pair == b"\r\n")?;
+        let Some(line_end) = rest.windows(2).position(|pair| pair == b"\r\n") else {
+            return Some((body, offset, false));
+        };
         let size =
             usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).ok()?.trim(), 16).ok()?;
         let after_size = &rest[line_end + 2..];
         if after_size.len() < size + 2 {
-            return None;
+            return Some((body, offset, false));
         }
         if &after_size[size..size + 2] != b"\r\n" {
             return None;
         }
         offset += line_end + 2 + size + 2;
         if size == 0 {
-            return Some((body, offset));
+            return Some((body, offset, true));
         }
         body.extend_from_slice(&after_size[..size]);
     }
+}
+
+/// The original all-or-nothing contract, kept for the still-existing
+/// callers that want "the whole body or nothing": `None` until the
+/// `0\r\n\r\n` terminator has actually been seen. Backed by
+/// `decode_chunked_body_incremental` starting from byte 0.
+fn decode_chunked_body(bytes: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let (body, consumed, terminated) = decode_chunked_body_incremental(bytes, 0)?;
+    terminated.then_some((body, consumed))
 }
 
 /// How long a connection may take to send a complete request head (and,
@@ -2142,6 +2162,54 @@ mod tests {
         // Incomplete: terminator not yet received.
         assert_eq!(decode_chunked_body(b"5\r\nhel"), None);
         assert_eq!(decode_chunked_body(b"5\r\nhello\r\n"), None);
+    }
+
+    /// The incremental primitive `decode_chunked_body_incremental` backs:
+    /// fed the same growing buffer a real socket read loop would produce
+    /// (arriving in several separate pieces, mid-chunk splits included),
+    /// it must decode each newly-complete chunk as soon as it's available
+    /// -- not wait for the `0\r\n\r\n` terminator like the all-or-nothing
+    /// `decode_chunked_body` wrapper still does -- matching real Node's
+    /// own incremental chunked-body streaming.
+    #[test]
+    fn decode_chunked_body_incremental_yields_each_chunk_as_it_arrives() {
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut consumed = 0;
+
+        // Mid-chunk-body split: not even the first chunk's bytes are all
+        // in yet.
+        buffer.extend_from_slice(b"5\r\nhel");
+        let (body, new_consumed, terminated) =
+            decode_chunked_body_incremental(&buffer, consumed).unwrap();
+        assert_eq!(body, b"");
+        assert_eq!(new_consumed, consumed);
+        assert!(!terminated);
+        consumed = new_consumed;
+
+        // Completes the first chunk, starts (but doesn't finish) the
+        // chunk-size line of a second chunk.
+        buffer.extend_from_slice(b"lo\r\n6\r\n wor");
+        let (body, new_consumed, terminated) =
+            decode_chunked_body_incremental(&buffer, consumed).unwrap();
+        assert_eq!(body, b"hello");
+        assert!(new_consumed > consumed);
+        assert!(!terminated);
+        consumed = new_consumed;
+
+        // Completes the second chunk and the terminator.
+        buffer.extend_from_slice(b"ld\r\n0\r\n\r\n");
+        let (body, new_consumed, terminated) =
+            decode_chunked_body_incremental(&buffer, consumed).unwrap();
+        assert_eq!(body, b" world");
+        assert_eq!(new_consumed, buffer.len());
+        assert!(terminated);
+        consumed = new_consumed;
+
+        // A pipelined next request's bytes right after the terminator
+        // aren't touched -- confirmed by `new_consumed` landing exactly
+        // at the terminator, not consuming into `"GET /next"`.
+        buffer.extend_from_slice(b"GET /next");
+        assert_eq!(consumed, buffer.len() - b"GET /next".len());
     }
 
     #[test]
