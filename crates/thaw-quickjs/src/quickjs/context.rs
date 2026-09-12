@@ -566,16 +566,25 @@ fn ensure_context() {
                 .expect("failed to create JavaScript asymmetric decrypt function");
                 let crypto_generate_key_pair = Function::new(
                     ctx.clone(),
-                    |key_type: String, modulus_bits_or_curve: String| {
-                        crypto_generate_key_pair_json(&key_type, &modulus_bits_or_curve).map_err(
-                            |error| {
-                                rquickjs::Error::new_from_js_message(
-                                    "generateKeyPair input",
-                                    "valid key type/options",
-                                    error,
-                                )
-                            },
+                    |key_type: String,
+                     modulus_bits_or_curve: String,
+                     public_exponent: String,
+                     private_key_type: String,
+                     public_key_type: String| {
+                        crypto_generate_key_pair_json(
+                            &key_type,
+                            &modulus_bits_or_curve,
+                            &public_exponent,
+                            &private_key_type,
+                            &public_key_type,
                         )
+                        .map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "generateKeyPair input",
+                                "valid key type/options",
+                                error,
+                            )
+                        })
                     },
                 )
                 .expect("failed to create JavaScript key-pair generation function");
