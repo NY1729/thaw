@@ -116,15 +116,6 @@ fn decode_chunked_body_incremental(bytes: &[u8], start: usize) -> Option<(Vec<u8
     }
 }
 
-/// The original all-or-nothing contract, kept for the still-existing
-/// callers that want "the whole body or nothing": `None` until the
-/// `0\r\n\r\n` terminator has actually been seen. Backed by
-/// `decode_chunked_body_incremental` starting from byte 0.
-fn decode_chunked_body(bytes: &[u8]) -> Option<(Vec<u8>, usize)> {
-    let (body, consumed, terminated) = decode_chunked_body_incremental(bytes, 0)?;
-    terminated.then_some((body, consumed))
-}
-
 /// How long a connection may take to send a complete request head (and,
 /// between requests on a kept-alive connection, how long it may sit idle
 /// before the next one) before the server closes it. Mirrors the purpose
@@ -332,15 +323,21 @@ struct IncomingMessage {
     /// declared `.d.ts` interface and dropping it would churn every
     /// handler's structural type annotation.
     status_code: f64,
-    /// The fully-read request body as a UTF-8 string. `read_request`
-    /// consumes `Content-Length` / `Transfer-Encoding: chunked` bytes
-    /// before the handler runs, so this is complete by the time the
-    /// handler sees it. Empty for a bodyless request.
-    body: *const c_char,
-    /// `request.on("data", cb)` / `request.on("end", cb)`. Registers a
-    /// listener; the already-buffered body is replayed to it once the
-    /// synchronous part of the handler returns (see
-    /// `deliver_request_body_events`).
+    /// `request.body()` -- the request body received *so far*, as a
+    /// lossy UTF-8 string (computed on call, like `bodyHex()`/
+    /// `bodyBytes()`, not a fixed snapshot -- the handler may now be
+    /// invoked before the body has finished arriving, so this genuinely
+    /// grows across calls until the request completes). Empty for a
+    /// bodyless request.
+    body: *const NativeClosure,
+    /// `request.on("data", cb)` / `request.on("end", cb)`. `"data"`
+    /// fires once per chunk of body bytes as they actually arrive off
+    /// the socket (a real `Uint8Array`, matching Node's own default
+    /// `Buffer` delivery), `"end"` once after the last one --
+    /// `sync_request_body_buffer`/`deliver_request_body_listeners` are
+    /// what deliver these for a
+    /// real connection; the one-shot helpers (which never have a body)
+    /// only ever fire `"end"`, via `deliver_request_body_events`.
     on: *const NativeClosure,
     /// `request.bodyHex()` -- the raw request body as a lowercase hex
     /// string, computed on call. thaw strings are NUL-terminated, so
@@ -412,32 +409,52 @@ struct RequestContext {
     end: NativeClosure,
     end_encoded: NativeClosure,
     request_on: NativeClosure,
+    request_body: NativeClosure,
     request_body_hex: NativeClosure,
     request_body_bytes: NativeClosure,
     write_bytes: NativeClosure,
     end_bytes: NativeClosure,
-    /// The raw request body, kept so `bodyHex()` can hex-encode it. Owns
-    /// what `_body` decoded from.
+    /// The request body received so far, appended to as more arrives
+    /// (`sync_request_body_buffer`) -- what `body()`/`bodyHex()`/
+    /// `bodyBytes()` all read from, live, on every call.
     _raw_body: Vec<u8>,
-    /// `bodyHex()`'s result, computed and stored on the first call so the
-    /// returned pointer stays valid for the rest of the request without
-    /// paying the 2x-body memory for a handler that never asks.
+    /// How much of `_raw_body` has already been delivered to `on("data",
+    /// ...)` listeners (`deliver_request_body_listeners`) -- separate
+    /// from `_raw_body.len()` itself because bytes can be (and, for the
+    /// common small-body case, always are) buffered *before* the handler
+    /// runs and registers any listener at all, but must still be
+    /// delivered to that listener exactly once, the first time delivery
+    /// runs after registration.
+    _delivered_offset: usize,
+    /// `body()`'s cached result. Only reused across calls once the
+    /// connection reports the body is actually complete (checked in
+    /// `request_body_string` via `context.connection`) -- caching a
+    /// snapshot taken while the body is still streaming in would go
+    /// stale the moment more bytes arrive.
+    _body_string: Option<CString>,
+    /// `bodyHex()`'s cached result -- same complete-gated caching as
+    /// `_body_string`, for the same reason.
     _body_hex: Option<CString>,
     /// `request.on("data", cb)` callbacks, in registration order. Each is
-    /// a raw closure pointer (`*const c_void` as `usize`), replayed once
-    /// with the whole body by `deliver_request_body_events`.
+    /// a raw closure pointer (`*const c_void` as `usize`), invoked once
+    /// per chunk by `sync_request_body_buffer`/
+    /// `deliver_request_body_listeners` (real connections)
+    /// or never at all (one-shot helpers, which have no body).
     request_data_listeners: Vec<usize>,
-    /// `request.on("end", cb)` callbacks, fired after the `data` ones.
+    /// `request.on("end", cb)` callbacks, fired once the body is
+    /// complete (or immediately, for the always-bodyless one-shot
+    /// helpers).
     request_end_listeners: Vec<usize>,
-    /// Set once `deliver_request_body_events` has run, so a listener
-    /// registered late (after an `await`) doesn't get a second replay and
-    /// a re-entrant `on(...)` during delivery is a no-op.
+    /// Set once `deliver_request_body_events` (the one-shot-helper path
+    /// only) has run, so a listener registered late doesn't get a
+    /// second replay and a re-entrant `on(...)` during delivery is a
+    /// no-op. The real connection-based path's own idempotency is
+    /// `ConnectionState::body_complete` instead.
     body_events_delivered: bool,
     // Backing storage the `IncomingMessage` pointers borrow from; never
     // read through directly (hence the underscores), just kept alive.
     _method: CString,
     _url: CString,
-    _body: CString,
 }
 
 impl RequestContext {
@@ -479,6 +496,10 @@ impl RequestContext {
                 code: request_add_listener as *const c_void,
                 context: std::ptr::null_mut(),
             },
+            request_body: NativeClosure {
+                code: request_body_string as *const c_void,
+                context: std::ptr::null_mut(),
+            },
             request_body_hex: NativeClosure {
                 code: request_body_hex as *const c_void,
                 context: std::ptr::null_mut(),
@@ -496,6 +517,8 @@ impl RequestContext {
                 context: std::ptr::null_mut(),
             },
             _raw_body: body.to_vec(),
+            _delivered_offset: 0,
+            _body_string: None,
             _body_hex: None,
             request_data_listeners: Vec::new(),
             request_end_listeners: Vec::new(),
@@ -518,23 +541,17 @@ impl RequestContext {
             },
             _method: CString::new(method).unwrap_or_default(),
             _url: CString::new(target).unwrap_or_default(),
-            // Exposed as a string, so decode lossily and drop interior
-            // NULs (which would otherwise truncate it). JSON / form /
-            // text bodies -- the target use case -- are unaffected;
-            // binary bodies are not supported through this field.
-            _body: CString::new(String::from_utf8_lossy(body).replace('\0', "\u{fffd}"))
-                .unwrap_or_default(),
         });
         // The box has a stable address now -- wire every self pointer.
         let context_ptr: *mut RequestContext = &mut *context;
         context.request.method = context._method.as_ptr();
         context.request.url = context._url.as_ptr();
-        context.request.body = context._body.as_ptr();
         context.set_header.context = context_ptr.cast();
         context.write.context = context_ptr.cast();
         context.end.context = context_ptr.cast();
         context.end_encoded.context = context_ptr.cast();
         context.request_on.context = context_ptr.cast();
+        context.request_body.context = context_ptr.cast();
         context.request_body_hex.context = context_ptr.cast();
         context.request_body_bytes.context = context_ptr.cast();
         context.write_bytes.context = context_ptr.cast();
@@ -546,19 +563,132 @@ impl RequestContext {
         context.response.write_bytes = &context.write_bytes;
         context.response.end_bytes = &context.end_bytes;
         context.request.on = &context.request_on;
+        context.request.body = &context.request_body;
         context.request.body_hex = &context.request_body_hex;
         context.request.body_bytes = &context.request_body_bytes;
         context
     }
 }
 
-/// `request.bodyHex()` -- the raw request body as a lowercase hex string,
-/// the lossless counterpart to the lossy `request.body` / `on("data")`
-/// string. Empty for a bodyless request. Computed once and cached on the
-/// context so the pointer outlives the call.
+/// Whether it's safe to permanently cache a `body()`/`bodyHex()` result:
+/// true for a one-shot helper (`connection` null, body is always empty
+/// and complete), or once the real connection reports the request body
+/// has actually finished arriving. Caching a snapshot taken while the
+/// body is still streaming in would go stale the moment more bytes
+/// arrive, so both native functions recompute fresh on every call until
+/// this is true.
+unsafe fn request_body_is_complete(context: &RequestContext) -> bool {
+    context.connection.is_null() || unsafe { (*context.connection).body_complete }
+}
+
+/// If `context`'s request body hasn't finished arriving yet, blocks
+/// (bounded by `header_timeout()`, reusing the same configurable
+/// `THAW_HTTP_HEADER_TIMEOUT_MS` a stalled *head* already uses) reading
+/// more of it directly off the socket -- preserving `body()`/`bodyHex()`/
+/// `bodyBytes()`'s original guarantee (always the *complete* body) for a
+/// handler that calls them synchronously without ever registering
+/// `on("data", ...)`, even for a body larger than fit in the single
+/// socket read that revealed the head. Safe to block here: this whole
+/// runtime is single-threaded and this native call is already
+/// synchronously on the stack inside the one event-loop turn currently
+/// running -- nothing else could make progress concurrently regardless,
+/// so this isn't new blocking, just moved to a different point than the
+/// pre-streaming design's own upfront full-body wait. Temporarily
+/// switches the socket out of its usual nonblocking mode for the
+/// duration; restores it before returning in the success case (a torn-
+/// down connection has nothing left to restore). A read error, EOF, or
+/// timeout tears the connection down via `finish_connection` (matching
+/// every other socket failure in this module) and nulls `context.
+/// connection`/sets `abandoned` (the same "connection died mid-handler"
+/// signal `bail_if_client_gone` already uses elsewhere) -- the caller
+/// still gets back whatever partial body arrived before that happened.
+unsafe fn block_until_body_complete(context: &mut RequestContext) {
+    if context.connection.is_null() {
+        return;
+    }
+    let connection = unsafe { &mut *context.connection };
+    let deadline = Instant::now() + header_timeout();
+    loop {
+        if connection.body_complete {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let abandon = |connection: &mut ConnectionState, context: &mut RequestContext| {
+            finish_connection(connection);
+            context.connection = std::ptr::null_mut();
+            context.abandoned = true;
+        };
+        if remaining.is_zero() {
+            abandon(connection, context);
+            return;
+        }
+        let Some(socket) = connection.socket() else {
+            abandon(connection, context);
+            return;
+        };
+        let _ = socket.set_nonblocking(false);
+        let _ = socket.set_read_timeout(Some(remaining));
+        let mut chunk = [0_u8; 4096];
+        let outcome = socket.read(&mut chunk);
+        match outcome {
+            Ok(0) => {
+                abandon(connection, context);
+                return;
+            }
+            Ok(length) => {
+                let Some(socket) = connection.socket() else {
+                    abandon(connection, context);
+                    return;
+                };
+                let _ = socket.set_read_timeout(None);
+                let _ = socket.set_nonblocking(true);
+                connection.request.extend_from_slice(&chunk[..length]);
+                sync_request_body_buffer(connection, context);
+                refresh_body_deadline(connection);
+            }
+            Err(_) => {
+                // Covers both a genuine I/O error and the timeout
+                // (`WouldBlock`/`TimedOut`, depending on platform) --
+                // either way, nothing more is coming in time.
+                abandon(connection, context);
+                return;
+            }
+        }
+    }
+}
+
+/// `request.body()` -- the request body received so far, as a lossy
+/// UTF-8 string (interior NULs dropped, which would otherwise truncate
+/// it -- JSON/form/text bodies, the target use case, are unaffected;
+/// binary bodies aren't supported through this method, use `bodyHex()`/
+/// `bodyBytes()`). Blocks until the body is actually complete (see
+/// `block_until_body_complete`) the first time it's called for a still-
+/// streaming request -- so, matching this method's original guarantee,
+/// this is always the *whole* body, not a partial snapshot; a handler
+/// that wants real incremental access instead should use
+/// `on("data"/"end", ...)`, which never blocks.
+unsafe extern "C" fn request_body_string(environment: *const c_void) -> *const c_char {
+    let context = request_context(environment);
+    unsafe { block_until_body_complete(context) };
+    if !(unsafe { request_body_is_complete(context) } && context._body_string.is_some()) {
+        let text = String::from_utf8_lossy(&context._raw_body).replace('\0', "\u{fffd}");
+        context._body_string = Some(CString::new(text).unwrap_or_default());
+    }
+    context
+        ._body_string
+        .as_ref()
+        .map_or(std::ptr::null(), |value| value.as_ptr())
+}
+
+/// `request.bodyHex()` -- the raw request body as a lowercase hex
+/// string, the lossless counterpart to `body()`/`on("data")`. Empty for
+/// a bodyless request. Blocks until complete like `body()` does (see
+/// `block_until_body_complete`), then caches the result so the pointer
+/// stays valid and further calls are cheap.
 unsafe extern "C" fn request_body_hex(environment: *const c_void) -> *const c_char {
     let context = request_context(environment);
-    if context._body_hex.is_none() {
+    unsafe { block_until_body_complete(context) };
+    if !(unsafe { request_body_is_complete(context) } && context._body_hex.is_some()) {
         let mut hex = String::with_capacity(context._raw_body.len() * 2);
         for byte in &context._raw_body {
             use std::fmt::Write;
@@ -636,11 +766,13 @@ fn native_bytes_from_slice(bytes: &[u8]) -> *mut u8 {
 /// `request.bodyBytes()` -- the raw request body as a first-class native
 /// byte array (`HirType::Bytes`). The lossless, directly-usable
 /// counterpart to `bodyHex()`: no hex round-trip, the handler indexes and
-/// iterates the bytes as-is. A fresh handle per call (cheap: bodies here
-/// are bounded by `MAX_REQUEST_BODY`), so a handler is free to mutate one
-/// without disturbing another read.
+/// iterates the bytes as-is. Blocks until complete like `body()` does
+/// (see `block_until_body_complete`). A fresh handle per call (cheap:
+/// bodies here are bounded by `MAX_REQUEST_BODY`), so a handler is free
+/// to mutate one without disturbing another read.
 unsafe extern "C" fn request_body_bytes(environment: *const c_void) -> *mut u8 {
     let context = request_context(environment);
+    unsafe { block_until_body_complete(context) };
     native_bytes_from_slice(&context._raw_body)
 }
 
@@ -691,35 +823,21 @@ unsafe extern "C" fn request_add_listener(
     true
 }
 
-/// Replays the fully-read request body to every `request.on("data", ...)`
-/// listener as a single string chunk (skipped when the body is empty,
-/// matching Node -- which never emits `data` for a bodyless request),
-/// then fires every `request.on("end", ...)` listener. Idempotent: runs
-/// at most once per request, right after the synchronous part of the
-/// handler returns, so a handler that registers listeners at the top
-/// (before any `await`) sees them fire regardless of registration order.
+/// Fires every `request.on("end", ...)` listener for the one-shot helpers
+/// (`createServerOnce`/`serveOnce`/`run_server_many`), which have no event
+/// loop and so never parse a request body at all (always empty) -- there
+/// is therefore nothing for `on("data", ...)` to ever fire here. The real,
+/// connection-based server uses `sync_request_body_buffer`/
+/// `deliver_request_body_listeners` instead,
+/// which delivers genuine incremental body chunks as they arrive.
+/// Idempotent: runs at most once per request, right after the
+/// synchronous part of the handler returns.
 fn deliver_request_body_events(context: &mut RequestContext) {
     if context.body_events_delivered {
         return;
     }
     context.body_events_delivered = true;
-    if context.request_data_listeners.is_empty() && context.request_end_listeners.is_empty() {
-        return;
-    }
-    let data_listeners = std::mem::take(&mut context.request_data_listeners);
     let end_listeners = std::mem::take(&mut context.request_end_listeners);
-    let body = context._body.clone();
-    if !context._body.as_bytes().is_empty() {
-        for callback in data_listeners {
-            let callback = callback as *const c_void;
-            unsafe {
-                type Callback = unsafe extern "C" fn(*const c_void, *const c_char);
-                let code = *(callback as *const *const c_void);
-                let callback_fn: Callback = std::mem::transmute(code);
-                callback_fn(callback, body.as_ptr());
-            }
-        }
-    }
     for callback in end_listeners {
         let callback = callback as *const c_void;
         unsafe {
@@ -727,6 +845,118 @@ fn deliver_request_body_events(context: &mut RequestContext) {
             let code = *(callback as *const *const c_void);
             let callback_fn: Callback = std::mem::transmute(code);
             callback_fn(callback);
+        }
+    }
+}
+
+/// Delivers whatever request-body bytes have newly become available since
+/// `connection.body_scan_offset` to `context`'s registered
+/// `on("data", ...)` listeners, as a real `Uint8Array` chunk (matching
+/// real Node's own default `Buffer` delivery, not a string) -- skipped
+/// when there's nothing new (matching Node, which never emits `data` for
+/// an empty chunk) -- and fires every `on("end", ...)` listener once the
+/// body plan reports the request is actually complete. Called both right
+/// after a handler's initial synchronous run (with whatever the very
+/// first read already turned up) and again from the event loop as more
+/// bytes arrive for a parked, still-streaming request -- this is what
+/// makes request-body streaming real rather than a synthetic one-shot
+/// replay. A no-op once this request's body is already marked complete.
+/// Appends whatever request-body bytes have newly become available since
+/// `connection.body_scan_offset` to `context._raw_body` -- what `body()`/
+/// `bodyHex()`/`bodyBytes()` all read from -- and marks `connection.
+/// body_complete`/updates `connection.consumed` once the body plan
+/// reports the request is actually done. Deliberately does *not* fire
+/// any `on("data"/"end", ...)` listener itself (see
+/// `deliver_request_body_listeners` for that): this runs once *before*
+/// the handler's first line of code too (so a handler that calls
+/// `bodyBytes()` synchronously, with no `on(...)` registration at all,
+/// sees whatever's already arrived immediately, matching the pre-
+/// streaming behavior for the overwhelmingly common "whole small body
+/// arrived in the same read as the head" case), and at that point
+/// nothing could possibly be registered to listen yet.
+fn sync_request_body_buffer(connection: &mut ConnectionState, context: &mut RequestContext) {
+    if connection.body_complete {
+        return;
+    }
+    let head_end = connection.head_end;
+    let tail = &connection.request[head_end..];
+    let (new_bytes, new_offset, complete) = match connection.body_plan {
+        BodyPlan::None => (Vec::new(), 0, true),
+        BodyPlan::Fixed(length) => {
+            let available = tail.len().min(length);
+            let new_bytes = tail[connection.body_scan_offset..available].to_vec();
+            (new_bytes, available, available >= length)
+        }
+        BodyPlan::Chunked => {
+            match decode_chunked_body_incremental(tail, connection.body_scan_offset) {
+                Some((bytes, offset, terminated)) => (bytes, offset, terminated),
+                // Malformed chunked body: nothing more can be safely
+                // decoded from this stream, so treat the body as
+                // complete with whatever was already decoded -- the
+                // handler/response can still finish, but the connection
+                // can't be reused afterward (see the keep-alive check in
+                // `write_response`, gated on `body_complete` alone, which
+                // doesn't distinguish "genuinely finished" from "gave up"
+                // -- both correctly force a close here).
+                None => (Vec::new(), connection.body_scan_offset, true),
+            }
+        }
+    };
+    connection.body_scan_offset = new_offset;
+    if complete {
+        connection.body_complete = true;
+        connection.consumed = head_end + new_offset;
+    }
+    if !new_bytes.is_empty() {
+        context._raw_body.extend_from_slice(&new_bytes);
+    }
+}
+
+/// Fires `context`'s registered `on("data", ...)` listeners with
+/// whatever's been appended to `_raw_body` since the last delivery (a
+/// real `Uint8Array` chunk, matching real Node's own default `Buffer`
+/// delivery, not a string) -- skipped when there's nothing new (matching
+/// Node, which never emits `data` for an empty chunk) -- and fires every
+/// `on("end", ...)` listener once `connection.body_complete`. Always
+/// call `sync_request_body_buffer` (or let the handler's own `bodyBytes
+/// ()`/etc. calls, which read `_raw_body` live, stand in for it) first;
+/// this function only ever delivers what's already buffered there, never
+/// reads the connection's raw request bytes itself. Called both right
+/// after a handler's initial synchronous run (with whatever the very
+/// first read already turned up) and again from the event loop as more
+/// bytes arrive for a parked, still-streaming request -- this, plus
+/// `sync_request_body_buffer` running before the handler too, is what
+/// makes request-body streaming real rather than a synthetic one-shot
+/// replay while still giving a handler that never registers `on(...)` at
+/// all synchronous access to the body via `bodyBytes()`/`body()`/
+/// `bodyHex()`.
+fn deliver_request_body_listeners(connection: &ConnectionState, context: &mut RequestContext) {
+    let new_bytes = &context._raw_body[context._delivered_offset..];
+    if !new_bytes.is_empty() {
+        if !context.request_data_listeners.is_empty() {
+            let chunk = native_bytes_from_slice(new_bytes);
+            for &callback in &context.request_data_listeners {
+                let callback = callback as *const c_void;
+                unsafe {
+                    type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
+                    let code = *(callback as *const *const c_void);
+                    let callback_fn: Callback = std::mem::transmute(code);
+                    callback_fn(callback, chunk);
+                }
+            }
+        }
+        context._delivered_offset = context._raw_body.len();
+    }
+    if connection.body_complete {
+        let end_listeners = std::mem::take(&mut context.request_end_listeners);
+        for callback in end_listeners {
+            let callback = callback as *const c_void;
+            unsafe {
+                type Callback = unsafe extern "C" fn(*const c_void);
+                let code = *(callback as *const *const c_void);
+                let callback_fn: Callback = std::mem::transmute(code);
+                callback_fn(callback);
+            }
         }
     }
 }
@@ -1041,6 +1271,20 @@ fn run_server_callback(
     connection: *mut ConnectionState,
 ) -> CallbackOutcome {
     let mut context = RequestContext::new(method, target, body, connection);
+    // Buffer whatever body bytes the very first read already turned up
+    // *before* the handler's first line of code -- a handler that calls
+    // `bodyBytes()`/`body()`/`bodyHex()` synchronously, with no
+    // `on(...)` registration at all, must see them immediately (matching
+    // the pre-streaming behavior for the overwhelmingly common "whole
+    // small body arrived in the same read as the head" case). No
+    // listener can be registered yet at this point, so nothing is
+    // delivered to `on(...)` here -- see the call after the handler runs
+    // for that.
+    if !connection.is_null() {
+        let connection = unsafe { &mut *connection };
+        sync_request_body_buffer(connection, &mut context);
+        refresh_body_deadline(connection);
+    }
     unsafe {
         // The ambient `.d.ts` declares this callback `=> void`, so thaw
         // emits a void-returning native function for a plain handler --
@@ -1060,11 +1304,20 @@ fn run_server_callback(
         let callback_fn: Callback = std::mem::transmute(code);
         callback_fn(callback, request_ptr, response_ptr);
     }
-    // Replay the buffered body to any `request.on("data"/"end", ...)`
-    // listener the handler registered synchronously. An `end` listener
-    // that finishes the response (`res.end(...)` from inside it) is the
-    // whole point, so this runs before the `ended` check below.
-    deliver_request_body_events(&mut context);
+    // Deliver whatever's now buffered (from just above, since nothing
+    // else could have read more off the socket in between) to any
+    // `request.on("data"/"end", ...)` listener the handler registered
+    // synchronously. An `end` listener that finishes the response
+    // (`res.end(...)` from inside it) is the whole point, so this runs
+    // before the `ended` check below. For a real connection this may
+    // only be a *partial* delivery (more bytes can still arrive later,
+    // fed by `connection_ready`); the one-shot helpers have no
+    // connection and no body, so they just fire `end`.
+    if connection.is_null() {
+        deliver_request_body_events(&mut context);
+    } else {
+        deliver_request_body_listeners(unsafe { &*connection }, &mut context);
+    }
     if context.state.ended || connection.is_null() {
         CallbackOutcome::Ready(ResponseSpec {
             status: normalize_status(context.response.status_code),
@@ -1205,6 +1458,24 @@ struct ConnectionState {
     /// body). On keep-alive these are drained and anything past them --
     /// a pipelined next request -- is kept and processed in turn.
     consumed: usize,
+    /// How far into `request[head_end..]` the body has already been
+    /// scanned and delivered to `on("data", ...)` listeners -- for
+    /// `BodyPlan::Fixed`, raw bytes delivered so far; for `BodyPlan::
+    /// Chunked`, the encoded-stream offset `decode_chunked_body_
+    /// incremental` already consumed. Reset to 0 for each new request.
+    body_scan_offset: usize,
+    /// Whether the *current* request's body has been fully received
+    /// (immediately true for `BodyPlan::None`). The handler is dispatched
+    /// as soon as the head is parsed, regardless of this -- real
+    /// incremental request-body streaming, not "buffer everything first."
+    body_complete: bool,
+    /// Whether the current request's handler has already been dispatched
+    /// -- guards `try_buffered_request` against ever calling it twice for
+    /// the same request (it may be invoked again, e.g. from a readable
+    /// event that arrives after dispatch but before the response fully
+    /// renders in some edge case). Reset alongside `head_end`/`body_plan`
+    /// on keep-alive reuse.
+    dispatched: bool,
     /// Set when the client is seen to have hung up while an `async`
     /// handler (or a streaming response) is still in flight: the socket
     /// is shut down and unwatched right away, and the handler's next
@@ -1461,6 +1732,9 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         head_end: 0,
         body_plan: BodyPlan::None,
         consumed: 0,
+        body_scan_offset: 0,
+        body_complete: false,
+        dispatched: false,
         client_gone: false,
     }));
     let watcher = unsafe {
@@ -1481,10 +1755,89 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
     server.connections.fetch_add(1, Ordering::AcqRel);
 }
 
+/// What `feed_parked_request_body` did. Deliberately not a plain `bool`:
+/// the caller must never touch `connection` again after `ConnectionClosed`
+/// (`finish_connection` frees the `ConnectionState` box itself).
+enum ParkedBodyFeed {
+    /// No live still-streaming context to feed (no `response_ctx`, or its
+    /// body is already complete) -- fall through to the existing
+    /// hang-up/streaming-response handling unchanged.
+    Nothing,
+    /// New bytes were read and delivered; the connection is still alive.
+    Fed,
+    /// The connection was torn down (EOF, a read error, or the socket was
+    /// already gone) -- `connection` must not be used again.
+    ConnectionClosed,
+}
+
+/// Called from `connection_ready`'s parked-handler branch: if there's a
+/// live, still-streaming request context (`response_ctx`, body not yet
+/// `body_complete`), reads whatever new bytes are available and delivers
+/// them via `sync_request_body_buffer`/`deliver_request_body_listeners`
+/// -- this is what lets
+/// `request.on("data"/"end", ...)` keep firing for a handler that already
+/// returned (or suspended) before the body finished arriving, the same
+/// way a genuinely async handler's `response.write`/`end` keeps driving
+/// the *response* side from this same parked state. If the delivered
+/// `"end"` event makes the handler call `response.end(...)`, that already
+/// flows through the ordinary `finish_response`/`rewatch_connection`
+/// path unchanged -- `connection_ready`'s own loop picks up the resulting
+/// state change (`awaiting_handler` cleared, a response now queued) on
+/// its next iteration.
+fn feed_parked_request_body(connection: &mut ConnectionState) -> ParkedBodyFeed {
+    if connection.response_ctx.is_null() || connection.body_complete {
+        return ParkedBodyFeed::Nothing;
+    }
+    let mut chunk = [0_u8; 4096];
+    let mut read_any = false;
+    loop {
+        let Some(socket) = connection.socket() else {
+            finish_connection(connection);
+            return ParkedBodyFeed::ConnectionClosed;
+        };
+        match socket.read(&mut chunk) {
+            Ok(0) => {
+                finish_connection(connection);
+                return ParkedBodyFeed::ConnectionClosed;
+            }
+            Ok(length) => {
+                connection.request.extend_from_slice(&chunk[..length]);
+                read_any = true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => {
+                finish_connection(connection);
+                return ParkedBodyFeed::ConnectionClosed;
+            }
+        }
+    }
+    // Genuinely nothing new (the very first read already `WouldBlock`ed):
+    // must report `Nothing`, not `Fed` -- `connection_ready`'s caller
+    // loops on `Fed` expecting real progress each time, and a nonblocking
+    // socket with no new data never blocks on its own, so returning `Fed`
+    // here would spin forever with no actual I/O to wait on.
+    if !read_any {
+        return ParkedBodyFeed::Nothing;
+    }
+    // Nothing between here and the entry check above can have nulled
+    // `response_ctx` (only `finish_connection` does, and that already
+    // returned early above).
+    let context = unsafe { &mut *connection.response_ctx };
+    sync_request_body_buffer(connection, context);
+    refresh_body_deadline(connection);
+    deliver_request_body_listeners(connection, context);
+    ParkedBodyFeed::Fed
+}
+
 extern "C" fn connection_ready(context: *mut u8, _events: i16) {
     let connection = unsafe { &mut *(context as *mut ConnectionState) };
     loop {
         if connection.awaiting_handler || (connection.streaming && !connection.response_ended) {
+            match feed_parked_request_body(connection) {
+                ParkedBodyFeed::ConnectionClosed => return,
+                ParkedBodyFeed::Fed => continue,
+                ParkedBodyFeed::Nothing => {}
+            }
             // An `async` handler / streaming response is still in flight.
             // Its `response.write`/`end` drives things from here -- but a
             // readable event now may be the client hanging up. If so,
@@ -1583,25 +1936,22 @@ fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan) {
     )
 }
 
-/// If `connection.request` (from `head_end` on) already holds a full
-/// body per `connection.body_plan`, returns it decoded plus how many
-/// bytes of the body region it spans (so pipelined bytes past it are
-/// left in place). `None` means keep reading.
-fn take_complete_body(connection: &ConnectionState) -> Option<(Vec<u8>, usize)> {
-    let tail = &connection.request[connection.head_end..];
-    match connection.body_plan {
-        BodyPlan::None => Some((Vec::new(), 0)),
-        BodyPlan::Fixed(length) => {
-            (tail.len() >= length).then(|| (tail[..length].to_vec(), length))
-        }
-        BodyPlan::Chunked => decode_chunked_body(tail),
-    }
-}
-
 /// Tries to turn what's currently buffered in `connection.request` into a
 /// dispatched request, without reading the socket. Returns `Some(true)`
 /// if a request was dispatched, `Some(false)` if the connection was torn
-/// down (oversized / malformed), `None` if more bytes are needed.
+/// down (oversized / malformed), `None` if the head isn't complete yet.
+///
+/// Unlike the old buffer-then-dispatch model, this dispatches the handler
+/// as soon as the *head* is parsed -- real Node invokes the handler before
+/// the body has necessarily finished arriving, and delivers it
+/// incrementally via `request.on("data"/"end", ...)` as more bytes come
+/// off the socket (`sync_request_body_buffer`/`deliver_request_body_
+/// listeners`, called both here for
+/// whatever's already buffered and again later from `connection_ready` as
+/// the rest arrives). Peak memory isn't reduced by this -- the whole body
+/// is still accumulated in `connection.request`/`context._raw_body`,
+/// bounded by `MAX_REQUEST_BODY` as before -- streaming here is about
+/// matching Node's actual timing/API contract, not backpressure.
 fn try_buffered_request(connection: &mut ConnectionState) -> Option<bool> {
     if connection.head_end == 0 {
         let index = connection
@@ -1611,6 +1961,15 @@ fn try_buffered_request(connection: &mut ConnectionState) -> Option<bool> {
         connection.head_end = index + 4;
         let (_, _, _, body_plan) = parse_head(&connection.request[..connection.head_end]);
         connection.body_plan = body_plan;
+        // Deliberately *not* pre-marking `body_complete` here even for
+        // `BodyPlan::None` -- `deliver_request_body_listeners`'s first
+        // call (right after dispatch) is the one place that transitions
+        // it false -> true *and* sets `connection.consumed` at that same
+        // moment; pre-setting it here would make that function's own
+        // `if connection.body_complete { return; }` guard skip ever
+        // running, leaving `consumed` at 0 forever and the same request
+        // bytes stuck in the buffer to be re-parsed (and re-dispatched)
+        // indefinitely on every keep-alive reuse.
     }
     // A `Content-Length` past the cap, or a chunked body that grows past
     // it, is refused -- and the connection can't be reused (unread body
@@ -1625,9 +1984,18 @@ fn try_buffered_request(connection: &mut ConnectionState) -> Option<bool> {
         finish_connection(connection);
         return Some(false);
     }
-    let (body, body_len) = take_complete_body(connection)?;
-    connection.consumed = connection.head_end + body_len;
-    Some(dispatch_request(connection, body))
+    if connection.dispatched {
+        // Already running (or finished) -- nothing new to do here; more
+        // body bytes for it are delivered by `connection_ready`'s own
+        // continuation path instead, not by re-entering this function.
+        // Shouldn't be reachable in practice (the surrounding guards
+        // already keep `read_request` from being called again once
+        // dispatched), but stays safe rather than re-invoking the
+        // handler a second time if it ever is.
+        return Some(true);
+    }
+    connection.dispatched = true;
+    Some(dispatch_request(connection))
 }
 
 fn read_request(connection: &mut ConnectionState) -> bool {
@@ -1660,11 +2028,34 @@ fn read_request(connection: &mut ConnectionState) -> bool {
 }
 
 /// The head and body are both fully in hand: run the handler.
-fn dispatch_request(connection: &mut ConnectionState, body: Vec<u8>) -> bool {
+/// (Re-)arms `connection.head_deadline` -- doubling, per its own existing
+/// role, as a body-arrival deadline now that the handler may be running
+/// (or parked) before the body is complete: `None` (no more read-side
+/// timeout needed) once `connection.body_complete`, otherwise a fresh
+/// `header_timeout()` from now. Called once right after dispatch (in
+/// `run_server_callback`, so even a handler that never touches the body
+/// at all -- just `on("data"/"end", ...)` -- still gets a stalled
+/// connection cleaned up by `sweep_idle_connections`, the same as a
+/// handler that calls `body()`/`bodyHex()`/`bodyBytes()` already does via
+/// `block_until_body_complete`'s own independent bound) and again every
+/// time `feed_parked_request_body` reads more bytes -- so a slow but
+/// still-progressing client keeps getting a fresh window, and only a
+/// genuine stall (no bytes at all within one window) is abandoned.
+fn refresh_body_deadline(connection: &mut ConnectionState) {
+    connection.head_deadline = if connection.body_complete {
+        None
+    } else {
+        Some(Instant::now() + header_timeout())
+    };
+}
+
+fn dispatch_request(connection: &mut ConnectionState) -> bool {
     let (method, target, keep_alive, _) = parse_head(&connection.request[..connection.head_end]);
     let callback = unsafe { &*connection.server }.callback as *const c_void;
-    // The whole request is in: the read-side timeout no longer applies --
-    // the handler (and any streaming response) bounds its own lifetime.
+    // The head is in and the handler is about to run -- cleared
+    // unconditionally here; `run_server_callback` re-arms it as a
+    // body-arrival deadline right after, once `sync_request_body_buffer`
+    // has determined whether the body is actually complete yet.
     connection.head_deadline = None;
     // Set before running the handler: an `async` handler that suspends
     // won't return through here, and `finish_response` needs the
@@ -1674,7 +2065,7 @@ fn dispatch_request(connection: &mut ConnectionState, body: Vec<u8>) -> bool {
         callback,
         &method,
         &target,
-        &body,
+        &[],
         connection as *mut ConnectionState,
     ) {
         CallbackOutcome::Ready(spec) => {
@@ -1733,6 +2124,16 @@ fn write_response(connection: &mut ConnectionState) -> FlushResult {
         rewatch_connection(connection, THAW_FD_READABLE);
         return FlushResult::Pending;
     }
+    // A response that finished before its own request's body did can't
+    // safely reuse the connection: the unread remainder is still sitting
+    // in the stream (or still arriving), and reading it as the start of
+    // the *next* request would desync every request after this one. Real
+    // Node drains it first; this is a deliberately simpler, honest
+    // fallback (force close instead) rather than a silent-discard-while-
+    // still-streaming code path.
+    if connection.keep_alive && !connection.body_complete {
+        connection.keep_alive = false;
+    }
     if connection.keep_alive {
         // Reuse the connection instead of closing it: drain the request
         // just answered and reset the per-request fields for the next
@@ -1757,6 +2158,9 @@ fn write_response(connection: &mut ConnectionState) -> FlushResult {
         connection.response_ended = false;
         connection.head_end = 0;
         connection.body_plan = BodyPlan::None;
+        connection.body_scan_offset = 0;
+        connection.body_complete = false;
+        connection.dispatched = false;
         // Waiting for the next request now: the read-side timeout applies
         // again (doubling as a keep-alive idle timeout).
         connection.head_deadline = Some(Instant::now() + header_timeout());
@@ -2151,26 +2555,35 @@ mod tests {
     #[test]
     fn decodes_a_chunked_request_body() {
         let input = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        let (body, consumed) = decode_chunked_body(input).unwrap();
+        let (body, consumed, terminated) = decode_chunked_body_incremental(input, 0).unwrap();
         assert_eq!(body, b"hello world");
         assert_eq!(consumed, input.len());
+        assert!(terminated);
         // Bytes past the terminator (a pipelined request) aren't consumed.
-        let (body, consumed) = decode_chunked_body(b"3\r\nabc\r\n0\r\n\r\nGET /next").unwrap();
+        let (body, consumed, terminated) =
+            decode_chunked_body_incremental(b"3\r\nabc\r\n0\r\n\r\nGET /next", 0).unwrap();
         assert_eq!(body, b"abc");
         assert_eq!(consumed, b"3\r\nabc\r\n0\r\n\r\n".len());
-        assert_eq!(decode_chunked_body(b"0\r\n\r\n"), Some((Vec::new(), 5)));
+        assert!(terminated);
+        assert_eq!(
+            decode_chunked_body_incremental(b"0\r\n\r\n", 0),
+            Some((Vec::new(), 5, true))
+        );
         // Incomplete: terminator not yet received.
-        assert_eq!(decode_chunked_body(b"5\r\nhel"), None);
-        assert_eq!(decode_chunked_body(b"5\r\nhello\r\n"), None);
+        let (body, _, terminated) = decode_chunked_body_incremental(b"5\r\nhel", 0).unwrap();
+        assert_eq!(body, b"");
+        assert!(!terminated);
+        let (body, _, terminated) = decode_chunked_body_incremental(b"5\r\nhello\r\n", 0).unwrap();
+        assert_eq!(body, b"hello");
+        assert!(!terminated);
     }
 
-    /// The incremental primitive `decode_chunked_body_incremental` backs:
-    /// fed the same growing buffer a real socket read loop would produce
-    /// (arriving in several separate pieces, mid-chunk splits included),
-    /// it must decode each newly-complete chunk as soon as it's available
-    /// -- not wait for the `0\r\n\r\n` terminator like the all-or-nothing
-    /// `decode_chunked_body` wrapper still does -- matching real Node's
-    /// own incremental chunked-body streaming.
+    /// `decode_chunked_body_incremental`, fed the same growing buffer a
+    /// real socket read loop would produce (arriving in several separate
+    /// pieces, mid-chunk splits included), must decode each newly-complete
+    /// chunk as soon as it's available -- not wait for the `0\r\n\r\n`
+    /// terminator -- matching real Node's own incremental chunked-body
+    /// streaming.
     #[test]
     fn decode_chunked_body_incremental_yields_each_chunk_as_it_arrives() {
         let mut buffer: Vec<u8> = Vec::new();
