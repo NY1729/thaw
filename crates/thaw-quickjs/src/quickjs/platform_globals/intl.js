@@ -74,11 +74,20 @@
     if (style === 'longOffset') {
       return intlOffsetString(zoned.offsetMinutes, true);
     }
-    if (style === 'long' || style === 'longGeneric') {
-      // No real per-zone English long names (e.g. "Eastern Daylight
-      // Time") without bundling full ICU data -- documented, honest
-      // simplification.
-      return intlOffsetString(zoned.offsetMinutes, true);
+    if (style === 'long') {
+      // Real per-zone English long name (e.g. "Eastern Daylight
+      // Time"/"Eastern Standard Time", DST-aware) -- `intl_zoned_
+      // parts_json`'s `longName`, mechanically extracted from a real
+      // `node`/ICU run (`intl_time_zone_names.rs`). Falls back to the
+      // synthesized numeric offset for a zone the table has no entry
+      // for (shouldn't happen for a real IANA zone, but keeps this
+      // honestly degrading rather than throwing either way).
+      return zoned.longName !== null ? zoned.longName : intlOffsetString(zoned.offsetMinutes, true);
+    }
+    if (style === 'longGeneric') {
+      // Same table, DST-independent form (e.g. "Eastern Time" rather
+      // than "Eastern Standard/Daylight Time").
+      return zoned.longGenericName !== null ? zoned.longGenericName : intlOffsetString(zoned.offsetMinutes, true);
     }
     // 'short' / 'shortOffset' / 'shortGeneric' -- 'shortOffset' always
     // wants a numeric offset; the others prefer `jiff`'s own
