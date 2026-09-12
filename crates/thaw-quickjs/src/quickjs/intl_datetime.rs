@@ -1,18 +1,18 @@
-// Real per-locale `Intl.DateTimeFormat` field rendering (M4 of
+// Real per-locale `Intl.DateTimeFormat` field rendering (M4+M5 of
 // docs/design/intl-polyfill.md's "Real CLDR data via icu4x" plan) --
-// month/weekday/era/day-period names, field ordering, and literal
-// punctuation via `icu_datetime`, for any curated locale
-// (`thaw-icu-data`). `jiff` (`intl.rs`) stays the raw offset/DST/
-// timezone-name engine unchanged; this file only ever receives already-
-// zone-adjusted calendar fields (year/month/day/hour/minute/second) and
-// formats *those*, so it needs no timezone awareness of its own.
+// month/weekday/era/day-period names, field ordering, literal
+// punctuation, and (M5) non-Gregorian calendar systems, via
+// `icu_datetime`, for any curated locale (`thaw-icu-data`). `jiff`
+// (`intl.rs`) stays the raw offset/DST/timezone-name engine unchanged;
+// this file only ever receives already-zone-adjusted calendar fields
+// (year/month/day/hour/minute/second) and formats *those*, so it needs
+// no timezone awareness of its own.
 //
-// Gregorian calendar only in this milestone (M5 adds the rest, dispatch
-// by the resolved locale's default/requested calendar). `timeZoneName`
-// rendering is deliberately NOT part of this file -- `intl.js` keeps
-// using the existing jiff-backed abbreviation/long-name path for that
-// one field until M13 retires `intl_time_zone_names.rs`'s English-only
-// table in favor of real per-locale `icu_datetime` zone data.
+// `timeZoneName` rendering is deliberately NOT part of this file --
+// `intl.js` keeps using the existing jiff-backed abbreviation/long-name
+// path for that one field until M13 retires `intl_time_zone_names.rs`'s
+// English-only table in favor of real per-locale `icu_datetime` zone
+// data.
 //
 // ## Why a `FieldSetBuilder`, and its real limits
 //
@@ -267,13 +267,27 @@ fn write_parts_json(formatted: &impl writeable::Writeable) -> Option<String> {
 /// zone-adjusted `year`/`month`/`day`/`hour`/`minute`/`second` fields
 /// are used here.
 ///
-/// Gregorian calendar only (`FixedCalendarDateTimeFormatter<Gregorian,
-/// _>`, not the fully calendar-generic `DateTimeFormatter` -- M5 adds
-/// the rest). Dispatches to the narrowest of `build_date()`/
-/// `build_time()`/`build_date_and_time()` that fits the request (never
-/// `build_composite()`, which is calendar- *and* zone-generic and would
-/// require data/input this milestone deliberately doesn't have -- no
-/// zone rendering here, see this file's own header comment).
+/// Any calendar system the resolved locale calls for (M5): a date field
+/// set uses the fully calendar-generic `DateTimeFormatter` (not
+/// `FixedCalendarDateTimeFormatter<Gregorian, _>`), whose `AnyCalendar`
+/// dispatch already reads both the request's `-u-ca-` subtag and the
+/// locale's own CLDR-default calendar (`thaw-icu-data`'s vendored
+/// `CalendarPreferredV1` marker) with zero extra code here -- confirmed
+/// empirically to match real Node exactly for `th-TH` (defaults to
+/// Buddhist, no explicit `calendar` needed), `ja-JP-u-ca-japanese`
+/// (Reiwa-era years), and `ar-SA-u-ca-islamic-umalqura` (real Hijri
+/// dates), with no per-calendar Rust dispatch code at all: the ISO date
+/// from `zoned_parts_json` is simply converted into whichever calendar
+/// the formatter already selected, via `Date::to_calendar(formatter.
+/// calendar())`. A time-only field set has no calendar to speak of, so
+/// it stays on `FixedCalendarDateTimeFormatter<Gregorian, _>` (any fixed
+/// calendar would render hour/minute/second identically).
+///
+/// Dispatches to the narrowest of `build_date()`/`build_time()`/
+/// `build_date_and_time()` that fits the request (never
+/// `build_composite()`, which is additionally *zone*-generic and would
+/// require zone data/input this milestone deliberately doesn't have --
+/// no zone rendering here, see this file's own header comment).
 fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_parts_json: &str) -> String {
     use std::str::FromStr;
 
@@ -283,10 +297,22 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
     let curated_tag = resolve_curated_locale(&locale.id);
     let curated_locale: icu_locale::Locale =
         curated_tag.parse().expect("resolve_curated_locale returns a valid tag");
+    // `curated_locale` only carries language/script/region (`thaw-icu-
+    // data` only vendors data keyed by those) -- its own `-u-ca-`/
+    // `-u-nu-` extensions, if any, come back from `resolve_curated_
+    // locale` empty. The *requested* locale's real extensions (already
+    // folded in JS-side for an explicit `calendar`/`numberingSystem`
+    // constructor option, via `Intl.Locale`'s own tag-rewriting) must
+    // still reach the formatter, or `ja-JP-u-ca-japanese`/`{calendar:
+    // 'japanese'}` would silently render Gregorian -- found exactly
+    // this way, cross-checking against real Node.
     let mut prefs = icu_datetime::DateTimeFormatterPreferences::from(&curated_locale);
+    let requested_prefs = icu_datetime::DateTimeFormatterPreferences::from(&locale);
+    prefs.calendar_algorithm = requested_prefs.calendar_algorithm;
+    prefs.numbering_system = requested_prefs.numbering_system;
 
     let options = DateTimeOptions::from_json(options_json);
-    prefs.hour_cycle = options.hour_cycle();
+    prefs.hour_cycle = options.hour_cycle().or(requested_prefs.hour_cycle);
 
     let mut builder = icu_datetime::fieldsets::builder::FieldSetBuilder::new();
     builder.date_fields = options.date_fields();
@@ -296,8 +322,11 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
 
     let zoned: serde_json::Value = serde_json::from_str(zoned_parts_json).unwrap_or_default();
     let get_i32 = |name: &str| zoned.get(name).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-    let date_result =
-        icu_calendar::Date::try_new_gregorian(get_i32("year"), get_i32("month") as u8, get_i32("day") as u8);
+    // ISO, not Gregorian: the source date `Date::to_calendar(...)`
+    // converts *from*, regardless of which calendar the formatter (and
+    // therefore the locale) actually selects.
+    let iso_date_result =
+        icu_calendar::Date::try_new_iso(get_i32("year"), get_i32("month") as u8, get_i32("day") as u8);
     let time_result = icu_time::Time::try_new(
         get_i32("hour") as u8,
         get_i32("minute") as u8,
@@ -310,36 +339,34 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
 
     let formatted = match (has_date, has_time) {
         (true, true) => {
-            let (Ok(date), Ok(time)) = (date_result, time_result) else {
+            let (Ok(iso_date), Ok(time)) = (iso_date_result, time_result) else {
                 return "[]".to_string();
             };
             let Ok(field_set) = builder.build_date_and_time() else {
                 return "[]".to_string();
             };
-            let Ok(formatter) = icu_datetime::FixedCalendarDateTimeFormatter::<icu_calendar::Gregorian, _>::try_new_unstable(
-                &thaw_icu_data::ThawIcuDataProvider,
-                prefs,
-                field_set,
-            ) else {
+            let Ok(formatter) =
+                icu_datetime::DateTimeFormatter::try_new_unstable(&thaw_icu_data::ThawIcuDataProvider, prefs, field_set)
+            else {
                 return "[]".to_string();
             };
+            let date = iso_date.to_calendar(formatter.calendar());
             let datetime = icu_datetime::input::DateTime { date, time };
             write_parts_json(&formatter.format(&datetime))
         }
         (true, false) => {
-            let Ok(date) = date_result else {
+            let Ok(iso_date) = iso_date_result else {
                 return "[]".to_string();
             };
             let Ok(field_set) = builder.build_date() else {
                 return "[]".to_string();
             };
-            let Ok(formatter) = icu_datetime::FixedCalendarDateTimeFormatter::<icu_calendar::Gregorian, _>::try_new_unstable(
-                &thaw_icu_data::ThawIcuDataProvider,
-                prefs,
-                field_set,
-            ) else {
+            let Ok(formatter) =
+                icu_datetime::DateTimeFormatter::try_new_unstable(&thaw_icu_data::ThawIcuDataProvider, prefs, field_set)
+            else {
                 return "[]".to_string();
             };
+            let date = iso_date.to_calendar(formatter.calendar());
             write_parts_json(&formatter.format(&date))
         }
         (false, true) => {

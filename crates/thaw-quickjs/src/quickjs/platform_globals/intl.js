@@ -131,7 +131,17 @@
       // genuinely new capabilities), so this constructor must degrade
       // gracefully rather than assume the native call exists.
       this._useRealLocaleData = typeof __thaw_intl_datetime_format_parts === 'function';
-      this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
+      // An explicit `calendar`/`numberingSystem` constructor option
+      // overrides any `-u-ca-`/`-u-nu-` the locale tag itself already
+      // carries (confirmed against real Node), the same precedence
+      // `Intl.Locale`'s constructor already implements above -- reuse
+      // its tag-rewriting approach rather than duplicating it.
+      const localeTag = String(locale === undefined ? 'en-US' : locale);
+      this.locale = this._useRealLocaleData
+        ? (opts.calendar !== undefined || opts.numberingSystem !== undefined
+            ? new Locale(localeTag, { calendar: opts.calendar, numberingSystem: opts.numberingSystem }).toString()
+            : localeTag)
+        : 'en-US';
       this._timeZone = opts.timeZone ? String(opts.timeZone) : 'UTC';
       // Eager validation -- real Intl throws a `RangeError` for an
       // unrecognized `timeZone` at construction time, which is exactly
@@ -436,8 +446,14 @@
   // existing at all is the wrong shape (it always exists in real Node),
   // but no program can observe the difference unless it actually names
   // `Intl.Locale`, which is exactly what turns the feature on.
-  if (typeof __thaw_intl_locale_parse === 'function') {
-    class Locale {
+  // Declared unconditionally (not gated by the `if` below) so
+  // `DateTimeFormat`'s own `calendar`/`numberingSystem` constructor
+  // option handling can reuse it internally even when `Intl.Locale`
+  // itself isn't meant to be publicly exposed yet -- its methods only
+  // ever get called from a code path that already checked the native
+  // global exists (`_useRealLocaleData`), so the class body itself
+  // never touches anything unavailable.
+  class Locale {
       constructor(tag, options) {
         if (tag === undefined || tag === null) {
           throw new TypeError("First argument to Intl.Locale constructor can't be empty or missing");
@@ -534,8 +550,12 @@
       minimize() {
         return this._withTransformedSubtags(JSON.parse(__thaw_intl_locale_minimize(this.baseName)));
       }
-    }
+  }
 
+  // `Intl.Locale` itself is only ever *publicly exposed* when the
+  // native primitives actually exist (see the class's own doc comment
+  // above) -- the class declaration itself stays unconditional.
+  if (typeof __thaw_intl_locale_parse === 'function') {
     globalThis.Intl = globalThis.Intl || {};
     globalThis.Intl.Locale = Locale;
   }
