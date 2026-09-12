@@ -260,6 +260,7 @@ fn generate_registry_shims(
         .flat_map(|pkg| {
             pkg.factory_class_returns
                 .iter()
+                .filter(|(_, class)| class.as_str() != "Buffer")
                 .map(|(function, class)| (function.clone(), class.clone()))
         })
         .collect();

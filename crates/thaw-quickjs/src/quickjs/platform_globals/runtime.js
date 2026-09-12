@@ -19,7 +19,7 @@
   // (`arguments`/`caller`, non-configurable on a bound function).
   globalThis.__thaw_bind_preserving_statics = (fn, receiver) => {
     if (typeof fn !== 'function') return fn;
-    const bound = fn.bind(receiver);
+    const bound = Function.prototype.bind.call(fn, receiver);
     for (const prop of Object.getOwnPropertyNames(fn)) {
       if (prop === 'length' || prop === 'name' || prop === 'prototype'
         || prop === 'arguments' || prop === 'caller') continue;
