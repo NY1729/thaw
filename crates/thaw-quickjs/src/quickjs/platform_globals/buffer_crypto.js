@@ -452,13 +452,34 @@
   const createVerify = algorithm => new Verify(algorithm);
   const sign = (algorithm, data, key) => new Sign(algorithm || 'sha256').update(data).sign(key);
   const verify = (algorithm, data, key, signature) => new Verify(algorithm || 'sha256').update(data).verify(key, signature);
+  const RSA_PKCS1_OAEP_PADDING = 4;
+  // `publicEncrypt(key, buffer)` / `privateDecrypt(key, buffer)` --
+  // real Node's default padding for *these* (unlike `Sign`/`Verify`'s
+  // own PKCS1v15 default) is OAEP, defaulting to a SHA-1 `oaepHash`
+  // (OpenSSL's own long-standing default) unless `padding:
+  // RSA_PKCS1_PADDING` is explicitly requested. RSA only -- an EC/
+  // Ed25519 key throws a clear error, matching real Node. `publicDecrypt`/
+  // `privateEncrypt` (the rarer raw-RSA "encrypt with private key"
+  // operations) are not implemented.
+  const resolveEncryptionPadding = key => (key && key.padding === RSA_PKCS1_PADDING)
+    ? '' : normalizeHashAlgorithm((key && key.oaepHash) || 'sha1');
+  const publicEncrypt = (key, buffer) => {
+    const { pem } = parseAsymmetricKeyMaterial(key);
+    const oaepDigest = resolveEncryptionPadding(key);
+    return Buffer.from(__thaw_crypto_asymmetric_encrypt_hex(pem, oaepDigest, Buffer.from(buffer).toString('hex')), 'hex');
+  };
+  const privateDecrypt = (key, buffer) => {
+    const { pem } = parseAsymmetricKeyMaterial(key);
+    const oaepDigest = resolveEncryptionPadding(key);
+    return Buffer.from(__thaw_crypto_asymmetric_decrypt_hex(pem, oaepDigest, Buffer.from(buffer).toString('hex')), 'hex');
+  };
   const cryptoModule = {
     createHash: algorithm => new Hash(algorithm),
     createHmac: (algorithm, key) => new Hmac(algorithm, key),
     createCipheriv, createDecipheriv, Cipheriv,
     Hash, Hmac, KeyObject, createSecretKey, createPrivateKey, createPublicKey, pbkdf2Sync, scrypt, scryptSync, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
-    Sign, Verify, createSign, createVerify, sign, verify,
-    constants: { RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING },
+    Sign, Verify, createSign, createVerify, sign, verify, publicEncrypt, privateDecrypt,
+    constants: { RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING },
     timingSafeEqual, getHashes: () => ['sha256', 'sha512']
   };
   const subtle = {

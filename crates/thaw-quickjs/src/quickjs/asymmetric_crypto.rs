@@ -1,13 +1,16 @@
 // RSA/ECDSA/EdDSA support for `node:crypto`'s `createSign`/
-// `createVerify`/`crypto.sign`/`crypto.verify`
-// (`platform_globals/buffer_crypto.js`). Matches this crate's existing
-// "honest partial support" precedent: sign/verify (RSA PKCS1v15+PSS,
-// ECDSA P-256/P-384/P-521 DER-encoded matching real Node's own default
-// `dsaEncoding: 'der'`, Ed25519/EdDSA), PEM and DER key input,
-// passphrase-protected PKCS8 private keys. No encrypt/decrypt or key
-// generation here (see `crypto_asymmetric_encrypt_hex`/
-// `crypto_generate_key_pair_json` for those, added alongside this).
-// Still out of scope: P-521's `SecretKey` is only reachable via the
+// `createVerify`/`crypto.sign`/`crypto.verify`/`publicEncrypt`/
+// `privateDecrypt` (`platform_globals/buffer_crypto.js`). Matches this
+// crate's existing "honest partial support" precedent: sign/verify
+// (RSA PKCS1v15+PSS, ECDSA P-256/P-384/P-521 DER-encoded matching real
+// Node's own default `dsaEncoding: 'der'`, Ed25519/EdDSA), RSA
+// encrypt/decrypt (PKCS1v15 default + OAEP), PEM and DER key input,
+// passphrase-protected PKCS8 private keys. No key generation here (see
+// `crypto_generate_key_pair_json`, added alongside this). No
+// `publicDecrypt`/`privateEncrypt` (Node's rarer raw-RSA "encrypt with
+// private, decrypt with public" operations -- essentially unused in
+// practice). Still out of scope: P-521's `SecretKey` is only reachable
+// via the
 // generic `elliptic_curve`/`ecdsa` crates (its own `ecdsa::SigningKey`/
 // `VerifyingKey` newtypes don't implement `pkcs8`'s decode traits
 // directly, unlike P-256/P-384 -- see `parse_ec_p521_private`/
@@ -574,4 +577,60 @@ fn verify_rsa_pss(
         "sha512" => rsa_pss_verify_for!(key, sha2::Sha512, data, signature),
         _ => unreachable!("checked by digest_size_matches"),
     }
+}
+
+/// RSA `publicEncrypt(key, buffer)` -- accepts either a public *or* a
+/// private key (real Node does too, encrypting with the private key's
+/// own public half), PKCS1v15 padding (Node's default) or OAEP
+/// (`oaep_digest` non-empty picks the hash). EC/Ed25519 keys don't
+/// support encryption at all, matching real Node's own error there.
+pub(crate) fn crypto_asymmetric_encrypt_hex(
+    pem: &str,
+    oaep_digest: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let key = match parse_key(pem).ok_or("invalid or unsupported key")? {
+        ParsedKey::RsaPrivate(key) => key.to_public_key(),
+        ParsedKey::RsaPublic(key) => *key,
+        _ => return Err("encryption is only supported for RSA keys".to_string()),
+    };
+    let mut rng = rand_core::OsRng;
+    if oaep_digest.is_empty() {
+        return key
+            .encrypt(&mut rng, rsa::Pkcs1v15Encrypt, data)
+            .map_err(|error| error.to_string());
+    }
+    match oaep_digest {
+        "sha1" => key.encrypt(&mut rng, rsa::Oaep::new::<sha1::Sha1>(), data),
+        "sha256" => key.encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha256>(), data),
+        "sha384" => key.encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha384>(), data),
+        "sha512" => key.encrypt(&mut rng, rsa::Oaep::new::<sha2::Sha512>(), data),
+        _ => return Err(format!("unsupported OAEP digest: {oaep_digest}")),
+    }
+    .map_err(|error| error.to_string())
+}
+
+/// RSA `privateDecrypt(key, buffer)` -- requires a private key.
+/// Mirrors `crypto_asymmetric_encrypt_hex`'s padding choice.
+pub(crate) fn crypto_asymmetric_decrypt_hex(
+    pem: &str,
+    oaep_digest: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let ParsedKey::RsaPrivate(key) = parse_key(pem).ok_or("invalid or unsupported key")? else {
+        return Err("decryption requires an RSA private key".to_string());
+    };
+    if oaep_digest.is_empty() {
+        return key
+            .decrypt(rsa::Pkcs1v15Encrypt, data)
+            .map_err(|error| error.to_string());
+    }
+    match oaep_digest {
+        "sha1" => key.decrypt(rsa::Oaep::new::<sha1::Sha1>(), data),
+        "sha256" => key.decrypt(rsa::Oaep::new::<sha2::Sha256>(), data),
+        "sha384" => key.decrypt(rsa::Oaep::new::<sha2::Sha384>(), data),
+        "sha512" => key.decrypt(rsa::Oaep::new::<sha2::Sha512>(), data),
+        _ => return Err(format!("unsupported OAEP digest: {oaep_digest}")),
+    }
+    .map_err(|error| error.to_string())
 }
