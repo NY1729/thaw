@@ -1683,6 +1683,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::JsonObjectLit(_, element) => {
                 Ok(HirType::Dictionary(Box::new(element.clone())))
             }
+            HirExpr::JsValueAsJson(_) => Ok(HirType::Json),
             HirExpr::JsonGet(_, _) | HirExpr::JsonIndex(_, _) | HirExpr::JsonKey(_, _) => {
                 Ok(HirType::Json)
             }
