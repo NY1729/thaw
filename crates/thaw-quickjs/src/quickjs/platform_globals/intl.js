@@ -355,6 +355,12 @@
   class NumberFormat {
     constructor(locale, options) {
       const opts = options || {};
+      // Same real-per-locale-or-English-fast-path split as
+      // `DateTimeFormat` above (M6): only the digit/grouping rendering
+      // changes here -- rounding, sign, and `style: 'unit'`'s English
+      // forms are locale-independent arithmetic already correct as-is.
+      this._useRealLocaleData = typeof __thaw_intl_number_format === 'function';
+      this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
       this._style = opts.style || 'decimal';
       this._unit = opts.unit;
       this._unitDisplay = opts.unitDisplay || 'short';
@@ -369,7 +375,7 @@
 
     resolvedOptions() {
       const result = {
-        locale: 'en-US',
+        locale: this.locale,
         numberingSystem: 'latn',
         style: this._style,
         useGrouping: this._useGrouping,
@@ -404,10 +410,14 @@
       }
       let intPart = wholePart;
       while (intPart.length < this._minimumIntegerDigits) intPart = `0${intPart}`;
-      if (this._useGrouping) {
-        intPart = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-      }
-      const rendered = fracPart ? `${intPart}.${fracPart}` : intPart;
+      const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
+      // Sign is handled here, not passed to the native call: it's
+      // applied identically across every curated locale (confirmed),
+      // so there's no need to push it through a locale-data lookup.
+      const rendered = this._useRealLocaleData
+        ? __thaw_intl_number_format(this.locale, digits, this._useGrouping)
+        : (this._useGrouping ? intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : intPart) +
+          (fracPart ? `.${fracPart}` : '');
       const signed = negative ? `-${rendered}` : rendered;
       if (this._style !== 'unit') return signed;
       const forms = INTL_UNITS[this._unit][this._unitDisplay] || INTL_UNITS[this._unit].short;

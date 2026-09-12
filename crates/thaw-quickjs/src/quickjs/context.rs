@@ -1023,6 +1023,14 @@ fn ensure_context() {
                     Function::new(ctx.clone(), |tag: String| intl_locale_minimize_json(&tag))
                         .expect("failed to create JavaScript Intl locale minimizer");
                 #[cfg(feature = "intl")]
+                let intl_number_format_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, digits: String, use_grouping: bool| {
+                        intl_number_format(&locale, &digits, use_grouping)
+                    },
+                )
+                .expect("failed to create JavaScript Intl number formatter");
+                #[cfg(feature = "intl")]
                 let intl_datetime_format_parts_function = Function::new(
                     ctx.clone(),
                     |locale: String, options_json: String, zoned_parts_json: String| {
@@ -1133,6 +1141,10 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_locale_minimize", intl_locale_minimize_function)
                     .expect("failed to install JavaScript Intl locale minimizer");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_number_format", intl_number_format_function)
+                    .expect("failed to install JavaScript Intl number formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set(
