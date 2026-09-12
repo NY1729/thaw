@@ -1237,6 +1237,49 @@ fn crypto_p521_and_ed25519_sign_and_verify_interoperate_with_real_openssl() {
     );
 }
 
+/// DER-format key input and passphrase-protected PKCS8 private keys --
+/// the two remaining `node:crypto` key-import gaps. Same real-key
+/// methodology as the other crypto tests: a fresh RSA keypair, signed
+/// by real OpenSSL, verified through DER-imported and passphrase-
+/// decrypted `KeyObject`s built from the *same* key material.
+#[test]
+fn crypto_der_and_passphrase_protected_key_import_interoperate_with_real_openssl() {
+    assert_eq!(
+        load(
+            "function rsaPublicPem() { return '-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoORKaNK2ZuUTmkCb/Oqh\\n3vw+cO8OCUFJRz+nPYP9gYArPbwy8I3nJe2ft5rVHPTn8u4gzSVwQGBpQ5fYMx4g\\n80htGj3JD16v1DHg8qIGDnnk9MGGEHJ6DcdJsKiWK8SK2xEttirRTY5fHGQwkAWg\\nMDFIjzG6OIoGDCZyRH+1zY1xdP617629Z2UvNL5eB9A6FPHwpmSlgr8T/nHmqGeN\\nL6VJuC61pnZTehGm6hvUMdqPEm0ciiHmavx0DAaWqzVjLBb5jTssayMabrmRCUdq\\nTpe3g/MeBcdQ/LCwF/j0QKmgoL3gzWubFA8IO+e2M+AnkV25wbrVTV4ysvWlzdKK\\nxwIDAQAB\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function rsaPrivateDerHex() { return '308204be020100300d06092a864886f70d0101010500048204a8308204a40201000282010100a0e44a68d2b666e5139a409bfceaa1defc3e70ef0e094149473fa73d83fd81802b3dbc32f08de725ed9fb79ad51cf4e7f2ee20cd25704060694397d8331e20f3486d1a3dc90f5eafd431e0f2a2060e79e4f4c18610727a0dc749b0a8962bc48adb112db62ad14d8e5f1c64309005a03031488f31ba388a060c2672447fb5cd8d7174feb5efadbd67652f34be5e07d03a14f1f0a664a582bf13fe71e6a8678d2fa549b82eb5a676537a11a6ea1bd431da8f126d1c8a21e66afc740c0696ab35632c16f98d3b2c6b231a6eb99109476a4e97b783f31e05c750fcb0b017f8f440a9a0a0bde0cd6b9b140f083be7b633e027915db9c1bad54d5e32b2f5a5cdd28ac7020301000102820100061c457b2fad7fc0e97aad437f5a85e54b1d2ffad444a3b71dbe9c2268f5e2ca345a36e094643f48207b3564eafd1b8c079ce5a004f0fb70edee8440d0c82f262e34fe8f2428b246e93f2fb4e754658e5994b618da5d0ea7a14efa279cf472957776728efd974f63bdd6fd331ef527bd4cd1dda65cd532e0c1eb5fe19c1c127f6237172346eb71d7d5a74e5d0bfafbe7bd1de6da4d361c011100cc7881b2b824df573445e8a166938960942ee19ad27fd6e96da35b954341c1896f6e47ae27d6d4e8b10e21bdcc75ac8f2023866920271dd6b4dce35b11db1e68ac0f9c8901617ea9cb2790b6879417a8f85eb1eff48573eb31580c008e37fae17666bf677d9102818100dffe4d703426d74947f8bf6fd8cdfc709276efe554364ebed55bb74c2555d17c80765d9523426fce8d22082c3fdb0fe3b779b2839348caa9866e2a24c643a75f722618e0ab5d3db6ceec1704bb28b4809714b5cc14811e0412adee71c68ae4f098cfc03c71744288394ce6c4a5cd19b0039dc657e1d0e01d92ef55881aa5a4bf02818100b7e1b9c5782fe8f801f13c994244057e527c3d84e38c641e2c8c27cd33702b073a36077bc12824de002856493f0cf8f5fa20a4b641258b594ae878482414e924aa40e68e09146063a7467f4e3a82d4a2b3d2c3e8afa12135066b6979b40b90be457f8ce0f3f8f627bc1d7368f8e25b5b04af0e56107ee6c4e1da53acc9acf3f902818039a35689e8e195c465a0bca22b47d60da1a2b95869b30fd04b56ae7409a76ba07dedf766c90bef795717cac2982be68ad24b9e83fd025e24015397c49ec009f1a58de818e7ffb641b43d4c2f0b7a0df888e7eb5ff866c1328b1bf69f90576d51fc007997141ab684173a92a74782df794b74edf4ef46b064ebca6a57fb83644102818100a5a93bf776bf1b110c96ec745aa9f39509f51a6b75a18eb54c86fc78b765cfae143886e76c6ea1404c3e0af6b452189d6aba2c0a7288c3912f965e7f07dabaeca8620e145a83bc0f2badac95aacb218c6f9b6b9a5f583815907206b5798a8ddd8db94b0f835d814eed004f707c015a3296f6ab60c83dbbe41661decea56726e9028181009557356289cef177e2aeb16a98f4dae588341eeda0dd47565736836a0338ea0c70f87dc077fe2cf75e0529b2c8c4b07a28a3d8052ce434bcf8bf61bcd8d4c0c7015b629af00743c6cf69a1b868df316b5886986fa1c98a4626975a27660efc84e8b2c61b4a57b89bd36af4b11a4828b8baac12bebe1ae990cb59b81591f9442b'; }\n\
+             function rsaPublicDerHex() { return '30820122300d06092a864886f70d01010105000382010f003082010a0282010100a0e44a68d2b666e5139a409bfceaa1defc3e70ef0e094149473fa73d83fd81802b3dbc32f08de725ed9fb79ad51cf4e7f2ee20cd25704060694397d8331e20f3486d1a3dc90f5eafd431e0f2a2060e79e4f4c18610727a0dc749b0a8962bc48adb112db62ad14d8e5f1c64309005a03031488f31ba388a060c2672447fb5cd8d7174feb5efadbd67652f34be5e07d03a14f1f0a664a582bf13fe71e6a8678d2fa549b82eb5a676537a11a6ea1bd431da8f126d1c8a21e66afc740c0696ab35632c16f98d3b2c6b231a6eb99109476a4e97b783f31e05c750fcb0b017f8f440a9a0a0bde0cd6b9b140f083be7b633e027915db9c1bad54d5e32b2f5a5cdd28ac70203010001'; }\n\
+             function rsaPrivateEncryptedPem() { return '-----BEGIN ENCRYPTED PRIVATE KEY-----\\nMIIFNTBfBgkqhkiG9w0BBQ0wUjAxBgkqhkiG9w0BBQwwJAQQvq2l3eEnfnFD3GVd\\nhtvb+QICCAAwDAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEECBT8TeR7sQt2Vmo\\nNpQJ+i0EggTQDM28rgAAPQmRjennOGuBEspP8qH2Yv0tWH51YDJ2xu+FswPDs8H2\\n7hA+kQRHhR6U+vw4UM31iQofb0qZ+XSRtfYldZ/4qfk0ND5sTuL4wPzktA/BlCY3\\n98m7TDW6OCYN+N1lzHn7FzNqmmEDD3uEUptgCkE2FVgN1bfvMBb25+2zXV6nNbEw\\nw+nDIQbdtsn+9P9+TN4DAO43l4Ep/wsVulPyiC2JWxMrly/59V+KMatJ4sPuvVEq\\na6JXgdllICzUMZz2cR1/vNzAQklZpI3ePZTSGPJNbH+0QvcPgun8OQGkDnTe3Eb0\\nQ3wcHbzjfb+w1x5M6l1KKtkQG1fq7tPHsV/4/HFkabxkQV50ZjpMIfwYeZlYo1Tl\\nEHSEgqR/GB5BcefaQSwBAzTJ7Jcn4SIWirIplG77+IG1FftdnIKq6Hx0uok9jC97\\nKdP9PTJFO/x7Istm4D844IuZ1wPe4cIZ3gTF/URptaDZYnYUQw2X3tH5mwdCO1Sl\\ngaQLsVTAhvPzR6pm4iUGHUwFa6vq6gA9AM8mnGXJdHSdcTeaPnOeJcVxtz+/DKma\\nI8dXUeECfzmW30jhQuBaYm4WyKTATjXHxuU3GsbhmKJn51LbfGePu7dXxGsaPvnQ\\nIfESiysT0BkdXPql7AEmjEG1HVqMxr/cxMW4Lm2YAHL9mqIig+w9lMiD/CCjOrXR\\nZIkgPqOyFEdtZJ6pVvAKg/GDiKX9Yv9V8pjxuGqLdcKv2nf8jXtNE8DusvIoCGtz\\n12nHHdBQwDKI4wQyqlEeRrgAALa+lbYHtxIlA7RktRjFA5PtFMdy5ZJf5Ft6Esns\\nIxEJSI6AVP0OKQaaTaNZpErfHbgFO/5fqMoLjS6XEy0UVX0ykjW7voNMV91GduGS\\nJI3HwH7OkjnvPyG81PwjOzdi/VqtzCYmI2zl6LuHemndEOD06DXUa6mztudIs1cM\\nN+WaiAAmbX5ppzN+YzAzhTM3bn3W/vN0vkLydKzekCs1hMs8ErwPkNkmdzySg+Zu\\nntvR3OOQXcl+7kNRISEr1OVELB3Th78TDeUcsx/JIGhIFpOIjtGeXz6rjusoJ/FJ\\n1jmonh830SiRmBvtdOA+uLHXw4Xsx2ucmWSIYpiQMRlZcsPfQBmU75l5bXrSpGtt\\ncEPngFVsSBeS5HuyVpU2fsYmmTZ2S3Q6imzg+1zsVnyXYo00V/3cyFIs+DIYB/a0\\ni1iKpns68Bj54qCrkxeaD/G1o1aMlQeekw7fRDZ5PxKI/EzIi/7P/3YL7zL8eRqE\\nTa/Bq9Z/Xm7nTVf3oUvzJdL4V3nSS1tmruktz0KXr/d1di2u7gtp6YqyR94DZtju\\ncrmuEKVdLhtdrYvstI8Rk9fJm7QR0il8FriwBaeti9aJjPPXDEjmeYf0o01wcpfn\\nuxtFM4JLtxOIKORU/enB1XSOsAmLG27IpIJfBWauAJmoPBiE8uOmiYb7Hx5DHUx5\\nmgWejWMOTCI/9gYu7RfYc5ZY2lO4BVMefpPWAWufag6Nwolti2l2FHLJBjfd2RBR\\ndv44+nFunyx1gE+bEiOUr4YbKRfaxvlTeDLbTTuZFX0wV24asByJhEeFFqJI6SA8\\nVK13uyQCON9eCknnEQKxkowmiXsgwzUX4pUmB48WpaHArrk8Ynifkxg=\\n-----END ENCRYPTED PRIVATE KEY-----\\n'; }\n\
+             function derRoundTrip() {\n\
+               const priv = __thaw_crypto_module.createPrivateKey({ key: Buffer.from(rsaPrivateDerHex(), 'hex'), format: 'der' });\n\
+               const pub = __thaw_crypto_module.createPublicKey({ key: Buffer.from(rsaPublicDerHex(), 'hex'), format: 'der' });\n\
+               const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign(priv, 'hex');\n\
+               const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(pub, sig, 'hex');\n\
+               const opensslSig = '8d357033bbae2065e82bd5cea6be16e4520ed5b5e2513862d0ab4e9817542944202c8dd7b0e738d71618a7cf93b0d75ea3a04022822ad6858446237729883dfa7c4f399472a742cb68fdb80cfd46a1865cd28f4d21a5b8f539ba6ac7ce8fcf67d03fd159bcd6b47f148822eedf83d93d3815c4fffe3943e008c2f68d07c2ef31c5e2ead3cd82bcf2b6164a4bff2e5ea199ad000f29af65d4cb633eff190a1add38cfea512bf6757a4a04ff868fe530973bf66ad0dc69775da151c86d78e174ded32722b3339da059823efc4e2f6645ca814be5bfe3663808c048ef60aec4a34223615819a354e340935684132fdf93641a4047cf623c7dac075357b7f4e6f514';\n\
+               const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(pub, opensslSig, 'hex');\n\
+               return [priv.asymmetricKeyType, pub.asymmetricKeyType, ok, opensslVerifies];\n\
+             }\n\
+             function passphraseRoundTrip() {\n\
+               let wrongPassphraseThrew = false;\n\
+               try { __thaw_crypto_module.createPrivateKey({ key: rsaPrivateEncryptedPem(), passphrase: 'wrong' }); } catch (error) { wrongPassphraseThrew = true; }\n\
+               const priv = __thaw_crypto_module.createPrivateKey({ key: rsaPrivateEncryptedPem(), passphrase: 'hunter2' });\n\
+               const pub = __thaw_crypto_module.createPublicKey(rsaPublicPem());\n\
+               const sig = __thaw_crypto_module.createSign('sha256').update('hello world').sign(priv, 'hex');\n\
+               const ok = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(pub, sig, 'hex');\n\
+               const opensslSig = '8d357033bbae2065e82bd5cea6be16e4520ed5b5e2513862d0ab4e9817542944202c8dd7b0e738d71618a7cf93b0d75ea3a04022822ad6858446237729883dfa7c4f399472a742cb68fdb80cfd46a1865cd28f4d21a5b8f539ba6ac7ce8fcf67d03fd159bcd6b47f148822eedf83d93d3815c4fffe3943e008c2f68d07c2ef31c5e2ead3cd82bcf2b6164a4bff2e5ea199ad000f29af65d4cb633eff190a1add38cfea512bf6757a4a04ff868fe530973bf66ad0dc69775da151c86d78e174ded32722b3339da059823efc4e2f6645ca814be5bfe3663808c048ef60aec4a34223615819a354e340935684132fdf93641a4047cf623c7dac075357b7f4e6f514';\n\
+               const opensslVerifies = __thaw_crypto_module.createVerify('sha256').update('hello world').verify(pub, opensslSig, 'hex');\n\
+               return [wrongPassphraseThrew, priv.asymmetricKeyType, ok, opensslVerifies];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(call("derRoundTrip", "[]"), r#"["rsa","rsa",true,true]"#);
+    assert_eq!(
+        call("passphraseRoundTrip", "[]"),
+        r#"[true,"rsa",true,true]"#
+    );
+}
+
 /// `Intl.DateTimeFormat` -- the practical, English/Latin-numeral-only
 /// polyfill (`docs/design/intl-polyfill.md`) added for real luxon, whose
 /// entire timezone system is built on exactly this shape (real luxon's

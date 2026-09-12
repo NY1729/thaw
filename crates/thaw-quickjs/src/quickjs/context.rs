@@ -471,11 +471,17 @@ fn ensure_context() {
                 // Backs `createPrivateKey`/`createPublicKey`/`KeyObject.
                 // asymmetricKeyType` and `createSign`/`createVerify`/
                 // `crypto.sign`/`crypto.verify` (`asymmetric_crypto.rs`,
-                // `platform_globals/buffer_crypto.js`).
-                let crypto_key_info = Function::new(ctx.clone(), |pem: String| {
-                    crypto_key_info_json(&pem)
-                })
-                .expect("failed to create JavaScript key-info function");
+                // `platform_globals/buffer_crypto.js`) -- resolves PEM/
+                // DER/passphrase-protected key material into a plain,
+                // normalized PEM string every other crypto function here
+                // consumes.
+                let crypto_import_key = Function::new(
+                    ctx.clone(),
+                    |bytes_hex: String, is_der: bool, passphrase: String| {
+                        crypto_import_key_json(&bytes_hex, is_der, &passphrase)
+                    },
+                )
+                .expect("failed to create JavaScript key-import function");
                 let crypto_asymmetric_sign = Function::new(
                     ctx.clone(),
                     |digest_algorithm: String, pem: String, data: String| {
@@ -911,8 +917,8 @@ fn ensure_context() {
                     .set("__thaw_crypto_cipher_hex", cipher_hex)
                     .expect("failed to install JavaScript cipher function");
                 ctx.globals()
-                    .set("__thaw_crypto_key_info_json", crypto_key_info)
-                    .expect("failed to install JavaScript key-info function");
+                    .set("__thaw_crypto_import_key_json", crypto_import_key)
+                    .expect("failed to install JavaScript key-import function");
                 ctx.globals()
                     .set("__thaw_crypto_asymmetric_sign_hex", crypto_asymmetric_sign)
                     .expect("failed to install JavaScript asymmetric sign function");

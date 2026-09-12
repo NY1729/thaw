@@ -81,6 +81,34 @@ impl ParsedKey {
             | ParsedKey::Ed25519Public(_) => None,
         }
     }
+
+    /// Re-encodes as a plain, unencrypted PKCS8 (private)/SPKI (public)
+    /// PEM string -- the normalized form `crypto_import_key_json`
+    /// stores on the JS-side `KeyObject`, regardless of what format the
+    /// original input was in.
+    fn to_pem(&self) -> Option<String> {
+        use pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+        match self {
+            ParsedKey::RsaPrivate(key) => {
+                key.to_pkcs8_pem(LineEnding::LF).ok().map(|pem| pem.to_string())
+            }
+            ParsedKey::RsaPublic(key) => key.to_public_key_pem(LineEnding::LF).ok(),
+            ParsedKey::EcPrivateP256(key) => {
+                key.to_pkcs8_pem(LineEnding::LF).ok().map(|pem| pem.to_string())
+            }
+            ParsedKey::EcPublicP256(key) => key.to_public_key_pem(LineEnding::LF).ok(),
+            ParsedKey::EcPrivateP384(key) => {
+                key.to_pkcs8_pem(LineEnding::LF).ok().map(|pem| pem.to_string())
+            }
+            ParsedKey::EcPublicP384(key) => key.to_public_key_pem(LineEnding::LF).ok(),
+            ParsedKey::EcPrivateP521(key) => ec_p521_private_to_pem(key),
+            ParsedKey::EcPublicP521(key) => ec_p521_public_to_pem(key),
+            ParsedKey::Ed25519Private(key) => {
+                key.to_pkcs8_pem(LineEnding::LF).ok().map(|pem| pem.to_string())
+            }
+            ParsedKey::Ed25519Public(key) => key.to_public_key_pem(LineEnding::LF).ok(),
+        }
+    }
 }
 
 /// P-521's own `ecdsa::SigningKey`/`VerifyingKey` newtypes don't
@@ -102,6 +130,58 @@ fn parse_ec_p521_public_pem(pem: &str) -> Option<p521::ecdsa::VerifyingKey> {
     let public = p521::PublicKey::from_public_key_pem(pem).ok()?;
     let core: ecdsa::VerifyingKey<p521::NistP521> = public.into();
     Some(core.into())
+}
+
+fn parse_ec_p521_private_der(bytes: &[u8]) -> Option<p521::ecdsa::SigningKey> {
+    let secret = p521::SecretKey::from_pkcs8_der(bytes)
+        .or_else(|_| p521::SecretKey::from_sec1_der(bytes))
+        .ok()?;
+    let core: ecdsa::SigningKey<p521::NistP521> = secret.into();
+    Some(core.into())
+}
+
+fn parse_ec_p521_public_der(bytes: &[u8]) -> Option<p521::ecdsa::VerifyingKey> {
+    let public = p521::PublicKey::from_public_key_der(bytes).ok()?;
+    let core: ecdsa::VerifyingKey<p521::NistP521> = public.into();
+    Some(core.into())
+}
+
+fn parse_ec_p521_private_encrypted_pem(
+    pem: &str,
+    passphrase: &str,
+) -> Option<p521::ecdsa::SigningKey> {
+    let secret = p521::SecretKey::from_pkcs8_encrypted_pem(pem, passphrase).ok()?;
+    let core: ecdsa::SigningKey<p521::NistP521> = secret.into();
+    Some(core.into())
+}
+
+fn parse_ec_p521_private_encrypted_der(
+    bytes: &[u8],
+    passphrase: &str,
+) -> Option<p521::ecdsa::SigningKey> {
+    let secret = p521::SecretKey::from_pkcs8_encrypted_der(bytes, passphrase).ok()?;
+    let core: ecdsa::SigningKey<p521::NistP521> = secret.into();
+    Some(core.into())
+}
+
+/// Re-encodes a P-521 signing/verifying key as a plain PKCS8/SPKI PEM
+/// string -- P-521's newtypes don't implement `pkcs8`'s encode traits
+/// either, so this round-trips through the raw scalar/point bytes into
+/// the generic `SecretKey`/`PublicKey` (which do), mirroring the
+/// decode-side detour above.
+fn ec_p521_private_to_pem(key: &p521::ecdsa::SigningKey) -> Option<String> {
+    let secret = p521::SecretKey::from_bytes(&key.to_bytes()).ok()?;
+    use pkcs8::EncodePrivateKey;
+    secret
+        .to_pkcs8_pem(pkcs8::LineEnding::LF)
+        .ok()
+        .map(|pem| pem.to_string())
+}
+
+fn ec_p521_public_to_pem(key: &p521::ecdsa::VerifyingKey) -> Option<String> {
+    let public = p521::PublicKey::from_sec1_bytes(key.to_encoded_point(false).as_bytes()).ok()?;
+    use pkcs8::EncodePublicKey;
+    public.to_public_key_pem(pkcs8::LineEnding::LF).ok()
 }
 
 /// Tries every supported private-then-public key shape in turn --
@@ -154,23 +234,138 @@ fn parse_key(pem: &str) -> Option<ParsedKey> {
     None
 }
 
-/// Backs `createPrivateKey`/`createPublicKey`'s validation and
-/// `KeyObject.asymmetricKeyType`/`asymmetricKeyDetails`.
-pub(crate) fn crypto_key_info_json(pem: &str) -> String {
-    match parse_key(pem) {
-        Some(key) => {
-            let curve = key
-                .curve()
-                .map(|curve| format!(r#","namedCurve":"{curve}""#))
-                .unwrap_or_default();
-            format!(
-                r#"{{"valid":true,"keyType":"{}","isPrivate":{}{curve}}}"#,
-                key.key_type(),
-                key.is_private()
-            )
+/// Tries every supported private key shape that needs a `passphrase`
+/// (the modern PKCS8 `ENCRYPTED PRIVATE KEY` format only -- see this
+/// module's own doc comment) in `is_der`'s format.
+fn parse_key_bytes_encrypted(bytes: &[u8], is_der: bool, passphrase: &str) -> Option<ParsedKey> {
+    if is_der {
+        if let Ok(key) = RsaPrivateKey::from_pkcs8_encrypted_der(bytes, passphrase) {
+            return Some(ParsedKey::RsaPrivate(Box::new(key)));
         }
-        None => r#"{"valid":false}"#.to_string(),
+        if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_encrypted_der(bytes, passphrase) {
+            return Some(ParsedKey::EcPrivateP256(Box::new(key)));
+        }
+        if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_encrypted_der(bytes, passphrase) {
+            return Some(ParsedKey::EcPrivateP384(Box::new(key)));
+        }
+        if let Some(key) = parse_ec_p521_private_encrypted_der(bytes, passphrase) {
+            return Some(ParsedKey::EcPrivateP521(Box::new(key)));
+        }
+        if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_encrypted_der(bytes, passphrase) {
+            return Some(ParsedKey::Ed25519Private(Box::new(key)));
+        }
+        None
+    } else {
+        let text = std::str::from_utf8(bytes).ok()?;
+        if let Ok(key) = RsaPrivateKey::from_pkcs8_encrypted_pem(text, passphrase) {
+            return Some(ParsedKey::RsaPrivate(Box::new(key)));
+        }
+        if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_encrypted_pem(text, passphrase) {
+            return Some(ParsedKey::EcPrivateP256(Box::new(key)));
+        }
+        if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_encrypted_pem(text, passphrase) {
+            return Some(ParsedKey::EcPrivateP384(Box::new(key)));
+        }
+        if let Some(key) = parse_ec_p521_private_encrypted_pem(text, passphrase) {
+            return Some(ParsedKey::EcPrivateP521(Box::new(key)));
+        }
+        if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_encrypted_pem(text, passphrase) {
+            return Some(ParsedKey::Ed25519Private(Box::new(key)));
+        }
+        None
     }
+}
+
+/// Tries every supported private-then-public key shape in DER form.
+fn parse_key_der(bytes: &[u8]) -> Option<ParsedKey> {
+    if let Ok(key) = RsaPrivateKey::from_pkcs8_der(bytes) {
+        return Some(ParsedKey::RsaPrivate(Box::new(key)));
+    }
+    if let Ok(key) = RsaPrivateKey::from_pkcs1_der(bytes) {
+        return Some(ParsedKey::RsaPrivate(Box::new(key)));
+    }
+    if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_der(bytes) {
+        return Some(ParsedKey::EcPrivateP256(Box::new(key)));
+    }
+    if let Ok(key) = p256::ecdsa::SigningKey::from_sec1_der(bytes) {
+        return Some(ParsedKey::EcPrivateP256(Box::new(key)));
+    }
+    if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_der(bytes) {
+        return Some(ParsedKey::EcPrivateP384(Box::new(key)));
+    }
+    if let Ok(key) = p384::ecdsa::SigningKey::from_sec1_der(bytes) {
+        return Some(ParsedKey::EcPrivateP384(Box::new(key)));
+    }
+    if let Some(key) = parse_ec_p521_private_der(bytes) {
+        return Some(ParsedKey::EcPrivateP521(Box::new(key)));
+    }
+    if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_der(bytes) {
+        return Some(ParsedKey::Ed25519Private(Box::new(key)));
+    }
+    if let Ok(key) = RsaPublicKey::from_public_key_der(bytes) {
+        return Some(ParsedKey::RsaPublic(Box::new(key)));
+    }
+    if let Ok(key) = RsaPublicKey::from_pkcs1_der(bytes) {
+        return Some(ParsedKey::RsaPublic(Box::new(key)));
+    }
+    if let Ok(key) = p256::ecdsa::VerifyingKey::from_public_key_der(bytes) {
+        return Some(ParsedKey::EcPublicP256(Box::new(key)));
+    }
+    if let Ok(key) = p384::ecdsa::VerifyingKey::from_public_key_der(bytes) {
+        return Some(ParsedKey::EcPublicP384(Box::new(key)));
+    }
+    if let Some(key) = parse_ec_p521_public_der(bytes) {
+        return Some(ParsedKey::EcPublicP521(Box::new(key)));
+    }
+    if let Ok(key) = ed25519_dalek::VerifyingKey::from_public_key_der(bytes) {
+        return Some(ParsedKey::Ed25519Public(Box::new(key)));
+    }
+    None
+}
+
+/// The single entry point for resolving *any* key material shape this
+/// module supports: PEM or DER, passphrase-protected or not. Tries an
+/// encrypted-private-key parse first when `passphrase` is non-empty
+/// (a passphrase only ever makes sense for a private key, and a real
+/// wrong-shape input still correctly falls through to `None` rather
+/// than silently ignoring the passphrase), then the unencrypted
+/// private-then-public cascade in the requested format.
+fn parse_key_bytes(bytes: &[u8], is_der: bool, passphrase: &str) -> Option<ParsedKey> {
+    if !passphrase.is_empty() {
+        if let Some(key) = parse_key_bytes_encrypted(bytes, is_der, passphrase) {
+            return Some(key);
+        }
+    }
+    if is_der {
+        parse_key_der(bytes)
+    } else {
+        parse_key(std::str::from_utf8(bytes).ok()?)
+    }
+}
+
+/// Backs `createPrivateKey`/`createPublicKey`/`Sign.sign`/`Verify.
+/// verify` (via `parseAsymmetricKeyMaterial`, which every one of those
+/// funnels through): resolves PEM/DER/passphrase-protected key
+/// material and re-encodes it as a plain, unencrypted PKCS8/SPKI PEM
+/// string -- the *only* thing every other function in this module
+/// (`crypto_asymmetric_sign_hex`/`_verify`/`_pss`/encrypt/decrypt) ever
+/// sees, so none of them need their own DER/passphrase handling.
+pub(crate) fn crypto_import_key_json(bytes_hex: &str, is_der: bool, passphrase: &str) -> String {
+    let bytes = hex_decode(bytes_hex);
+    let Some(key) = parse_key_bytes(&bytes, is_der, passphrase) else {
+        return r#"{"valid":false}"#.to_string();
+    };
+    let Some(pem) = key.to_pem() else {
+        return r#"{"valid":false}"#.to_string();
+    };
+    serde_json::json!({
+        "valid": true,
+        "pem": pem,
+        "keyType": key.key_type(),
+        "isPrivate": key.is_private(),
+        "namedCurve": key.curve(),
+    })
+    .to_string()
 }
 
 fn digest_size_matches(digest_algorithm: &str) -> Result<(), String> {

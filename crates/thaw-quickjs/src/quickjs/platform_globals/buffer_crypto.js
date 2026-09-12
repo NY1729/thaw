@@ -195,16 +195,20 @@
   // producing a `KeyObject` whose `.type` must read back `"secret"` for
   // the rest of jsonwebtoken's own logic to accept it.
   //
-  // Also backs a real asymmetric (RSA/EC) key now: `_material` for
-  // those is the PEM text itself (`asymmetric_crypto.rs` reparses it
-  // fresh on every `sign`/`verify` -- no persistent native key object),
-  // and `asymmetricKeyType`/`asymmetricKeyDetails` are populated from
-  // `__thaw_crypto_key_info_json`, matching real `KeyObject`'s own
-  // fields closely enough for `x.asymmetricKeyType === 'rsa'`-style
-  // feature checks. `export()` for an asymmetric key returns the PEM
-  // text as a string (real Node's own default `format: 'pem'`) --
-  // `format: 'der'`/`jwk` are not supported, matching this shim's
-  // existing PEM-only scope.
+  // Also backs a real asymmetric (RSA/EC/Ed25519) key now: `_material`
+  // for those is always a plain, unencrypted, normalized PKCS8/SPKI PEM
+  // string -- regardless of what format/encryption the *original* input
+  // was in (PEM, DER, or passphrase-protected PKCS8; see
+  // `parseAsymmetricKeyMaterial` and `crypto_import_key_json`,
+  // `asymmetric_crypto.rs`) -- reparsed fresh on every `sign`/`verify`,
+  // no persistent native key object. `asymmetricKeyType`/
+  // `asymmetricKeyDetails` are populated from the same import call,
+  // matching real `KeyObject`'s own fields closely enough for
+  // `x.asymmetricKeyType === 'rsa'`-style feature checks. `export()`
+  // for an asymmetric key returns the normalized PEM text as a string
+  // (real Node's own default `format: 'pem'`) -- `format: 'der'`/`jwk`
+  // output are not supported, matching this shim's existing PEM-only
+  // *output* scope (DER *input* is supported, see above).
   class KeyObject {
     constructor(type, material, asymmetricInfo) {
       this.type = type;
@@ -223,23 +227,34 @@
   // Extracts a PEM string plus its parsed key-info from whatever shape
   // `createPrivateKey`/`createPublicKey`/`.sign()`/`.verify()` accepts:
   // a bare PEM string/Buffer, a `{key, format, type, passphrase}`
-  // options object (`format`/`type` other than `'pem'` and any
-  // `passphrase` throw a clear "not supported" error rather than
-  // silently misbehaving), or an existing `KeyObject`.
+  // options object, or an existing `KeyObject` (already normalized at
+  // construction time -- returned as-is, no need to reimport). `format:
+  // 'der'` reads `key`'s raw bytes as DER instead of PEM text;
+  // `passphrase` decrypts a modern PKCS8 `ENCRYPTED PRIVATE KEY` (the
+  // legacy OpenSSL "Proc-Type: 4,ENCRYPTED" PKCS#1/SEC1 header format
+  // is not supported -- real Node's own modern default is PKCS8 too).
+  // Whatever shape/encoding the input was in, the *output* is always a
+  // plain, unencrypted, normalized PEM string (`crypto_import_key_json`
+  // re-encodes it) -- every other caller of this function only ever
+  // sees that.
   const parseAsymmetricKeyMaterial = key => {
-    const pem = typeof key === 'string' ? key
-      : key instanceof Buffer || ArrayBuffer.isView(key) ? Buffer.from(key).toString()
-      : key instanceof KeyObject ? key._material
-      : key && typeof key.key === 'string' ? key.key
-      : key && (key.key instanceof Buffer || ArrayBuffer.isView(key.key)) ? Buffer.from(key.key).toString()
-      : key && key.key instanceof KeyObject ? key.key._material
+    if (key instanceof KeyObject) return { pem: key._material, info: {
+      valid: true, keyType: key.asymmetricKeyType, isPrivate: key.type === 'private',
+      namedCurve: key.asymmetricKeyDetails && key.asymmetricKeyDetails.namedCurve
+    } };
+    const rawKey = key && key.key instanceof KeyObject ? key.key
+      : key && (typeof key.key === 'string' || key.key instanceof Buffer || ArrayBuffer.isView(key.key)) ? key.key
+      : key;
+    if (rawKey instanceof KeyObject) return parseAsymmetricKeyMaterial(rawKey);
+    const material = typeof rawKey === 'string' ? Buffer.from(rawKey)
+      : rawKey instanceof Buffer || ArrayBuffer.isView(rawKey) ? Buffer.from(rawKey)
       : null;
-    if (pem === null) throw new TypeError('Only a PEM string/Buffer or a KeyObject is supported (no DER, no passphrase-protected keys)');
-    if (key && key.format && key.format !== 'pem') throw new Error(`Unsupported key format: ${key.format} (only 'pem' is supported)`);
-    if (key && key.passphrase) throw new Error('Passphrase-protected keys are not supported');
-    const info = JSON.parse(__thaw_crypto_key_info_json(pem));
-    if (!info.valid) throw new Error('Invalid or unsupported key (only RSA/EC PEM keys are supported)');
-    return { pem, info };
+    if (material === null) throw new TypeError('Only a PEM/DER string/Buffer or a KeyObject is supported');
+    const isDer = Boolean(key && key.format === 'der');
+    const passphrase = (key && key.passphrase) || '';
+    const info = JSON.parse(__thaw_crypto_import_key_json(material.toString('hex'), isDer, String(passphrase)));
+    if (!info.valid) throw new Error('Invalid or unsupported key (only RSA/EC/Ed25519 PEM or DER keys are supported)');
+    return { pem: info.pem, info };
   };
   class Hash {
     constructor(algorithm) { this.algorithm = normalizeHashAlgorithm(algorithm); this._chunks = []; this._digested = false; }
@@ -376,11 +391,11 @@
   const createDecipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, true);
   const createSecretKey = key => new KeyObject('secret', Buffer.from(key));
   // Real Node's `createPrivateKey`/`createPublicKey`, now backed by
-  // real RSA/EC PEM parsing (`asymmetric_crypto.rs`) -- PEM only (no
-  // DER, no passphrase-protected keys), matching this shim's existing
-  // honest-partial-support style. `createPublicKey` deriving a public
-  // key *from* a private key/PEM (real Node supports this) is not
-  // implemented -- pass the public key PEM directly instead.
+  // real RSA/EC/Ed25519 PEM *and DER* parsing, including passphrase-
+  // protected PKCS8 private keys (`asymmetric_crypto.rs`,
+  // `parseAsymmetricKeyMaterial`). `createPublicKey` deriving a public
+  // key *from* a private key/PEM (real Node supports this) is still
+  // not implemented -- pass the public key PEM directly instead.
   const createPrivateKey = key => {
     const { pem, info } = parseAsymmetricKeyMaterial(key);
     if (!info.isPrivate) throw new Error('Expected a private key');
