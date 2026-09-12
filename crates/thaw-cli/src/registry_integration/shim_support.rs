@@ -345,6 +345,9 @@ fn generate_napi_class_method_overloads_with_callback_instances(
     let mut generated = Vec::new();
     let mut method_names = std::collections::HashSet::new();
     for method in &class.methods {
+        if class.name == "Buffer" && method.name == "toString" {
+            continue;
+        }
         if method.is_static != is_static
             || method.kind != thaw_bridge::DtsMethodKind::Method
             || !method_names.insert(method.name.clone())

@@ -26,6 +26,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.basic_type(elem)?;
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
+            HirType::Bytes => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             // `Map`/`Set` are both a single opaque pointer to an
             // arena-allocated hash-table header (see `thaw-runtime`'s
             // `thaw_map_new`); `basic_type` on the key/value types just

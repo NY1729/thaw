@@ -760,6 +760,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // reads the flag while marshaling each argument below.
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = signature.backend == DynamicBackend::QuickJs;
+        let mut returned_bytes_argument = None;
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
             if signature.backend == DynamicBackend::Napi
                 && function_argument
@@ -778,6 +779,13 @@ impl<'ctx> HirCompiler<'ctx> {
             } else {
                 (self.compile_expr(arg)?, ty)
             };
+            if index == 0
+                && *ty == HirType::Bytes
+                && signature.ret == HirType::Bytes
+                && signature.symbol.ends_with("randomFillSync")
+            {
+                returned_bytes_argument = Some(value.into_pointer_value());
+            }
             self.compile_typed_dynamic_argument(array, value, marshalled_type)
                 .map_err(|error| {
                     format!("typed dynamic argument {} ({ty:?}): {error}", index + 1)
@@ -1041,7 +1049,24 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let json =
             self.compile_json_backend_values(name.as_pointer_value().into(), array, backend)?;
-        self.compile_typed_dynamic_result(json, &signature.ret)
+        let result = self.compile_typed_dynamic_result(json, &signature.ret)?;
+        if let Some(argument) = returned_bytes_argument {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_bytes_copy").unwrap(),
+                    &[
+                        result.into_pointer_value().into(),
+                        argument.into(),
+                        self.context.f64_type().const_zero().into(),
+                        self.context.f64_type().const_zero().into(),
+                        self.context.f64_type().const_float(-1.0).into(),
+                    ],
+                    "sync_returned_bytes_argument",
+                )
+                .map_err(|error| error.to_string())?;
+            return Ok(argument.into());
+        }
+        Ok(result)
     }
 
 }

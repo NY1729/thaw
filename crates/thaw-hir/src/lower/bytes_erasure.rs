@@ -60,9 +60,54 @@ fn erase_ffi(sig: &mut FfiSignature) {
 
 fn erase_dyn(sig: &mut DynamicSignature) {
     for ty in &mut sig.params {
-        erase_ty(ty);
+        erase_dynamic_ty(ty);
     }
-    erase_ty(&mut sig.ret);
+    erase_dynamic_ty(&mut sig.ret);
+}
+
+// Dynamic calls need the marker to select the Buffer JSON wire shape.
+// The value itself still has the same native layout as `number[]`.
+fn erase_dynamic_ty(ty: &mut HirType) {
+    match ty {
+        HirType::Bytes => {}
+        HirType::Array(inner)
+        | HirType::Promise(inner)
+        | HirType::Dictionary(inner)
+        | HirType::Set(inner)
+        | HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner) => erase_dynamic_ty(inner),
+        HirType::Map(key, value) => {
+            erase_dynamic_ty(key);
+            erase_dynamic_ty(value);
+        }
+        HirType::Tuple(elements) | HirType::Union(elements) => {
+            for element in elements {
+                erase_dynamic_ty(element);
+            }
+        }
+        HirType::Object(fields) => {
+            for (_, field) in fields {
+                erase_dynamic_ty(field);
+            }
+        }
+        HirType::Function(params, ret) => {
+            for param in params {
+                erase_dynamic_ty(param);
+            }
+            erase_dynamic_ty(ret);
+        }
+        HirType::CallableFunction(params, _, rest, ret) => {
+            for param in params {
+                erase_dynamic_ty(param);
+            }
+            if let Some(rest) = rest {
+                erase_dynamic_ty(rest);
+            }
+            erase_dynamic_ty(ret);
+        }
+        _ => {}
+    }
 }
 
 fn erase_ty(ty: &mut HirType) {
