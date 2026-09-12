@@ -3058,10 +3058,11 @@ fn byte_buffer_numeric_accessors() {
 /// `readUIntLE`/`readUIntBE`/`readIntLE`/`readIntBE`/`writeUIntLE`/
 /// `writeUIntBE`/`writeIntLE`/`writeIntBE` -- the variable-`byteLength`
 /// (1-6) siblings of `byte_buffer_numeric_accessors`'s fixed-width
-/// accessors. No `BigInt`-backed 7/8-byte forms (`readBigUInt64*` &c)
-/// -- those need a real `BigInt` native type Thaw doesn't have, and
-/// stay out of scope; every value below is cross-checked against a
-/// real `node` run of the same `Buffer` calls.
+/// accessors. The `BigInt`-backed 7/8-byte forms (`readBigUInt64*` &c)
+/// are their own always-8-byte family, using a real `HirType::I64`
+/// value instead of `F64` -- see `byte_buffer_bigint_accessors` below;
+/// every value below is cross-checked against a real `node` run of the
+/// same `Buffer` calls.
 #[test]
 fn byte_buffer_variable_width_numeric_accessors() {
     let source = r#"
@@ -3092,5 +3093,69 @@ fn byte_buffer_variable_width_numeric_accessors() {
     assert_eq!(
         compile_and_run(source, "byte_buffer_variable_width_numeric_accessors"),
         "1234565634120000\n1193046 1193046\n3 11259375\n-2 16777214\n4328719365\n-123456 281474976587200\n0\n"
+    );
+}
+
+/// `readBigInt64LE`/`readBigUInt64BE`/`writeBigInt64LE`/
+/// `writeBigUInt64BE` &c. -- always a full 8 bytes, and the value is a
+/// genuine `HirType::I64` (a TS `bigint`), not `F64`. A TS `bigint`
+/// literal itself is parsed into Thaw's *signed* 64-bit range (see
+/// `lower_expr`'s `Lit::BigInt` arm) -- and a negative literal's
+/// *magnitude* is parsed before the unary minus is applied, so
+/// `i64::MIN` itself has no direct literal spelling (its magnitude,
+/// `9223372036854775808`, is one past `i64::MAX`); this test reaches
+/// it the same way Rust/C code does, via `-9223372036854775807n - 1n`
+/// -- so this test reaches `2^63` and `2^64-1` via their signed
+/// bit-pattern equivalents (`i64::MIN` and `-1n`), exactly the
+/// documented practical-subset behavior: a `BigUInt64`
+/// value `>= 2^63` round-trips through the buffer correctly but
+/// displays as negative (no genuine unsigned 64-bit type exists),
+/// unlike real Node's arbitrary-precision `BigInt`. Every value below
+/// is cross-checked against a real `node` run of the same `Buffer`
+/// calls (except the final out-of-range read, where real Node throws a
+/// `RangeError` and Thaw instead reads `0`, matching every other
+/// accessor's own established no-throw-across-this-boundary
+/// convention).
+#[test]
+fn byte_buffer_bigint_accessors() {
+    let source = r#"
+        function main(): void {
+            const buf: Buffer = Buffer.alloc(8);
+
+            buf.writeBigInt64BE(0n, 0);
+            console.log(buf.toString("hex"));
+            console.log(buf.readBigInt64BE(0));
+            console.log(buf.readBigUInt64BE(0));
+
+            // Max signed 64-bit value -- LE, round trip through both the
+            // signed and unsigned reader (identical below 2^63).
+            buf.writeBigInt64LE(9223372036854775807n, 0);
+            console.log(buf.toString("hex"));
+            console.log(buf.readBigInt64LE(0));
+            console.log(buf.readBigUInt64LE(0));
+            const next: number = buf.writeBigUInt64LE(9223372036854775807n, 0);
+            console.log(next);
+
+            // 2^63's bit pattern (`i64::MIN`), BE, via the BigUInt64
+            // writer -- reads back negative via *both* accessors, since
+            // Thaw has no genuine unsigned 64-bit storage.
+            buf.writeBigUInt64BE(-9223372036854775807n - 1n, 0);
+            console.log(buf.toString("hex"));
+            console.log(buf.readBigInt64BE(0));
+            console.log(buf.readBigUInt64BE(0));
+
+            // 2^64-1's bit pattern (-1), LE.
+            buf.writeBigUInt64LE(-1n, 0);
+            console.log(buf.toString("hex"));
+            console.log(buf.readBigInt64LE(0));
+            console.log(buf.readBigUInt64LE(0));
+
+            // Out of range: reads as 0n (no thrown RangeError).
+            console.log(buf.readBigInt64BE(1));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "byte_buffer_bigint_accessors"),
+        "0000000000000000\n0\n0\nffffffffffffff7f\n9223372036854775807\n9223372036854775807\n8\n8000000000000000\n-9223372036854775808\n-9223372036854775808\nffffffffffffffff\n-1\n-1\n0\n"
     );
 }

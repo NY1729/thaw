@@ -47,9 +47,10 @@ impl<'a> FnLowerer<'a> {
     /// `bytes_numeric_accessor`'s fixed-width names: `byteLength` (1-6,
     /// unlike the fixed accessors' compile-time-known width) is a real
     /// runtime argument, not derivable from the method name alone.
-    /// Returns `(signed, big-endian, write)`. No `BigUInt64`/`BigInt64`
-    /// sibling -- those need a real `BigInt` native type Thaw doesn't
-    /// have, and stay out of scope.
+    /// Returns `(signed, big-endian, write)`. `BigUInt64`/`BigInt64` are
+    /// a separate, always-8-byte family (`bytes_bigint_accessor`), not
+    /// this one -- they need a genuine 64-bit value type (`HirType::
+    /// I64`), which this accessor's `f64`-typed value doesn't have.
     fn bytes_variable_width_accessor(property: &str) -> Option<(bool, bool, bool)> {
         let (write, rest) = match property.strip_prefix("write") {
             Some(rest) => (true, rest),
@@ -68,9 +69,36 @@ impl<'a> FnLowerer<'a> {
         Some((signed, big, write))
     }
 
+    /// `buf.readBigInt64LE(offset)` / `buf.writeBigUInt64BE(value,
+    /// offset)` &c. -- always a full 8 bytes, and the one `Buffer`
+    /// accessor family whose value is `HirType::I64` (a genuine 64-bit
+    /// integer) rather than `F64` (which can only exactly represent 53
+    /// bits) -- see `lower_native_bytes_bigint_accessor`'s doc comment
+    /// for the signed/unsigned bit-pattern-sharing note. Returns
+    /// `(signed, big-endian, write)`.
+    fn bytes_bigint_accessor(property: &str) -> Option<(bool, bool, bool)> {
+        let (write, rest) = match property.strip_prefix("write") {
+            Some(rest) => (true, rest),
+            None => (false, property.strip_prefix("read")?),
+        };
+        let rest = rest.strip_prefix("Big")?;
+        let (signed, rest) = if let Some(rest) = rest.strip_prefix("UInt") {
+            (false, rest)
+        } else {
+            (true, rest.strip_prefix("Int")?)
+        };
+        let big = match rest {
+            "64LE" => false,
+            "64BE" => true,
+            _ => return None,
+        };
+        Some((signed, big, write))
+    }
+
     fn is_native_instance_builtin(property: &str) -> bool {
         Self::bytes_numeric_accessor(property).is_some()
             || Self::bytes_variable_width_accessor(property).is_some()
+            || Self::bytes_bigint_accessor(property).is_some()
             || matches!(
             property,
             "charAt" | "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
@@ -149,6 +177,9 @@ impl<'a> FnLowerer<'a> {
             }
             other if Self::bytes_variable_width_accessor(other).is_some() => {
                 self.lower_native_bytes_variable_width_accessor(member, property, call)
+            }
+            other if Self::bytes_bigint_accessor(other).is_some() => {
+                self.lower_native_bytes_bigint_accessor(member, property, call)
             }
             _ => unreachable!("native instance builtin dispatch was checked before lowering"),
         }

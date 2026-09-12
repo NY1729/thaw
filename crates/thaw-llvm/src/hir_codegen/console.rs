@@ -142,6 +142,28 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
         } else if hir_type == Some(HirType::JsValue) {
             self.compile_console_js_value(value.into_int_value(), newline, descriptor)?;
+        } else if hir_type == Some(HirType::I64) {
+            // A real `i64`, not the `i1` the fallback `IntValue` arm below
+            // assumes -- reachable now that `Buffer.prototype.
+            // readBigInt64LE`/`readBigUInt64LE` &c. hand back a genuine
+            // `HirType::I64` value that a caller may log directly.
+            let rendered = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_i64_to_string").unwrap(),
+                    &[value.into()],
+                    "console_i64",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_i64_to_string returned no value")?;
+            self.compile_console_text(
+                rendered.into_pointer_value(),
+                newline,
+                "console_i64",
+                descriptor,
+            )?;
         } else if hir_type == Some(HirType::Symbol) {
             let rendered = self
                 .builder
@@ -210,8 +232,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 BasicValueEnum::FloatValue(f) => {
                     self.compile_console_number(f, newline, "console_number", descriptor)?;
                 }
-                // Our only first-class `IntValue` is `i1` (`HirType::Bool`) --
-                // nothing else reaches console.log as a raw `IntValue`.
+                // `HirType::I64` already took its own branch above, so the
+                // only `IntValue` left untyped/reaching here is `i1`
+                // (`HirType::Bool`).
                 BasicValueEnum::IntValue(b) => {
                     let true_str = self
                         .builder
