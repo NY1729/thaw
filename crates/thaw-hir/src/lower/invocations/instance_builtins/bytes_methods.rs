@@ -66,6 +66,65 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &bindings)
     }
 
+    /// `buf.readUIntLE(offset, byteLength)` / `buf.writeIntBE(value,
+    /// offset, byteLength)` &c. -- the variable-width sibling of
+    /// `lower_native_bytes_accessor`: `byteLength` is a real runtime
+    /// argument (clamped to 1-6 by `thaw_bytes_read`/`thaw_bytes_write`
+    /// themselves; anything else reads as `0`/is a no-op, matching this
+    /// API's existing "no thrown `RangeError` across this boundary"
+    /// convention) rather than a name-derived compile-time constant.
+    fn lower_native_bytes_variable_width_accessor(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let (signed, big_endian, write) =
+            Self::bytes_variable_width_accessor(property.sym.as_ref())
+                .expect("dispatch checked bytes_variable_width_accessor");
+        let receiver = self.lower_expr(&member.obj)?;
+        if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
+            return Err(format!(
+                "`.{}()` is only supported on a Buffer / Uint8Array",
+                property.sym
+            ));
+        }
+        let (arguments, bindings) =
+            self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
+        let kind_lit = HirExpr::Lit(HirLit::F64(if signed { 1.0 } else { 0.0 }));
+        let le_lit = HirExpr::Lit(HirLit::F64(if big_endian { 0.0 } else { 1.0 }));
+        let number = |lowerer: &mut Self, value: HirExpr| lowerer.coerce_primitive_to_number(value);
+        let result = if write {
+            let [value, offset, byte_length] = arguments.as_slice() else {
+                return Err(format!(
+                    "`Buffer.prototype.{}` expects a value, an offset, and a byte length",
+                    property.sym
+                ));
+            };
+            let value = number(self, value.clone())?;
+            let offset = number(self, offset.clone())?;
+            let byte_length = number(self, byte_length.clone())?;
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_write".to_string())),
+                vec![receiver, offset, value, byte_length, kind_lit, le_lit],
+            )
+        } else {
+            let [offset, byte_length] = arguments.as_slice() else {
+                return Err(format!(
+                    "`Buffer.prototype.{}` expects an offset and a byte length",
+                    property.sym
+                ));
+            };
+            let offset = number(self, offset.clone())?;
+            let byte_length = number(self, byte_length.clone())?;
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_read".to_string())),
+                vec![receiver, offset, byte_length, kind_lit, le_lit],
+            )
+        };
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     /// `source.copy(target, targetStart?, sourceStart?, sourceEnd?)` --
     /// blits bytes into an existing byte buffer in place and returns the
     /// count copied (Node's contract). Both receiver and `target` must be

@@ -42,8 +42,35 @@ impl<'a> FnLowerer<'a> {
         Some((width, signed, false, big, write))
     }
 
+    /// `buf.readUIntLE(offset, byteLength)` / `buf.writeIntBE(value,
+    /// offset, byteLength)` &c. -- the variable-width sibling of
+    /// `bytes_numeric_accessor`'s fixed-width names: `byteLength` (1-6,
+    /// unlike the fixed accessors' compile-time-known width) is a real
+    /// runtime argument, not derivable from the method name alone.
+    /// Returns `(signed, big-endian, write)`. No `BigUInt64`/`BigInt64`
+    /// sibling -- those need a real `BigInt` native type Thaw doesn't
+    /// have, and stay out of scope.
+    fn bytes_variable_width_accessor(property: &str) -> Option<(bool, bool, bool)> {
+        let (write, rest) = match property.strip_prefix("write") {
+            Some(rest) => (true, rest),
+            None => (false, property.strip_prefix("read")?),
+        };
+        let (signed, rest) = if let Some(rest) = rest.strip_prefix("UInt") {
+            (false, rest)
+        } else {
+            (true, rest.strip_prefix("Int")?)
+        };
+        let big = match rest {
+            "LE" => false,
+            "BE" => true,
+            _ => return None,
+        };
+        Some((signed, big, write))
+    }
+
     fn is_native_instance_builtin(property: &str) -> bool {
         Self::bytes_numeric_accessor(property).is_some()
+            || Self::bytes_variable_width_accessor(property).is_some()
             || matches!(
             property,
             "charAt" | "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
@@ -119,6 +146,9 @@ impl<'a> FnLowerer<'a> {
             "copy" => self.lower_native_bytes_copy(member, call),
             other if Self::bytes_numeric_accessor(other).is_some() => {
                 self.lower_native_bytes_accessor(member, property, call)
+            }
+            other if Self::bytes_variable_width_accessor(other).is_some() => {
+                self.lower_native_bytes_variable_width_accessor(member, property, call)
             }
             _ => unreachable!("native instance builtin dispatch was checked before lowering"),
         }

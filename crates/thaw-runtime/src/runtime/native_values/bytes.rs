@@ -192,50 +192,64 @@ pub unsafe extern "C" fn thaw_bytes_from_array(array: *const u8) -> *mut u8 {
 }
 
 /// Element width in bytes for a `thaw_bytes_read`/`write` `width`/`kind`
-/// pair; `None` for an unsupported combination.
+/// pair; `None` for an unsupported combination. The fixed-name
+/// accessors (`readUInt16BE` &c, `bytes_numeric_accessor`) only ever
+/// pass 1/2/4 (int) or 4/8 (float); `readUIntLE`/`readIntBE` &c's
+/// variable-width, integer-only sibling
+/// (`bytes_variable_width_accessor`) can pass any of 1-6 (Node's own
+/// `byteLength` range -- 7-8 would need a real `BigInt` native type
+/// Thaw doesn't have, so `readUIntLE`/`writeUIntLE` &c go no further
+/// than 6, and this validates that even though `decode_scalar`/
+/// `encode_scalar` below happen to also work for 7/8).
 fn accessor_width(width: f64) -> Option<usize> {
     match width as u32 {
-        1 => Some(1),
-        2 => Some(2),
-        4 => Some(4),
-        8 => Some(8),
+        1..=6 | 8 => Some(width as usize),
         _ => None,
     }
 }
 
 /// Reassembles `width` little-endian bytes (already byte-swapped by the
 /// caller if the accessor was big-endian) into the number the accessor
-/// `kind` (0 = unsigned int, 1 = signed int, 2 = float) names.
+/// `kind` (0 = unsigned int, 1 = signed int, 2 = float) names. Integer
+/// widths other than the fixed accessors' 1/2/4/8 (i.e. 3/5/6, from
+/// `readUIntLE`/`readIntBE` &c) decode via the same generic bit
+/// pattern -- `buf` is already zero-padded to 8 bytes above `le.len()`,
+/// so treating it as a `u64` directly gives the correct unsigned value
+/// for any length up to 8, and sign-extending from the *actual* bit
+/// width (not always 64) gives the correct signed value.
 fn decode_scalar(le: &[u8], kind: u32) -> f64 {
     let mut buf = [0u8; 8];
     buf[..le.len()].copy_from_slice(le);
     match (kind, le.len()) {
         (2, 4) => f64::from(f32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
         (2, 8) => f64::from_le_bytes(buf),
-        (1, 1) => f64::from(buf[0] as i8),
-        (1, 2) => f64::from(i16::from_le_bytes([buf[0], buf[1]])),
-        (1, 4) => f64::from(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
-        (1, 8) => i64::from_le_bytes(buf) as f64,
-        (_, 1) => f64::from(buf[0]),
-        (_, 2) => f64::from(u16::from_le_bytes([buf[0], buf[1]])),
-        (_, 4) => f64::from(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
-        (_, 8) => u64::from_le_bytes(buf) as f64,
+        (1, len @ 1..=8) => sign_extend_from_width(u64::from_le_bytes(buf), len) as f64,
+        (_, 1..=8) => u64::from_le_bytes(buf) as f64,
         _ => 0.0,
     }
 }
 
+/// Sign-extends the low `width` bytes of `raw` (already zero-extended
+/// to 64 bits) from that width's own sign bit out to a full `i64`.
+fn sign_extend_from_width(raw: u64, width: usize) -> i64 {
+    let shift = 64 - (width * 8) as u32;
+    ((raw << shift) as i64) >> shift
+}
+
 /// Encodes `value` into `width` little-endian bytes per the accessor
 /// `kind`. Integer kinds truncate toward zero then wrap mod 2^bits
-/// (`Buffer`'s own coercion); floats use IEEE-754.
+/// (`Buffer`'s own coercion, including widths 3/5/6 from `writeUIntLE`/
+/// `writeIntBE` &c -- the low `width` bytes of the same `i64`
+/// truncation already used for 1/2/4/8); floats use IEEE-754.
 fn encode_scalar(value: f64, width: usize, kind: u32) -> [u8; 8] {
     let mut out = [0u8; 8];
     match (kind, width) {
         (2, 4) => out[..4].copy_from_slice(&(value as f32).to_le_bytes()),
         (2, 8) => out = value.to_le_bytes(),
-        (_, 1) => out[0] = value as i64 as u8,
-        (_, 2) => out[..2].copy_from_slice(&(value as i64 as u16).to_le_bytes()),
-        (_, 4) => out[..4].copy_from_slice(&(value as i64 as u32).to_le_bytes()),
-        (_, 8) => out = (value as i64).to_le_bytes(),
+        (_, 1..=8) => {
+            let truncated = (value as i64).to_le_bytes();
+            out[..width].copy_from_slice(&truncated[..width]);
+        }
         _ => {}
     }
     out
