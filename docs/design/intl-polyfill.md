@@ -89,12 +89,18 @@ literal punctuation/ordering for every field combination luxon uses
 is `'long'`, and the `h11`/`h12` vs `h23`/`h24` hour-padding difference:
 `hourCycle` `h23`/`h24` always zero-pads even under the `'numeric'`
 style). `timeZoneName` prefers `jiff`'s own abbreviation (`"EDT"`) for
-`short`/`shortGeneric` when it's a plain alphabetic code, and always
-synthesizes a `"GMT+H[:MM]"` offset string for `long`/`longGeneric`/
-`*Offset` (no real per-zone English long names like "Eastern Daylight
-Time" without bundling full ICU data -- a documented, honest
-simplification; not needed for luxon's own correctness, only for a
-nicer display string). `dateStyle`/`timeStyle` shorthand and
+`short`/`shortGeneric` when it's a plain alphabetic code, always
+synthesizes a `"GMT+H[:MM]"` offset string for `*Offset`, and for
+`long`/`longGeneric` looks up a real per-zone English name (e.g.
+"Eastern Daylight Time"/"Eastern Time") from a static table
+(`intl_time_zone_names.rs`) covering all 418 real IANA zones --
+mechanically extracted from a real `node`/ICU run (`Intl.
+DateTimeFormat` itself, at reference instants clear of any recent
+zone-rule change like Kazakhstan's 2024 restructuring), not typed from
+memory, since CLDR's ~150+ metazone names are exactly the kind of data
+real hallucination risk applies to. Falls back to the same synthesized
+offset string for a zone the table has no entry for (shouldn't happen
+for a real IANA name). `dateStyle`/`timeStyle` shorthand and
 `fractionalSecondDigits` are accepted but not rendered (confirmed
 luxon's own presets, `impl/formats.js`, never use them -- always plain
 per-field options).

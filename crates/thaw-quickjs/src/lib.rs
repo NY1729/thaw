@@ -513,6 +513,8 @@ include!("quickjs/processes.rs");
 
 include!("quickjs/intl.rs");
 
+include!("quickjs/intl_time_zone_names.rs");
+
 include!("quickjs/asymmetric_crypto.rs");
 
 #[cfg(unix)]
