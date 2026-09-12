@@ -1,24 +1,31 @@
-// RSA/ECDSA support for `node:crypto`'s `createSign`/`createVerify`/
-// `crypto.sign`/`crypto.verify` (`platform_globals/buffer_crypto.js`).
-// A practical subset, matching this crate's existing "honest partial
-// support" precedent (`buffer_crypto.js`'s own doc comments already
-// documented the *lack* of this before now): sign/verify only, RSA
-// (PKCS1v15 and PSS padding) and ECDSA (P-256/P-384, DER-encoded
-// signatures matching real Node's own default `dsaEncoding: 'der'`).
-// No encrypt/decrypt, no key generation, no DER (only PEM) key input,
-// no passphrase-protected keys, no P-521/Ed25519/Ed448 -- each would be
-// its own separately-scoped effort if a real package ever needs it.
+// RSA/ECDSA/EdDSA support for `node:crypto`'s `createSign`/
+// `createVerify`/`crypto.sign`/`crypto.verify`
+// (`platform_globals/buffer_crypto.js`). Matches this crate's existing
+// "honest partial support" precedent: sign/verify (RSA PKCS1v15+PSS,
+// ECDSA P-256/P-384/P-521 DER-encoded matching real Node's own default
+// `dsaEncoding: 'der'`, Ed25519/EdDSA), PEM and DER key input,
+// passphrase-protected PKCS8 private keys. No encrypt/decrypt or key
+// generation here (see `crypto_asymmetric_encrypt_hex`/
+// `crypto_generate_key_pair_json` for those, added alongside this).
+// Still out of scope: P-521's `SecretKey` is only reachable via the
+// generic `elliptic_curve`/`ecdsa` crates (its own `ecdsa::SigningKey`/
+// `VerifyingKey` newtypes don't implement `pkcs8`'s decode traits
+// directly, unlike P-256/P-384 -- see `parse_ec_p521_private`/
+// `parse_ec_p521_public` below), Ed448, the legacy OpenSSL
+// "Proc-Type: 4,ENCRYPTED" PKCS#1/SEC1 passphrase format (only modern
+// PKCS#8 `ENCRYPTED PRIVATE KEY` is supported).
 //
-// Stateless and PEM-text/bytes-in, bytes-out, matching every other
-// native crypto primitive in this crate (`digest_bytes`/`hmac_bytes` in
-// `lib.rs`): no persistent native key objects are kept across calls --
-// the PEM text itself is carried on the JS-side `KeyObject` and
-// reparsed on every `sign`/`verify` call. Simpler than caching a
-// parsed key, and signing/verifying is not hot-path/high-frequency
-// enough in a Lambda handler for the reparse cost to matter.
+// Stateless and bytes-in/bytes-out, matching every other native
+// crypto primitive in this crate (`digest_bytes`/`hmac_bytes` in
+// `lib.rs`): no persistent native key objects are kept across calls.
+// Import (`crypto_import_key_json`) is the one place PEM/DER/
+// passphrase are actually resolved -- it re-encodes whatever it parses
+// as a plain, decrypted PKCS8/SPKI PEM string, which is what gets
+// carried on the JS-side `KeyObject` and handed back to every other
+// function here unchanged, so `crypto_asymmetric_sign_hex`/`_verify`/
+// `_pss`/encrypt/decrypt never need to know about DER or passphrases
+// at all.
 
-use p256::ecdsa::{SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey};
-use p384::ecdsa::{SigningKey as P384SigningKey, VerifyingKey as P384VerifyingKey};
 use pkcs1::{DecodeRsaPrivateKey, DecodeRsaPublicKey};
 use pkcs8::{DecodePrivateKey, DecodePublicKey};
 use rsa::{RsaPrivateKey, RsaPublicKey};
@@ -28,10 +35,14 @@ use signature::{SignatureEncoding, Signer, Verifier};
 enum ParsedKey {
     RsaPrivate(Box<RsaPrivateKey>),
     RsaPublic(Box<RsaPublicKey>),
-    EcPrivateP256(Box<P256SigningKey>),
-    EcPublicP256(Box<P256VerifyingKey>),
-    EcPrivateP384(Box<P384SigningKey>),
-    EcPublicP384(Box<P384VerifyingKey>),
+    EcPrivateP256(Box<p256::ecdsa::SigningKey>),
+    EcPublicP256(Box<p256::ecdsa::VerifyingKey>),
+    EcPrivateP384(Box<p384::ecdsa::SigningKey>),
+    EcPublicP384(Box<p384::ecdsa::VerifyingKey>),
+    EcPrivateP521(Box<p521::ecdsa::SigningKey>),
+    EcPublicP521(Box<p521::ecdsa::VerifyingKey>),
+    Ed25519Private(Box<ed25519_dalek::SigningKey>),
+    Ed25519Public(Box<ed25519_dalek::VerifyingKey>),
 }
 
 impl ParsedKey {
@@ -41,14 +52,21 @@ impl ParsedKey {
             ParsedKey::EcPrivateP256(_)
             | ParsedKey::EcPublicP256(_)
             | ParsedKey::EcPrivateP384(_)
-            | ParsedKey::EcPublicP384(_) => "ec",
+            | ParsedKey::EcPublicP384(_)
+            | ParsedKey::EcPrivateP521(_)
+            | ParsedKey::EcPublicP521(_) => "ec",
+            ParsedKey::Ed25519Private(_) | ParsedKey::Ed25519Public(_) => "ed25519",
         }
     }
 
     fn is_private(&self) -> bool {
         matches!(
             self,
-            ParsedKey::RsaPrivate(_) | ParsedKey::EcPrivateP256(_) | ParsedKey::EcPrivateP384(_)
+            ParsedKey::RsaPrivate(_)
+                | ParsedKey::EcPrivateP256(_)
+                | ParsedKey::EcPrivateP384(_)
+                | ParsedKey::EcPrivateP521(_)
+                | ParsedKey::Ed25519Private(_)
         )
     }
 
@@ -56,9 +74,34 @@ impl ParsedKey {
         match self {
             ParsedKey::EcPrivateP256(_) | ParsedKey::EcPublicP256(_) => Some("P-256"),
             ParsedKey::EcPrivateP384(_) | ParsedKey::EcPublicP384(_) => Some("P-384"),
-            ParsedKey::RsaPrivate(_) | ParsedKey::RsaPublic(_) => None,
+            ParsedKey::EcPrivateP521(_) | ParsedKey::EcPublicP521(_) => Some("P-521"),
+            ParsedKey::RsaPrivate(_)
+            | ParsedKey::RsaPublic(_)
+            | ParsedKey::Ed25519Private(_)
+            | ParsedKey::Ed25519Public(_) => None,
         }
     }
+}
+
+/// P-521's own `ecdsa::SigningKey`/`VerifyingKey` newtypes don't
+/// implement `pkcs8`'s decode traits directly (unlike P-256/P-384) --
+/// go through the generic `elliptic_curve::SecretKey<NistP521>`/
+/// `PublicKey<NistP521>` (which do) and convert via the generic
+/// `ecdsa` crate's own `SigningKey<C>: From<SecretKey<C>>`/
+/// `VerifyingKey<C>: From<PublicKey<C>>`, then P-521's own
+/// `SigningKey: From<ecdsa::SigningKey<NistP521>>` newtype wrapper.
+fn parse_ec_p521_private_pem(pem: &str) -> Option<p521::ecdsa::SigningKey> {
+    let secret = p521::SecretKey::from_pkcs8_pem(pem)
+        .or_else(|_| p521::SecretKey::from_sec1_pem(pem))
+        .ok()?;
+    let core: ecdsa::SigningKey<p521::NistP521> = secret.into();
+    Some(core.into())
+}
+
+fn parse_ec_p521_public_pem(pem: &str) -> Option<p521::ecdsa::VerifyingKey> {
+    let public = p521::PublicKey::from_public_key_pem(pem).ok()?;
+    let core: ecdsa::VerifyingKey<p521::NistP521> = public.into();
+    Some(core.into())
 }
 
 /// Tries every supported private-then-public key shape in turn --
@@ -72,17 +115,23 @@ fn parse_key(pem: &str) -> Option<ParsedKey> {
     if let Ok(key) = RsaPrivateKey::from_pkcs1_pem(pem) {
         return Some(ParsedKey::RsaPrivate(Box::new(key)));
     }
-    if let Ok(key) = P256SigningKey::from_pkcs8_pem(pem) {
+    if let Ok(key) = p256::ecdsa::SigningKey::from_pkcs8_pem(pem) {
         return Some(ParsedKey::EcPrivateP256(Box::new(key)));
     }
-    if let Ok(key) = P256SigningKey::from_sec1_pem(pem) {
+    if let Ok(key) = p256::ecdsa::SigningKey::from_sec1_pem(pem) {
         return Some(ParsedKey::EcPrivateP256(Box::new(key)));
     }
-    if let Ok(key) = P384SigningKey::from_pkcs8_pem(pem) {
+    if let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_pem(pem) {
         return Some(ParsedKey::EcPrivateP384(Box::new(key)));
     }
-    if let Ok(key) = P384SigningKey::from_sec1_pem(pem) {
+    if let Ok(key) = p384::ecdsa::SigningKey::from_sec1_pem(pem) {
         return Some(ParsedKey::EcPrivateP384(Box::new(key)));
+    }
+    if let Some(key) = parse_ec_p521_private_pem(pem) {
+        return Some(ParsedKey::EcPrivateP521(Box::new(key)));
+    }
+    if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_pem(pem) {
+        return Some(ParsedKey::Ed25519Private(Box::new(key)));
     }
     if let Ok(key) = RsaPublicKey::from_public_key_pem(pem) {
         return Some(ParsedKey::RsaPublic(Box::new(key)));
@@ -90,11 +139,17 @@ fn parse_key(pem: &str) -> Option<ParsedKey> {
     if let Ok(key) = RsaPublicKey::from_pkcs1_pem(pem) {
         return Some(ParsedKey::RsaPublic(Box::new(key)));
     }
-    if let Ok(key) = P256VerifyingKey::from_public_key_pem(pem) {
+    if let Ok(key) = p256::ecdsa::VerifyingKey::from_public_key_pem(pem) {
         return Some(ParsedKey::EcPublicP256(Box::new(key)));
     }
-    if let Ok(key) = P384VerifyingKey::from_public_key_pem(pem) {
+    if let Ok(key) = p384::ecdsa::VerifyingKey::from_public_key_pem(pem) {
         return Some(ParsedKey::EcPublicP384(Box::new(key)));
+    }
+    if let Some(key) = parse_ec_p521_public_pem(pem) {
+        return Some(ParsedKey::EcPublicP521(Box::new(key)));
+    }
+    if let Ok(key) = ed25519_dalek::VerifyingKey::from_public_key_pem(pem) {
+        return Some(ParsedKey::Ed25519Public(Box::new(key)));
     }
     None
 }
@@ -126,18 +181,23 @@ fn digest_size_matches(digest_algorithm: &str) -> Result<(), String> {
     }
 }
 
-/// RSA-PKCS1v15 (default) or ECDSA (P-256/P-384, DER-encoded) sign,
-/// chosen by the parsed key's own type -- `digest_algorithm` only
-/// matters for RSA (ECDSA always uses its curve's natural digest, the
-/// same pairing JOSE/JWT's ES256/ES384 always use).
+/// RSA-PKCS1v15 (default), ECDSA (P-256/P-384/P-521, DER-encoded), or
+/// Ed25519/EdDSA sign, chosen by the parsed key's own type --
+/// `digest_algorithm` only matters for RSA (ECDSA always uses its
+/// curve's natural digest, the same pairing JOSE/JWT's ES256/ES384/
+/// ES512 always use; EdDSA hashes internally with no external digest
+/// choice at all, matching real Node's own `crypto.sign(null, data,
+/// key)` for an Ed25519 key).
 pub(crate) fn crypto_asymmetric_sign_hex(
     digest_algorithm: &str,
     pem: &str,
     data: &[u8],
 ) -> Result<Vec<u8>, String> {
-    digest_size_matches(digest_algorithm)?;
     match parse_key(pem).ok_or("invalid or unsupported private key")? {
-        ParsedKey::RsaPrivate(key) => sign_rsa_pkcs1v15(&key, digest_algorithm, data),
+        ParsedKey::RsaPrivate(key) => {
+            digest_size_matches(digest_algorithm)?;
+            sign_rsa_pkcs1v15(&key, digest_algorithm, data)
+        }
         ParsedKey::EcPrivateP256(key) => {
             let signature: p256::ecdsa::Signature = key.sign(data);
             Ok(signature.to_der().to_vec())
@@ -146,9 +206,19 @@ pub(crate) fn crypto_asymmetric_sign_hex(
             let signature: p384::ecdsa::Signature = key.sign(data);
             Ok(signature.to_der().to_vec())
         }
-        ParsedKey::RsaPublic(_) | ParsedKey::EcPublicP256(_) | ParsedKey::EcPublicP384(_) => {
-            Err("a public key cannot sign".to_string())
+        ParsedKey::EcPrivateP521(key) => {
+            let signature: p521::ecdsa::Signature = key.sign(data);
+            Ok(signature.to_der().to_vec())
         }
+        ParsedKey::Ed25519Private(key) => {
+            let signature: ed25519_dalek::Signature = key.sign(data);
+            Ok(signature.to_vec())
+        }
+        ParsedKey::RsaPublic(_)
+        | ParsedKey::EcPublicP256(_)
+        | ParsedKey::EcPublicP384(_)
+        | ParsedKey::EcPublicP521(_)
+        | ParsedKey::Ed25519Public(_) => Err("a public key cannot sign".to_string()),
     }
 }
 
@@ -173,13 +243,16 @@ pub(crate) fn crypto_asymmetric_verify(
     data: &[u8],
     signature: &[u8],
 ) -> Result<bool, String> {
-    digest_size_matches(digest_algorithm)?;
     let key = parse_key(pem).ok_or("invalid or unsupported public/private key")?;
     Ok(match key {
         ParsedKey::RsaPrivate(key) => {
+            digest_size_matches(digest_algorithm)?;
             verify_rsa_pkcs1v15(&key.to_public_key(), digest_algorithm, data, signature)
         }
-        ParsedKey::RsaPublic(key) => verify_rsa_pkcs1v15(&key, digest_algorithm, data, signature),
+        ParsedKey::RsaPublic(key) => {
+            digest_size_matches(digest_algorithm)?;
+            verify_rsa_pkcs1v15(&key, digest_algorithm, data, signature)
+        }
         ParsedKey::EcPrivateP256(key) => p256::ecdsa::Signature::from_der(signature)
             .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
         ParsedKey::EcPublicP256(key) => p256::ecdsa::Signature::from_der(signature)
@@ -187,6 +260,14 @@ pub(crate) fn crypto_asymmetric_verify(
         ParsedKey::EcPrivateP384(key) => p384::ecdsa::Signature::from_der(signature)
             .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
         ParsedKey::EcPublicP384(key) => p384::ecdsa::Signature::from_der(signature)
+            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
+        ParsedKey::EcPrivateP521(key) => p521::ecdsa::Signature::from_der(signature)
+            .is_ok_and(|sig| p521::ecdsa::VerifyingKey::from(&*key).verify(data, &sig).is_ok()),
+        ParsedKey::EcPublicP521(key) => p521::ecdsa::Signature::from_der(signature)
+            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
+        ParsedKey::Ed25519Private(key) => ed25519_dalek::Signature::from_slice(signature)
+            .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
+        ParsedKey::Ed25519Public(key) => ed25519_dalek::Signature::from_slice(signature)
             .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
     })
 }
