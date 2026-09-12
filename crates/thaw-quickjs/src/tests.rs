@@ -1439,6 +1439,89 @@ fn crypto_generates_pkcs1_and_sec1_keys_with_a_custom_rsa_exponent() {
     assert_eq!(call("rsaDefaultExponentIsStill65537", "[]"), "true");
 }
 
+/// `crypto.diffieHellman({privateKey, publicKey})` (EC P-256 and
+/// X25519) and the classic `crypto.createECDH('P-256')` raw-byte API,
+/// both cross-checked against a real `openssl pkeyutl -derive` run
+/// over the same real OpenSSL-generated key pairs -- proving the
+/// shared secret is actually correct, not just "both sides of a
+/// self-generated exchange happen to agree" (which would hold even if
+/// the whole implementation used the wrong curve arithmetic, as long
+/// as it was wrong the same way both directions). The EC case is also
+/// checked both directions (Alice's private + Bob's public, and vice
+/// versa) to confirm real ECDH's symmetry, and classic `ECDH.
+/// generateKeys()`/`computeSecret()` get one more self-consistency
+/// round trip between two fresh instances.
+#[test]
+fn crypto_diffie_hellman_and_ecdh_interoperate_with_real_openssl() {
+    assert_eq!(
+        load(
+            "function alicePrivPem() { return '-----BEGIN EC PRIVATE KEY-----\\nMHcCAQEEID8/kIPxluh6keGFqU7b+3PMEAqaumkIFLrSgZZmVJa1oAoGCCqGSM49\\nAwEHoUQDQgAELfzRLsK1BBFn4pglfQV7Gazp4V61JldbTEjrf6eZ2F6javGqeCV2\\nUkovc0eH52rsLp2GA08farLjd+gMQ1Cezg==\\n-----END EC PRIVATE KEY-----\\n'; }\n\
+             function alicePubPem() { return '-----BEGIN PUBLIC KEY-----\\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELfzRLsK1BBFn4pglfQV7Gazp4V61\\nJldbTEjrf6eZ2F6javGqeCV2Ukovc0eH52rsLp2GA08farLjd+gMQ1Cezg==\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function bobPrivPem() { return '-----BEGIN EC PRIVATE KEY-----\\nMHcCAQEEIMwxYX5kMWvdBF6UKBmHbwviYmWvZqF0XmH/Stn6+RjdoAoGCCqGSM49\\nAwEHoUQDQgAELR0lReKZrqy9p6px1daxStA6z3UArX/kMx4PHGbFDVeCMaRozDLx\\nAauzY9WI3CBAoIt8J2cFy1EiGvlcmrzUrA==\\n-----END EC PRIVATE KEY-----\\n'; }\n\
+             function bobPubPem() { return '-----BEGIN PUBLIC KEY-----\\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELR0lReKZrqy9p6px1daxStA6z3UA\\nrX/kMx4PHGbFDVeCMaRozDLxAauzY9WI3CBAoIt8J2cFy1EiGvlcmrzUrA==\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function ecDiffieHellmanBothDirections() {\n\
+               const ab = __thaw_crypto_module.diffieHellman({\n\
+                 privateKey: __thaw_crypto_module.createPrivateKey(alicePrivPem()),\n\
+                 publicKey: __thaw_crypto_module.createPublicKey(bobPubPem())\n\
+               }).toString('hex');\n\
+               const ba = __thaw_crypto_module.diffieHellman({\n\
+                 privateKey: __thaw_crypto_module.createPrivateKey(bobPrivPem()),\n\
+                 publicKey: __thaw_crypto_module.createPublicKey(alicePubPem())\n\
+               }).toString('hex');\n\
+               return [ab, ab === ba];\n\
+             }\n\
+             function x25519DiffieHellman() {\n\
+               const privPem = '-----BEGIN PRIVATE KEY-----\\nMC4CAQAwBQYDK2VuBCIEIDDdFhjLq58TVyVinr+MzvuL85xQJ/jpJzm4LL6e4ARP\\n-----END PRIVATE KEY-----\\n';\n\
+               const peerPubPem = '-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VuAyEAZ3DdQhuKTv05mGmqCtCNs+G0vJtx9eNnUnbCNwVEAXY=\\n-----END PUBLIC KEY-----\\n';\n\
+               return __thaw_crypto_module.diffieHellman({\n\
+                 privateKey: __thaw_crypto_module.createPrivateKey(privPem),\n\
+                 publicKey: __thaw_crypto_module.createPublicKey(peerPubPem)\n\
+               }).toString('hex');\n\
+             }\n\
+             function classicEcdhMatchesOpenssl() {\n\
+               const ecdh = new __thaw_crypto_module.ECDH('P-256');\n\
+               ecdh.setPrivateKey(Buffer.from('3f3f9083f196e87a91e185a94edbfb73cc100a9aba690814bad28196665496b5', 'hex'));\n\
+               return ecdh.computeSecret(Buffer.from('042d1d2545e299aeacbda7aa71d5d6b14ad03acf7500ad7fe4331e0f1c66c50d578231a468cc32f101abb363d588dc2040a08b7c276705cb51221af95c9abcd4ac', 'hex')).toString('hex');\n\
+             }\n\
+             function ecdhGenerateKeysRoundTrip() {\n\
+               const a = new __thaw_crypto_module.ECDH('P-256');\n\
+               const b = new __thaw_crypto_module.ECDH('P-256');\n\
+               const aPub = a.generateKeys();\n\
+               const bPub = b.generateKeys();\n\
+               const secretA = a.computeSecret(bPub).toString('hex');\n\
+               const secretB = b.computeSecret(aPub).toString('hex');\n\
+               return [secretA === secretB, secretA.length === 64];\n\
+             }\n\
+             function x25519KeygenRoundTrip() {\n\
+               const alice = __thaw_crypto_module.generateKeyPairSync('x25519');\n\
+               const bob = __thaw_crypto_module.generateKeyPairSync('x25519');\n\
+               const secretA = __thaw_crypto_module.diffieHellman({ privateKey: alice.privateKey, publicKey: bob.publicKey }).toString('hex');\n\
+               const secretB = __thaw_crypto_module.diffieHellman({ privateKey: bob.privateKey, publicKey: alice.publicKey }).toString('hex');\n\
+               return [alice.privateKey.asymmetricKeyType, secretA === secretB, secretA.length === 64];\n\
+             }"
+        ),
+        1
+    );
+    let expected_shared_secret = "a011fde311c142bd1dfdfa0e6853f2033fe6acb3d15c9e20fc824793d39a5615";
+    assert_eq!(
+        call("ecDiffieHellmanBothDirections", "[]"),
+        format!(r#"["{expected_shared_secret}",true]"#)
+    );
+    assert_eq!(
+        call("x25519DiffieHellman", "[]"),
+        r#""1fd9b5a6bff7ce9782c32c6b88fc505af7a98fce9b9c1e5d3f9f52f879b0fb56""#
+    );
+    assert_eq!(
+        call("classicEcdhMatchesOpenssl", "[]"),
+        format!(r#""{expected_shared_secret}""#)
+    );
+    assert_eq!(call("ecdhGenerateKeysRoundTrip", "[]"), "[true,true]");
+    assert_eq!(
+        call("x25519KeygenRoundTrip", "[]"),
+        r#"["x25519",true,true]"#
+    );
+}
+
 /// `Intl.DateTimeFormat` -- the practical, English/Latin-numeral-only
 /// polyfill (`docs/design/intl-polyfill.md`) added for real luxon, whose
 /// entire timezone system is built on exactly this shape (real luxon's

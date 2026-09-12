@@ -6,20 +6,27 @@
 // Node's own default `dsaEncoding: 'der'`, Ed25519/EdDSA), RSA
 // encrypt/decrypt (PKCS1v15 default + OAEP), PEM and DER key input,
 // passphrase-protected PKCS8 private keys, key generation (RSA/EC/
-// Ed25519, custom RSA `publicExponent`, PKCS8/SPKI or PKCS1(RSA)/
-// SEC1(EC) output -- see `crypto_generate_key_pair_json`). No
-// `publicDecrypt`/`privateEncrypt` (Node's rarer raw-RSA "encrypt with
-// private, decrypt with public" operations -- essentially unused in
-// practice). P-521's own `ecdsa::SigningKey`/`VerifyingKey` newtypes
-// don't implement `pkcs8`'s/`sec1`'s encode/decode traits directly
-// (unlike P-256/P-384, which are plain type aliases of the generic
-// `ecdsa`/`elliptic_curve` types that do) -- worked around by
-// round-tripping through the generic `elliptic_curve::SecretKey`/
-// `PublicKey<NistP521>` instead (see `parse_ec_p521_private_pem`/
-// `ec_p521_private_pem` below). Still out of scope: X25519/EC
-// Diffie-Hellman key agreement, Ed448, the legacy OpenSSL
-// "Proc-Type: 4,ENCRYPTED" PKCS#1/SEC1 passphrase format (only modern
-// PKCS#8 `ENCRYPTED PRIVATE KEY` is supported).
+// Ed25519/X25519, custom RSA `publicExponent`, PKCS8/SPKI or PKCS1
+// (RSA)/SEC1(EC) output -- see `crypto_generate_key_pair_json`),
+// Diffie-Hellman key agreement (EC P-256/P-384/P-521 and X25519 via
+// `crypto.diffieHellman`/`crypto_diffie_hellman_hex`, classic raw-byte
+// EC-only `crypto.createECDH`/`crypto_ecdh_*_hex`). No `publicDecrypt`/
+// `privateEncrypt` (Node's rarer raw-RSA "encrypt with private,
+// decrypt with public" operations -- essentially unused in practice).
+// P-521's own `ecdsa::SigningKey`/`VerifyingKey` newtypes don't
+// implement `pkcs8`'s/`sec1`'s encode/decode traits directly (unlike
+// P-256/P-384, which are plain type aliases of the generic `ecdsa`/
+// `elliptic_curve` types that do) -- worked around by round-tripping
+// through the generic `elliptic_curve::SecretKey`/`PublicKey
+// <NistP521>` instead (see `parse_ec_p521_private_pem`/
+// `ec_p521_private_pem` below). `x25519-dalek` has no `pkcs8` feature
+// at all (unlike `ed25519-dalek`) -- its PKCS8/SPKI PEM wrapping is
+// hand-built (see `x25519_private_to_pem`/`parse_x25519_private_der`),
+// mirroring the `ed25519` crate's own internal approach for the same
+// RFC 8410 OKP-key shape, just with X25519's OID instead. Still out of
+// scope: Ed448, the legacy OpenSSL "Proc-Type: 4,ENCRYPTED" PKCS#1/
+// SEC1 passphrase format (only modern PKCS#8 `ENCRYPTED PRIVATE KEY`
+// is supported), passphrase-protected X25519 keys.
 //
 // Stateless and bytes-in/bytes-out, matching every other native
 // crypto primitive in this crate (`digest_bytes`/`hmac_bytes` in
@@ -49,6 +56,8 @@ enum ParsedKey {
     EcPublicP521(Box<p521::ecdsa::VerifyingKey>),
     Ed25519Private(Box<ed25519_dalek::SigningKey>),
     Ed25519Public(Box<ed25519_dalek::VerifyingKey>),
+    X25519Private(Box<x25519_dalek::StaticSecret>),
+    X25519Public(Box<x25519_dalek::PublicKey>),
 }
 
 impl ParsedKey {
@@ -62,6 +71,7 @@ impl ParsedKey {
             | ParsedKey::EcPrivateP521(_)
             | ParsedKey::EcPublicP521(_) => "ec",
             ParsedKey::Ed25519Private(_) | ParsedKey::Ed25519Public(_) => "ed25519",
+            ParsedKey::X25519Private(_) | ParsedKey::X25519Public(_) => "x25519",
         }
     }
 
@@ -73,6 +83,7 @@ impl ParsedKey {
                 | ParsedKey::EcPrivateP384(_)
                 | ParsedKey::EcPrivateP521(_)
                 | ParsedKey::Ed25519Private(_)
+                | ParsedKey::X25519Private(_)
         )
     }
 
@@ -84,7 +95,9 @@ impl ParsedKey {
             ParsedKey::RsaPrivate(_)
             | ParsedKey::RsaPublic(_)
             | ParsedKey::Ed25519Private(_)
-            | ParsedKey::Ed25519Public(_) => None,
+            | ParsedKey::Ed25519Public(_)
+            | ParsedKey::X25519Private(_)
+            | ParsedKey::X25519Public(_) => None,
         }
     }
 
@@ -127,6 +140,8 @@ impl ParsedKey {
                 key.to_pkcs8_pem(LineEnding::LF).ok().map(|pem| pem.to_string())
             }
             ParsedKey::Ed25519Public(key) => key.to_public_key_pem(LineEnding::LF).ok(),
+            ParsedKey::X25519Private(key) => x25519_private_to_pem(key),
+            ParsedKey::X25519Public(key) => x25519_public_to_pem(key),
         }
     }
 }
@@ -245,6 +260,85 @@ fn ec_p521_public_pem(
         .map_err(|error| error.to_string())
 }
 
+/// X25519's OID (RFC 8410 -- `id-X25519`); `x25519-dalek` has no
+/// `pkcs8` feature at all (unlike `ed25519-dalek`), so this crate's
+/// PKCS8/SPKI wrapping is hand-built the same way `ed25519`'s own
+/// `pkcs8::KeypairBytes`/`PublicKeyBytes` do internally for Ed25519 --
+/// same nested-OCTET-STRING private-key shape, same flat-bytes
+/// SPKI `BIT STRING` public-key shape, different OID.
+const X25519_ALGORITHM_ID: pkcs8::AlgorithmIdentifierRef<'static> = pkcs8::AlgorithmIdentifierRef {
+    oid: pkcs8::ObjectIdentifier::new_unwrap("1.3.101.110"),
+    parameters: None,
+};
+
+fn x25519_private_to_pem(secret: &x25519_dalek::StaticSecret) -> Option<String> {
+    let mut private_key = [0u8; 34];
+    private_key[0] = 0x04;
+    private_key[1] = 0x20;
+    private_key[2..].copy_from_slice(&secret.to_bytes());
+    let public_key = x25519_dalek::PublicKey::from(secret).to_bytes();
+    let info = pkcs8::PrivateKeyInfo {
+        algorithm: X25519_ALGORITHM_ID,
+        private_key: &private_key,
+        public_key: Some(&public_key),
+    };
+    let document = pkcs8::SecretDocument::encode_msg(&info).ok()?;
+    document
+        .to_pem("PRIVATE KEY", pkcs8::LineEnding::LF)
+        .ok()
+        .map(|pem| pem.to_string())
+}
+
+fn x25519_public_to_pem(public: &x25519_dalek::PublicKey) -> Option<String> {
+    let bytes = public.to_bytes();
+    let spki = pkcs8::SubjectPublicKeyInfoRef {
+        algorithm: X25519_ALGORITHM_ID,
+        subject_public_key: pkcs8::der::asn1::BitStringRef::new(0, &bytes).ok()?,
+    };
+    let document: pkcs8::Document = spki.try_into().ok()?;
+    document.to_pem("PUBLIC KEY", pkcs8::LineEnding::LF).ok()
+}
+
+fn parse_x25519_private_pem(pem: &str) -> Option<x25519_dalek::StaticSecret> {
+    let (label, document) = pkcs8::SecretDocument::from_pem(pem).ok()?;
+    if label != "PRIVATE KEY" {
+        return None;
+    }
+    parse_x25519_private_der(document.as_bytes())
+}
+
+fn parse_x25519_private_der(bytes: &[u8]) -> Option<x25519_dalek::StaticSecret> {
+    use pkcs8::der::Decode;
+    let info = pkcs8::PrivateKeyInfo::from_der(bytes).ok()?;
+    if info.algorithm.oid != X25519_ALGORITHM_ID.oid {
+        return None;
+    }
+    let scalar: [u8; 32] = match info.private_key {
+        [0x04, 0x20, rest @ ..] => rest.try_into().ok()?,
+        _ => return None,
+    };
+    Some(x25519_dalek::StaticSecret::from(scalar))
+}
+
+fn parse_x25519_public_pem(pem: &str) -> Option<x25519_dalek::PublicKey> {
+    let (label, document) = pkcs8::Document::from_pem(pem).ok()?;
+    if label != "PUBLIC KEY" {
+        return None;
+    }
+    parse_x25519_public_der(document.as_bytes())
+}
+
+fn parse_x25519_public_der(bytes: &[u8]) -> Option<x25519_dalek::PublicKey> {
+    use pkcs8::der::Decode;
+    let spki = pkcs8::SubjectPublicKeyInfoRef::from_der(bytes).ok()?;
+    if spki.algorithm.oid != X25519_ALGORITHM_ID.oid {
+        return None;
+    }
+    let raw = spki.subject_public_key.as_bytes()?;
+    let bytes: [u8; 32] = raw.try_into().ok()?;
+    Some(x25519_dalek::PublicKey::from(bytes))
+}
+
 /// Tries every supported private-then-public key shape in turn --
 /// there is no cheap way to know a PEM's real key type without fully
 /// parsing it as each candidate, and this only ever runs on a short,
@@ -274,6 +368,9 @@ fn parse_key(pem: &str) -> Option<ParsedKey> {
     if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_pem(pem) {
         return Some(ParsedKey::Ed25519Private(Box::new(key)));
     }
+    if let Some(key) = parse_x25519_private_pem(pem) {
+        return Some(ParsedKey::X25519Private(Box::new(key)));
+    }
     if let Ok(key) = RsaPublicKey::from_public_key_pem(pem) {
         return Some(ParsedKey::RsaPublic(Box::new(key)));
     }
@@ -291,6 +388,9 @@ fn parse_key(pem: &str) -> Option<ParsedKey> {
     }
     if let Ok(key) = ed25519_dalek::VerifyingKey::from_public_key_pem(pem) {
         return Some(ParsedKey::Ed25519Public(Box::new(key)));
+    }
+    if let Some(key) = parse_x25519_public_pem(pem) {
+        return Some(ParsedKey::X25519Public(Box::new(key)));
     }
     None
 }
@@ -363,6 +463,9 @@ fn parse_key_der(bytes: &[u8]) -> Option<ParsedKey> {
     if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_der(bytes) {
         return Some(ParsedKey::Ed25519Private(Box::new(key)));
     }
+    if let Some(key) = parse_x25519_private_der(bytes) {
+        return Some(ParsedKey::X25519Private(Box::new(key)));
+    }
     if let Ok(key) = RsaPublicKey::from_public_key_der(bytes) {
         return Some(ParsedKey::RsaPublic(Box::new(key)));
     }
@@ -380,6 +483,9 @@ fn parse_key_der(bytes: &[u8]) -> Option<ParsedKey> {
     }
     if let Ok(key) = ed25519_dalek::VerifyingKey::from_public_key_der(bytes) {
         return Some(ParsedKey::Ed25519Public(Box::new(key)));
+    }
+    if let Some(key) = parse_x25519_public_der(bytes) {
+        return Some(ParsedKey::X25519Public(Box::new(key)));
     }
     None
 }
@@ -481,6 +587,9 @@ pub(crate) fn crypto_asymmetric_sign_hex(
         | ParsedKey::EcPublicP384(_)
         | ParsedKey::EcPublicP521(_)
         | ParsedKey::Ed25519Public(_) => Err("a public key cannot sign".to_string()),
+        ParsedKey::X25519Private(_) | ParsedKey::X25519Public(_) => {
+            Err("an X25519 key cannot sign -- it's a Diffie-Hellman key-agreement key, not a signing key".to_string())
+        }
     }
 }
 
@@ -531,6 +640,9 @@ pub(crate) fn crypto_asymmetric_verify(
             .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
         ParsedKey::Ed25519Public(key) => ed25519_dalek::Signature::from_slice(signature)
             .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
+        ParsedKey::X25519Private(_) | ParsedKey::X25519Public(_) => return Err(
+            "an X25519 key cannot verify -- it's a Diffie-Hellman key-agreement key, not a signing key".to_string()
+        ),
     })
 }
 
@@ -934,7 +1046,196 @@ pub(crate) fn crypto_generate_key_pair_json(
                     .map_err(|error| error.to_string())?,
             )
         }
+        "x25519" => {
+            if !matches!(private_key_type, "" | "pkcs8") {
+                return Err(format!(
+                    "unsupported X25519 privateKeyEncoding.type: {private_key_type}"
+                ));
+            }
+            if !matches!(public_key_type, "" | "spki") {
+                return Err(format!(
+                    "unsupported X25519 publicKeyEncoding.type: {public_key_type}"
+                ));
+            }
+            let secret = x25519_dalek::StaticSecret::random_from_rng(rng);
+            let public = x25519_dalek::PublicKey::from(&secret);
+            (
+                x25519_private_to_pem(&secret).ok_or("failed to encode X25519 private key")?,
+                x25519_public_to_pem(&public).ok_or("failed to encode X25519 public key")?,
+            )
+        }
         _ => return Err(format!("unsupported key type: {key_type}")),
     };
     Ok(serde_json::json!({ "privatePem": private_pem, "publicPem": public_pem }).to_string())
+}
+
+/// Computes an (X25519 or P-256/P-384/P-521 EC) Diffie-Hellman shared
+/// secret from a private and a public PEM -- backs `crypto.
+/// diffieHellman({privateKey, publicKey})` and `ECDH.computeSecret`.
+/// Both keys must be the same key-agreement type (matching EC curve,
+/// or both X25519); RSA/Ed25519 keys are signing/encryption keys, not
+/// key-agreement keys, and are rejected, matching real Node. P-256/
+/// P-384 convert their parsed `ecdsa::SigningKey<C>`/`VerifyingKey<C>`
+/// straight to the generic `elliptic_curve::SecretKey<C>`/`PublicKey
+/// <C>` `diffie_hellman` itself needs, via the crate's own direct
+/// `From` impls; P-521 needs the same scalar/point-byte round trip
+/// its own PEM encode/decode already needs (see `ec_p521_private_
+/// to_pem`), since its newtype wrapper doesn't implement that `From`.
+pub(crate) fn crypto_diffie_hellman_hex(
+    private_pem: &str,
+    public_pem: &str,
+) -> Result<Vec<u8>, String> {
+    let private = parse_key(private_pem).ok_or("invalid or unsupported private key")?;
+    let public = parse_key(public_pem).ok_or("invalid or unsupported public key")?;
+    match (private, public) {
+        (ParsedKey::EcPrivateP256(key), ParsedKey::EcPublicP256(peer)) => {
+            let secret = elliptic_curve::SecretKey::<p256::NistP256>::from(&*key);
+            let public = elliptic_curve::PublicKey::<p256::NistP256>::from(&*peer);
+            let shared =
+                elliptic_curve::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            Ok(shared.raw_secret_bytes().to_vec())
+        }
+        (ParsedKey::EcPrivateP384(key), ParsedKey::EcPublicP384(peer)) => {
+            let secret = elliptic_curve::SecretKey::<p384::NistP384>::from(&*key);
+            let public = elliptic_curve::PublicKey::<p384::NistP384>::from(&*peer);
+            let shared =
+                elliptic_curve::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            Ok(shared.raw_secret_bytes().to_vec())
+        }
+        (ParsedKey::EcPrivateP521(key), ParsedKey::EcPublicP521(peer)) => {
+            let secret =
+                p521::SecretKey::from_bytes(&key.to_bytes()).map_err(|error| error.to_string())?;
+            let public = p521::PublicKey::from_sec1_bytes(peer.to_encoded_point(false).as_bytes())
+                .map_err(|error| error.to_string())?;
+            let shared =
+                elliptic_curve::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+            Ok(shared.raw_secret_bytes().to_vec())
+        }
+        (ParsedKey::X25519Private(secret), ParsedKey::X25519Public(peer)) => {
+            Ok(secret.diffie_hellman(&peer).as_bytes().to_vec())
+        }
+        _ => Err(
+            "diffieHellman requires both keys to be the same key-agreement type (matching EC curve, or both X25519)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Backs `crypto.createECDH(curveName)`'s classic raw-byte API (`.
+/// generateKeys()`/`.getPublicKey()`/`.getPrivateKey()`/`.
+/// setPrivateKey()`/`.computeSecret()`) -- operates on the generic
+/// `elliptic_curve::SecretKey<C>`/`PublicKey<C>` directly (not the
+/// `ecdsa::SigningKey`/`VerifyingKey` wrapper the sign/verify/PEM-
+/// based code elsewhere in this module works with), since classic
+/// `ECDH` never PEM-encodes anything -- it exchanges raw scalar/SEC1-
+/// point bytes end to end, matching real Node's own raw-byte
+/// `computeSecret`. P-521 doesn't need its usual newtype-wrapper
+/// detour here for exactly that reason -- `p521::SecretKey`/
+/// `PublicKey` (unlike `p521::ecdsa::SigningKey`/`VerifyingKey`) are
+/// plain aliases of these same generic types Node's classic API only
+/// ever supports EC (never X25519), matching this implementation's own
+/// scope.
+fn ecdh_generate_raw<C>() -> (Vec<u8>, Vec<u8>)
+where
+    C: elliptic_curve::CurveArithmetic,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+{
+    use elliptic_curve::sec1::ToEncodedPoint;
+    let secret = elliptic_curve::SecretKey::<C>::random(&mut rand_core::OsRng);
+    let public = secret.public_key();
+    (
+        secret.to_bytes().to_vec(),
+        public.to_encoded_point(false).as_bytes().to_vec(),
+    )
+}
+
+fn ecdh_public_from_private_raw<C>(private_key: &[u8]) -> Result<Vec<u8>, String>
+where
+    C: elliptic_curve::CurveArithmetic,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+{
+    use elliptic_curve::sec1::ToEncodedPoint;
+    let secret = elliptic_curve::SecretKey::<C>::from_slice(private_key)
+        .map_err(|error| error.to_string())?;
+    Ok(secret
+        .public_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec())
+}
+
+fn ecdh_compute_secret_raw<C>(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, String>
+where
+    C: elliptic_curve::CurveArithmetic,
+    elliptic_curve::AffinePoint<C>:
+        elliptic_curve::sec1::FromEncodedPoint<C> + elliptic_curve::sec1::ToEncodedPoint<C>,
+    elliptic_curve::FieldBytesSize<C>: elliptic_curve::sec1::ModulusSize,
+{
+    let secret = elliptic_curve::SecretKey::<C>::from_slice(private_key)
+        .map_err(|error| error.to_string())?;
+    let public =
+        elliptic_curve::PublicKey::<C>::from_sec1_bytes(public_key).map_err(|error| error.to_string())?;
+    let shared =
+        elliptic_curve::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+    Ok(shared.raw_secret_bytes().to_vec())
+}
+
+/// `curveName` -> `(privateKeyHex, publicKeyHex)`, raw SEC1 bytes
+/// (uncompressed point, matching Node's own default `format:
+/// 'uncompressed'`).
+pub(crate) fn crypto_ecdh_generate_keys_hex(curve: &str) -> Result<String, String> {
+    let (private, public) = match normalize_curve_name(curve)
+        .ok_or_else(|| format!("unsupported EC curve: {curve}"))?
+    {
+        "P-256" => ecdh_generate_raw::<p256::NistP256>(),
+        "P-384" => ecdh_generate_raw::<p384::NistP384>(),
+        "P-521" => ecdh_generate_raw::<p521::NistP521>(),
+        _ => unreachable!(),
+    };
+    Ok(serde_json::json!({
+        "privateKeyHex": hex_encode(&private),
+        "publicKeyHex": hex_encode(&public),
+    })
+    .to_string())
+}
+
+/// Backs `ecdh.setPrivateKey(privateKey)`: derives the matching raw
+/// public key bytes for a caller-supplied raw private scalar.
+pub(crate) fn crypto_ecdh_public_from_private_hex(
+    curve: &str,
+    private_key_hex: &str,
+) -> Result<String, String> {
+    let private_key = hex_decode(private_key_hex);
+    let public = match normalize_curve_name(curve)
+        .ok_or_else(|| format!("unsupported EC curve: {curve}"))?
+    {
+        "P-256" => ecdh_public_from_private_raw::<p256::NistP256>(&private_key)?,
+        "P-384" => ecdh_public_from_private_raw::<p384::NistP384>(&private_key)?,
+        "P-521" => ecdh_public_from_private_raw::<p521::NistP521>(&private_key)?,
+        _ => unreachable!(),
+    };
+    Ok(hex_encode(&public))
+}
+
+/// Backs `ecdh.computeSecret(otherPublicKey)`.
+pub(crate) fn crypto_ecdh_compute_secret_hex(
+    curve: &str,
+    private_key_hex: &str,
+    public_key_hex: &str,
+) -> Result<String, String> {
+    let private_key = hex_decode(private_key_hex);
+    let public_key = hex_decode(public_key_hex);
+    let shared = match normalize_curve_name(curve)
+        .ok_or_else(|| format!("unsupported EC curve: {curve}"))?
+    {
+        "P-256" => ecdh_compute_secret_raw::<p256::NistP256>(&private_key, &public_key)?,
+        "P-384" => ecdh_compute_secret_raw::<p384::NistP384>(&private_key, &public_key)?,
+        "P-521" => ecdh_compute_secret_raw::<p521::NistP521>(&private_key, &public_key)?,
+        _ => unreachable!(),
+    };
+    Ok(hex_encode(&shared))
 }
