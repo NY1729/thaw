@@ -1,3 +1,41 @@
+thread_local! {
+    /// Scopes `Buffer`/`Uint8Array` -> `HirType::Bytes` classification
+    /// (see `classify_ts_type`'s `TsTypeRef` arm) to thaw's own hand-
+    /// authored ambient builtin-module `.d.ts` text (`node:http` and
+    /// friends, `thaw_registry::resolve_builtin`) -- never a real
+    /// `--use`d npm package's `.d.ts`. Widening this classification
+    /// unconditionally reroutes an ordinary npm package's `Uint8Array`
+    /// parameters from the safe "unresolved -> Json Fallback" dispatch
+    /// path into native marshaling, which Fallback-wrapper codegen
+    /// doesn't expect and breaks (confirmed via a reverted experiment
+    /// during investigation: a real npm package that only ever passes
+    /// such a value through as opaque JSON regressed). Single-threaded,
+    /// sequential per-package compilation (`generate_registry_shims`'s
+    /// own `for name in use_packages` loop) makes a thread-local safe
+    /// and far less invasive than threading a mode parameter through
+    /// every `classify_ts_type`/`classify`/`parse_dts*` call site.
+    static ALLOW_NATIVE_BYTES_TYPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Resets `ALLOW_NATIVE_BYTES_TYPE` to its prior value when dropped,
+/// so a nested or early-returning caller can never leave it stuck on.
+pub struct NativeBytesTypeGuard(bool);
+
+impl Drop for NativeBytesTypeGuard {
+    fn drop(&mut self) {
+        ALLOW_NATIVE_BYTES_TYPE.with(|flag| flag.set(self.0));
+    }
+}
+
+/// Scopes `classify_ts_type`'s `Buffer`/`Uint8Array` -> `HirType::Bytes`
+/// mapping to the caller's own duration (see `ALLOW_NATIVE_BYTES_TYPE`'s
+/// doc comment) -- pass `true` only while classifying thaw's own
+/// ambient builtin-module `.d.ts` text, never a real npm package's.
+pub fn allow_native_bytes_type(enabled: bool) -> NativeBytesTypeGuard {
+    let previous = ALLOW_NATIVE_BYTES_TYPE.with(|flag| flag.replace(enabled));
+    NativeBytesTypeGuard(previous)
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -409,6 +447,15 @@ fn classify_ts_type(
                     "timestamp".to_string(),
                     HirType::F64,
                 )]));
+            }
+            // See `ALLOW_NATIVE_BYTES_TYPE`'s doc comment: only while
+            // classifying thaw's own ambient builtin `.d.ts` (never a
+            // real npm package's, where this stays `Unsupported` ->
+            // Fallback/Json, unchanged).
+            if matches!(ref_name.as_str(), "Buffer" | "Uint8Array")
+                && ALLOW_NATIVE_BYTES_TYPE.with(std::cell::Cell::get)
+            {
+                return DtsType::Native(HirType::Bytes);
             }
             if ref_name == "Readonly" {
                 let Some(inner) = ty_ref
