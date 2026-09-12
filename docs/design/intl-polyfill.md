@@ -1,6 +1,9 @@
 # A practical `Intl` (ECMA-402) polyfill, for luxon
 
-**Status: done.**
+**Status: superseded for the scope below by a real, multi-locale CLDR
+integration (icu4x) — see "Real CLDR data via icu4x" at the end of this
+document. This section (English/Latin-only) describes the original,
+narrower polyfill and stays accurate for what it covers.**
 
 ## Scope
 
@@ -254,3 +257,109 @@ luxon's own results depend on it).
   real luxon pinned integration test (`THAW_RUN_NPM_INTEGRATION=1`-
   gated), using fixed historical dates (never `DateTime.now()`, for
   determinism), including `Settings.defaultLocale = "en-US"` (bug 4).
+
+## Real CLDR data via icu4x (in progress)
+
+Follow-up effort, planned at
+`~/.claude/plans/toasty-percolating-harbor.md` (14 milestones, M0-M14),
+to replace the English/Latin-only scope above with real multi-locale CLDR
+data via the `icu4x` Rust crate family, plus new `Intl.Locale`/
+`PluralRules`/`Collator`/`Segmenter`/`RelativeTimeFormat` and non-Gregorian
+calendar support. Locale scope is a **curated list** (not all ~700 CLDR
+locales), chosen to bound binary size; API breadth is the full list above
+in one effort (both explicit user choices, not phased).
+
+### M0 spike findings (2026-09-12)
+
+Verified hands-on, with real generated/compiled/run code (a throwaway
+probe crate, not part of this workspace):
+
+- **Tooling**: `icu4x-datagen` 2.3.0 (`cargo install icu4x-datagen
+  --version 2.3.0 --locked`). Resolved component crate versions: `icu_locale`
+  2.3.1, `icu_calendar`/`icu_datetime`/`icu_decimal`/`icu_list`/`icu_plurals`/
+  `icu_segmenter` 2.3.0, `icu_collator` 2.3.1 — all on the 2.x line, no
+  version conflicts across components.
+- **Offline/vendoring**: confirmed via `icu4x-datagen --help` that
+  `--cldr-root <path>`/`--icuexport-root <path>` (a local
+  `cldr-{version}-json-full.zip` directory / local `icuexport` directory)
+  are real, first-class alternatives to `--cldr-tag`/`--icuexport-tag`
+  (which fetch by tag over the network) — the same "fetch once, vendor,
+  no network at normal build time" shape as `jiff`'s `tzdb-bundle-always`.
+  This session's actual spike runs used `--cldr-tag latest
+  --icuexport-tag latest --segmenter-lstm-tag latest --tzdb-tag latest`
+  (resolved to CLDR `48.2.1` at spike time) for speed; the real M1
+  vendoring commit should pin exact tags and use the `--*-root` local-path
+  form for full reproducibility, per this same file's own header-comment
+  convention for `intl_time_zone_names.rs`.
+- **`--format baked --use-separate-crates`** (avoids depending on the
+  `icu` facade crate, matching this plan's per-component-crate dependency
+  choice) produces plain `.rs`/`.rs.data` source files plus a generated
+  `impl_data_provider!` macro — confirmed real, compiles, and — wired into
+  a probe binary via the `_unstable` constructors — actually runs and
+  produces correct output (see below).
+- **Size, curated ~35-locale list** (`en-US en-GB es es-419 fr de it pt
+  pt-BR nl sv pl ru uk tr ar ar-SA he hi bn ja ko zh-Hans zh-Hant th vi id
+  ms fil el ro cs hu da fi nb`):
+  - `--markers all`: 21MB generated source. Dominated by
+    `segmenter_dictionary_{auto,extended}_v1` (~10.4MB combined — CJK/Thai/
+    Burmese/Khmer/Lao word-segmentation dictionaries) and
+    `collation_tailoring_v1` (2.4MB).
+  - `--markers-for-bin <probe-binary>` (real static analysis of a binary
+    exercising `DateTimeFormatter`/`DecimalFormatter`/`ListFormatter`/
+    `PluralRules`/`Collator`/`WordSegmenter` for one locale): 11MB —
+    correctly trims unrelated markers (normalizer/properties data already
+    covered by `thaw-runtime`'s separate `icu_normalizer` dependency,
+    unneeded segmenter break-rule variants, etc.) while *keeping* every
+    non-Gregorian calendar's pattern/name data (Buddhist/Chinese/Coptic/
+    Dangi/Ethiopian/Hebrew/Hijri/Indian/Japanese/Persian/ROC, ~60-125KB
+    each) — because `DateTimeFormatter` (the runtime-calendar-polymorphic
+    type, not `FixedCalendarDateTimeFormatter<Gregorian>`) can reach any
+    of them, which is exactly the calendar breadth M5 wants, so this is
+    the *right* scope, not an over-broad one. Remaining size is
+    dominated by the same segmenter-dictionary (5.1MB) and collation
+    (2.4MB) data.
+  - A `compiled_data`-feature probe binary (default constructors, ALL
+    ~700 CLDR locales baked in, not just curated) linking all 8 planned
+    components stripped to **5.2MB total** — smaller than icu4x's own
+    docs' general "tens of megabytes" warning for `compiled_data`
+    defaults, though that figure is for a from-scratch program; the
+    actual marginal delta over a curated custom-baked dataset (M1's real
+    approach) still needs measuring once `thaw-icu-data` exists for real
+    (M14).
+  - Segmenter word/dictionary data and collation tailoring are the two
+    real size drivers, not locale count or calendar breadth — worth
+    knowing before M9 (Collator)/M10 (Segmenter)'s own size mini-spikes.
+- **Confirmed real, correct output** from the probe binary for `ja-JP`:
+  `DateTimeFormatter` → `"2026年9月12日"`; `DecimalFormatter` on `12345` →
+  `"12,345"`; `ListFormatter` (and/wide) on `["a","b","c"]` →
+  `"a、b、c"`; `PluralRules::category_for(1u32)` → `Other` (correct —
+  Japanese has no cardinal plural distinction); `Collator::compare("a",
+  "b")` → `Less`; `WordSegmenter::try_new_auto` constructs successfully.
+- **Exact current API signatures** (2.x line; differ from older 1.x
+  tutorials found during research — verified by actually compiling, not
+  guessed): `DateTimeFormatter::try_new(DateTimeFormatterPreferences,
+  fieldsets::YMD::long())`; `DecimalFormatter::try_new
+  (DecimalFormatterPreferences, DecimalFormatterOptions::default())` with
+  `icu_decimal::input::Decimal` (not `icu_decimal::Decimal` — it's
+  re-exported under an `input` submodule); `ListFormatter::try_new_and
+  (ListFormatterPreferences, ListFormatterOptions::default()
+  .with_length(ListLength::Wide))` (`ListLength` lives in
+  `icu_list::options`, not the crate root); `PluralRules::try_new_cardinal
+  (PluralRulesPreferences)`; `Collator::try_new(CollatorPreferences,
+  CollatorOptions::default())`; `WordSegmenter::try_new_auto(_)`. Each
+  `*Preferences` struct is built via `SomePreferences::from(&locale)`.
+- **Calendar-suffixed locale variants**: not needed as separate
+  `--locales` entries — requesting a runtime-polymorphic
+  `DateTimeFormatter` pulls in every calendar's pattern/name data for
+  every requested locale regardless of calendar suffix (confirmed by the
+  `--markers-for-bin` output above including all 11 non-Gregorian
+  calendars' data despite the curated locale list having no `-u-ca-`
+  suffixes at all) — M5 doesn't need a `thaw-icu-data` regeneration step
+  for this reason after all.
+
+Net effect on the plan: M0's open questions are resolved favorably — the
+tooling works exactly as documented, real API signatures are now pinned
+down precisely (recorded above so M2+ don't need to re-discover them), and
+the size profile is dominated by segmenter/collation data rather than
+locale or calendar count, which sharpens M9/M10's own size-tradeoff
+mini-spikes rather than changing this effort's overall shape.
