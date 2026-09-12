@@ -995,11 +995,28 @@ fn source_uses_brotli(source: &str) -> bool {
 }
 
 fn source_uses_intl(source: &str) -> bool {
+    // Deliberately narrower than "any `Intl.*` use": `DateTimeFormat`/
+    // `NumberFormat`/`ListFormat` still have a pure-JS, English-only
+    // fast path in `intl.js` that needs no icu4x data at all (and, once
+    // M4/M6/M7 land real per-locale rendering for those three, will
+    // still fall back to that same fast path when this feature is off
+    // -- see docs/design/intl-polyfill.md). Only the genuinely new
+    // capabilities that have no non-icu4x implementation at all should
+    // pull in thaw-icu-data by default.
+    //
     // `String.prototype.localeCompare` is a separate, always-linked
     // thaw-runtime primitive (crates/thaw-runtime/src/runtime/
     // native_values/strings.rs), not part of thaw-quickjs's `intl`
-    // feature -- only `Intl.*` usage needs to be detected here.
-    source.contains("Intl.")
+    // feature at all.
+    [
+        "Intl.Locale",
+        "Intl.PluralRules",
+        "Intl.Collator",
+        "Intl.Segmenter",
+        "Intl.RelativeTimeFormat",
+    ]
+    .iter()
+    .any(|marker| source.contains(marker))
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
