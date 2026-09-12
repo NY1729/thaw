@@ -628,15 +628,48 @@
     }
   }
 
-  // `Intl.Locale`/`Intl.PluralRules`/`Intl.Collator` are only ever
-  // *publicly exposed* when the native primitives actually exist (see
-  // each class's own doc comment above) -- the class declarations
-  // themselves stay unconditional.
+  // `Intl.Segmenter` (M10) -- entirely new. Only the iterable protocol
+  // is implemented on the returned `Segments` object (`for (const s of
+  // segmenter.segment(text))`, by far the common usage) -- `.containing
+  // (index)` random access isn't (a documented gap).
+  class Segmenter {
+    constructor(locale, options) {
+      const opts = options || {};
+      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this._granularity = ['word', 'sentence'].includes(opts.granularity) ? opts.granularity : 'grapheme';
+    }
+
+    resolvedOptions() {
+      return { locale: this.locale, granularity: this._granularity };
+    }
+
+    segment(text) {
+      const input = String(text);
+      const parts = JSON.parse(__thaw_intl_segment(this.locale, this._granularity, input));
+      const segments = parts.map(p => ({
+        segment: p.segment,
+        index: p.index,
+        input,
+        ...(p.isWordLike === null ? {} : { isWordLike: p.isWordLike }),
+      }));
+      return {
+        [Symbol.iterator]() {
+          return segments[Symbol.iterator]();
+        },
+      };
+    }
+  }
+
+  // `Intl.Locale`/`Intl.PluralRules`/`Intl.Collator`/`Intl.Segmenter`
+  // are only ever *publicly exposed* when the native primitives
+  // actually exist (see each class's own doc comment above) -- the
+  // class declarations themselves stay unconditional.
   if (typeof __thaw_intl_locale_parse === 'function') {
     globalThis.Intl = globalThis.Intl || {};
     globalThis.Intl.Locale = Locale;
     globalThis.Intl.PluralRules = PluralRules;
     globalThis.Intl.Collator = Collator;
+    globalThis.Intl.Segmenter = Segmenter;
   }
 
   globalThis.Intl = Object.assign({ DateTimeFormat, NumberFormat, ListFormat }, globalThis.Intl);
