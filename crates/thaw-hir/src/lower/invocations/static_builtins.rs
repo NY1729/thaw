@@ -11,6 +11,7 @@ fn json_convertible_native_type(ty: &HirType) -> bool {
             | HirType::Str
             | HirType::Bool
             | HirType::Null
+            | HirType::Undefined
             | HirType::Json
             | HirType::Dictionary(_)
             | HirType::Array(_)
