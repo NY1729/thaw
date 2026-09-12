@@ -236,7 +236,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                         let requests: number = 0;
                         const server = createServer(
                             (
-                                request: {{ method: string; url: string; statusCode: number; body: string }},
+                                request: {{ method: string; url: string; statusCode: number; body: () => string }},
                                 response: {{
                                     statusCode: number;
                                     setHeader: (name: string, value: string) => boolean;
@@ -342,7 +342,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
             r#"import { createServer } from "node:http";
             function main(): void {
                 const server = createServer((
-                    request: { method: string; url: string; statusCode: number; body: string },
+                    request: { method: string; url: string; statusCode: number; body: () => string },
                     response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
                 ): boolean => true);
                 server.listen(70000);
@@ -504,7 +504,7 @@ fn node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_whe
         r#"import { createServer } from "node:http";
 function main(): void {
     const server = createServer((
-        request: { method: string; url: string; statusCode: number; body: string },
+        request: { method: string; url: string; statusCode: number; body: () => string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): void => {
         response.setHeader("Content-Type", "text/plain");
@@ -626,7 +626,7 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: string },
+        request: { method: string; url: string; statusCode: number; body: () => string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         if (request.url === "/pieces") {
@@ -788,7 +788,7 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: string },
+        request: { method: string; url: string; statusCode: number; body: () => string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         response.write("A" + request.url + ";");
@@ -900,7 +900,7 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: string },
+        request: { method: string; url: string; statusCode: number; body: () => string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         if (request.url === "/slow") {
@@ -1087,11 +1087,17 @@ function main(): void {
 }
 
 /// `request.on("data", ...)` / `request.on("end", ...)` -- the streaming
-/// body-reading shape most Node handlers actually use -- replays the
-/// already-buffered body: `data` fires once with the whole body (never
-/// for an empty one), `end` once after, regardless of the order the two
-/// listeners were registered in. `request.method`/`.url` still resolve
-/// correctly with the `on` member present.
+/// body-reading shape most Node handlers actually use. For a small body
+/// that arrives fully in the same read as the head (the common case
+/// these three requests exercise), `data` fires exactly once with the
+/// whole body (never for an empty one) and `end` once after, regardless
+/// of the order the two listeners were registered in -- delivery is now
+/// genuinely incremental (see `node_http_delivers_request_body_chunks_
+/// as_they_actually_arrive` for a body that actually arrives in
+/// separate pieces, where `data` fires more than once), but that can't
+/// be observed here since nothing splits these bodies across reads.
+/// `request.method`/`.url` still resolve correctly with the `on` member
+/// present.
 #[test]
 fn node_http_replays_the_request_body_through_on_data_and_on_end() {
     let dir = std::env::temp_dir().join(format!(
@@ -1117,9 +1123,9 @@ function main(): void {
                     + " [" + chunks + "]"
             );
         });
-        request.on("data", (chunk: string): void => {
+        request.on("data", (chunk: Uint8Array): void => {
             dataCalls = dataCalls + 1;
-            chunks = chunks + chunk;
+            chunks = chunks + chunk.toString();
         });
     });
     server.listen(Number(process.env.PORT));
@@ -1202,7 +1208,7 @@ fn node_http_replays_the_request_body_to_an_async_handler() {
 async function main(): Promise<void> {
     const server = createServer(async (request, response): Promise<void> => {
         let body = "";
-        request.on("data", (chunk: string): void => { body = body + chunk; });
+        request.on("data", (chunk: Uint8Array): void => { body = body + chunk.toString(); });
         request.on("end", (): void => {
             response.end("async " + request.method + " " + request.url + " [" + body + "]");
         });
@@ -1240,8 +1246,172 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The actual point of this whole feature: `request.on("data", ...)`
+/// fires once *per genuinely separate arrival* off the socket, not once
+/// with the whole body replayed after the fact -- real Node's own
+/// behavior, and the reverse of this crate's previous one-shot-replay
+/// design (see `node_http_replays_the_request_body_through_on_data_and_
+/// on_end` above, which -- for a body that happens to arrive all at
+/// once, the overwhelmingly common case -- can't tell the two designs
+/// apart, since both fire exactly once then). Here the client
+/// deliberately splits a 10-byte body across two `write()` calls with a
+/// real delay between them, so if the server were still buffering the
+/// whole body before ever invoking the handler (or before delivering
+/// anything), `chunkCount` would be `1`; genuine incremental delivery
+/// makes it `2`.
+#[test]
+fn node_http_delivers_request_body_chunks_as_they_actually_arrive() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-real-streaming-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+function main(): void {
+    const server = createServer((request, response): void => {
+        let chunkCount = 0;
+        let received = "";
+        request.on("data", (chunk: Uint8Array): void => {
+            chunkCount = chunkCount + 1;
+            received = received + chunk.toString();
+        });
+        request.on("end", (): void => {
+            response.end("chunks=" + String(chunkCount) + " [" + received + "]");
+        });
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stream = (0..500)
+        .find_map(|_| {
+            TcpStream::connect(("127.0.0.1", port)).ok().or_else(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            })
+        })
+        .expect("server did not start");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    // Content-Length: 10, but only the first 5 bytes go out now.
+    stream
+        .write_all(b"POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabcde")
+        .unwrap();
+    // Long enough that the server's `on("data")` almost certainly already
+    // fired for the first 5 bytes before the rest ever arrives (proven
+    // by the assertion below, not assumed).
+    std::thread::sleep(Duration::from_millis(200));
+    stream.write_all(b"fghij").unwrap();
+
+    assert_eq!(
+        read_one_response_body_any(&mut stream),
+        "chunks=2 [abcdefghij]"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A handler that only ever uses `on("data"/"end", ...)` -- never
+/// `body()`/`bodyHex()`/`bodyBytes()` -- still gets a connection whose
+/// body stops arriving mid-stream closed by the same read-side deadline
+/// (`refresh_body_deadline`, armed right after dispatch and refreshed on
+/// every real read), not held open forever. Complements
+/// `node_http_reads_request_bodies_and_keeps_the_connection_in_sync`'s
+/// own stalled-body case, which only exercises this timeout through
+/// `body()`'s independent `block_until_body_complete` bound.
+#[test]
+fn node_http_times_out_a_stalled_body_for_an_on_data_only_handler() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-http-stalled-on-data-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("main.ts");
+    std::fs::write(
+        &source,
+        r#"import { createServer } from "node:http";
+function main(): void {
+    const server = createServer((request, response): void => {
+        request.on("data", (): void => {});
+        request.on("end", (): void => { response.end("done"); });
+    });
+    server.listen(Number(process.env.PORT));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let mut child = Command::new(&output)
+        .env("PORT", port.to_string())
+        .env("THAW_HTTP_HEADER_TIMEOUT_MS", "700")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stalled = (0..500)
+        .find_map(|_| {
+            TcpStream::connect(("127.0.0.1", port)).ok().or_else(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            })
+        })
+        .expect("server did not start");
+    // Content-Length: 100, but only 16 bytes ever actually arrive.
+    stalled
+        .write_all(b"POST /slow HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nonly-a-few-bytes")
+        .unwrap();
+    stalled.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+
+    let started = std::time::Instant::now();
+    let mut sink = [0_u8; 16];
+    loop {
+        match stalled.read(&mut sink) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => panic!("stalled body conn: unexpected {error}"),
+        }
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "on(\"data\")-only handler's stalled connection not closed within the timeout"
+    );
+
+    // The server is still healthy for the next well-behaved client.
+    let mut after = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    after.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    after
+        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    assert_eq!(read_one_response_body_any(&mut after), "done");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `request.bodyHex()` returns the request body's raw bytes as a hex
-/// string -- the escape hatch for a body that `request.body` /
+/// string -- the escape hatch for a body that `request.body()` /
 /// `on("data")` would mangle, since a thaw string is NUL-terminated. A
 /// four-byte body `00 ff 41 80` (NUL, non-UTF-8) round-trips exactly.
 #[test]
@@ -1262,7 +1432,7 @@ function main(): void {
         response.end(
             request.method + " " + request.url
                 + " hex=" + hex
-                + " body=[" + request.body + "]"
+                + " body=[" + request.body() + "]"
         );
     });
     server.listen(Number(process.env.PORT));
@@ -1290,7 +1460,7 @@ function main(): void {
     keep.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
     // 00 ff 41 80: NUL, a non-UTF-8 lead byte, 'A', a bare continuation
-    // byte. `request.body` sees a truncated / U+FFFD-mangled version;
+    // byte. `request.body()` sees a truncated / U+FFFD-mangled version;
     // `bodyHex()` sees all four bytes.
     keep.write_all(b"POST /raw HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n\x00\xff\x41\x80")
         .unwrap();
@@ -1425,8 +1595,8 @@ function main(): void {
 }
 
 /// The native server reads a request body (`Content-Length` or
-/// `Transfer-Encoding: chunked`) before invoking the handler and exposes
-/// it as `request.body`. Consuming it also means a body-carrying request
+/// `Transfer-Encoding: chunked`), and exposes it as `request.body()`,
+/// live, on every call. Consuming it also means a body-carrying request
 /// no longer forces the connection closed -- several with distinct
 /// bodies ride one keep-alive connection without desyncing. Oversized
 /// and stalled bodies are refused / timed out rather than buffered
@@ -1444,10 +1614,10 @@ fn node_http_reads_request_bodies_and_keeps_the_connection_in_sync() {
         r#"import { createServer } from "node:http";
 function main(): void {
     const server = createServer((
-        request: { method: string; url: string; statusCode: number; body: string },
+        request: { method: string; url: string; statusCode: number; body: () => string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): void => {
-        response.end(request.method + " " + request.url + " [" + request.body + "]");
+        response.end(request.method + " " + request.url + " [" + request.body() + "]");
     });
     server.listen(Number(process.env.PORT));
 }"#,
@@ -1625,17 +1795,17 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: string },
+        request: { method: string; url: string; statusCode: number; body: () => string },
         response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         // A couple of paths make the handler genuinely suspend, so a
         // pipelined request behind them has to wait its turn.
         if (request.url === "/slow") {
             await delay(120);
-            response.end("slow[" + request.body + "]");
+            response.end("slow[" + request.body() + "]");
             return;
         }
-        response.end(request.method + " " + request.url + "[" + request.body + "]");
+        response.end(request.method + " " + request.url + "[" + request.body() + "]");
     });
     server.listen(Number(process.env.PORT));
 }"#,
