@@ -665,6 +665,16 @@ fn brotli_host_detection_only_enables_brotli_users() {
 }
 
 #[test]
+fn intl_host_detection_only_enables_intl_users() {
+    assert!(!source_uses_intl("module.exports = value => value + 1"));
+    assert!(!source_uses_intl("value.localeCompare(other)"));
+    assert!(source_uses_intl("new Intl.DateTimeFormat('ja-JP')"));
+    assert!(source_uses_intl(
+        "Intl.PluralRules.supportedLocalesOf(['en'])"
+    ));
+}
+
+#[test]
 fn node_compat_manifest_covers_each_public_builtin_family() {
     let manifest = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
