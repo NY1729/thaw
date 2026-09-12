@@ -2226,3 +2226,44 @@ fn intl_datetime_format_matches_real_node_for_curated_non_english_locales() {
         .unwrap()
     );
 }
+
+/// Non-Gregorian calendar systems (M5) -- `DateTimeFormatter`'s
+/// `AnyCalendar` dispatch automatically picks the right calendar from
+/// either the locale's own CLDR default (`th-TH` -> Buddhist, no
+/// explicit `calendar` needed) or an explicit `calendar` option/`-u-ca-`
+/// subtag (`ja-JP-u-ca-japanese` -> real Reiwa-era years, `ar-SA-u-ca-
+/// islamic-umalqura` -> real Hijri dates) -- with zero per-calendar
+/// dispatch code in `intl_datetime.rs`, confirmed empirically. Every
+/// case cross-checked against real Node.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_dispatches_non_gregorian_calendars_matching_real_node() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, epochMs) {\n\
+               return new Intl.DateTimeFormat(locale, opts).format(new Date(epochMs));\n\
+             }\n\
+             function all() {\n\
+               const t = Date.parse('2024-07-04T00:00:00Z');\n\
+               const opts = {year:'numeric',month:'long',day:'numeric',timeZone:'UTC'};\n\
+               return [\n\
+                 show('th-TH', opts, t),\n\
+                 show('ja-JP-u-ca-japanese', opts, t),\n\
+                 show('ja-JP', {...opts, calendar:'japanese'}, t),\n\
+                 show('ar-SA-u-ca-islamic-umalqura', opts, t),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "4 กรกฎาคม 2567",
+            "令和6年7月4日",
+            "令和6年7月4日",
+            "٢٨ ذو الحجة ١٤٤٥ هـ",
+        ])
+        .unwrap()
+    );
+}
