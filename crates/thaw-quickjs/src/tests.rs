@@ -1584,6 +1584,48 @@ fn intl_date_time_format_matches_real_node_for_every_field_and_style_luxon_uses(
     assert_eq!(call("defaultsToUtc", "[]"), r#""UTC""#);
 }
 
+/// `timeZoneName: 'long'`/`'longGeneric'` -- real per-zone English
+/// names (`intl_time_zone_names.rs`, mechanically extracted from a
+/// real `node`/ICU run, not typed from memory), replacing the
+/// previous synthesized `"GMT+H:MM"` fallback for these two styles.
+/// Covers a real DST-transition zone in both seasons (`America/
+/// New_York`: "Eastern Daylight/Standard Time", same "Eastern Time"
+/// either way for `longGeneric`), a fixed-offset zone (`Asia/Tokyo`),
+/// and a real *southern-hemisphere* DST-inverted zone (`Australia/
+/// Sydney`: daylight in the northern winter, standard in the northern
+/// summer -- the reverse of `America/New_York`'s own pattern, so this
+/// isn't just "whichever season happened to be sampled").
+#[test]
+fn intl_time_zone_name_long_and_long_generic_match_real_node() {
+    assert_eq!(
+        load(
+            "function longName(zone, epochMs) {\n\
+               return new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'long' }).formatToParts(new Date(epochMs)).find(p => p.type === 'timeZoneName').value;\n\
+             }\n\
+             function longGenericName(zone, epochMs) {\n\
+               return new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'longGeneric' }).formatToParts(new Date(epochMs)).find(p => p.type === 'timeZoneName').value;\n\
+             }\n\
+             function allCases() {\n\
+               return [\n\
+                 longName('America/New_York', 1782907200000),\n\
+                 longName('America/New_York', 1767268800000),\n\
+                 longGenericName('America/New_York', 1782907200000),\n\
+                 longName('Asia/Tokyo', 1782907200000),\n\
+                 longGenericName('Asia/Tokyo', 1782907200000),\n\
+                 longName('Australia/Sydney', 1782907200000),\n\
+                 longName('Australia/Sydney', 1767268800000),\n\
+                 longGenericName('Australia/Sydney', 1782907200000),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("allCases", "[]"),
+        r#"["Eastern Daylight Time","Eastern Standard Time","Eastern Time","Japan Standard Time","Japan Standard Time","Australian Eastern Standard Time","Australian Eastern Daylight Time","Australian Eastern Time"]"#
+    );
+}
+
 /// `Intl.NumberFormat`/`Intl.ListFormat` -- covers `PolyNumberFormatter`'s
 /// actual usage (plain grouping/padding), the `style: 'unit'` shape real
 /// luxon's own `Duration.toHuman()` uses (found while getting luxon's
