@@ -23,6 +23,7 @@ getrandom = "0.2"
 httlib-huffman = "0.3.4"
 ecdsa = "0.16"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core", "signature", "alloc"] }
+elliptic-curve = { version = "0.13", features = ["sec1", "pem", "arithmetic"] }
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 libc = "0.2"
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }

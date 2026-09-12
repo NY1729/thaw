@@ -1377,6 +1377,68 @@ fn crypto_generates_rsa_ec_and_ed25519_key_pairs_that_round_trip() {
     assert_eq!(call("asyncGeneration", "[]"), "[true,true]");
 }
 
+/// `generateKeyPairSync`'s `privateKeyEncoding`/`publicKeyEncoding`
+/// `type: 'pkcs1'` (RSA)/`'sec1'` (EC) -- the native format real
+/// OpenSSL itself produces (`-----BEGIN RSA PRIVATE KEY-----`/`-----
+/// BEGIN EC PRIVATE KEY-----`), as opposed to the default PKCS8/SPKI
+/// wrapper -- plus a custom RSA `publicExponent`. Each generated key
+/// signs and verifies (proving the PKCS1/SEC1-encoded key is actually
+/// functional, not just cosmetically labeled), and the custom exponent
+/// is confirmed via `asymmetricKeyDetails.publicExponent` (a real
+/// value, not merely "sign/verify still succeeds", since a
+/// self-consistent key would sign/verify correctly under *any*
+/// exponent -- this is the one property that only holds if the
+/// requested exponent was actually honored). Every PEM header line
+/// below was also cross-checked once against real `openssl rsa
+/// -in - -text -noout` / `openssl ec -in - -text -noout`, confirming
+/// OpenSSL itself parses Thaw's PKCS1/SEC1 output as a genuine RSA/EC
+/// key with the requested exponent/curve.
+#[test]
+fn crypto_generates_pkcs1_and_sec1_keys_with_a_custom_rsa_exponent() {
+    assert_eq!(
+        load(
+            "function signAndVerify(priv, pub) {\n\
+               const sig = __thaw_crypto_module.createSign('sha256').update('pkcs1/sec1 test').sign(priv, 'hex');\n\
+               return __thaw_crypto_module.createVerify('sha256').update('pkcs1/sec1 test').verify(pub, sig, 'hex');\n\
+             }\n\
+             function rsaPkcs1WithCustomExponent() {\n\
+               const { publicKey, privateKey } = __thaw_crypto_module.generateKeyPairSync('rsa', {\n\
+                 modulusLength: 512, publicExponent: 3,\n\
+                 privateKeyEncoding: { type: 'pkcs1', format: 'pem' },\n\
+                 publicKeyEncoding: { type: 'pkcs1', format: 'pem' }\n\
+               });\n\
+               const privOk = privateKey.indexOf('-----BEGIN RSA PRIVATE KEY-----') === 0;\n\
+               const pubOk = publicKey.indexOf('-----BEGIN RSA PUBLIC KEY-----') === 0;\n\
+               const priv = __thaw_crypto_module.createPrivateKey(privateKey);\n\
+               const pub = __thaw_crypto_module.createPublicKey(publicKey);\n\
+               return [privOk, pubOk, priv.asymmetricKeyDetails.publicExponent === 3n, signAndVerify(priv, pub)];\n\
+             }\n\
+             function ecSec1PrivateKey() {\n\
+               const { publicKey, privateKey } = __thaw_crypto_module.generateKeyPairSync('ec', {\n\
+                 namedCurve: 'P-256',\n\
+                 privateKeyEncoding: { type: 'sec1', format: 'pem' },\n\
+                 publicKeyEncoding: { type: 'spki', format: 'pem' }\n\
+               });\n\
+               const privOk = privateKey.indexOf('-----BEGIN EC PRIVATE KEY-----') === 0;\n\
+               const priv = __thaw_crypto_module.createPrivateKey(privateKey);\n\
+               const pub = __thaw_crypto_module.createPublicKey(publicKey);\n\
+               return [privOk, priv.asymmetricKeyDetails.namedCurve, signAndVerify(priv, pub)];\n\
+             }\n\
+             function rsaDefaultExponentIsStill65537() {\n\
+               const { privateKey } = __thaw_crypto_module.generateKeyPairSync('rsa', { modulusLength: 512 });\n\
+               return privateKey.asymmetricKeyDetails.publicExponent === 65537n;\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("rsaPkcs1WithCustomExponent", "[]"),
+        "[true,true,true,true]"
+    );
+    assert_eq!(call("ecSec1PrivateKey", "[]"), r#"[true,"P-256",true]"#);
+    assert_eq!(call("rsaDefaultExponentIsStill65537", "[]"), "true");
+}
+
 /// `Intl.DateTimeFormat` -- the practical, English/Latin-numeral-only
 /// polyfill (`docs/design/intl-polyfill.md`) added for real luxon, whose
 /// entire timezone system is built on exactly this shape (real luxon's

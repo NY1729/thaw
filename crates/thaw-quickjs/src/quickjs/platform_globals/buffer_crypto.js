@@ -202,9 +202,11 @@
   // `parseAsymmetricKeyMaterial` and `crypto_import_key_json`,
   // `asymmetric_crypto.rs`) -- reparsed fresh on every `sign`/`verify`,
   // no persistent native key object. `asymmetricKeyType`/
-  // `asymmetricKeyDetails` are populated from the same import call,
-  // matching real `KeyObject`'s own fields closely enough for
-  // `x.asymmetricKeyType === 'rsa'`-style feature checks. `export()`
+  // `asymmetricKeyDetails` are populated from the same import call
+  // (`namedCurve` for EC, `modulusLength`/`publicExponent` -- a
+  // `BigInt`, matching real Node -- for RSA), matching real
+  // `KeyObject`'s own fields closely enough for `x.asymmetricKeyType
+  // === 'rsa'`-style feature checks. `export()`
   // for an asymmetric key returns the normalized PEM text as a string
   // (real Node's own default `format: 'pem'`) -- `format: 'der'`/`jwk`
   // output are not supported, matching this shim's existing PEM-only
@@ -217,6 +219,8 @@
         this.asymmetricKeyType = asymmetricInfo.keyType;
         this.asymmetricKeyDetails = asymmetricInfo.namedCurve
           ? { namedCurve: asymmetricInfo.namedCurve }
+          : asymmetricInfo.modulusLength != null
+          ? { modulusLength: asymmetricInfo.modulusLength, publicExponent: BigInt(asymmetricInfo.publicExponent) }
           : {};
       }
     }
@@ -485,14 +489,16 @@
   // options, callback)` -- `type` is `'rsa'`/`'ec'`/`'ed25519'`;
   // `options.modulusLength` (RSA) or `options.namedCurve` (EC, either
   // Node/JOSE's own names or the common OpenSSL aliases) picks the key
-  // size/curve. `options.privateKeyEncoding`/`publicKeyEncoding`
-  // (`{type, format}`) control the return shape per half: omitted -> a
-  // real `KeyObject` (matching real Node's own default); `format:
-  // 'pem'` -> the PEM string as-is; `format: 'der'` -> raw DER bytes as
-  // a `Buffer`. Always produces PKCS8 (private)/SPKI (public) --
-  // a `type: 'pkcs1'`/`'sec1'` request is not honored, and a custom
-  // `publicExponent` for RSA is not supported (always 65537), matching
-  // this shim's existing practical-subset style.
+  // size/curve; `options.publicExponent` (RSA only, default 65537)
+  // picks a custom public exponent. `options.privateKeyEncoding`/
+  // `publicKeyEncoding` (`{type, format}`) control the return shape per
+  // half: omitted -> a real `KeyObject` (matching real Node's own
+  // default, always normalized as PKCS8/SPKI internally regardless of
+  // `type` below); `format: 'pem'` -> the PEM string as-is; `format:
+  // 'der'` -> raw DER bytes as a `Buffer`. `type` is `'pkcs8'`/`'spki'`
+  // (the default) or `'pkcs1'` (RSA)/`'sec1'` (EC) for the native
+  // format real OpenSSL itself would produce; Ed25519 has no PKCS1/SEC1
+  // equivalent (RSA/EC only, matching real Node).
   const encodeGeneratedKeyHalf = (pem, isPrivate, encoding) => {
     if (!encoding) {
       const info = JSON.parse(__thaw_crypto_import_key_json(Buffer.from(pem).toString('hex'), false, ''));
@@ -505,7 +511,10 @@
     const arg = type === 'rsa' ? String(options.modulusLength)
       : type === 'ec' ? options.namedCurve
       : '';
-    const generated = JSON.parse(__thaw_crypto_generate_key_pair_json(type, arg || ''));
+    const publicExponent = type === 'rsa' && options.publicExponent != null ? String(options.publicExponent) : '';
+    const privateType = (options.privateKeyEncoding && options.privateKeyEncoding.type) || '';
+    const publicType = (options.publicKeyEncoding && options.publicKeyEncoding.type) || '';
+    const generated = JSON.parse(__thaw_crypto_generate_key_pair_json(type, arg || '', publicExponent, privateType, publicType));
     return {
       publicKey: encodeGeneratedKeyHalf(generated.publicPem, false, options.publicKeyEncoding),
       privateKey: encodeGeneratedKeyHalf(generated.privatePem, true, options.privateKeyEncoding)
