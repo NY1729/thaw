@@ -534,6 +534,36 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript asymmetric PSS verify function");
+                let crypto_asymmetric_encrypt = Function::new(
+                    ctx.clone(),
+                    |pem: String, oaep_digest: String, data: String| {
+                        crypto_asymmetric_encrypt_hex(&pem, &oaep_digest, &hex_decode(&data))
+                            .map(|value| hex_encode(&value))
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "encrypt input",
+                                    "valid RSA key/data",
+                                    error,
+                                )
+                            })
+                    },
+                )
+                .expect("failed to create JavaScript asymmetric encrypt function");
+                let crypto_asymmetric_decrypt = Function::new(
+                    ctx.clone(),
+                    |pem: String, oaep_digest: String, data: String| {
+                        crypto_asymmetric_decrypt_hex(&pem, &oaep_digest, &hex_decode(&data))
+                            .map(|value| hex_encode(&value))
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "decrypt input",
+                                    "valid RSA key/data",
+                                    error,
+                                )
+                            })
+                    },
+                )
+                .expect("failed to create JavaScript asymmetric decrypt function");
                 let hpack_huffman_encode = Function::new(ctx.clone(), |value: String| {
                     let mut output = Vec::new();
                     httlib_huffman::encode(&hex_decode(&value), &mut output)
@@ -940,6 +970,18 @@ fn ensure_context() {
                         crypto_asymmetric_verify_pss,
                     )
                     .expect("failed to install JavaScript asymmetric PSS verify function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_asymmetric_encrypt_hex",
+                        crypto_asymmetric_encrypt,
+                    )
+                    .expect("failed to install JavaScript asymmetric encrypt function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_asymmetric_decrypt_hex",
+                        crypto_asymmetric_decrypt,
+                    )
+                    .expect("failed to install JavaScript asymmetric decrypt function");
                 ctx.globals()
                     .set("__thaw_intl_zoned_parts", intl_zoned_parts_function)
                     .expect("failed to install JavaScript Intl timezone source");
