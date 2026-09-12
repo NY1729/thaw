@@ -125,6 +125,70 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &bindings)
     }
 
+    /// `buf.readBigInt64LE(offset)` / `buf.writeBigUInt64BE(value,
+    /// offset)` &c. -- the full-precision 64-bit sibling of
+    /// `lower_native_bytes_accessor`: always exactly 8 bytes, and the
+    /// value itself is a real `HirType::I64` (a genuine 64-bit integer,
+    /// i.e. a TS `bigint`) rather than the `F64` every other accessor
+    /// here uses -- `f64` can only exactly represent 53 bits of
+    /// integer, not a full 64-bit range. Signed and unsigned share the
+    /// exact same bit pattern (`__thaw_bytes_read_i64`/`_write_i64` have
+    /// no separate `kind` parameter): a `BigUInt64` value `>= 2^63`
+    /// round-trips correctly through a buffer but displays as negative
+    /// via `.toString()`/`console.log` -- a deliberate, documented
+    /// practical-subset limitation (no genuine unsigned 64-bit type
+    /// exists), not a silent miscalculation.
+    fn lower_native_bytes_bigint_accessor(
+        &mut self,
+        member: &MemberExpr,
+        property: &swc_ecma_ast::IdentName,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let (_signed, big_endian, write) = Self::bytes_bigint_accessor(property.sym.as_ref())
+            .expect("dispatch checked bytes_bigint_accessor");
+        let receiver = self.lower_expr(&member.obj)?;
+        if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
+            return Err(format!(
+                "`.{}()` is only supported on a Buffer / Uint8Array",
+                property.sym
+            ));
+        }
+        let (arguments, bindings) =
+            self.lower_native_spread_values(&call.args, &format!("Buffer.{}", property.sym))?;
+        let le_lit = HirExpr::Lit(HirLit::F64(if big_endian { 0.0 } else { 1.0 }));
+        let result = if write {
+            let [value, offset] = arguments.as_slice() else {
+                return Err(format!(
+                    "`Buffer.prototype.{}` expects a value and an offset",
+                    property.sym
+                ));
+            };
+            self.expect_type(
+                &HirType::I64,
+                value,
+                &format!("`Buffer.prototype.{}` value", property.sym),
+            )?;
+            let offset = self.coerce_primitive_to_number(offset.clone())?;
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_write_i64".to_string())),
+                vec![receiver, offset, value.clone(), le_lit],
+            )
+        } else {
+            let [offset] = arguments.as_slice() else {
+                return Err(format!(
+                    "`Buffer.prototype.{}` expects an offset",
+                    property.sym
+                ));
+            };
+            let offset = self.coerce_primitive_to_number(offset.clone())?;
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_read_i64".to_string())),
+                vec![receiver, offset, le_lit],
+            )
+        };
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     /// `source.copy(target, targetStart?, sourceStart?, sourceEnd?)` --
     /// blits bytes into an existing byte buffer in place and returns the
     /// count copied (Node's contract). Both receiver and `target` must be

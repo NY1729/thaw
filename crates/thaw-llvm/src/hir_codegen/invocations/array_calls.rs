@@ -29,6 +29,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_equals"
                 | "__thaw_bytes_read"
                 | "__thaw_bytes_write"
+                | "__thaw_bytes_read_i64"
+                | "__thaw_bytes_write_i64"
                 | "__thaw_bytes_copy"
                 | "__thaw_bytes_index_of"
                 | "__thaw_bytes_byte_length"
@@ -217,11 +219,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| format!("`{name}` returned no value"));
             }
-            "__thaw_bytes_read" | "__thaw_bytes_write" => {
-                let (runtime, label) = if name == "__thaw_bytes_write" {
-                    ("thaw_bytes_write", "bytes_write")
-                } else {
-                    ("thaw_bytes_read", "bytes_read")
+            "__thaw_bytes_read" | "__thaw_bytes_write" | "__thaw_bytes_read_i64"
+            | "__thaw_bytes_write_i64" => {
+                let (runtime, label) = match name {
+                    "__thaw_bytes_write" => ("thaw_bytes_write", "bytes_write"),
+                    "__thaw_bytes_read_i64" => ("thaw_bytes_read_i64", "bytes_read_i64"),
+                    "__thaw_bytes_write_i64" => ("thaw_bytes_write_i64", "bytes_write_i64"),
+                    _ => ("thaw_bytes_read", "bytes_read"),
                 };
                 let [receiver, rest @ ..] = args else {
                     return Err(format!("`{name}` expects a receiver"));

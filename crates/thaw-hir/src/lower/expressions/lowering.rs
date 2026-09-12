@@ -788,6 +788,20 @@ impl<'a> FnLowerer<'a> {
                 }
                 let value = self.lower_expr(&unary.arg)?;
                 let lowered = match unary.op {
+                    UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::I64 => {
+                        // No dedicated native negation for `I64` -- `0n -
+                        // x` reuses the existing `bigint_sub` codegen
+                        // (two's-complement wraps exactly the way real
+                        // JS `BigInt` negation of `i64::MIN` itself
+                        // would overflow anyway, so this stays within
+                        // Thaw's already-documented fixed-64-bit-range
+                        // subset).
+                        HirExpr::BinOp(
+                            BinOp::Sub,
+                            Box::new(HirExpr::Lit(HirLit::I64(0))),
+                            Box::new(value),
+                        )
+                    }
                     UnaryOp::Minus => {
                         self.expect_type(&HirType::F64, &value, "unary minus")?;
                         HirExpr::Call(
