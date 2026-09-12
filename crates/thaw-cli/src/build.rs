@@ -510,6 +510,7 @@ fn build_with_native_mode(
     let uses_wasm = source_uses_wasm(&shim_source) || source_uses_wasm(&user_source);
     let uses_tls = source_uses_tls(&shim_source) || source_uses_tls(&user_source);
     let uses_brotli = source_uses_brotli(&shim_source) || source_uses_brotli(&user_source);
+    let uses_intl = source_uses_intl(&shim_source) || source_uses_intl(&user_source);
     // A QuickJS-enabled `thaw-napi` staticlib already contains its Rust
     // dependency objects. Linking a second standalone QuickJS archive would
     // define every host symbol twice.
@@ -524,6 +525,9 @@ fn build_with_native_mode(
             }
             if uses_wasm {
                 features.push("wasm");
+            }
+            if uses_intl {
+                features.push("intl");
             }
             if features.len() == 3 {
                 build_staticlib("thaw-quickjs")
@@ -988,6 +992,14 @@ fn source_uses_tls(source: &str) -> bool {
 
 fn source_uses_brotli(source: &str) -> bool {
     source.contains("brotli") || source.contains("Brotli")
+}
+
+fn source_uses_intl(source: &str) -> bool {
+    // `String.prototype.localeCompare` is a separate, always-linked
+    // thaw-runtime primitive (crates/thaw-runtime/src/runtime/
+    // native_values/strings.rs), not part of thaw-quickjs's `intl`
+    // feature -- only `Intl.*` usage needs to be detected here.
+    source.contains("Intl.")
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
