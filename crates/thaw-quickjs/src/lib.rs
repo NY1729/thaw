@@ -533,6 +533,9 @@ include!("quickjs/intl_plurals.rs");
 #[cfg(feature = "intl")]
 include!("quickjs/intl_collator.rs");
 
+#[cfg(feature = "intl")]
+include!("quickjs/intl_segmenter.rs");
+
 include!("quickjs/asymmetric_crypto.rs");
 
 #[cfg(unix)]

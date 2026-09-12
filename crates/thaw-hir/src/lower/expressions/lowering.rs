@@ -1837,6 +1837,7 @@ impl<'a> FnLowerer<'a> {
                                 | "Intl.Locale"
                                 | "Intl.PluralRules"
                                 | "Intl.Collator"
+                                | "Intl.Segmenter"
                         ) {
                             let args = new_expr.args.as_deref().unwrap_or_default();
                             if args.iter().any(|argument| argument.spread.is_some()) {

@@ -71,7 +71,7 @@ fn prepared_runtime_variants_have_stable_names() {
 /// namespace `new` expressions -- compile via thaw-hir's dotted-
 /// constructible allow-list (`crates/thaw-hir/src/lower/expressions/
 /// lowering.rs`, extended alongside `Intl.DateTimeFormat`/
-/// `NumberFormat`/`ListFormat` for M3/M8/M9 of docs/design/
+/// `NumberFormat`/`ListFormat` for M3/M8/M9/M10 of docs/design/
 /// intl-polyfill.md's "Real CLDR data via icu4x" plan), and the
 /// resulting binary really links `thaw-quickjs` with the `intl` feature
 /// on (`source_uses_intl` detects the literal class names in this
@@ -79,8 +79,20 @@ fn prepared_runtime_variants_have_stable_names() {
 /// compile-time check, since the feature-detection and the actual
 /// classes only come together at this level, not in thaw-llvm's simpler
 /// `compile_and_run` test harness (which always builds thaw-quickjs
-/// with default features only). One build covers both classes' allow-
-/// list entries rather than paying the ~50s build cost twice.
+/// with default features only). One build covers all four classes'
+/// allow-list entries rather than paying the ~50s build cost each time.
+///
+/// `Intl.Segmenter`'s check here only calls `resolvedOptions()`, not
+/// `segment(text)`'s actual iteration -- iterating a plain custom
+/// `[Symbol.iterator]`-protocol object (what `segment()` returns)
+/// through native-compiled `for...of` produced zero iterations, and
+/// `Array.from(iterable, mapFn)` on the same object rejected it
+/// outright ("requires a homogeneous array, string, Map, or Set, got
+/// Json") -- two real, general native-compiler gaps in custom-iterable
+/// support, unrelated to `Intl.Segmenter`'s own correctness (already
+/// proven via the interpreted-QuickJS-level cross-check against real
+/// Node in `crates/thaw-quickjs/src/tests.rs`'s own test). Not chased
+/// further here, out of scope for this milestone.
 #[test]
 fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
     let directory =
@@ -97,6 +109,8 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
            console.log(plurals.select(3));\n\
            const collator = new Intl.Collator('en');\n\
            console.log(collator.compare('a', 'b') < 0);\n\
+           const segmenter = new Intl.Segmenter('en', { granularity: 'word' });\n\
+           console.log(segmenter.resolvedOptions().granularity);\n\
          }\n",
     )
     .unwrap();
@@ -118,7 +132,7 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "ja ja-u-ca-japanese ja\nfew\ntrue\n"
+        "ja ja-u-ca-japanese ja\nfew\ntrue\nword\n"
     );
     let _ = std::fs::remove_dir_all(directory);
 }

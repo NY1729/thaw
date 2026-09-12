@@ -1031,6 +1031,14 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl number formatter");
                 #[cfg(feature = "intl")]
+                let intl_segment_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, granularity: String, text: String| {
+                        intl_segment(&locale, &granularity, &text)
+                    },
+                )
+                .expect("failed to create JavaScript Intl segmenter");
+                #[cfg(feature = "intl")]
                 let intl_collator_compare_function = Function::new(
                     ctx.clone(),
                     |locale: String,
@@ -1175,6 +1183,10 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_number_format", intl_number_format_function)
                     .expect("failed to install JavaScript Intl number formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_segment", intl_segment_function)
+                    .expect("failed to install JavaScript Intl segmenter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_collator_compare", intl_collator_compare_function)

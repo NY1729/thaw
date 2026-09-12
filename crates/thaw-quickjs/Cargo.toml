@@ -52,7 +52,7 @@ icu_experimental = { version = "=0.6.0", default-features = false, optional = tr
 icu_list = { version = "=2.3.0", default-features = false, optional = true }
 icu_locale = { version = "=2.3.1", default-features = false, optional = true }
 icu_plurals = { version = "=2.3.0", default-features = false, optional = true }
-icu_segmenter = { version = "=2.3.0", default-features = false, optional = true }
+icu_segmenter = { version = "=2.3.0", default-features = false, features = ["auto"], optional = true }
 icu_time = { version = "=2.3.0", default-features = false, optional = true }
 writeable = { version = "=0.6.4", optional = true }
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }

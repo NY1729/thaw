@@ -2446,3 +2446,48 @@ fn intl_collator_matches_real_node() {
         serde_json::to_string(&[-1, -1, -1, 1, 0, 0, -1, -1, 1, 0]).unwrap()
     );
 }
+
+/// `Intl.Segmenter` (M10, entirely new capability) -- real word
+/// segmentation cross-checked against real Node, including Thai's real
+/// dictionary-based word breaking (no inter-word spaces in the source
+/// text at all -- proves the locale/script-aware segmenter is really
+/// wired, not a naive whitespace split), an English word case (with
+/// `isWordLike` distinguishing words from whitespace/punctuation),
+/// grapheme-cluster segmentation across an emoji (a single segment, not
+/// split across its surrogate pair), and sentence segmentation.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_segmenter_matches_real_node() {
+    assert_eq!(
+        load(
+            "function segs(locale, granularity, text) {\n\
+               const seg = new Intl.Segmenter(locale, { granularity });\n\
+               return Array.from(seg.segment(text), s => ({\n\
+                 segment: s.segment, index: s.index,\n\
+                 isWordLike: s.isWordLike === undefined ? null : s.isWordLike,\n\
+               }));\n\
+             }\n\
+             function thaiWord() { return segs('th', 'word', 'สวัสดีชาวโลก'); }\n\
+             function enWord() { return segs('en', 'word', 'Hello world!'); }\n\
+             function enGrapheme() { return segs('en', 'grapheme', 'a👍bc'); }\n\
+             function enSentence() { return segs('en', 'sentence', 'Hi. Bye!'); }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("thaiWord", "[]"),
+        r#"[{"segment":"สวัสดี","index":0,"isWordLike":true},{"segment":"ชาว","index":6,"isWordLike":true},{"segment":"โลก","index":9,"isWordLike":true}]"#
+    );
+    assert_eq!(
+        call("enWord", "[]"),
+        r#"[{"segment":"Hello","index":0,"isWordLike":true},{"segment":" ","index":5,"isWordLike":false},{"segment":"world","index":6,"isWordLike":true},{"segment":"!","index":11,"isWordLike":false}]"#
+    );
+    assert_eq!(
+        call("enGrapheme", "[]"),
+        r#"[{"segment":"a","index":0,"isWordLike":null},{"segment":"👍","index":1,"isWordLike":null},{"segment":"b","index":3,"isWordLike":null},{"segment":"c","index":4,"isWordLike":null}]"#
+    );
+    assert_eq!(
+        call("enSentence", "[]"),
+        r#"[{"segment":"Hi. ","index":0,"isWordLike":null},{"segment":"Bye!","index":4,"isWordLike":null}]"#
+    );
+}
