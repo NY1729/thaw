@@ -1188,6 +1188,55 @@ fn crypto_rsa_and_ecdsa_sign_and_verify_interoperate_with_real_openssl() {
     );
 }
 
+/// P-521 (ES512) and Ed25519 (EdDSA) sign/verify -- the two algorithms
+/// added to round out the ECDSA curve trio (P-256/P-384/P-521) and add
+/// modern JWT's other common asymmetric scheme. Same methodology as
+/// `crypto_rsa_and_ecdsa_sign_and_verify_interoperate_with_real_openssl`:
+/// verifies a signature produced by real OpenSSL, not just internal
+/// round-trip. Ed25519 ignores the `algorithm` argument entirely
+/// (`'sha256'` here is just a placeholder -- real Node's own
+/// `crypto.sign(null, data, key)` passes `null`), matching real EdDSA's
+/// whole-message, no-external-digest design.
+#[test]
+fn crypto_p521_and_ed25519_sign_and_verify_interoperate_with_real_openssl() {
+    assert_eq!(
+        load(
+            "function ec521PrivateKey() { return '-----BEGIN PRIVATE KEY-----\\nMIHuAgEAMBAGByqGSM49AgEGBSuBBAAjBIHWMIHTAgEBBEIBjSW4dVBkRUfwm4RF\\nl+sHT3Bb+K3g3OK8rBc9FKUI7yseNOqjMJH4NWAA4COGQLrcrEZd8i3mC6PMiYlP\\nW2kM0rWhgYkDgYYABABj3B3pln7Wni4OZxl1rPfCXviip4IG30MzhbXxCmsdtWZW\\n9rs74AS0HzfD3JmxhpsyykdhymyRcCUTK6Dg0AMn4AFkkRuVJ6EH5naQbrW/gm1S\\nVhMwsFhDH8U4eFloVh5F224ipvr8StOkFbX7bc8SEAInT4mJoPOVhHIh3Nic5RPT\\nzw==\\n-----END PRIVATE KEY-----\\n'; }\n\
+             function ec521PublicKey() { return '-----BEGIN PUBLIC KEY-----\\nMIGbMBAGByqGSM49AgEGBSuBBAAjA4GGAAQAY9wd6ZZ+1p4uDmcZdaz3wl74oqeC\\nBt9DM4W18QprHbVmVva7O+AEtB83w9yZsYabMspHYcpskXAlEyug4NADJ+ABZJEb\\nlSehB+Z2kG61v4JtUlYTMLBYQx/FOHhZaFYeRdtuIqb6/ErTpBW1+23PEhACJ0+J\\niaDzlYRyIdzYnOUT088=\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function ed25519PrivateKey() { return '-----BEGIN PRIVATE KEY-----\\nMC4CAQAwBQYDK2VwBCIEIIQeFoclOMRan6+SUSRbRw78/TZyhWbyoWJcEbyE9MM+\\n-----END PRIVATE KEY-----\\n'; }\n\
+             function ed25519PublicKey() { return '-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VwAyEAbKI14Nm8FASaqC+aL64yTxj+nIFlCG8Ylhs1gQwQDls=\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function ec521RoundTrip() {\n\
+               const sig = __thaw_crypto_module.createSign('sha512').update('hello world').sign(ec521PrivateKey(), 'hex');\n\
+               const ok = __thaw_crypto_module.createVerify('sha512').update('hello world').verify(ec521PublicKey(), sig, 'hex');\n\
+               const tamperedMessage = __thaw_crypto_module.createVerify('sha512').update('goodbye world').verify(ec521PublicKey(), sig, 'hex');\n\
+               const opensslSig = '30818702414b69e53677eca1ee5f0d40de0ad064064a480a1de9b0b9fe82e898778f705e56f57b8899e53b58d32603aee99f18c4921330487c339e1b3c8d05c0011c90122c1b02420091998e2df97d18f040bcca159eae7f27f3d046188801b92c88771e0dbd2fe74767b20bde678eb460f1819e30523b5c9f5ba1580b74a495acdf67b83009728d3225';\n\
+               const opensslVerifies = __thaw_crypto_module.createVerify('sha512').update('hello world').verify(ec521PublicKey(), opensslSig, 'hex');\n\
+               return [ok, tamperedMessage, opensslVerifies];\n\
+             }\n\
+             function ed25519RoundTrip() {\n\
+               const sig = __thaw_crypto_module.sign('sha256', 'hello world', ed25519PrivateKey());\n\
+               const ok = __thaw_crypto_module.verify('sha256', 'hello world', ed25519PublicKey(), sig);\n\
+               const tamperedMessage = __thaw_crypto_module.verify('sha256', 'goodbye world', ed25519PublicKey(), sig);\n\
+               const opensslSig = Buffer.from('34eb966388de794ba39493a2da457c263e716beea079da49cb8ce8cd544dfaf1bc494987096177c3edda654fe1fbb1efe34e8266eec20c2e17a69481ddc1780d', 'hex');\n\
+               const opensslVerifies = __thaw_crypto_module.verify('sha256', 'hello world', ed25519PublicKey(), opensslSig);\n\
+               return [ok, tamperedMessage, opensslVerifies];\n\
+             }\n\
+             function keyObjectAsymmetricInfoP521AndEd25519() {\n\
+               const ecPriv = __thaw_crypto_module.createPrivateKey(ec521PrivateKey());\n\
+               const edPub = __thaw_crypto_module.createPublicKey(ed25519PublicKey());\n\
+               return [ecPriv.asymmetricKeyType, ecPriv.asymmetricKeyDetails.namedCurve, edPub.asymmetricKeyType];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(call("ec521RoundTrip", "[]"), "[true,false,true]");
+    assert_eq!(call("ed25519RoundTrip", "[]"), "[true,false,true]");
+    assert_eq!(
+        call("keyObjectAsymmetricInfoP521AndEd25519", "[]"),
+        r#"["ec","P-521","ed25519"]"#
+    );
+}
+
 /// `Intl.DateTimeFormat` -- the practical, English/Latin-numeral-only
 /// polyfill (`docs/design/intl-polyfill.md`) added for real luxon, whose
 /// entire timezone system is built on exactly this shape (real luxon's
