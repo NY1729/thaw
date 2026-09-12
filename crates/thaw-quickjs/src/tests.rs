@@ -1542,3 +1542,56 @@ fn shared_json_reviver_reconstructs_native_errors() {
     );
     assert_eq!(call("reviveError", "[]"), "[true,\"TypeError\",\"bad\"]");
 }
+
+/// Regression guard for a previously-documented (2026-09-05,
+/// [[project_npm_interop_gaps_2]]) rquickjs/QuickJS-NG limitation: a
+/// function value reached through a *two-level* property chain
+/// (`module.exports.sub.fn`), captured via a **separate**, later
+/// `loadScript`/`eval` call from the one that set `module.exports` --
+/// exactly the shape `ModuleBundle::qualified_aliases` (thaw-bridge)
+/// still uses today for a single-level name -- was reported to become
+/// silently uninvokable through the native `callDynamic` FFI boundary
+/// (clean `exit(1)`, no exception). `nested_namespace_aliases` was
+/// added as a workaround (capturing from *inside* the same wrapped
+/// script instead). Re-investigated 2026-09-12: this no longer
+/// reproduces under any tested condition, including through the real
+/// compiled thaw-cli pipeline with the exact original separate-
+/// loadScript mechanism deliberately restored -- most likely fixed as
+/// a side effect of commit `170f6a23`'s `retain_value` self-heal (the
+/// JsValue handle registry no longer assumes it was already
+/// bootstrapped by an earlier call). This test pins the historically-
+/// broken shape directly against thaw-quickjs to guard against a
+/// future regression, independent of whether the compiler keeps using
+/// the same-script-capture workaround.
+#[test]
+fn a_function_reached_via_a_two_level_property_chain_calls_correctly_when_captured_via_a_separate_load_script(
+) {
+    assert_eq!(
+        load(
+            "globalThis.module = { exports: {} };\n\
+             (function(module, exports) {\n\
+             \x20\x20var secret = 7;\n\
+             \x20\x20module.exports = { sub: { fn: function() { return 42 + secret; } } };\n\
+             })(globalThis.module, globalThis.module.exports);"
+        ),
+        1
+    );
+    // A separate `loadScript` call, matching `qualified_aliases`'s own
+    // capture shape (including its `.bind()`-preserving-statics wrap).
+    assert_eq!(
+        load(
+            "globalThis.__thaw_bind_preserving_statics = (fn, receiver) => {\n\
+             \x20\x20if (typeof fn !== 'function') return fn;\n\
+             \x20\x20const bound = fn.bind(receiver);\n\
+             \x20\x20for (const prop of Object.getOwnPropertyNames(fn)) {\n\
+             \x20\x20\x20\x20if (prop === 'length' || prop === 'name' || prop === 'prototype' || prop === 'arguments' || prop === 'caller') continue;\n\
+             \x20\x20\x20\x20try { Object.defineProperty(bound, prop, Object.getOwnPropertyDescriptor(fn, prop)); } catch (error) {}\n\
+             \x20\x20}\n\
+             \x20\x20return bound;\n\
+             };\n\
+             if (typeof globalThis.module !== 'undefined' && globalThis.module && typeof globalThis.module.exports !== 'undefined' && globalThis.module.exports !== null && typeof globalThis.module.exports.sub.fn !== 'undefined') { globalThis[\"nested_chain_capture\"] = typeof globalThis.module.exports.sub.fn === 'function' ? globalThis.__thaw_bind_preserving_statics(globalThis.module.exports.sub.fn, globalThis.module.exports.sub) : globalThis.module.exports.sub.fn; }"
+        ),
+        1
+    );
+    assert_eq!(call("nested_chain_capture", "[]"), "49");
+}
