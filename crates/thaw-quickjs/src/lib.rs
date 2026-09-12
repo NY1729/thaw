@@ -513,6 +513,8 @@ include!("quickjs/processes.rs");
 
 include!("quickjs/intl.rs");
 
+include!("quickjs/asymmetric_crypto.rs");
+
 #[cfg(unix)]
 static PENDING_PROCESS_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
