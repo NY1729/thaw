@@ -103,6 +103,8 @@
 //!    as this: try building the real Rust code against the current
 //!    dataset and read the compiler's "trait not implemented" errors,
 //!    which name the exact missing marker type.
+//! 6. (M7, same day) `ListOrV1`/`ListUnitV1` added the same way --
+//!    the M1 probe only exercised `ListFormatter::try_new_and`.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!
