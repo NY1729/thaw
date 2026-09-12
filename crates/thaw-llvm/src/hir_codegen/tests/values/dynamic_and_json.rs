@@ -458,6 +458,83 @@ fn json_stringify_omits_or_nulls_a_nested_undefined_value() {
     );
 }
 
+/// `JSON.stringify(x)` where `x` *itself* -- the top-level argument, not
+/// a nested field/element (see `json_stringify_omits_or_nulls_a_nested_
+/// undefined_value` above) -- is genuinely `undefined`. Real JS returns
+/// the actual value `undefined` there (`typeof JSON.stringify(x) ===
+/// 'undefined'`), which doesn't fit Thaw's own always-a-`Str` calling
+/// convention for this call; `console.log` prints the string
+/// `"undefined"` instead, matching real JS's own `String(undefined)`
+/// coercion for the common case of printing/concatenating the result --
+/// a documented, honest approximation (see `top_level_undefined_string`,
+/// `thaw-std/src/json.rs`), not a silent miscalculation. Cross-checked
+/// against real Node's own `console.log(JSON.stringify(x))` output for
+/// exactly this case, which also prints the bare word `undefined`.
+#[test]
+fn json_stringify_of_a_bare_top_level_undefined_value_prints_the_word_undefined() {
+    let source = r#"
+        function main(): void {
+            const raw: Json = JSON.parse("{\"a\":1}");
+            const missing = raw.b;
+            console.log(JSON.stringify(missing));
+            console.log(JSON.stringify(missing, null, 2));
+            console.log(JSON.stringify(missing, ["a"]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_bare_top_level_undefined"),
+        "undefined\nundefined\nundefined\n"
+    );
+}
+
+/// Same top-level-`undefined` case as above, but reached through an
+/// `Optional<T>`-typed value (a real `x?: T` parameter) rather than a
+/// plain `Json` one -- exercises `wrap_native_value_as_json`'s own path
+/// (`JsonSet(..., preserve_undefined: true)`) into the same `thaw_json_
+/// stringify_public` fix, not just the direct-`Json` case above.
+#[test]
+fn json_stringify_of_a_bare_top_level_undefined_optional_value_prints_the_word_undefined() {
+    let source = r#"
+        function stringifyIt(x?: number): string {
+            return JSON.stringify(x);
+        }
+        function main(): void {
+            console.log(stringifyIt(undefined));
+            console.log(stringifyIt(42));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_bare_top_level_undefined_optional"),
+        "undefined\n42\n"
+    );
+}
+
+/// The literal, purely-static form of the same case:
+/// `JSON.stringify(undefined)` with the bare `undefined` keyword itself
+/// as the argument (`HirType::Undefined`, previously rejected at build
+/// time entirely -- `json_convertible_native_type` didn't list it).
+/// `wrap_native_value_as_json`'s temporary-object round trip already
+/// handles this correctly for free: `JsonSet` treats a bare
+/// `HirType::Undefined` field as a complete no-op (the field is never
+/// set at all, matching an ordinary object literal's own "legitimately
+/// omitted field" convention), so reading it straight back out finds a
+/// genuinely *missing* key -- which this crate's own JSON layer already
+/// represents as the same napi-undefined sentinel a real missing key
+/// produces, landing on the identical fix above with no new codegen.
+#[test]
+fn json_stringify_of_the_literal_undefined_keyword_prints_the_word_undefined() {
+    let source = r#"
+        function main(): void {
+            console.log(JSON.stringify(undefined));
+            console.log(JSON.stringify(undefined, null, 2));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_literal_undefined"),
+        "undefined\nundefined\n"
+    );
+}
+
 /// `new <Namespace>.<Class>(...)` -- a namespaced global constructor
 /// (real example: `new Intl.DateTimeFormat(...)`, needed for the `Intl`
 /// polyfill) used to fail to compile at all ("only `new Promise<T>(...)`
