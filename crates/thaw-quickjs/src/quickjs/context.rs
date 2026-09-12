@@ -468,6 +468,66 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript cipher function");
+                // Backs `createPrivateKey`/`createPublicKey`/`KeyObject.
+                // asymmetricKeyType` and `createSign`/`createVerify`/
+                // `crypto.sign`/`crypto.verify` (`asymmetric_crypto.rs`,
+                // `platform_globals/buffer_crypto.js`).
+                let crypto_key_info = Function::new(ctx.clone(), |pem: String| {
+                    crypto_key_info_json(&pem)
+                })
+                .expect("failed to create JavaScript key-info function");
+                let crypto_asymmetric_sign = Function::new(
+                    ctx.clone(),
+                    |digest_algorithm: String, pem: String, data: String| {
+                        crypto_asymmetric_sign_hex(&digest_algorithm, &pem, &hex_decode(&data))
+                            .map(|signature| hex_encode(&signature))
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message("sign input", "valid key/data", error)
+                            })
+                    },
+                )
+                .expect("failed to create JavaScript asymmetric sign function");
+                let crypto_asymmetric_sign_pss = Function::new(
+                    ctx.clone(),
+                    |digest_algorithm: String, pem: String, data: String| {
+                        crypto_asymmetric_sign_pss_hex(&digest_algorithm, &pem, &hex_decode(&data))
+                            .map(|signature| hex_encode(&signature))
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message("sign input", "valid RSA key/data", error)
+                            })
+                    },
+                )
+                .expect("failed to create JavaScript asymmetric PSS sign function");
+                let crypto_asymmetric_verify = Function::new(
+                    ctx.clone(),
+                    |digest_algorithm: String, pem: String, data: String, signature: String| {
+                        crypto_asymmetric_verify(
+                            &digest_algorithm,
+                            &pem,
+                            &hex_decode(&data),
+                            &hex_decode(&signature),
+                        )
+                        .map_err(|error| {
+                            rquickjs::Error::new_from_js_message("verify input", "valid key/data", error)
+                        })
+                    },
+                )
+                .expect("failed to create JavaScript asymmetric verify function");
+                let crypto_asymmetric_verify_pss = Function::new(
+                    ctx.clone(),
+                    |digest_algorithm: String, pem: String, data: String, signature: String| {
+                        crypto_asymmetric_verify_pss(
+                            &digest_algorithm,
+                            &pem,
+                            &hex_decode(&data),
+                            &hex_decode(&signature),
+                        )
+                        .map_err(|error| {
+                            rquickjs::Error::new_from_js_message("verify input", "valid RSA key/data", error)
+                        })
+                    },
+                )
+                .expect("failed to create JavaScript asymmetric PSS verify function");
                 let hpack_huffman_encode = Function::new(ctx.clone(), |value: String| {
                     let mut output = Vec::new();
                     httlib_huffman::encode(&hex_decode(&value), &mut output)
@@ -850,6 +910,30 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_crypto_cipher_hex", cipher_hex)
                     .expect("failed to install JavaScript cipher function");
+                ctx.globals()
+                    .set("__thaw_crypto_key_info_json", crypto_key_info)
+                    .expect("failed to install JavaScript key-info function");
+                ctx.globals()
+                    .set("__thaw_crypto_asymmetric_sign_hex", crypto_asymmetric_sign)
+                    .expect("failed to install JavaScript asymmetric sign function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_asymmetric_sign_pss_hex",
+                        crypto_asymmetric_sign_pss,
+                    )
+                    .expect("failed to install JavaScript asymmetric PSS sign function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_asymmetric_verify",
+                        crypto_asymmetric_verify,
+                    )
+                    .expect("failed to install JavaScript asymmetric verify function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_asymmetric_verify_pss",
+                        crypto_asymmetric_verify_pss,
+                    )
+                    .expect("failed to install JavaScript asymmetric PSS verify function");
                 ctx.globals()
                     .set("__thaw_intl_zoned_parts", intl_zoned_parts_function)
                     .expect("failed to install JavaScript Intl timezone source");

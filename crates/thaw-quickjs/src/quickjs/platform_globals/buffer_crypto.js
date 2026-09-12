@@ -162,9 +162,18 @@
   globalThis.SlowBuffer = size => Buffer.alloc(Number(size));
   const normalizeHashAlgorithm = algorithm => {
     const name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
-    if (name !== 'sha1' && name !== 'sha256' && name !== 'sha512') throw new TypeError(`Unsupported digest: ${algorithm}`);
+    if (name !== 'sha1' && name !== 'sha256' && name !== 'sha384' && name !== 'sha512') throw new TypeError(`Unsupported digest: ${algorithm}`);
     return name;
   };
+  // `createSign`/`createVerify`'s own `algorithm` argument is a *digest*
+  // name that real Node also accepts in an `"rsa-sha256"`-style prefixed
+  // form (matching OpenSSL's own digest names) -- the actual RSA-vs-
+  // ECDSA choice always comes from the key passed to `.sign()`/
+  // `.verify()`, never from this string, so the prefix is simply
+  // stripped before normalizing.
+  const normalizeSignDigestAlgorithm = algorithm => normalizeHashAlgorithm(
+    String(algorithm).replace(/^(rsa|ecdsa|dsa)-/i, '')
+  );
   const randomBytesSync = size => Buffer.from(__thaw_crypto_random_hex(Number(size)), 'hex');
   // A minimal stand-in for real Node's `crypto.KeyObject` -- thaw's own
   // crypto shim has no asymmetric-key support at all (no
@@ -184,18 +193,54 @@
   // doesn't implement it at all -- calling it throws "not a function",
   // caught the same way) then `createSecretKey(secret)` succeeding and
   // producing a `KeyObject` whose `.type` must read back `"secret"` for
-  // the rest of jsonwebtoken's own logic to accept it. No support for a
-  // real asymmetric key (`type: "private"/"public"`) -- out of scope,
-  // matching this crypto shim's existing lack of RSA/ECDSA/EC support.
+  // the rest of jsonwebtoken's own logic to accept it.
+  //
+  // Also backs a real asymmetric (RSA/EC) key now: `_material` for
+  // those is the PEM text itself (`asymmetric_crypto.rs` reparses it
+  // fresh on every `sign`/`verify` -- no persistent native key object),
+  // and `asymmetricKeyType`/`asymmetricKeyDetails` are populated from
+  // `__thaw_crypto_key_info_json`, matching real `KeyObject`'s own
+  // fields closely enough for `x.asymmetricKeyType === 'rsa'`-style
+  // feature checks. `export()` for an asymmetric key returns the PEM
+  // text as a string (real Node's own default `format: 'pem'`) --
+  // `format: 'der'`/`jwk` are not supported, matching this shim's
+  // existing PEM-only scope.
   class KeyObject {
-    constructor(type, material) {
+    constructor(type, material, asymmetricInfo) {
       this.type = type;
       this._material = material;
+      if (asymmetricInfo) {
+        this.asymmetricKeyType = asymmetricInfo.keyType;
+        this.asymmetricKeyDetails = asymmetricInfo.namedCurve
+          ? { namedCurve: asymmetricInfo.namedCurve }
+          : {};
+      }
     }
     export() {
-      return Buffer.from(this._material);
+      return this.type === 'secret' ? Buffer.from(this._material) : this._material;
     }
   }
+  // Extracts a PEM string plus its parsed key-info from whatever shape
+  // `createPrivateKey`/`createPublicKey`/`.sign()`/`.verify()` accepts:
+  // a bare PEM string/Buffer, a `{key, format, type, passphrase}`
+  // options object (`format`/`type` other than `'pem'` and any
+  // `passphrase` throw a clear "not supported" error rather than
+  // silently misbehaving), or an existing `KeyObject`.
+  const parseAsymmetricKeyMaterial = key => {
+    const pem = typeof key === 'string' ? key
+      : key instanceof Buffer || ArrayBuffer.isView(key) ? Buffer.from(key).toString()
+      : key instanceof KeyObject ? key._material
+      : key && typeof key.key === 'string' ? key.key
+      : key && (key.key instanceof Buffer || ArrayBuffer.isView(key.key)) ? Buffer.from(key.key).toString()
+      : key && key.key instanceof KeyObject ? key.key._material
+      : null;
+    if (pem === null) throw new TypeError('Only a PEM string/Buffer or a KeyObject is supported (no DER, no passphrase-protected keys)');
+    if (key && key.format && key.format !== 'pem') throw new Error(`Unsupported key format: ${key.format} (only 'pem' is supported)`);
+    if (key && key.passphrase) throw new Error('Passphrase-protected keys are not supported');
+    const info = JSON.parse(__thaw_crypto_key_info_json(pem));
+    if (!info.valid) throw new Error('Invalid or unsupported key (only RSA/EC PEM keys are supported)');
+    return { pem, info };
+  };
   class Hash {
     constructor(algorithm) { this.algorithm = normalizeHashAlgorithm(algorithm); this._chunks = []; this._digested = false; }
     update(data, encoding) {
@@ -330,28 +375,75 @@
   const createCipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, false);
   const createDecipheriv = (algorithm, key, iv) => new Cipheriv(algorithm, key, iv, true);
   const createSecretKey = key => new KeyObject('secret', Buffer.from(key));
-  // Real Node's `createPrivateKey`/`createPublicKey` -- unimplemented,
-  // matching this crypto shim's existing lack of RSA/ECDSA/EC support
-  // (no PEM/DER parsing at all). Existing as real, callable *functions*
-  // that honestly throw (rather than not existing at all) still matters:
-  // several real packages feature-detect asymmetric-key support via
-  // `typeof crypto.createPublicKey === 'function'` before ever calling
-  // it -- real example: `jwa` (a `jsonwebtoken` dependency), which
-  // otherwise silently rejects a *symmetric* `KeyObject` too (the one
-  // case this shim does support, via `createSecretKey`) because it
-  // assumes a JS engine with no `createPublicKey` at all has no
-  // `KeyObject` concept whatsoever.
-  const createPrivateKey = () => {
-    throw new Error('createPrivateKey is not supported (no asymmetric-key support)');
+  // Real Node's `createPrivateKey`/`createPublicKey`, now backed by
+  // real RSA/EC PEM parsing (`asymmetric_crypto.rs`) -- PEM only (no
+  // DER, no passphrase-protected keys), matching this shim's existing
+  // honest-partial-support style. `createPublicKey` deriving a public
+  // key *from* a private key/PEM (real Node supports this) is not
+  // implemented -- pass the public key PEM directly instead.
+  const createPrivateKey = key => {
+    const { pem, info } = parseAsymmetricKeyMaterial(key);
+    if (!info.isPrivate) throw new Error('Expected a private key');
+    return new KeyObject('private', pem, info);
   };
-  const createPublicKey = () => {
-    throw new Error('createPublicKey is not supported (no asymmetric-key support)');
+  const createPublicKey = key => {
+    if (key instanceof KeyObject) {
+      if (key.type === 'public') return key;
+      throw new Error('Deriving a public key from a private key is not supported here -- pass the public key PEM directly');
+    }
+    const { pem, info } = parseAsymmetricKeyMaterial(key);
+    if (info.isPrivate) throw new Error('Deriving a public key from a private key is not supported here -- pass the public key PEM directly');
+    return new KeyObject('public', pem, info);
   };
+  const RSA_PKCS1_PADDING = 1;
+  const RSA_PKCS1_PSS_PADDING = 6;
+  // `createSign(algorithm).update(data).sign(privateKey)` /
+  // `createVerify(algorithm).update(data).verify(publicKey, signature)`
+  // -- `algorithm` is a *digest* name (real Node accepts an
+  // `"RSA-SHA256"`-style prefixed form too, see
+  // `normalizeSignDigestAlgorithm`); the actual RSA-vs-ECDSA choice
+  // always comes from the key passed to `.sign()`/`.verify()`, not from
+  // this string. ECDSA signatures are DER-encoded, matching real Node's
+  // own default (`dsaEncoding: 'der'`) -- no `ieee-p1363` raw-format
+  // support (out of scope; real packages that need JOSE's raw r||s
+  // format, e.g. jsonwebtoken's own `ecdsa-sig-formatter` dependency,
+  // already convert DER<->raw entirely in JS, so this needs no special
+  // handling here).
+  class Sign {
+    constructor(algorithm) { this.algorithm = normalizeSignDigestAlgorithm(algorithm); this._chunks = []; }
+    update(data, encoding) { this._chunks.push(Buffer.from(data, encoding)); return this; }
+    sign(privateKey, outputEncoding) {
+      const { pem } = parseAsymmetricKeyMaterial(privateKey);
+      const data = Buffer.concat(this._chunks).toString('hex');
+      const usePss = privateKey && privateKey.padding === RSA_PKCS1_PSS_PADDING;
+      const signer = usePss ? __thaw_crypto_asymmetric_sign_pss_hex : __thaw_crypto_asymmetric_sign_hex;
+      const value = Buffer.from(signer(this.algorithm, pem, data), 'hex');
+      return outputEncoding === undefined ? value : value.toString(outputEncoding);
+    }
+  }
+  class Verify {
+    constructor(algorithm) { this.algorithm = normalizeSignDigestAlgorithm(algorithm); this._chunks = []; }
+    update(data, encoding) { this._chunks.push(Buffer.from(data, encoding)); return this; }
+    verify(publicKey, signature, signatureEncoding) {
+      const { pem } = parseAsymmetricKeyMaterial(publicKey);
+      const data = Buffer.concat(this._chunks).toString('hex');
+      const signatureHex = Buffer.from(signature, signatureEncoding).toString('hex');
+      const usePss = publicKey && publicKey.padding === RSA_PKCS1_PSS_PADDING;
+      const verifier = usePss ? __thaw_crypto_asymmetric_verify_pss : __thaw_crypto_asymmetric_verify;
+      return verifier(this.algorithm, pem, data, signatureHex);
+    }
+  }
+  const createSign = algorithm => new Sign(algorithm);
+  const createVerify = algorithm => new Verify(algorithm);
+  const sign = (algorithm, data, key) => new Sign(algorithm || 'sha256').update(data).sign(key);
+  const verify = (algorithm, data, key, signature) => new Verify(algorithm || 'sha256').update(data).verify(key, signature);
   const cryptoModule = {
     createHash: algorithm => new Hash(algorithm),
     createHmac: (algorithm, key) => new Hmac(algorithm, key),
     createCipheriv, createDecipheriv, Cipheriv,
     Hash, Hmac, KeyObject, createSecretKey, createPrivateKey, createPublicKey, pbkdf2Sync, scrypt, scryptSync, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
+    Sign, Verify, createSign, createVerify, sign, verify,
+    constants: { RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING },
     timingSafeEqual, getHashes: () => ['sha256', 'sha512']
   };
   const subtle = {
