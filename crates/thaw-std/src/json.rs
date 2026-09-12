@@ -37,7 +37,12 @@
 //! needs the sentinel's exact shape preserved verbatim, so giving it the
 //! same omitting behavior would silently corrupt that mechanism instead
 //! (see `ordered_json`'s own doc comment for the full story, including
-//! the earlier attempt and regression that led to this split).
+//! the earlier attempt and regression that led to this split). The
+//! *top-level* sentinel case (`JSON.stringify(x)` where `x` itself, not
+//! a nested field/element, is `undefined`) is handled too, in the three
+//! public entry points themselves rather than the nested-value helpers
+//! above -- see `top_level_undefined_string`'s own doc comment for why
+//! that's a string approximation rather than a real `undefined` return.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -135,11 +140,11 @@ fn ordered_json(value: &Value) -> Value {
 /// (`stringify_with_indent`/`filtered_json_omitting_undefined`), never
 /// from the internal marshaling paths that need the sentinel preserved
 /// verbatim -- see `ordered_json`'s own doc comment for why those two
-/// audiences can't share one implementation. The bare top-level case (the
-/// `JSON.stringify` argument itself, not nested, *is* the sentinel) is
-/// deliberately left alone here too: real JS returns actual `undefined`
-/// there, which doesn't fit this function's always-a-string ABI -- a
-/// narrow, pre-existing, unworsened rough edge.
+/// audiences can't share one implementation. The bare top-level case
+/// (the `JSON.stringify` argument itself, not nested, *is* the
+/// sentinel) is handled by this function's three callers themselves,
+/// before they ever reach here -- see `top_level_undefined_string`'s
+/// own doc comment.
 fn ordered_json_omitting_undefined(value: &Value) -> Value {
     match value {
         Value::Object(fields) => Value::Object(
@@ -210,15 +215,42 @@ pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
     stringify_value(&ordered_json(value), &[])
 }
 
+/// Real `JSON.stringify(x)` returns the actual JS value `undefined`
+/// (not a string) when `x` itself -- the top-level argument, not a
+/// nested field/element -- is `undefined`; `typeof JSON.stringify(x)
+/// === 'undefined'`, and `JSON.stringify(x) === undefined`. Thaw's own
+/// compiled calling convention always returns a real `Str` here (the
+/// same practical-subset choice TypeScript's own `lib.d.ts` already
+/// makes for `JSON.stringify`'s declared return type -- `string`, never
+/// `string | undefined`, even though this exact case makes that
+/// signature unsound in real Node too), so there's no way to return a
+/// genuine non-string value through this ABI. Returning the *string*
+/// `"undefined"` is the closest honest approximation: it matches real
+/// JS's own `String(undefined)` coercion, so the overwhelmingly common
+/// usage patterns (`` `${JSON.stringify(x)}` ``, string concatenation,
+/// `console.log`) read identically to real Node; a narrower,
+/// defensive-only check like `JSON.stringify(x) === undefined` or
+/// `typeof JSON.stringify(x) === 'undefined'` is the one thing this
+/// doesn't reproduce -- a documented, narrow, honest simplification,
+/// not a silent miscalculation.
+fn top_level_undefined_string() -> *const c_char {
+    CString::new("undefined").unwrap_or_default().into_raw()
+}
+
 /// The user-facing `JSON.stringify(value)` (no replacer/space) entry
 /// point -- distinct from `thaw_json_stringify` precisely because that
 /// one is *also* used internally for argument/result marshaling and
 /// can't safely gain sentinel-omitting behavior (see its doc comment).
 /// This one omits/nulls a nested napi-undefined sentinel the way real
-/// `JSON.stringify` treats a real `undefined`.
+/// `JSON.stringify` treats a real `undefined`, and special-cases the
+/// top-level sentinel itself the same way (see `top_level_undefined_
+/// string`'s own doc comment).
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify_public(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
+    if is_napi_undefined(value) {
+        return top_level_undefined_string();
+    }
     stringify_value(&ordered_json_omitting_undefined(value), &[])
 }
 
@@ -268,6 +300,9 @@ fn stringify_value(value: &Value, indent: &[u8]) -> *const c_char {
 
 fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
     let value = unsafe { &*value };
+    if is_napi_undefined(value) {
+        return top_level_undefined_string();
+    }
     stringify_value(&ordered_json_omitting_undefined(value), indent)
 }
 
@@ -289,6 +324,9 @@ fn string_array(array: *const u8) -> Vec<String> {
 
 fn stringify_with_keys(value: *mut Value, keys: *const u8, indent: &[u8]) -> *const c_char {
     let value = unsafe { &*value };
+    if is_napi_undefined(value) {
+        return top_level_undefined_string();
+    }
     let keys = string_array(keys);
     stringify_value(&filtered_json_omitting_undefined(value, &keys), indent)
 }
@@ -1552,6 +1590,57 @@ mod tests {
         assert_eq!(
             read_c_string(thaw_json_stringify_public(outer)),
             r#"{"nested":{"y":2}}"#
+        );
+    }
+
+    /// `JSON.stringify(x)` where `x` *itself* -- the top-level argument,
+    /// not a nested field/element -- is the napi-undefined sentinel:
+    /// every `_public` entry point now returns the string `"undefined"`
+    /// (a documented approximation of real JS's actual `undefined`
+    /// return value, which doesn't fit this always-a-string ABI --
+    /// see `top_level_undefined_string`'s own doc comment) instead of
+    /// leaking the sentinel's raw JSON shape (`{"$__thaw_napi_undefined
+    /// $":true}"`, confirmed as the pre-fix behavior below via the
+    /// still-unaffected plain `thaw_json_stringify`).
+    #[test]
+    fn public_stringify_of_a_bare_top_level_undefined_sentinel_returns_the_string_undefined() {
+        let empty = parse("{}");
+        let missing_key = CString::new("nope").unwrap();
+        let sentinel = thaw_json_get(empty, missing_key.as_ptr());
+
+        assert_eq!(
+            read_c_string(thaw_json_stringify_public(sentinel)),
+            "undefined"
+        );
+        assert_eq!(
+            read_c_string(thaw_json_stringify_number_space(sentinel, 2.0)),
+            "undefined"
+        );
+        assert_eq!(
+            read_c_string(thaw_json_stringify_string_space(
+                sentinel,
+                CString::new("  ").unwrap().as_ptr()
+            )),
+            "undefined"
+        );
+        let key_array = encode_string_array(&["a"]);
+        assert_eq!(
+            read_c_string(thaw_json_stringify_keys(sentinel, key_array)),
+            "undefined"
+        );
+        assert_eq!(
+            read_c_string(thaw_json_stringify_keys_number_space(
+                sentinel, key_array, 2.0
+            )),
+            "undefined"
+        );
+
+        // The plain (non-`_public`) function stays unaffected -- this
+        // confirms the sentinel's raw shape is exactly what would
+        // otherwise leak through here.
+        assert_eq!(
+            read_c_string(thaw_json_stringify(sentinel)),
+            r#"{"$__thaw_napi_undefined$":true}"#
         );
     }
 
