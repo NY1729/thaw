@@ -3054,3 +3054,43 @@ fn byte_buffer_numeric_accessors() {
         "12343412deadbeef\n4660 4660\n3735928559\n1 127\n-2 254\n0\n1.5\n3 001e2832\n14 -1\n3\ntrue 16\n"
     );
 }
+
+/// `readUIntLE`/`readUIntBE`/`readIntLE`/`readIntBE`/`writeUIntLE`/
+/// `writeUIntBE`/`writeIntLE`/`writeIntBE` -- the variable-`byteLength`
+/// (1-6) siblings of `byte_buffer_numeric_accessors`'s fixed-width
+/// accessors. No `BigInt`-backed 7/8-byte forms (`readBigUInt64*` &c)
+/// -- those need a real `BigInt` native type Thaw doesn't have, and
+/// stay out of scope; every value below is cross-checked against a
+/// real `node` run of the same `Buffer` calls.
+#[test]
+fn byte_buffer_variable_width_numeric_accessors() {
+    let source = r#"
+        function main(): void {
+            const buf: Buffer = Buffer.alloc(8);
+            buf.writeUIntBE(0x123456, 0, 3);
+            buf.writeUIntLE(0x123456, 3, 3);
+            console.log(buf.toString("hex"));
+            console.log(buf.readUIntBE(0, 3) + " " + buf.readUIntLE(3, 3));
+            const next: number = buf.writeUIntLE(0xabcdef, 0, 3);
+            console.log(next + " " + buf.readUIntLE(0, 3));
+            // Signed wrap-around/sign extension.
+            buf.writeIntBE(-2, 0, 3);
+            console.log(buf.readIntBE(0, 3) + " " + buf.readUIntBE(0, 3));
+            // A 5-byte width (beyond the fixed accessors' 1/2/4).
+            buf.writeUIntBE(0x0102030405, 0, 5);
+            console.log(buf.readUIntBE(0, 5));
+            // A 6-byte width, negative value (the widest Node supports
+            // without BigInt).
+            buf.writeIntLE(-123456, 0, 6);
+            console.log(buf.readIntLE(0, 6) + " " + buf.readUIntLE(0, 6));
+            // Out of range: read is 0, write is a no-op (no thrown
+            // RangeError across this boundary, matching every other
+            // accessor here).
+            console.log(buf.readUIntBE(7, 3));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "byte_buffer_variable_width_numeric_accessors"),
+        "1234565634120000\n1193046 1193046\n3 11259375\n-2 16777214\n4328719365\n-123456 281474976587200\n0\n"
+    );
+}
