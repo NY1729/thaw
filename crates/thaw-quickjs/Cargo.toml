@@ -29,6 +29,8 @@ intl = [
     "dep:icu_locale",
     "dep:icu_plurals",
     "dep:icu_segmenter",
+    "dep:icu_time",
+    "dep:writeable",
 ]
 
 [dependencies]
@@ -51,6 +53,8 @@ icu_list = { version = "=2.3.0", default-features = false, optional = true }
 icu_locale = { version = "=2.3.1", default-features = false, optional = true }
 icu_plurals = { version = "=2.3.0", default-features = false, optional = true }
 icu_segmenter = { version = "=2.3.0", default-features = false, optional = true }
+icu_time = { version = "=2.3.0", default-features = false, optional = true }
+writeable = { version = "=0.6.4", optional = true }
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 libc = "0.2"
 p256 = { version = "0.13", features = ["ecdsa", "pem", "ecdh"] }

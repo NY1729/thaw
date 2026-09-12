@@ -123,7 +123,15 @@
   class DateTimeFormat {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = 'en-US';
+      // Real per-locale rendering (M4) only when the `intl` Cargo
+      // feature is compiled in; otherwise the same fixed English/
+      // Latin-numeral fast path this polyfill always had. Requesting a
+      // locale doesn't itself turn the feature on (`crates/thaw-cli/
+      // src/build.rs`'s `source_uses_intl` only watches for the
+      // genuinely new capabilities), so this constructor must degrade
+      // gracefully rather than assume the native call exists.
+      this._useRealLocaleData = typeof __thaw_intl_datetime_format_parts === 'function';
+      this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
       this._timeZone = opts.timeZone ? String(opts.timeZone) : 'UTC';
       // Eager validation -- real Intl throws a `RangeError` for an
       // unrecognized `timeZone` at construction time, which is exactly
@@ -141,6 +149,15 @@
       this._minute = opts.minute;
       this._second = opts.second;
       this._timeZoneName = opts.timeZoneName;
+      // Kept separate from `this._hourCycle` below (which always
+      // forces a concrete value for the legacy English-only path's own
+      // internal am/pm logic): the *real* per-locale path must leave
+      // hour12/hourCycle unset when the caller didn't request either,
+      // so the native call can apply the requested locale's own actual
+      // default hour cycle (e.g. most of Europe defaults to h23, not
+      // en-US's h12) instead of a hardcoded English default.
+      this._explicitHour12 = opts.hour12;
+      this._explicitHourCycle = opts.hourCycle;
       if (opts.hourCycle) {
         this._hourCycle = opts.hourCycle;
       } else if (opts.hour12 === true) {
@@ -181,6 +198,60 @@
       if (!zoned.valid) {
         throw new RangeError('Invalid time value');
       }
+      return this._useRealLocaleData
+        ? this._formatToPartsRealLocale(zoned)
+        : this._formatToPartsEnglishFastPath(zoned);
+    }
+
+    // Real per-locale month/weekday/era/day-period names, field
+    // ordering, and literal punctuation (`__thaw_intl_datetime_
+    // format_parts`, `intl_datetime.rs`) -- everything except
+    // `timeZoneName`, which stays on the existing jiff-backed English
+    // path below until M13 gives it real per-locale zone-name data too.
+    _formatToPartsRealLocale(zoned) {
+      const options = {
+        weekday: this._weekday,
+        era: this._era,
+        year: this._year,
+        month: this._month,
+        day: this._day,
+        hour: this._hour,
+        minute: this._minute,
+        second: this._second,
+        hour12: this._explicitHour12,
+        hourCycle: this._explicitHourCycle,
+      };
+      const parts = JSON.parse(
+        __thaw_intl_datetime_format_parts(this.locale, JSON.stringify(options), JSON.stringify(zoned)),
+      );
+      // `icu_datetime`'s numeric fields render un-padded by default
+      // (confirmed: `YMD::short()` gives `"7/4/24"`, not `"07/04/24"`)
+      // -- there's no independent "always 2 digits" mode in its simple
+      // Length-based builder (unlike real ECMA-402's `'2-digit'`
+      // option), so zero-pad here, matching real Node's own zero-padded
+      // `'2-digit'` output (confirmed for month/day/hour/minute/second,
+      // including 12-hour-clock hours, e.g. `"01 AM"` for 1am).
+      const twoDigitStyleFor = {
+        year: this._year,
+        month: this._month,
+        day: this._day,
+        hour: this._hour,
+        minute: this._minute,
+        second: this._second,
+      };
+      for (const part of parts) {
+        if (twoDigitStyleFor[part.type] === '2-digit' && /^\d+$/.test(part.value) && part.value.length < 2) {
+          part.value = `0${part.value}`;
+        }
+      }
+      if (this._timeZoneName) {
+        if (parts.length) parts.push({ type: 'literal', value: ' ' });
+        parts.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned) });
+      }
+      return parts;
+    }
+
+    _formatToPartsEnglishFastPath(zoned) {
       const leading = [];
       if (this._weekday) {
         const name = this._weekday === 'long' ? INTL_WEEKDAYS_LONG

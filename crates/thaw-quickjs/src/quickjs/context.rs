@@ -1022,6 +1022,14 @@ fn ensure_context() {
                 let intl_locale_minimize_function =
                     Function::new(ctx.clone(), |tag: String| intl_locale_minimize_json(&tag))
                         .expect("failed to create JavaScript Intl locale minimizer");
+                #[cfg(feature = "intl")]
+                let intl_datetime_format_parts_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, options_json: String, zoned_parts_json: String| {
+                        intl_datetime_format_parts_json(&locale, &options_json, &zoned_parts_json)
+                    },
+                )
+                .expect("failed to create JavaScript Intl datetime formatter");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -1125,6 +1133,13 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_locale_minimize", intl_locale_minimize_function)
                     .expect("failed to install JavaScript Intl locale minimizer");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set(
+                        "__thaw_intl_datetime_format_parts",
+                        intl_datetime_format_parts_function,
+                    )
+                    .expect("failed to install JavaScript Intl datetime formatter");
                 ctx.globals()
                     .set("__thaw_hpack_huffman_encode", hpack_huffman_encode)
                     .expect("failed to install HPACK Huffman encoder");
