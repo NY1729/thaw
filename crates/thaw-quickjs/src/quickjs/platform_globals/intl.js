@@ -569,12 +569,33 @@
       }
   }
 
-  // `Intl.Locale` itself is only ever *publicly exposed* when the
-  // native primitives actually exist (see the class's own doc comment
-  // above) -- the class declaration itself stays unconditional.
+  // `Intl.PluralRules` (M8) -- entirely new, no prior English-only
+  // version existed. `minimumFractionDigits`/significant-digit options
+  // aren't honored (see `intl_plurals.rs`'s own doc comment).
+  class PluralRules {
+    constructor(locale, options) {
+      const opts = options || {};
+      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this._type = opts.type === 'ordinal' ? 'ordinal' : 'cardinal';
+    }
+
+    select(value) {
+      return __thaw_intl_plural_category(this.locale, this._type, String(Number(value)));
+    }
+
+    resolvedOptions() {
+      return { locale: this.locale, type: this._type, pluralCategories: ['other'] };
+    }
+  }
+
+  // `Intl.Locale`/`Intl.PluralRules` are only ever *publicly exposed*
+  // when the native primitives actually exist (see each class's own doc
+  // comment above) -- the class declarations themselves stay
+  // unconditional.
   if (typeof __thaw_intl_locale_parse === 'function') {
     globalThis.Intl = globalThis.Intl || {};
     globalThis.Intl.Locale = Locale;
+    globalThis.Intl.PluralRules = PluralRules;
   }
 
   globalThis.Intl = Object.assign({ DateTimeFormat, NumberFormat, ListFormat }, globalThis.Intl);

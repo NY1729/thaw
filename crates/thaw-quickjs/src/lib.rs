@@ -527,6 +527,9 @@ include!("quickjs/intl_number.rs");
 #[cfg(feature = "intl")]
 include!("quickjs/intl_list.rs");
 
+#[cfg(feature = "intl")]
+include!("quickjs/intl_plurals.rs");
+
 include!("quickjs/asymmetric_crypto.rs");
 
 #[cfg(unix)]
