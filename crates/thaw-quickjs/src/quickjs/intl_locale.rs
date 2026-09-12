@@ -104,14 +104,91 @@ fn json_string_or_null(value: Option<&str>) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
+/// The Unicode extension keywords ECMA-402 cares about, each falling
+/// back to the ECMA-402 default when the tag doesn't specify one --
+/// *not* a locale-appropriate default (e.g. real Node's `th-TH` defaults
+/// to `"buddhist"`, not `"gregory"`); that's M5's job, once
+/// non-Gregorian `DateTimeFormatter` support exists to make a real
+/// per-locale default calendar meaningful (`thaw-icu-data` already
+/// vendors the `CalendarPreferredV1` marker M5 will need for it).
+struct UnicodeKeywords {
+    calendar: String,
+    numbering_system: String,
+    collation: Option<String>,
+}
+
+fn unicode_keywords(locale: &icu_locale::Locale) -> UnicodeKeywords {
+    let get = |key: &str| {
+        locale
+            .extensions
+            .unicode
+            .keywords
+            .get(&key.parse().expect("a 2-letter ASCII key is a valid unicode extension key"))
+            .map(|value| value.to_string())
+    };
+    UnicodeKeywords {
+        calendar: get("ca").unwrap_or_else(|| "gregory".to_string()),
+        numbering_system: get("nu").unwrap_or_else(|| "latn".to_string()),
+        collation: get("co"),
+    }
+}
+
+/// `__thaw_intl_locale_parse(tag)`: the requested tag's own canonical
+/// identity -- `{"valid":true,"language":..,"script":..,"region":..,
+/// "calendar":..,"numberingSystem":..,"collation":..}`, or
+/// `{"valid":false}` for a tag that doesn't parse as BCP-47 syntax (a
+/// `RangeError` in `Intl.Locale`'s constructor). Deliberately **not**
+/// resolved against the curated locale list -- `Intl.Locale` is a pure
+/// BCP-47/likely-subtags identity object in real ECMA-402, entirely
+/// independent of which locales this polyfill actually ships formatting
+/// data for (confirmed against real Node: `new Intl.Locale("zz-Zzzz-
+/// ZZ")` doesn't throw, and `new Intl.Locale("ja").script` is `null`,
+/// *not* auto-maximized to `"Jpan"` -- `maximize()`/`minimize()` are
+/// separate, explicit methods). `calendar`/`numberingSystem`/`collation`
+/// are `null` (JS `undefined`, per real `Intl.Locale`) when the tag
+/// doesn't specify them -- unlike `intl_locale_resolve_json`, this does
+/// **not** fill in an ECMA-402 default, since real `new Intl.Locale
+/// ("de").calendar` is `undefined`, not `"gregory"` (confirmed against
+/// real Node). Use `intl_locale_resolve_json` instead when a *formatter*
+/// needs a concrete calendar/numbering system to pick data with.
+fn intl_locale_parse_json(tag: &str) -> String {
+    use std::str::FromStr;
+    let Ok(locale) = icu_locale::Locale::from_str(tag) else {
+        return r#"{"valid":false}"#.to_string();
+    };
+    let get = |key: &str| {
+        locale
+            .extensions
+            .unicode
+            .keywords
+            .get(&key.parse().expect("a 2-letter ASCII key is a valid unicode extension key"))
+            .map(|value| value.to_string())
+    };
+    format!(
+        r#"{{"valid":true,"language":"{}","script":{},"region":{},"calendar":{},"numberingSystem":{},"collation":{}}}"#,
+        locale.id.language,
+        json_string_or_null(locale.id.script.as_ref().map(|s| s.as_str())),
+        json_string_or_null(locale.id.region.as_ref().map(|r| r.as_str())),
+        json_string_or_null(get("ca").as_deref()),
+        json_string_or_null(get("nu").as_deref()),
+        json_string_or_null(get("co").as_deref()),
+    )
+}
+
 /// `__thaw_intl_locale_resolve(tag)`: resolves a requested BCP-47 tag to
 /// `{"valid":true,"locale":"<curated tag>","language":..,"script":..,
 /// "region":..,"calendar":..,"numberingSystem":..,"collation":..}`, or
 /// `{"valid":false}` only for a tag that doesn't even parse as BCP-47
-/// syntax (real `Intl` throws a `RangeError` for that case; an
-/// unrecognized-but-well-formed *locale*, unlike an unrecognized
-/// `timeZone`, never throws -- it degrades to the nearest curated
-/// ancestor instead, per this file's own doc comment).
+/// syntax. An *internal* primitive for formatters (`DateTimeFormat`/
+/// `NumberFormat`/etc, M4+) to pick which curated dataset to render
+/// with -- not what `Intl.Locale` itself reports (see
+/// `intl_locale_parse_json`'s doc comment for that distinction). A tag
+/// outside the curated list degrades gracefully to the nearest curated
+/// ancestor (matching language, then matching language+region ignoring
+/// script, then language+script ignoring region, then bare language),
+/// finally `en-US` -- never fails, matching this polyfill's existing
+/// graceful-degradation philosophy (an unrecognized `timeZone` is the
+/// one thing that legitimately throws, per `intl.rs`).
 fn intl_locale_resolve_json(tag: &str) -> String {
     use std::str::FromStr;
     let Ok(locale) = icu_locale::Locale::from_str(tag) else {
@@ -120,27 +197,7 @@ fn intl_locale_resolve_json(tag: &str) -> String {
     let curated_tag = resolve_curated_locale(&locale.id);
     let curated_id: icu_locale::LanguageIdentifier =
         curated_tag.parse().expect("resolve_curated_locale returns a valid tag");
-
-    let calendar = locale
-        .extensions
-        .unicode
-        .keywords
-        .get(&"ca".parse().expect("\"ca\" is a valid unicode extension key"))
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "gregory".to_string());
-    let numbering_system = locale
-        .extensions
-        .unicode
-        .keywords
-        .get(&"nu".parse().expect("\"nu\" is a valid unicode extension key"))
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "latn".to_string());
-    let collation = locale
-        .extensions
-        .unicode
-        .keywords
-        .get(&"co".parse().expect("\"co\" is a valid unicode extension key"))
-        .map(|value| value.to_string());
+    let keywords = unicode_keywords(&locale);
 
     format!(
         r#"{{"valid":true,"locale":"{}","language":"{}","script":{},"region":{},"calendar":"{}","numberingSystem":"{}","collation":{}}}"#,
@@ -148,9 +205,9 @@ fn intl_locale_resolve_json(tag: &str) -> String {
         curated_id.language,
         json_string_or_null(curated_id.script.as_ref().map(|s| s.as_str())),
         json_string_or_null(curated_id.region.as_ref().map(|r| r.as_str())),
-        calendar,
-        numbering_system,
-        json_string_or_null(collation.as_deref()),
+        keywords.calendar,
+        keywords.numbering_system,
+        json_string_or_null(keywords.collation.as_deref()),
     )
 }
 
@@ -159,11 +216,29 @@ fn intl_locale_resolve_json(tag: &str) -> String {
 /// "language":..,"script":..,"region":..}` or `{"valid":false}` for a
 /// tag that doesn't parse.
 fn intl_locale_maximize_json(tag: &str) -> String {
+    intl_locale_transform_json(tag, |expander, id| {
+        expander.maximize(id);
+    })
+}
+
+/// `__thaw_intl_locale_minimize(tag)`: the converse of `maximize` --
+/// drops the script/region subtags that are already implied by the
+/// language alone (`Intl.Locale.prototype.minimize()`, M3).
+fn intl_locale_minimize_json(tag: &str) -> String {
+    intl_locale_transform_json(tag, |expander, id| {
+        expander.minimize(id);
+    })
+}
+
+fn intl_locale_transform_json(
+    tag: &str,
+    transform: impl FnOnce(&icu_locale::LocaleExpander, &mut icu_locale::LanguageIdentifier),
+) -> String {
     use std::str::FromStr;
     let Ok(mut id) = icu_locale::LanguageIdentifier::from_str(tag) else {
         return r#"{"valid":false}"#.to_string();
     };
-    locale_expander().maximize(&mut id);
+    transform(&locale_expander(), &mut id);
     format!(
         r#"{{"valid":true,"language":"{}","script":{},"region":{}}}"#,
         id.language,
