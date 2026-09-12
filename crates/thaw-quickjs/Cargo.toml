@@ -21,12 +21,16 @@ cbc = { version = "0.1", features = ["alloc"] }
 flate2 = "1"
 getrandom = "0.2"
 httlib-huffman = "0.3.4"
+ecdsa = "0.16"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core", "signature", "alloc"] }
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 libc = "0.2"
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 p384 = { version = "0.13", features = ["ecdsa", "pem"] }
+p521 = { version = "0.13", features = ["ecdsa", "pem"] }
 pkcs1 = { version = "0.7", features = ["pem"] }
-pkcs8 = { version = "0.10", features = ["pem"] }
+pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 rquickjs = "0.12.2"
 rsa = { version = "0.9", features = ["sha2", "pem", "getrandom"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
