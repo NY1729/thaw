@@ -634,3 +634,100 @@ pub(crate) fn crypto_asymmetric_decrypt_hex(
     }
     .map_err(|error| error.to_string())
 }
+
+/// Normalizes an EC curve name to one of `"P-256"`/`"P-384"`/`"P-521"`
+/// -- accepts both Node/JOSE's own names and the common OpenSSL
+/// aliases (`prime256v1`/`secp384r1`/`secp521r1`), matching how real
+/// packages spell `namedCurve` either way.
+fn normalize_curve_name(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
+        "p256" | "prime256v1" | "secp256r1" => Some("P-256"),
+        "p384" | "secp384r1" => Some("P-384"),
+        "p521" | "secp521r1" => Some("P-521"),
+        _ => None,
+    }
+}
+
+/// Backs `generateKeyPairSync`/`generateKeyPair`: generates a fresh
+/// keypair for `key_type` (`"rsa"`/`"ec"`/`"ed25519"`), returning both
+/// halves as plain PKCS8/SPKI PEM (the same normalized form `crypto_
+/// import_key_json` produces, so the JS side's own PEM/DER/`KeyObject`
+/// encoding logic is shared with import rather than duplicated).
+/// `modulus_bits_or_curve` is the RSA modulus length (as a string,
+/// parsed to `usize`) for `"rsa"`, or the EC curve name for `"ec"`
+/// (ignored for `"ed25519"`). Always uses the universal 65537 RSA
+/// public exponent -- a custom `publicExponent` option is not
+/// supported, matching this shim's existing practical-subset style.
+pub(crate) fn crypto_generate_key_pair_json(
+    key_type: &str,
+    modulus_bits_or_curve: &str,
+) -> Result<String, String> {
+    use pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    let mut rng = rand_core::OsRng;
+    let (private_pem, public_pem) = match key_type {
+        "rsa" => {
+            let bits: usize = modulus_bits_or_curve
+                .parse()
+                .map_err(|_| "modulusLength must be a positive integer".to_string())?;
+            let key = RsaPrivateKey::new(&mut rng, bits).map_err(|error| error.to_string())?;
+            let public = key.to_public_key();
+            (
+                key.to_pkcs8_pem(LineEnding::LF)
+                    .map_err(|error| error.to_string())?
+                    .to_string(),
+                public
+                    .to_public_key_pem(LineEnding::LF)
+                    .map_err(|error| error.to_string())?,
+            )
+        }
+        "ec" => match normalize_curve_name(modulus_bits_or_curve) {
+            Some("P-256") => {
+                let key = p256::ecdsa::SigningKey::random(&mut rng);
+                let public = *key.verifying_key();
+                (
+                    key.to_pkcs8_pem(LineEnding::LF)
+                        .map_err(|error| error.to_string())?
+                        .to_string(),
+                    public
+                        .to_public_key_pem(LineEnding::LF)
+                        .map_err(|error| error.to_string())?,
+                )
+            }
+            Some("P-384") => {
+                let key = p384::ecdsa::SigningKey::random(&mut rng);
+                let public = *key.verifying_key();
+                (
+                    key.to_pkcs8_pem(LineEnding::LF)
+                        .map_err(|error| error.to_string())?
+                        .to_string(),
+                    public
+                        .to_public_key_pem(LineEnding::LF)
+                        .map_err(|error| error.to_string())?,
+                )
+            }
+            Some("P-521") => {
+                let key = p521::ecdsa::SigningKey::random(&mut rng);
+                let public = p521::ecdsa::VerifyingKey::from(&key);
+                (
+                    ec_p521_private_to_pem(&key).ok_or("failed to encode P-521 private key")?,
+                    ec_p521_public_to_pem(&public).ok_or("failed to encode P-521 public key")?,
+                )
+            }
+            _ => return Err(format!("unsupported EC curve: {modulus_bits_or_curve}")),
+        },
+        "ed25519" => {
+            let key = ed25519_dalek::SigningKey::generate(&mut rng);
+            let public = key.verifying_key();
+            (
+                key.to_pkcs8_pem(LineEnding::LF)
+                    .map_err(|error| error.to_string())?
+                    .to_string(),
+                public
+                    .to_public_key_pem(LineEnding::LF)
+                    .map_err(|error| error.to_string())?,
+            )
+        }
+        _ => return Err(format!("unsupported key type: {key_type}")),
+    };
+    Ok(serde_json::json!({ "privatePem": private_pem, "publicPem": public_pem }).to_string())
+}
