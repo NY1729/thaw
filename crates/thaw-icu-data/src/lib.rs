@@ -105,6 +105,12 @@
 //!    which name the exact missing marker type.
 //! 6. (M7, same day) `ListOrV1`/`ListUnitV1` added the same way --
 //!    the M1 probe only exercised `ListFormatter::try_new_and`.
+//! 7. (M9, same day) `CollationSpecialPrimariesV1`/`CollationRootV1`/
+//!    `CollationJamoV1`/`NormalizerNfdDataV1`/`NormalizerNfdTablesV1`
+//!    added the same way for `Intl.Collator` -- `icu_collator` needs
+//!    real NFD normalization data internally (added `icu_normalizer`
+//!    as a `thaw-icu-data` dependency for this reason), which the M1
+//!    probe never touched at all.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!
