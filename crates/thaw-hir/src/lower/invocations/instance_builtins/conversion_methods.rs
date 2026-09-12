@@ -141,6 +141,15 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    if receiver_type == HirType::Array(Box::new(HirType::F64))
+                        && call.args.len() == 1
+                    {
+                        let encoding = self.lower_expr(&call.args[0].expr)?;
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_bytes_to_string".to_string())),
+                            vec![receiver, encoding],
+                        ));
+                    }
                     if receiver_type == HirType::F64 && !call.args.is_empty() {
                         let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, "Number.toString")?;
@@ -285,4 +294,3 @@ impl<'a> FnLowerer<'a> {
         unreachable!("instance builtin category was checked before lowering")
     }
 }
-

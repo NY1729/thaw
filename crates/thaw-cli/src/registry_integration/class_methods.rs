@@ -868,6 +868,7 @@ fn rewrite_external_class_methods_with_static(
                     // "unknown type" here, same as any other unrecognized
                     // reference.
                     ("JsValue", []) => Some(thaw_hir::HirType::JsValue),
+                    ("Uint8Array", []) => Some(thaw_hir::HirType::Bytes),
                     (_, []) => named.get(name.sym.as_str()).cloned(),
                     _ => None,
                 }

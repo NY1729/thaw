@@ -1119,6 +1119,38 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
                 self.compile_json_array_push_native(array, json, &HirType::Json)
             }
+            HirType::Bytes => {
+                let object = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_object_new").unwrap(),
+                        &[],
+                        "dynamic_bytes",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                let ty_key = self.builder.build_global_string_ptr("type", "bytes_type_key").map_err(|error| error.to_string())?;
+                let ty_value = self.builder.build_global_string_ptr("Buffer", "bytes_type_value").map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_object_set_string").unwrap(),
+                    &[object.into(), ty_key.as_pointer_value().into(), ty_value.as_pointer_value().into()],
+                    "set_bytes_type",
+                ).map_err(|error| error.to_string())?;
+                let data = self.compile_native_array_to_json_with_undefined(
+                    value.into_pointer_value(),
+                    &HirType::F64,
+                    true,
+                )?;
+                let data_key = self.builder.build_global_string_ptr("data", "bytes_data_key").map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_object_set_json").unwrap(),
+                    &[object.into(), data_key.as_pointer_value().into(), data.into()],
+                    "set_bytes_data",
+                ).map_err(|error| error.to_string())?;
+                self.compile_json_array_push_native(array, object, &HirType::Json)
+            }
             HirType::Tuple(elements) => {
                 let json = self.compile_native_tuple_to_json_with_undefined(
                     value.into_pointer_value(),
@@ -1344,6 +1376,20 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Bool => self.compile_json_as_bool_value(json),
             HirType::Json => Ok(json),
             HirType::Dictionary(_) => Ok(json),
+            HirType::Bytes => {
+                let key = self.builder.build_global_string_ptr("data", "bytes_result_data_key").map_err(|error| error.to_string())?;
+                let data = self.builder.build_call(
+                    self.module.get_function("thaw_json_get").unwrap(),
+                    &[json.into(), key.as_pointer_value().into()],
+                    "dynamic_bytes_data",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap();
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_json_to_number_array").unwrap(),
+                    &[data.into()],
+                    "dynamic_bytes_result",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("thaw_json_to_number_array returned no value")?.into_pointer_value();
+                Ok(self.compile_array_wrap(result)?.into())
+            }
             // A real, declared union return -- e.g. validator's own
             // `normalizeEmail(...): string | false`. Every member here
             // must be a plain scalar (`F64`/`Str`/`Bool`/`Null`/

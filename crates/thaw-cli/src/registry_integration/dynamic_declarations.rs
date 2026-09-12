@@ -66,6 +66,7 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
         thaw_hir::HirType::Void => Some("void".into()),
         thaw_hir::HirType::Json => Some("Json".into()),
         thaw_hir::HirType::JsValue => Some("JsValue".into()),
+        thaw_hir::HirType::Bytes => Some("Uint8Array".into()),
         thaw_hir::HirType::Promise(payload) => {
             render_dynamic_type(payload).map(|payload| format!("Promise<{payload}>") )
         }
