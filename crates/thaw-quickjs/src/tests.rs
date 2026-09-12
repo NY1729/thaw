@@ -2357,3 +2357,52 @@ fn intl_list_format_matches_real_node_for_curated_non_english_locales() {
         .unwrap()
     );
 }
+
+/// `Intl.PluralRules` (M8, entirely new capability) -- cardinal and
+/// ordinal category selection cross-checked against real Node,
+/// including Arabic's genuinely 6-category cardinal system (the widest
+/// real CLDR plural system) and Japanese's complete absence of any
+/// cardinal distinction (always `"other"`).
+#[cfg(feature = "intl")]
+#[test]
+fn intl_plural_rules_matches_real_node() {
+    assert_eq!(
+        load(
+            "function cardinal(locale, n) {\n\
+               return new Intl.PluralRules(locale).select(n);\n\
+             }\n\
+             function ordinal(locale, n) {\n\
+               return new Intl.PluralRules(locale, { type: 'ordinal' }).select(n);\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 cardinal('en', 1),\n\
+                 cardinal('en', 2),\n\
+                 cardinal('en', 1.0),\n\
+                 cardinal('en', 1.5),\n\
+                 cardinal('ar', 0),\n\
+                 cardinal('ar', 1),\n\
+                 cardinal('ar', 2),\n\
+                 cardinal('ar', 3),\n\
+                 cardinal('ar', 11),\n\
+                 cardinal('ar', 100),\n\
+                 cardinal('ja', 1),\n\
+                 ordinal('en', 1),\n\
+                 ordinal('en', 2),\n\
+                 ordinal('en', 3),\n\
+                 ordinal('en', 4),\n\
+                 ordinal('en', 11),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "one", "other", "one", "other", "zero", "one", "two", "few", "many", "other", "other",
+            "one", "two", "few", "other", "other",
+        ])
+        .unwrap()
+    );
+}

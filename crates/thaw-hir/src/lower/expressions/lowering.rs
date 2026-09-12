@@ -1835,6 +1835,7 @@ impl<'a> FnLowerer<'a> {
                                 | "Intl.NumberFormat"
                                 | "Intl.ListFormat"
                                 | "Intl.Locale"
+                                | "Intl.PluralRules"
                         ) {
                             let args = new_expr.args.as_deref().unwrap_or_default();
                             if args.iter().any(|argument| argument.spread.is_some()) {
