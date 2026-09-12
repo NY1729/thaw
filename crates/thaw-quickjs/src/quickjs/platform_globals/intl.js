@@ -432,11 +432,18 @@
   class ListFormat {
     constructor(locale, options) {
       const opts = options || {};
-      this._type = opts.type === 'disjunction' ? 'disjunction' : 'conjunction';
+      this._useRealLocaleData = typeof __thaw_intl_list_format === 'function';
+      this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
+      this._type = opts.type === 'disjunction' ? 'disjunction' : opts.type === 'unit' ? 'unit' : 'conjunction';
+      this._style = opts.style === 'short' || opts.style === 'narrow' ? opts.style : 'long';
     }
 
     format(list) {
       const items = Array.from(list, String);
+      if (this._useRealLocaleData) {
+        const kind = this._type === 'disjunction' ? 'or' : this._type === 'unit' ? 'unit' : 'and';
+        return __thaw_intl_list_format(this.locale, kind, this._style, JSON.stringify(items));
+      }
       if (items.length === 0) return '';
       if (items.length === 1) return items[0];
       const conjunction = this._type === 'disjunction' ? 'or' : 'and';

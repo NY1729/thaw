@@ -2315,3 +2315,45 @@ fn intl_number_format_matches_real_node_for_curated_non_english_locales() {
         .unwrap()
     );
 }
+
+/// Real multi-locale `Intl.ListFormat` (M7 of docs/design/
+/// intl-polyfill.md's "Real CLDR data via icu4x" plan) --
+/// `intl_list.rs`'s `__thaw_intl_list_format`, replacing the previous
+/// fixed English-only conjunction/disjunction joining for any curated
+/// locale. Every case cross-checked against real Node, including
+/// Japanese's real `、` separator (not a comma) and its distinct
+/// "or"-list connector.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_list_format_matches_real_node_for_curated_non_english_locales() {
+    assert_eq!(
+        load(
+            "function show(locale, opts, items) {\n\
+               return new Intl.ListFormat(locale, opts).format(items);\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 show('ja', {}, ['a', 'b', 'c']),\n\
+                 show('ja', { type: 'disjunction' }, ['a', 'b', 'c']),\n\
+                 show('fr', {}, ['a', 'b', 'c']),\n\
+                 show('de', { style: 'short' }, ['a', 'b', 'c']),\n\
+                 show('en-US', {}, ['a', 'b', 'c']),\n\
+                 show('en-US', { type: 'disjunction' }, ['a', 'b', 'c']),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "a、b、c",
+            "a、b、またはc",
+            "a, b et c",
+            "a, b und c",
+            "a, b, and c",
+            "a, b, or c",
+        ])
+        .unwrap()
+    );
+}
