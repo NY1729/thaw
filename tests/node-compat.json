@@ -810,7 +810,7 @@
     },
     {
       "name": "child process missing executable error code",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { execFile } from 'node:child_process'; async function main(): Promise<void> { await new Promise<void>((resolve) => { execFile('/tmp/thaw-command-does-not-exist', (error) => { console.log(error.name, error.code); resolve(); }); }); }"
     },
     {
