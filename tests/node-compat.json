@@ -857,6 +857,11 @@
       "name": "inspector promise network domain lifecycle",
       "expect": "matched",
       "source": "import { Session } from 'node:inspector/promises'; async function main(): Promise<void> { const session = new Session(); session.connect(); await session.post('Network.enable'); await session.post('Network.disable'); console.log('ok'); session.disconnect(); }"
+    },
+    {
+      "name": "cluster executes worker process",
+      "expect": "unsupported",
+      "source": "import cluster, { isPrimary } from 'node:cluster'; import process from 'node:process'; import { existsSync, rmSync, writeFileSync } from 'node:fs'; function main(): void { const path = '/tmp/thaw-cluster-worker-ran'; if (isPrimary) { rmSync(path, { force: true }); cluster.fork(); setTimeout((): void => { console.log(existsSync(path)); rmSync(path, { force: true }); }, 200); } else { writeFileSync(path, 'worker'); process.disconnect(); } }"
     }
   ]
 }
