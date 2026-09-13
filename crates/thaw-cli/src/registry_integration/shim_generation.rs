@@ -42,6 +42,13 @@ fn generate_registry_shims(
         };
         let mut functions = thaw_bridge::parse_dts(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
+        // This mutating API returns the exact Buffer handle it receives.
+        if name == "node:crypto" {
+            if let Some(function) = functions.iter_mut().find(|f| f.name == "randomFillSync") {
+                function.params[0].1 = thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue);
+                function.ret = thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue);
+            }
+        }
         let classes = thaw_bridge::parse_dts_classes(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
         let values = thaw_bridge::parse_dts_values(&package.dts_source)
