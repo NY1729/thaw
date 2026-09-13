@@ -849,9 +849,14 @@
       "source": "import { Worker } from 'node:worker_threads'; async function main(): Promise<void> { const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.postMessage(42);`, { eval: true }); await new Promise<void>((resolve, reject) => { worker.once('message', (value) => { console.log(value); resolve(); }); worker.once('error', reject); }); await worker.terminate(); }"
     },
     {
-      "name": "inspector unsupported protocol error code",
-      "expect": "unsupported",
-      "source": "import { Session } from 'node:inspector'; async function main(): Promise<void> { const session = new Session(); session.connect(); await new Promise<void>((resolve) => session.post('Network.enable', {}, (error): void => { console.log(error === null); resolve(); })); session.disconnect(); }"
+      "name": "inspector network domain lifecycle",
+      "expect": "matched",
+      "source": "import { Session } from 'node:inspector'; async function main(): Promise<void> { const session = new Session(); session.connect(); await new Promise<void>((resolve) => session.post('Network.enable', {}, (enableError): void => { session.post('Network.disable', {}, (disableError): void => { console.log(enableError === null, disableError === null); resolve(); }); })); session.disconnect(); }"
+    },
+    {
+      "name": "inspector promise network domain lifecycle",
+      "expect": "matched",
+      "source": "import { Session } from 'node:inspector/promises'; async function main(): Promise<void> { const session = new Session(); session.connect(); await session.post('Network.enable'); await session.post('Network.disable'); console.log('ok'); session.disconnect(); }"
     }
   ]
 }
