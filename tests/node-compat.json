@@ -402,12 +402,12 @@
     },
     {
       "name": "crypto random fill range",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { Buffer } from 'node:buffer'; import { randomFillSync } from 'node:crypto'; function main(): void { const value = Buffer.alloc(8); randomFillSync(value, 2, 3); const hex: string = value.toString('hex'); console.log(hex.startsWith('0000'), hex.endsWith('000000'), hex.length); }"
     },
     {
       "name": "crypto random fill identity",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { Buffer } from 'node:buffer'; import { randomFillSync } from 'node:crypto'; function main(): void { const value = Buffer.alloc(8); console.log(randomFillSync(value) === value); }"
     },
     {
