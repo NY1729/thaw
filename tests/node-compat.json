@@ -835,7 +835,7 @@
     },
     {
       "name": "vm context intrinsic isolation",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { runInNewContext } from 'node:vm'; function main(): void { runInNewContext(`Object.prototype.thawVmLeak = 1`); console.log(runInNewContext(`typeof Object.prototype.thawVmLeak`)); }"
     },
     {
