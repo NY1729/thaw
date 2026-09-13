@@ -15,7 +15,10 @@ fn main() {
 
     match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => println!("thaw {}", env!("CARGO_PKG_VERSION")),
-        Some("--help" | "-h") => println!("{USAGE}"),
+        Some("--help" | "-h" | "help") => println!("{USAGE}"),
+        Some(_) if matches!(args.get(2).map(String::as_str), Some("--help" | "-h")) => {
+            println!("{USAGE}")
+        }
         Some("build") => {
             if let Err(err) = run_build(&args[2..]) {
                 eprintln!("error: {err}");
@@ -84,7 +87,11 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        _ => {
+        Some(command) => {
+            eprintln!("error: unknown command or script `{command}`\n\n{USAGE}");
+            std::process::exit(1);
+        }
+        None => {
             eprintln!("{USAGE}");
             std::process::exit(1);
         }
