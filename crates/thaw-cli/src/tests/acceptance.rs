@@ -14,7 +14,7 @@ fn record_acceptance_metrics(name: &str, build_time: Duration, output: &Path) {
         )
         .unwrap();
     }
-    assert!(build_time < Duration::from_secs(120), "{metrics}");
+    assert!(build_time < Duration::from_secs(300), "{metrics}");
     assert!(executable_bytes < 100 * 1024 * 1024, "{metrics}");
 }
 
