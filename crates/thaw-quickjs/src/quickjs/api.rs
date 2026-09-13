@@ -1202,6 +1202,21 @@ pub extern "C" fn thaw_js_call_handle_value_result(handle: u64, argument: u64) -
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_js_retain_handle(handle: u64) -> u8 {
+    with_active_or_context(|ctx| {
+        if handle == 0 || value_for_handle(&ctx, handle).is_err() {
+            return 0;
+        }
+        let Ok(refs) = ctx.globals().get::<_, Array>("__thaw_value_handle_refs") else {
+            return 0;
+        };
+        let index = (handle - 1) as usize;
+        let count = refs.get::<u64>(index).unwrap_or(1);
+        u8::from(refs.set(index, count + 1).is_ok())
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_js_release_handle(handle: u64) -> u8 {
     with_active_or_context(|ctx| {
         if handle == 0 {

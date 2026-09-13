@@ -1408,6 +1408,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_retain_handle",
+            self.context
+                .i8_type()
+                .fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_release_handle",
             self.context
                 .i8_type()
