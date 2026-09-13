@@ -76,7 +76,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or("JS callback adapter is missing an argument")?;
             self.compile_json_array_push_native(arguments, value, ty)?;
         }
-        let arguments = self
+        let arguments_json = self
             .builder
             .build_call(
                 self.module.get_function("thaw_json_stringify").unwrap(),
@@ -91,7 +91,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module.get_function("thaw_js_call_handle_result").unwrap(),
-                &[adapter_handle.into(), arguments.into()],
+                &[adapter_handle.into(), arguments_json.into()],
                 "js_callback_result",
             )
             .map_err(|error| error.to_string())?
@@ -102,6 +102,31 @@ impl<'ctx> HirCompiler<'ctx> {
         let error = self
             .builder
             .build_extract_value(result, 1, "js_callback_error")
+            .map_err(|error| error.to_string())?;
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "js_callback_value")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[arguments_json.into()],
+                "destroy_js_callback_arguments_string",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[arguments.into()],
+                "destroy_js_callback_arguments",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[value.into()],
+                "destroy_js_callback_result_string",
+            )
             .map_err(|error| error.to_string())?;
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
@@ -464,6 +489,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .unwrap();
         let null_key = ptr_type.const_null();
         let mut callback_args = vec![context.into()];
+        let mut argument_json = Vec::with_capacity(params.len());
         for (index, param) in params.iter().enumerate() {
             let argument = if rest_start == Some(index) {
                 self.builder.build_call(
@@ -489,6 +515,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
+            argument_json.push(argument);
             callback_args.push(self.compile_json_value_to_native(argument, param)?.into());
         }
         let code = self
@@ -501,6 +528,31 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
             .map_err(|error| error.to_string())?;
+        if defer_promise && !matches!(ret, HirType::Promise(_)) {
+            for (index, param) in params.iter().enumerate() {
+                if matches!(
+                    param,
+                    HirType::JsValue | HirType::Function(_, _) | HirType::CallableFunction(..)
+                ) {
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_js_release_handle").unwrap(),
+                            &[callback_args[index + 1]],
+                            "release_native_callback_argument",
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            for value in argument_json.into_iter().chain(std::iter::once(args_json)) {
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[value.into()],
+                        "destroy_native_callback_json",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let pending_slot = self.pending_exception().as_pointer_value();
         let pending = self
             .builder
@@ -637,6 +689,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[result_json.into()],
+                "destroy_native_callback_result_json",
+            )
+            .map_err(|error| error.to_string())?;
         self.builder
             .build_return(Some(&result))
             .map_err(|error| error.to_string())?;
@@ -1117,7 +1176,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     element,
                     true,
                 )?;
-                self.compile_json_array_push_native(array, json, &HirType::Json)
+                self.compile_json_array_push_owned(array, json)
             }
             HirType::Bytes => {
                 let object = self
@@ -1149,7 +1208,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[object.into(), data_key.as_pointer_value().into(), data.into()],
                     "set_bytes_data",
                 ).map_err(|error| error.to_string())?;
-                self.compile_json_array_push_native(array, object, &HirType::Json)
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[data.into()],
+                        "destroy_dynamic_bytes_data",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.compile_json_array_push_owned(array, object)
             }
             HirType::Tuple(elements) => {
                 let json = self.compile_native_tuple_to_json_with_undefined(
@@ -1157,7 +1223,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     elements,
                     true,
                 )?;
-                self.compile_json_array_push_native(array, json, &HirType::Json)
+                self.compile_json_array_push_owned(array, json)
             }
             HirType::Object(_) => {
                 let json = self.compile_native_object_to_json_with_undefined(
@@ -1165,10 +1231,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     ty,
                     true,
                 )?;
-                self.compile_json_array_push_native(array, json, &HirType::Json)
+                self.compile_json_array_push_owned(array, json)
             }
             _ => self.compile_json_array_push_native(array, value, ty),
         }
+    }
+
+    fn compile_json_array_push_owned(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        self.compile_json_array_push_native(array, value, &HirType::Json)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[value.into()],
+                "destroy_marshaled_dynamic_argument",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     fn compile_napi_optional_result_container(
@@ -1371,9 +1453,22 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
-            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
-            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
-            HirType::Bool => self.compile_json_as_bool_value(json),
+            HirType::F64 | HirType::Str | HirType::Bool => {
+                let value = match ty {
+                    HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number")?,
+                    HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string")?,
+                    HirType::Bool => self.compile_json_as_bool_value(json)?,
+                    _ => unreachable!(),
+                };
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[json.into()],
+                        "destroy_typed_dynamic_scalar",
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(value)
+            }
             HirType::Json => Ok(json),
             HirType::Dictionary(_) => Ok(json),
             HirType::Bytes => {
@@ -1478,7 +1573,16 @@ impl<'ctx> HirCompiler<'ctx> {
             // return expression produced and emits a bare `build_return
             // (None)` regardless (see `compile_ignored_this_adapter` for
             // the same pattern), so any placeholder value is fine here.
-            HirType::Void => Ok(self.context.i32_type().const_zero().into()),
+            HirType::Void => {
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[json.into()],
+                        "destroy_typed_dynamic_void",
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(self.context.i32_type().const_zero().into())
+            }
             other => Err(format!("typed dynamic return does not support {other:?} yet")),
         }
     }

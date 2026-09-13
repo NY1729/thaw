@@ -1933,6 +1933,33 @@ fn compiles_quickjs_fallback_path() {
 }
 
 #[test]
+fn releases_a_discarded_dynamic_value() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.value = {};");
+            getDynamicValue("value");
+            const value: JsValue = getDynamicValue("value");
+            console.log(releaseDynamicValue(value));
+            console.log(releaseDynamicValue(value));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "discarded_dynamic_value"), "true\nfalse\n");
+}
+
+#[test]
+fn keeps_a_dynamic_value_stored_by_an_assignment_statement() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.first = {}; globalThis.second = {};");
+            let value: JsValue = getDynamicValue("first");
+            value = getDynamicValue("second");
+            console.log(releaseDynamicValue(value));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "assigned_dynamic_value"), "true\n");
+}
+
+#[test]
 fn passes_callbacks_to_typed_quickjs_calls() {
     let source = r#"
         declare function __thaw_typed_js_72756e43616c6c6261636b(
@@ -2032,6 +2059,21 @@ fn runs_module_init_before_main_body() {
         compile_and_run(source, "module_init_main"),
         "hi from registry\n"
     );
+}
+
+#[test]
+fn dynamic_json_calls_release_bridge_temporaries() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void { callDynamic("value", JSON.parse("[]")); }"#,
+    )
+    .unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "dynamic_json_cleanup");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert_eq!(ir.matches("call void @thaw_cstring_destroy").count(), 2, "{ir}");
+    assert_eq!(ir.matches("call void @thaw_json_destroy").count(), 1, "{ir}");
 }
 
 #[test]

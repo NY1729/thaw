@@ -168,6 +168,21 @@ impl<'ctx> HirCompiler<'ctx> {
         let json_parse_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module
             .add_function("thaw_json_parse", json_parse_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_json_destroy",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_handle_id",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_cstring_destroy",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
 
         let json_stringify_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
@@ -218,6 +233,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let json_get_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         self.module
             .add_function("thaw_json_get", json_get_type, Some(Linkage::External));
+        self.module
+            .add_function("thaw_json_take", json_get_type, Some(Linkage::External));
 
         let json_index_type =
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), i8_ptr.into()], false);
@@ -1304,6 +1321,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ("thaw_json_object_set_string", i8_ptr.into()),
             ("thaw_json_object_set_bool", self.context.i8_type().into()),
             ("thaw_json_object_set_json", i8_ptr.into()),
+            ("thaw_json_object_set_json_owned", i8_ptr.into()),
         ] {
             self.module.add_function(
                 name,

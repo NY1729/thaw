@@ -10,7 +10,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_global_string_ptr(field, "jsonkey")
             .map_err(|e| e.to_string())?;
-        let get_fn = self.module.get_function("thaw_json_get").unwrap();
+        let get_fn = self
+            .module
+            .get_function(if matches!(obj, HirExpr::Var(name) if name.starts_with("__thaw_json_wrap_obj_")) {
+                "thaw_json_take"
+            } else {
+                "thaw_json_get"
+            })
+            .unwrap();
         let call = self
             .builder
             .build_call(
@@ -51,6 +58,7 @@ impl<'ctx> HirCompiler<'ctx> {
         element: &HirType,
         preserve_undefined: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        let owned = matches!(object, HirExpr::Var(name) if name.starts_with("__thaw_json_wrap_obj_"));
         let object = self.compile_expr(object)?;
         let key = self.compile_expr(key)?;
         let result = self.compile_expr(value)?;
@@ -60,6 +68,7 @@ impl<'ctx> HirCompiler<'ctx> {
             result,
             element,
             preserve_undefined,
+            owned,
         )?;
         Ok(result)
     }

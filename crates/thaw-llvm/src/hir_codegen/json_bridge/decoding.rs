@@ -73,6 +73,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(pointer, field)
                 .map_err(|error| error.to_string())?;
+            self.compile_destroy_json_if_native_scalar(field_json, field_ty)?;
         }
         Ok(object.into())
     }
@@ -129,33 +130,17 @@ impl<'ctx> HirCompiler<'ctx> {
             // marker shape, not decoded defensively the way a value from
             // real user JSON would need to be.
             HirType::JsValue => {
-                let key = self
-                    .builder
-                    .build_global_string_ptr(
-                        "__thaw_js_handle_id__",
-                        "native_callback_jsvalue_key",
-                    )
-                    .map_err(|error| error.to_string())?;
-                let id = self
+                self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_json_get").unwrap(),
-                        &[json.into(), key.as_pointer_value().into()],
-                        "native_callback_jsvalue_marker",
+                        self.module.get_function("thaw_json_handle_id").unwrap(),
+                        &[json.into()],
+                        "native_callback_jsvalue_arg",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("thaw_json_get did not return a value")?;
-                let id = self.compile_json_as_value(id, "thaw_json_as_number")?;
-                self.builder
-                    .build_float_to_unsigned_int(
-                        id.into_float_value(),
-                        self.context.i64_type(),
-                        "native_callback_jsvalue_arg",
-                    )
-                    .map(Into::into)
-                    .map_err(|error| error.to_string())
+                    .ok_or_else(|| "thaw_json_handle_id did not return a value".into())
             }
             HirType::Function(params, ret) if **ret == HirType::Void => {
                 self.compile_js_void_callback_from_json(json, params)
@@ -165,6 +150,23 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             other => Err(format!("unsupported dynamic result value {other:?}")),
         }
+    }
+
+    fn compile_destroy_json_if_native_scalar(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<(), String> {
+        if matches!(ty, HirType::F64 | HirType::Str | HirType::Bool) {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[json.into()],
+                    "destroy_decoded_json_scalar",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn compile_json_to_optional_field(
@@ -562,6 +564,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(pointer, value)
             .map_err(|error| error.to_string())?;
+        self.compile_destroy_json_if_native_scalar(element_json, element)?;
         let next = self
             .builder
             .build_int_add(
@@ -681,6 +684,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(pointer, value)
                 .map_err(|error| error.to_string())?;
+            self.compile_destroy_json_if_native_scalar(element_json, element)?;
         }
         // `tuple` is a freshly built raw buffer; wrap it in a handle before
         // treating it as this call's tuple-typed return value (see

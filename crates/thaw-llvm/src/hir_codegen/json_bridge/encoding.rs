@@ -90,17 +90,40 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?
             .into_pointer_value();
         self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[args_json_str.into()],
+                "destroy_call_dynamic_args_string",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[args_json_val.into()],
+                "destroy_call_dynamic_args",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|e| e.to_string())?;
         self.branch_on_pending_exception()?;
 
         let parse_fn = self.module.get_function("thaw_json_parse").unwrap();
-        self.builder
+        let parsed = self
+            .builder
             .build_call(parse_fn, &[result_json_str.into()], "call_dynamic_result")
             .map_err(|e| e.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| "thaw_json_parse did not return a value".to_string())
+            .ok_or_else(|| "thaw_json_parse did not return a value".to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[result_json_str.into()],
+                "destroy_call_dynamic_result_string",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(parsed)
     }
 
     fn compile_json_as_value(
@@ -190,6 +213,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 value,
                 field_ty,
                 preserve_undefined,
+                false,
             )?;
         }
         Ok(json)
@@ -202,7 +226,7 @@ impl<'ctx> HirCompiler<'ctx> {
         value: BasicValueEnum<'ctx>,
         field_type: &HirType,
     ) -> Result<(), String> {
-        self.compile_json_object_set_native_with_undefined(json, key, value, field_type, false)
+        self.compile_json_object_set_native_with_undefined(json, key, value, field_type, false, false)
     }
 
     fn compile_json_object_set_native_with_undefined(
@@ -212,6 +236,7 @@ impl<'ctx> HirCompiler<'ctx> {
         mut value: BasicValueEnum<'ctx>,
         field_type: &HirType,
         preserve_undefined: bool,
+        owned: bool,
     ) -> Result<(), String> {
         match field_type {
             HirType::Optional(payload) => {
@@ -257,7 +282,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Null => value = self.compile_json_null()?,
             _ => {}
         }
-        let setter = match field_type {
+        let mut setter = match field_type {
                 HirType::F64 => "thaw_json_object_set_number",
                 HirType::Str => "thaw_json_object_set_string",
                 HirType::Bool => {
@@ -327,6 +352,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 other => return Err(format!("unsupported dynamic object field {other:?}")),
             };
+        if owned && setter == "thaw_json_object_set_json" {
+            setter = "thaw_json_object_set_json_owned";
+        }
         self.builder
             .build_call(
                 self.module.get_function(setter).unwrap(),
@@ -480,6 +508,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 member_value,
                 member,
                 preserve_undefined,
+                false,
             )?;
             self.builder
                 .build_unconditional_branch(merge)
@@ -561,6 +590,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 null,
                 &HirType::Null,
                 preserve_undefined,
+                false,
             )?;
             self.builder
                 .build_unconditional_branch(done)
@@ -574,6 +604,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     undefined,
                     &HirType::Json,
                     true,
+                    false,
                 )?;
             }
         } else if absent_is_null {
@@ -584,6 +615,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 null,
                 &HirType::Null,
                 preserve_undefined,
+                false,
             )?;
         } else if preserve_undefined {
             let undefined = self.compile_napi_undefined_json()?;
@@ -593,6 +625,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 undefined,
                 &HirType::Json,
                 true,
+                false,
             )?;
         }
         self.builder
@@ -606,6 +639,7 @@ impl<'ctx> HirCompiler<'ctx> {
             payload,
             payload_type,
             preserve_undefined,
+            false,
         )?;
         self.builder
             .build_unconditional_branch(done)
