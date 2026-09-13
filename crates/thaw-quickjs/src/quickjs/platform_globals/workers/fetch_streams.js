@@ -371,6 +371,7 @@
       constructor(transformer = {}, writableStrategy = {}, readableStrategy = {}) { let readableController, writable; const readableQueueStrategy = { ...readableStrategy, highWaterMark: readableStrategy.highWaterMark === undefined ? 0 : readableStrategy.highWaterMark }, cancel = reason => typeof transformer.cancel === 'function' ? transformer.cancel(reason) : undefined; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); return cancel(error); } }, readableQueueStrategy); const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; }; writable = this.writable = new WritableStream({ start() { return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return readableController._stream._waitForCapacity().then(() => typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk)).catch(fail); }, close() { return Promise.resolve().then(() => typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()).catch(fail); }, abort(error) { return Promise.resolve(cancel(error)).then(() => readableController.error(error)); } }, writableStrategy); controller._writable = writable; }
     };
     globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
+    const streamBytes = value => value instanceof ArrayBuffer ? new Uint8Array(value) : ArrayBuffer.isView(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : Array.isArray(value) ? Uint8Array.from(value) : null;
     const hexFromBytes = value => Array.from(value, byte => byte.toString(16).padStart(2, '0')).join('');
     const bytesFromHex = value => new Uint8Array(String(value).match(/../g)?.map(pair => parseInt(pair, 16)) || []);
     const compressionTransform = (operation, format) => {
@@ -382,8 +383,8 @@
       return new TransformStream({
         transform(chunk, controller) {
           try {
-            if (!(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk)) throw new TypeError('chunk must be an ArrayBuffer or view');
-            const bytes = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+            const bytes = streamBytes(chunk);
+            if (!bytes) throw new TypeError('chunk must be an ArrayBuffer or view');
             const output = bytesFromHex(__thaw_zlib_stream_write(handle, hexFromBytes(bytes), false));
             if (output.byteLength) controller.enqueue(output);
           } catch (error) { release(); throw error; }
@@ -417,7 +418,7 @@
     globalThis.ByteLengthQueuingStrategy = ByteLengthQueuingStrategy;
     globalThis.CountQueuingStrategy = CountQueuingStrategy;
     globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); let pendingHigh = ''; const transform = new TransformStream({ transform(chunk, controller) { let text = pendingHigh + String(chunk); pendingHigh = ''; const last = text.charCodeAt(text.length - 1); if (last >= 0xd800 && last <= 0xdbff) { pendingHigh = text.slice(-1); text = text.slice(0, -1); } if (text) controller.enqueue(encoder.encode(text)); }, flush(controller) { if (pendingHigh) controller.enqueue(encoder.encode(pendingHigh)); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = 'utf-8'; } };
-    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const text = decoder.decode(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength), { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = decoder.encoding || String(label).toLowerCase(); this.fatal = Boolean(options.fatal); this.ignoreBOM = Boolean(options.ignoreBOM); } };
+    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const bytes = streamBytes(chunk); if (!bytes) throw new TypeError('chunk must be an ArrayBuffer or view'); const text = decoder.decode(bytes, { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = decoder.encoding || String(label).toLowerCase(); this.fatal = Boolean(options.fatal); this.ignoreBOM = Boolean(options.ignoreBOM); } };
   }
   if (typeof globalThis.FormData !== 'function') {
     const formDataEntries = new WeakMap();
