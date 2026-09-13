@@ -8,7 +8,7 @@ mod module_graph;
 include!("compat.rs");
 include!("node_compat.rs");
 
-const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
+const USAGE: &str = "usage: thaw <script.ts> [arguments...]\n       thaw prepare\n       thaw install [directory]\n       thaw add <package>... [--prefix <directory>]\n       thaw run <file.ts> [arguments...]\n       thaw run <package-script> [--prefix <directory>]\n       thaw dev <input.ts|project> [build options]\n       thaw build <input.ts|project> [-o <output>] [--static] [--external-native] [--assets <directory> | --vite <directory>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw compat [manifest.json]\n       thaw node-compat [manifest.json]\n       thaw registry add <package>[@<version>] [--registry <dir>] [--from-node-modules <dir>]\n       thaw --help\n       thaw --version";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -40,12 +40,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some("run") => {
-            if let Err(err) = run_script(&args[2..]) {
+        Some("run") => match run_script(&args[2..]) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
                 eprintln!("error: {err}");
                 std::process::exit(1);
             }
-        }
+        },
         Some("dev") => {
             if let Err(err) = run_dev(&args[2..]) {
                 eprintln!("error: {err}");
@@ -179,14 +180,20 @@ fn npm_add_command(packages: &[String], directory: &Path) -> Command {
     command
 }
 
-fn run_script(args: &[String]) -> Result<(), String> {
+fn run_script(args: &[String]) -> Result<i32, String> {
     let script = args
         .first()
-        .ok_or("usage: thaw run <script> [--prefix <directory>]")?;
+        .ok_or("usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>]")?;
+    if is_script_path(script) {
+        return run_file(script, &args[1..]);
+    }
     let directory = match args.get(1).map(String::as_str) {
         None => Path::new("."),
         Some("--prefix") if args.len() == 3 => Path::new(&args[2]),
-        _ => return Err("usage: thaw run <script> [--prefix <directory>]".into()),
+        _ => return Err(
+            "usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>]"
+                .into(),
+        ),
     };
     if !directory.join("package.json").is_file() {
         return Err(format!(
@@ -200,7 +207,7 @@ fn run_script(args: &[String]) -> Result<(), String> {
     if !status.success() {
         return Err(format!("npm script `{script}` failed with {status}"));
     }
-    Ok(())
+    Ok(0)
 }
 
 fn npm_run_command(script: &str, directory: &Path) -> Command {
