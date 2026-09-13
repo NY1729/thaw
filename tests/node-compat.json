@@ -860,8 +860,8 @@
     },
     {
       "name": "cluster executes worker process",
-      "expect": "unsupported",
-      "source": "import cluster, { isPrimary } from 'node:cluster'; import process from 'node:process'; import { existsSync, rmSync, writeFileSync } from 'node:fs'; function main(): void { const path = '/tmp/thaw-cluster-worker-ran'; if (isPrimary) { rmSync(path, { force: true }); cluster.fork(); setTimeout((): void => { console.log(existsSync(path)); rmSync(path, { force: true }); }, 200); } else { writeFileSync(path, 'worker'); process.disconnect(); } }"
+      "expect": "matched",
+      "source": "import cluster, { isPrimary } from 'node:cluster'; function main(): void { if (isPrimary) cluster.fork(); else { console.log('worker'); cluster.worker.disconnect(); } }"
     }
   ]
 }

@@ -81,7 +81,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              module.exports = { start: start, REPLServer: REPLServer, Recoverable: Recoverable, REPL_MODE_SLOPPY: REPL_MODE_SLOPPY, REPL_MODE_STRICT: REPL_MODE_STRICT, writer: writer, _builtinLibs: [] }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
         ),
-        "cluster" => Some(
+        "cluster" => Some(concat!(
             r#"var EventEmitter = require('node:events'), processObject = require('node:process'), cluster = new EventEmitter();
              var nextWorkerId = 1, SCHED_NONE = 1, SCHED_RR = 2, schedulingPolicy = SCHED_RR, workers = Object.create(null), settings = {}, isPrimary = processObject.env.NODE_UNIQUE_ID === undefined;
              function Worker(options) { if (!(this instanceof Worker)) return new Worker(options); EventEmitter.call(this); options = options || {}; this.id = options.id === undefined ? nextWorkerId++ : Number(options.id); this.process = options.process || { pid: Number(processObject.pid || 0) + this.id, connected: true, killed: false, kill: function() { this.killed = true; this.connected = false; return true; } }; this.exitedAfterDisconnect = undefined; this.state = 'none'; }
@@ -98,7 +98,10 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              Object.defineProperty(cluster, 'schedulingPolicy', { enumerable: true, get: function() { return schedulingPolicy; }, set: function(value) { value = Number(value); if (value !== SCHED_NONE && value !== SCHED_RR) throw new RangeError('invalid scheduling policy'); schedulingPolicy = value; } });
              module.exports = cluster; module.exports.default = cluster; module.exports.__esModule = true;
 "#,
-        ),
+            r#"var thawSimulatedClusterFork = fork, thawClusterChildProcess = require('node:child_process');
+             fork = function(environment) { if (settings.exec !== undefined || !processObject.execPath) return thawSimulatedClusterFork(environment); if (!isPrimary) { var primaryError = new Error('cluster.fork() may only be called from a primary process'); primaryError.code = 'ERR_CLUSTER_ONLY_PRIMARY'; throw primaryError; } var worker = new Worker(), childEnvironment = Object.assign({}, processObject.env, environment || {}, { NODE_UNIQUE_ID: String(worker.id) }), child = thawClusterChildProcess.spawn(processObject.execPath, processObject.argv.slice(2), { env: childEnvironment, stdio: 'inherit' }); worker.process = child; worker.environment = childEnvironment; worker.state = 'online'; child.connected = true; workers[worker.id] = worker; queueMicrotask(function() { cluster.emit('fork', worker); }); child.on('spawn', function() { worker.emit('online'); cluster.emit('online', worker); }); child.on('exit', function(code, signal) { worker.state = 'dead'; child.connected = false; delete workers[worker.id]; worker.emit('exit', code, signal); cluster.emit('exit', worker, code, signal); }); return worker; }; cluster.fork = fork;
+"#,
+        )),
         _ => None,
     }
 }
