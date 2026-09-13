@@ -725,10 +725,39 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Short soak test: a real, listening Fastify server hit with
+#[cfg(target_os = "linux")]
+fn process_rss_kb(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse().ok())
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+fn assert_soak_rss(name: &str, pid: u32, initial_rss: u64, requests: usize) {
+    let growth = process_rss_kb(pid).saturating_sub(initial_rss);
+    eprintln!("{name} soak: {requests} requests, RSS +{growth} KiB");
+    assert!(
+        growth <= (requests as u64 * 24).max(32 * 1024),
+        "{name} RSS grew by {growth} KiB over {requests} requests"
+    );
+}
+
+fn soak_duration() -> Duration {
+    Duration::from_secs(
+        std::env::var("THAW_SOAK_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3),
+    )
+}
+
+/// Soak test: a real, listening Fastify server hit with
 /// sequential HTTP requests over a fixed wall-clock window, then
 /// cleanly shut down -- checks the compiled binary stays alive and
-/// correct under sustained load, not just for one request.
+/// correct under sustained load, not just for one request. CI raises
+/// `THAW_SOAK_SECONDS` to 30 and checks RSS after a warm-up period.
 #[test]
 fn registry_add_runs_fastify_continuously_for_a_short_window_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -783,7 +812,14 @@ async function main(): Promise<void> {
             }
         })
         .expect("compiled Fastify server did not start");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    for _ in 0..20 {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+        stream.read_to_end(&mut Vec::new()).unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    let initial_rss = process_rss_kb(child.id());
+    let deadline = Instant::now() + soak_duration();
     let mut count = 0usize;
     while Instant::now() < deadline {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -803,7 +839,9 @@ async function main(): Promise<void> {
         assert!(child.try_wait().unwrap().is_none(), "Fastify server died during the soak run");
         count += 1;
     }
-    assert!(count > 5, "expected several requests in the 3s window, only got {count}");
+    assert!(count > 5, "expected several requests in the soak window, only got {count}");
+    #[cfg(target_os = "linux")]
+    assert_soak_rss("Fastify", child.id(), initial_rss, count);
     assert!(Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
@@ -825,7 +863,7 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Short soak test: a real, listening Express server hit with
+/// Soak test: a real, listening Express server hit with
 /// sequential HTTP requests over a fixed wall-clock window, then
 /// cleanly shut down -- same shape as the Fastify soak test above.
 #[test]
@@ -884,7 +922,14 @@ async function main(): Promise<void> {
             }
         })
         .expect("compiled Express server did not start");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    for _ in 0..20 {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+        stream.read_to_end(&mut Vec::new()).unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    let initial_rss = process_rss_kb(child.id());
+    let deadline = Instant::now() + soak_duration();
     let mut count = 0usize;
     while Instant::now() < deadline {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -904,7 +949,9 @@ async function main(): Promise<void> {
         assert!(child.try_wait().unwrap().is_none(), "Express server died during the soak run");
         count += 1;
     }
-    assert!(count > 5, "expected several requests in the 3s window, only got {count}");
+    assert!(count > 5, "expected several requests in the soak window, only got {count}");
+    #[cfg(target_os = "linux")]
+    assert_soak_rss("Express", child.id(), initial_rss, count);
     assert!(Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()

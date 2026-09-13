@@ -73,6 +73,7 @@ jobs:
       - name: Test real web applications and packages
         env:
           THAW_RUN_NPM_INTEGRATION: "1"
+          THAW_SOAK_SECONDS: "30"
         # The whole `THAW_RUN_NPM_INTEGRATION` package-interop suite, run
         # serially (the parallel run has known contention). Every gated
         # test in it is named `registry_add_*_when_enabled`; run them as
