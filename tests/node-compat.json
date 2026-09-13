@@ -777,6 +777,26 @@
       "name": "node test dot reporter terminates output",
       "expect": "matched",
       "source": "import { dot } from 'node:test/reporters'; async function main(): Promise<void> { const reporter = dot([]); const result = await reporter.next(); console.log(result.done, JSON.stringify(result.value)); }"
+    },
+    {
+      "name": "filesystem symbolic link and chmod",
+      "expect": "matched",
+      "source": "import { chmodSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'; function main(): void { const root = '/tmp/thaw-node-fs-link'; const target = root + '/target.txt'; const link = root + '/link.txt'; rmSync(root, { recursive: true, force: true }); mkdirSync(root); writeFileSync(target, 'linked'); chmodSync(target, 0o640); symlinkSync('target.txt', link); console.log(lstatSync(link).isSymbolicLink(), readlinkSync(link), readFileSync(link, 'utf8'), (lstatSync(target).mode & 0o777).toString(8)); rmSync(root, { recursive: true }); }"
+    },
+    {
+      "name": "filesystem watch change event",
+      "expect": "matched",
+      "source": "import { rmSync, watch, writeFileSync } from 'node:fs'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-watch.txt'; rmSync(path, { force: true }); writeFileSync(path, 'before'); await new Promise<void>((resolve, reject) => { const watcher = watch(path, (eventType: string, filename: string): void => { console.log(eventType === 'change', filename === 'thaw-node-fs-watch.txt'); watcher.close(); rmSync(path, { force: true }); resolve(); }); watcher.on('error', reject); setTimeout((): void => writeFileSync(path, 'after'), 10); }); }"
+    },
+    {
+      "name": "filesystem promise file handle",
+      "expect": "matched",
+      "source": "import { open, rm } from 'node:fs/promises'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-handle.txt'; await rm(path, { force: true }); const output = await open(path, 'w'); await output.writeFile('hello'); const stat = await output.stat(); await output.close(); const input = await open(path, 'r'); const value = await input.readFile({ encoding: 'utf8' }); console.log(stat.size, value); await input.close(); await rm(path); }"
+    },
+    {
+      "name": "filesystem read and write streams",
+      "expect": "matched",
+      "source": "import { createReadStream, createWriteStream, rmSync } from 'node:fs'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-stream.txt'; rmSync(path, { force: true }); await new Promise<void>((resolve, reject) => { const output = createWriteStream(path, { highWaterMark: 2 }); output.on('error', reject); output.end('streamed', resolve); }); const chunks: string[] = []; await new Promise<void>((resolve, reject) => { const input = createReadStream(path, { highWaterMark: 3, encoding: 'utf8' }); input.on('data', (chunk: string): void => chunks.push(chunk)); input.on('end', resolve); input.on('error', reject); }); console.log(chunks.join(''), chunks.length); rmSync(path); }"
     }
   ]
 }
