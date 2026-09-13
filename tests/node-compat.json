@@ -822,6 +822,26 @@
       "name": "zlib invalid data error code",
       "expect": "unsupported",
       "source": "import { gunzipSync } from 'node:zlib'; function main(): void { try { gunzipSync('not gzip'); } catch (error) { console.log(error.name, error.code); } }"
+    },
+    {
+      "name": "vm context process isolation",
+      "expect": "unsupported",
+      "source": "import { runInNewContext } from 'node:vm'; function main(): void { console.log(runInNewContext('typeof process')); }"
+    },
+    {
+      "name": "performance event loop delay histogram",
+      "expect": "unsupported",
+      "source": "import { monitorEventLoopDelay } from 'node:perf_hooks'; async function main(): Promise<void> { const histogram = monitorEventLoopDelay({ resolution: 1 }); histogram.enable(); await new Promise<void>((resolve) => setTimeout(resolve, 20)); histogram.disable(); console.log(histogram.count > 0); }"
+    },
+    {
+      "name": "worker evaluated thread",
+      "expect": "unsupported",
+      "source": "import { Worker } from 'node:worker_threads'; async function main(): Promise<void> { const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.postMessage(42);`, { eval: true }); await new Promise<void>((resolve, reject) => { worker.once('message', (value) => { console.log(value); resolve(); }); worker.once('error', reject); }); await worker.terminate(); }"
+    },
+    {
+      "name": "inspector unsupported protocol error code",
+      "expect": "unsupported",
+      "source": "import { Session } from 'node:inspector'; async function main(): Promise<void> { const session = new Session(); session.connect(); await new Promise<void>((resolve) => session.post('Network.enable', {}, (error): void => { console.log(error === null); resolve(); })); session.disconnect(); }"
     }
   ]
 }
