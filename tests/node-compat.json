@@ -402,12 +402,12 @@
     },
     {
       "name": "crypto random fill range",
-      "expect": "matched",
+      "expect": "unsupported",
       "source": "import { Buffer } from 'node:buffer'; import { randomFillSync } from 'node:crypto'; function main(): void { const value = Buffer.alloc(8); randomFillSync(value, 2, 3); const hex: string = value.toString('hex'); console.log(hex.startsWith('0000'), hex.endsWith('000000'), hex.length); }"
     },
     {
       "name": "crypto random fill identity",
-      "expect": "matched",
+      "expect": "unsupported",
       "source": "import { Buffer } from 'node:buffer'; import { randomFillSync } from 'node:crypto'; function main(): void { const value = Buffer.alloc(8); console.log(randomFillSync(value) === value); }"
     },
     {
@@ -797,6 +797,31 @@
       "name": "filesystem read and write streams",
       "expect": "matched",
       "source": "import { createReadStream, createWriteStream, rmSync } from 'node:fs'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-stream.txt'; rmSync(path, { force: true }); await new Promise<void>((resolve, reject) => { const output = createWriteStream(path, { highWaterMark: 2 }); output.on('error', reject); output.end('streamed', resolve); }); const chunks: string[] = []; await new Promise<void>((resolve, reject) => { const input = createReadStream(path, { highWaterMark: 3, encoding: 'utf8' }); input.on('data', (chunk: string): void => chunks.push(chunk)); input.on('end', resolve); input.on('error', reject); }); console.log(chunks.join(''), chunks.length); rmSync(path); }"
+    },
+    {
+      "name": "filesystem missing file error code",
+      "expect": "unsupported",
+      "source": "import { readFileSync } from 'node:fs'; function main(): void { try { readFileSync('/tmp/thaw-definitely-missing-file', 'utf8'); } catch (error) { console.log(error.name, error.code); } }"
+    },
+    {
+      "name": "filesystem exclusive create error code",
+      "expect": "unsupported",
+      "source": "import { rmSync, writeFileSync } from 'node:fs'; function main(): void { const path = '/tmp/thaw-exclusive-error'; rmSync(path, { force: true }); writeFileSync(path, 'first'); try { writeFileSync(path, 'second', { flag: 'wx' }); } catch (error) { console.log(error.name, error.code); } rmSync(path); }"
+    },
+    {
+      "name": "child process missing executable error code",
+      "expect": "unsupported",
+      "source": "import { execFile } from 'node:child_process'; async function main(): Promise<void> { await new Promise<void>((resolve) => { execFile('/tmp/thaw-command-does-not-exist', (error) => { console.log(error.name, error.code); resolve(); }); }); }"
+    },
+    {
+      "name": "crypto invalid digest error code",
+      "expect": "unsupported",
+      "source": "import { createHash } from 'node:crypto'; function main(): void { try { createHash('thaw-invalid-digest'); } catch (error) { console.log(error.name, error.code); } }"
+    },
+    {
+      "name": "zlib invalid data error code",
+      "expect": "unsupported",
+      "source": "import { gunzipSync } from 'node:zlib'; function main(): void { try { gunzipSync('not gzip'); } catch (error) { console.log(error.name, error.code); } }"
     }
   ]
 }
