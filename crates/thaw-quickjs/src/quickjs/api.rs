@@ -1035,9 +1035,9 @@ pub extern "C" fn thaw_js_register_native_callback(
                 let result = unsafe { finish_fn(promise, std::ptr::null()) };
                 if state == 2 {
                     return if result.is_null() {
-                    "error:native Promise rejected".to_string()
-                } else {
-                        let error = unsafe { take_owned_string(result) };
+                        "error:native Promise rejected".to_string()
+                    } else {
+                        let error = to_str(result);
                         let message = error
                             .strip_prefix('\u{1}')
                             .and_then(|tagged| tagged.split_once('\u{1}'))
