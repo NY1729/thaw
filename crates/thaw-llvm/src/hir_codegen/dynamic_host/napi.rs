@@ -339,6 +339,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_extract_value(result, 1, "typed_dynamic_method_handle_error")
                 .map_err(|error| error.to_string())?;
             self.builder
+                .build_call(
+                    self.module.get_function("thaw_cstring_destroy").unwrap(),
+                    &[args_json.into()],
+                    "destroy_typed_dynamic_method_args_string",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[array.into()],
+                    "destroy_typed_dynamic_method_args",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
                 .build_store(self.pending_exception().as_pointer_value(), error)
                 .map_err(|error| error.to_string())?;
             self.branch_on_pending_exception()?;
@@ -384,6 +398,20 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_extract_value(result, 1, "napi_method_error")
             .map_err(|error| error.to_string())?;
         self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[args_json.into()],
+                "destroy_typed_method_args_string",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[array.into()],
+                "destroy_typed_method_args",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
         self.branch_on_pending_exception()?;
@@ -398,6 +426,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_parse returned no method value".to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[value.into()],
+                "destroy_typed_method_result_string",
+            )
+            .map_err(|error| error.to_string())?;
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 

@@ -1023,6 +1023,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_extract_value(result, 1, "typed_dynamic_callable_error")
                 .map_err(|error| error.to_string())?;
             self.builder
+                .build_call(
+                    self.module.get_function("thaw_cstring_destroy").unwrap(),
+                    &[args_json.into()],
+                    "destroy_typed_dynamic_callable_args_string",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[array.into()],
+                    "destroy_typed_dynamic_callable_args",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
                 .build_store(self.pending_exception().as_pointer_value(), error)
                 .map_err(|error| error.to_string())?;
             self.branch_on_pending_exception()?;

@@ -3,10 +3,9 @@
 //! et al. and `thaw-llvm::hir_codegen`).
 //!
 //! A `Json` value at the LLVM level is an opaque pointer to a
-//! `Box<serde_json::Value>`, leaked on creation -- consistent with every
-//! other heap value in Thaw today (strings, arrays, objects): nothing is
-//! freed yet, since the arena-reset lifecycle isn't wired to a request
-//! boundary until Phase 2's Lambda loop actually needs it to be.
+//! `Box<serde_json::Value>`. Values that cross the dynamic runtime bridge
+//! are explicitly destroyed once their ownership ends; longer-lived user
+//! values remain live for the process lifetime like other Thaw heap values.
 //!
 //! There is no exception channel wired to any of this yet (`throw` only
 //! unwinds within a single HIR function -- see `HirStmt::Try`), so every
@@ -209,6 +208,40 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
     leak(serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
+/// # Safety
+///
+/// `value` must be null or a pointer returned by this module's JSON constructors,
+/// and it must not be used or destroyed again after this call.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_destroy(value: *mut Value) {
+    if !value.is_null() {
+        drop(unsafe { Box::from_raw(value) });
+    }
+}
+
+/// # Safety
+///
+/// `value` must be null or an owned pointer returned by `CString::into_raw`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_cstring_destroy(value: *mut c_char) {
+    if !value.is_null() {
+        drop(unsafe { CString::from_raw(value) });
+    }
+}
+
+/// Reads the internal dynamic-value handle marker without allocating a child JSON value.
+///
+/// # Safety
+///
+/// `value` must point to a valid JSON value.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_handle_id(value: *const Value) -> u64 {
+    unsafe { value.as_ref() }
+        .and_then(|value| value.get("__thaw_js_handle_id__"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
@@ -396,6 +429,21 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
             .cloned()
             .unwrap_or_else(napi_undefined_value),
     };
+    leak(result)
+}
+
+/// Takes one field while consuming a temporary JSON object.
+///
+/// # Safety
+///
+/// `value` must be a pointer returned by this module and must not be used again.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_take(value: *mut Value, key: *const c_char) -> *mut Value {
+    let mut value = unsafe { Box::from_raw(value) };
+    let result = value
+        .as_object_mut()
+        .and_then(|fields| fields.remove(&to_str(key)))
+        .unwrap_or_else(napi_undefined_value);
     leak(result)
 }
 
@@ -1183,6 +1231,18 @@ pub extern "C" fn thaw_json_object_set_json(
     );
 }
 
+/// # Safety
+///
+/// `value` must be a pointer returned by this module and must not be used again.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_object_set_json_owned(
+    object: *mut Value,
+    key: *const c_char,
+    value: *mut Value,
+) {
+    object_insert(object, key, *unsafe { Box::from_raw(value) });
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char) -> u8 {
     if let Some(fields) = (unsafe { object.as_mut() }).and_then(Value::as_object_mut) {
@@ -1269,6 +1329,17 @@ mod tests {
         let stable_key = CString::new("stable").unwrap();
         let stable = thaw_json_get(value, stable_key.as_ptr());
         assert_eq!(thaw_json_as_bool(stable), 0);
+    }
+
+    #[test]
+    fn takes_a_field_from_a_consumed_temporary_object() {
+        let value = thaw_json_object_new();
+        let key = CString::new("answer").unwrap();
+        let child = parse("42");
+        unsafe { thaw_json_object_set_json_owned(value, key.as_ptr(), child) };
+        let answer = unsafe { thaw_json_take(value, key.as_ptr()) };
+        assert_eq!(thaw_json_as_number(answer), 42.0);
+        unsafe { thaw_json_destroy(answer) };
     }
 
     #[test]

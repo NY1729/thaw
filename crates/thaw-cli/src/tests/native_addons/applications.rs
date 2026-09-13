@@ -739,7 +739,7 @@ fn assert_soak_rss(name: &str, pid: u32, initial_rss: u64, requests: usize) {
     let growth = process_rss_kb(pid).saturating_sub(initial_rss);
     eprintln!("{name} soak: {requests} requests, RSS +{growth} KiB");
     assert!(
-        growth <= (requests as u64 * 24).max(32 * 1024),
+        growth <= 64 * 1024,
         "{name} RSS grew by {growth} KiB over {requests} requests"
     );
 }

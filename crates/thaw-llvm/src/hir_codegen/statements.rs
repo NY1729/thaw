@@ -63,7 +63,18 @@ impl<'ctx> HirCompiler<'ctx> {
                         return Ok(false);
                     }
                 }
-                self.compile_expr(expr)?;
+                let value = self.compile_expr(expr)?;
+                if matches!(expr, HirExpr::Call(..) | HirExpr::DynamicCall(..))
+                    && self.expr_hir_type(expr) == Some(HirType::JsValue)
+                {
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_js_release_handle").unwrap(),
+                            &[value.into()],
+                            "release_discarded_dynamic_value",
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
                 Ok(false)
             }
 
