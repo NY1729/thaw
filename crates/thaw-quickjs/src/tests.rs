@@ -1595,6 +1595,7 @@ fn intl_date_time_format_matches_real_node_for_every_field_and_style_luxon_uses(
 /// Sydney`: daylight in the northern winter, standard in the northern
 /// summer -- the reverse of `America/New_York`'s own pattern, so this
 /// isn't just "whichever season happened to be sampled").
+#[cfg(feature = "intl")]
 #[test]
 fn intl_time_zone_name_long_and_long_generic_match_real_node() {
     assert_eq!(
@@ -2212,15 +2213,7 @@ fn intl_datetime_format_matches_real_node_for_curated_non_english_locales() {
             "16:30",
             "jeudi 4 juillet 2024",
             "٤ يوليو ٢٠٢٤",
-            // A genuine, narrow CLDR-data-version artifact, not a bug:
-            // the vendored icu4x CLDR (48.2.1) renders U+202F (narrow
-            // no-break space) between the hour and the day period for
-            // `en-US`, where the specific Node build used to
-            // cross-check this session (v22.22.2, bundled ICU 78) still
-            // renders a plain space. Every other case in this test
-            // (including a completely different script/digit set,
-            // `ar-SA`) matches real Node byte-for-byte.
-            "4\u{202f}PM",
+            "4 PM",
             "16",
         ])
         .unwrap()
@@ -2313,6 +2306,59 @@ fn intl_number_format_matches_real_node_for_curated_non_english_locales() {
             "1,234,567.891",
         ])
         .unwrap()
+    );
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_number_currency_and_percent_match_real_node() {
+    assert_eq!(
+        load(
+            "function all() {\n\
+               const f = (locale, options, value) => new Intl.NumberFormat(locale, options).format(value);\n\
+               return [\n\
+                 f('en-US', { style: 'percent' }, 0.56),\n\
+                 f('tr-TR', { style: 'percent' }, 0.56),\n\
+                 f('en-US', { style: 'currency', currency: 'USD' }, 1234.5),\n\
+                 f('de-DE', { style: 'currency', currency: 'EUR' }, 1234.5),\n\
+                 f('fr-FR', { style: 'currency', currency: 'USD', currencyDisplay: 'code' }, 1234.5),\n\
+                 f('ja-JP', { style: 'currency', currency: 'JPY' }, 1234.5),\n\
+                 f('en-US', { style: 'currency', currency: 'USD', currencyDisplay: 'name' }, 1234.5)\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "56%",
+            "%56",
+            "$1,234.50",
+            "1.234,50 €",
+            "1 234,50 USD",
+            "￥1,235",
+            "1,234.50 US dollars",
+        ])
+        .unwrap()
+    );
+}
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_number_units_match_real_node() {
+    assert_eq!(
+        load(
+            "function all() {\n\
+               const f = (locale, unit, unitDisplay, value) => new Intl.NumberFormat(locale, { style: 'unit', unit, unitDisplay }).format(value);\n\
+               return [f('de-DE', 'meter', 'long', 2), f('fr-FR', 'liter', 'long', 1), f('ja-JP', 'kilogram', 'short', 3)];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&["2 Meter", "1 litre", "3 kg"]).unwrap()
     );
 }
 
@@ -2489,5 +2535,55 @@ fn intl_segmenter_matches_real_node() {
     assert_eq!(
         call("enSentence", "[]"),
         r#"[{"segment":"Hi. ","index":0,"isWordLike":null},{"segment":"Bye!","index":4,"isWordLike":null}]"#
+    );
+}
+
+/// `Intl.RelativeTimeFormat` (M11, entirely new capability, backed by
+/// the one deliberately-unstable icu4x dependency in this whole effort)
+/// -- cross-checked against real Node, including `numeric: 'auto'`
+/// producing real special-cased words ("yesterday"/"昨日", not
+/// a numeric phrase) and Japanese's own real phrasing.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_relative_time_format_matches_real_node() {
+    assert_eq!(
+        load(
+            "function fmt(locale, opts, value, unit) {\n\
+               return new Intl.RelativeTimeFormat(locale, opts).format(value, unit);\n\
+             }\n\
+             function all() {\n\
+               return [\n\
+                 fmt('en', {}, -1, 'day'),\n\
+                 fmt('en', {}, 3, 'days'),\n\
+                 fmt('en', { numeric: 'auto' }, -1, 'day'),\n\
+                 fmt('en', { style: 'short' }, -3, 'hour'),\n\
+                 fmt('ja', {}, -1, 'day'),\n\
+                 fmt('ja', { numeric: 'auto' }, -1, 'day'),\n\
+                 fmt('de', {}, 2, 'year'),\n\
+                 fmt('en', {}, 1.5, 'day'),\n\
+                 new Intl.RelativeTimeFormat('en').resolvedOptions().numberingSystem,\n\
+                 (() => { try { fmt('en', {}, Infinity, 'day'); return 'no-throw'; } catch (e) { return e.name; } })(),\n\
+                 (() => { try { new Intl.RelativeTimeFormat('en', { style: 'bad' }); return 'no-throw'; } catch (e) { return e.name; } })(),\n\
+               ];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("all", "[]"),
+        serde_json::to_string(&[
+            "1 day ago",
+            "in 3 days",
+            "yesterday",
+            "3 hr. ago",
+            "1 日前",
+            "昨日",
+            "in 2 Jahren",
+            "in 1.5 days",
+            "latn",
+            "RangeError",
+            "RangeError",
+        ])
+        .unwrap()
     );
 }

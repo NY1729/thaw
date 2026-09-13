@@ -1031,6 +1031,58 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl number formatter");
                 #[cfg(feature = "intl")]
+                let intl_percent_format_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, digits: String| {
+                        intl_percent_format(&locale, &digits).unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl percent formatter");
+                #[cfg(feature = "intl")]
+                let intl_currency_format_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, digits: String, currency: String, display: String| {
+                        intl_currency_format(&locale, &digits, &currency, &display)
+                            .unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl currency formatter");
+                #[cfg(feature = "intl")]
+                let intl_unit_format_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, digits: String, unit: String, width: String| {
+                        intl_unit_format(&locale, &digits, &unit, &width).unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl unit formatter");
+                #[cfg(feature = "intl")]
+                let intl_time_zone_name_function = Function::new(
+                    ctx.clone(),
+                    |locale: String,
+                     time_zone: String,
+                     timestamp_ms: f64,
+                     offset_minutes: i32,
+                     generic: bool| {
+                        intl_time_zone_name(
+                            &locale,
+                            &time_zone,
+                            timestamp_ms,
+                            offset_minutes,
+                            generic,
+                        )
+                        .unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl timezone-name formatter");
+                #[cfg(feature = "intl")]
+                let intl_relative_time_format_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, unit: String, style: String, numeric: String, value: f64| {
+                        intl_relative_time_format(&locale, &unit, &style, &numeric, value)
+                    },
+                )
+                .expect("failed to create JavaScript Intl relative-time formatter");
+                #[cfg(feature = "intl")]
                 let intl_segment_function = Function::new(
                     ctx.clone(),
                     |locale: String, granularity: String, text: String| {
@@ -1183,6 +1235,29 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_number_format", intl_number_format_function)
                     .expect("failed to install JavaScript Intl number formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_percent_format", intl_percent_format_function)
+                    .expect("failed to install JavaScript Intl percent formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_currency_format", intl_currency_format_function)
+                    .expect("failed to install JavaScript Intl currency formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_unit_format", intl_unit_format_function)
+                    .expect("failed to install JavaScript Intl unit formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_time_zone_name", intl_time_zone_name_function)
+                    .expect("failed to install JavaScript Intl timezone-name formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set(
+                        "__thaw_intl_relative_time_format",
+                        intl_relative_time_format_function,
+                    )
+                    .expect("failed to install JavaScript Intl relative-time formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_segment", intl_segment_function)

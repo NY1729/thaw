@@ -41,6 +41,20 @@
     second: { long: ['second', 'seconds'], short: ['sec', 'sec'], narrow: ['s', 's'] },
     millisecond: { long: ['millisecond', 'milliseconds'], short: ['ms', 'ms'], narrow: ['ms', 'ms'] },
   };
+  const INTL_SANCTIONED_UNITS = new Set([
+    'acre', 'bit', 'byte', 'celsius', 'centimeter', 'day', 'degree', 'fahrenheit',
+    'fluid-ounce', 'foot', 'gallon', 'gigabit', 'gigabyte', 'gram', 'hectare', 'hour',
+    'inch', 'kilobit', 'kilobyte', 'kilogram', 'kilometer', 'liter', 'megabit',
+    'megabyte', 'meter', 'microsecond', 'mile', 'mile-scandinavian', 'milliliter',
+    'millimeter', 'millisecond', 'minute', 'month', 'ounce', 'percent', 'petabyte',
+    'pound', 'second', 'stone', 'terabit', 'terabyte', 'week', 'yard', 'year',
+  ]);
+
+  function intlValidUnit(unit) {
+    if (INTL_SANCTIONED_UNITS.has(unit)) return true;
+    const parts = String(unit).split('-per-');
+    return parts.length === 2 && parts.every(part => INTL_SANCTIONED_UNITS.has(part));
+  }
 
   function intlZonedParts(timeZone, epochMs) {
     return JSON.parse(__thaw_intl_zoned_parts(String(timeZone), Number(epochMs)));
@@ -70,11 +84,15 @@
     return `GMT${sign}${hourText}${minuteText}`;
   }
 
-  function intlTimeZoneName(style, zoned) {
+  function intlTimeZoneName(style, zoned, locale) {
     if (style === 'longOffset') {
       return intlOffsetString(zoned.offsetMinutes, true);
     }
     if (style === 'long') {
+      if (typeof __thaw_intl_time_zone_name === 'function') {
+        const name = __thaw_intl_time_zone_name(locale, zoned.timeZone, zoned.timestampMs, zoned.offsetMinutes, false);
+        if (name) return name;
+      }
       // Real per-zone English long name (e.g. "Eastern Daylight
       // Time"/"Eastern Standard Time", DST-aware) -- `intl_zoned_
       // parts_json`'s `longName`, mechanically extracted from a real
@@ -82,12 +100,16 @@
       // synthesized numeric offset for a zone the table has no entry
       // for (shouldn't happen for a real IANA zone, but keeps this
       // honestly degrading rather than throwing either way).
-      return zoned.longName !== null ? zoned.longName : intlOffsetString(zoned.offsetMinutes, true);
+      return zoned.longName != null ? zoned.longName : intlOffsetString(zoned.offsetMinutes, true);
     }
     if (style === 'longGeneric') {
+      if (typeof __thaw_intl_time_zone_name === 'function') {
+        const name = __thaw_intl_time_zone_name(locale, zoned.timeZone, zoned.timestampMs, zoned.offsetMinutes, true);
+        if (name) return name;
+      }
       // Same table, DST-independent form (e.g. "Eastern Time" rather
       // than "Eastern Standard/Daylight Time").
-      return zoned.longGenericName !== null ? zoned.longGenericName : intlOffsetString(zoned.offsetMinutes, true);
+      return zoned.longGenericName != null ? zoned.longGenericName : intlOffsetString(zoned.offsetMinutes, true);
     }
     // 'short' / 'shortOffset' / 'shortGeneric' -- 'shortOffset' always
     // wants a numeric offset; the others prefer `jiff`'s own
@@ -256,7 +278,7 @@
       }
       if (this._timeZoneName) {
         if (parts.length) parts.push({ type: 'literal', value: ' ' });
-        parts.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned) });
+        parts.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned, this.locale) });
       }
       return parts;
     }
@@ -331,7 +353,7 @@
       }
       if (this._timeZoneName) {
         if (trailing.length) trailing.push({ type: 'literal', value: ' ' });
-        trailing.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned) });
+        trailing.push({ type: 'timeZoneName', value: intlTimeZoneName(this._timeZoneName, zoned, this.locale) });
       }
 
       if (leading.length && trailing.length) {
@@ -362,10 +384,22 @@
       this._useRealLocaleData = typeof __thaw_intl_number_format === 'function';
       this.locale = this._useRealLocaleData ? String(locale === undefined ? 'en-US' : locale) : 'en-US';
       this._style = opts.style || 'decimal';
+      if (!['decimal', 'percent', 'currency', 'unit'].includes(this._style)) throw new RangeError(`Invalid style: ${this._style}`);
       this._unit = opts.unit;
       this._unitDisplay = opts.unitDisplay || 'short';
-      if (this._style === 'unit' && !INTL_UNITS[this._unit]) {
+      if (this._style === 'unit' && !intlValidUnit(this._unit)) {
         throw new RangeError(`Invalid unit argument for Intl.NumberFormat() '${this._unit}'`);
+      }
+      if (!['long', 'short', 'narrow'].includes(this._unitDisplay)) {
+        throw new RangeError(`Invalid unitDisplay: ${this._unitDisplay}`);
+      }
+      this._currency = opts.currency === undefined ? undefined : String(opts.currency).toUpperCase();
+      this._currencyDisplay = opts.currencyDisplay || 'symbol';
+      if (this._style === 'currency' && !/^[A-Z]{3}$/.test(this._currency || '')) {
+        throw new TypeError('Currency code is required with currency style');
+      }
+      if (!['symbol', 'narrowSymbol', 'code', 'name'].includes(this._currencyDisplay)) {
+        throw new RangeError(`Invalid currencyDisplay: ${this._currencyDisplay}`);
       }
       this._useGrouping = opts.useGrouping === undefined ? true : Boolean(opts.useGrouping);
       this._minimumIntegerDigits = opts.minimumIntegerDigits || 1;
@@ -384,18 +418,22 @@
       if (this._style === 'unit') {
         result.unit = this._unit;
         result.unitDisplay = this._unitDisplay;
+      } else if (this._style === 'currency') {
+        result.currency = this._currency;
+        result.currencyDisplay = this._currencyDisplay;
       }
       return result;
     }
 
     format(value) {
-      const number = Number(value);
+      const input = Number(value);
+      const number = this._style === 'percent' ? input * 100 : input;
       const negative = number < 0 || Object.is(number, -0);
       let minFrac = this._minimumFractionDigits;
       let maxFrac = this._maximumFractionDigits;
       if (minFrac === undefined && maxFrac === undefined) {
-        minFrac = 0;
-        maxFrac = 3;
+        minFrac = this._style === 'currency' ? (this._currency === 'JPY' ? 0 : 2) : 0;
+        maxFrac = this._style === 'currency' ? minFrac : (this._style === 'percent' ? 0 : 3);
       } else if (minFrac === undefined) {
         minFrac = 0;
       } else if (maxFrac === undefined) {
@@ -411,6 +449,19 @@
       let intPart = wholePart;
       while (intPart.length < this._minimumIntegerDigits) intPart = `0${intPart}`;
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
+      const signedDigits = negative ? `-${digits}` : digits;
+      if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
+        const result = __thaw_intl_percent_format(this.locale, signedDigits);
+        if (result) return result;
+      }
+      if (this._style === 'currency' && typeof __thaw_intl_currency_format === 'function') {
+        const result = __thaw_intl_currency_format(this.locale, signedDigits, this._currency, this._currencyDisplay);
+        if (result) return result;
+      }
+      if (this._style === 'unit' && typeof __thaw_intl_unit_format === 'function') {
+        const result = __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay);
+        if (result) return result;
+      }
       // Sign is handled here, not passed to the native call: it's
       // applied identically across every curated locale (confirmed),
       // so there's no need to push it through a locale-data lookup.
@@ -419,8 +470,12 @@
         : (this._useGrouping ? intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : intPart) +
           (fracPart ? `.${fracPart}` : '');
       const signed = negative ? `-${rendered}` : rendered;
+      if (this._style === 'percent') return `${signed}%`;
+      if (this._style === 'currency') return `${this._currency} ${signed}`;
       if (this._style !== 'unit') return signed;
-      const forms = INTL_UNITS[this._unit][this._unitDisplay] || INTL_UNITS[this._unit].short;
+      const fallback = INTL_UNITS[this._unit];
+      if (!fallback) return `${signed} ${this._unit.replaceAll('-', ' ')}`;
+      const forms = fallback[this._unitDisplay] || fallback.short;
       const unitText = forms[Math.abs(number) === 1 ? 0 : 1];
       // 'narrow' has no space between the number and unit (`"3d"`);
       // 'long'/'short' both do (`"3 days"`/`"3 days"`) -- confirmed
@@ -660,16 +715,56 @@
     }
   }
 
-  // `Intl.Locale`/`Intl.PluralRules`/`Intl.Collator`/`Intl.Segmenter`
-  // are only ever *publicly exposed* when the native primitives
-  // actually exist (see each class's own doc comment above) -- the
-  // class declarations themselves stay unconditional.
+  // `Intl.RelativeTimeFormat` (M11) -- entirely new, backed by the one
+  // deliberately-unstable icu4x dependency in this whole effort
+  // (`icu_experimental`, see `intl_relative_time.rs`'s own doc comment).
+  const INTL_RELATIVE_TIME_UNITS = {
+    year: 'year', years: 'year',
+    quarter: 'quarter', quarters: 'quarter',
+    month: 'month', months: 'month',
+    week: 'week', weeks: 'week',
+    day: 'day', days: 'day',
+    hour: 'hour', hours: 'hour',
+    minute: 'minute', minutes: 'minute',
+    second: 'second', seconds: 'second',
+  };
+
+  class RelativeTimeFormat {
+    constructor(locale, options) {
+      const opts = options || {};
+      this.locale = String(locale === undefined ? 'en-US' : locale);
+      this._style = opts.style === undefined ? 'long' : String(opts.style);
+      this._numeric = opts.numeric === undefined ? 'always' : String(opts.numeric);
+      if (!['long', 'short', 'narrow'].includes(this._style)) throw new RangeError(`Invalid style: ${this._style}`);
+      if (!['always', 'auto'].includes(this._numeric)) throw new RangeError(`Invalid numeric: ${this._numeric}`);
+    }
+
+    format(value, unit) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new RangeError('value must be finite');
+      const resolvedUnit = INTL_RELATIVE_TIME_UNITS[unit];
+      if (!resolvedUnit) {
+        throw new RangeError(`Invalid unit argument for Intl.RelativeTimeFormat.prototype.format() '${unit}'`);
+      }
+      return __thaw_intl_relative_time_format(this.locale, resolvedUnit, this._style, this._numeric, number);
+    }
+
+    resolvedOptions() {
+      return { locale: this.locale, style: this._style, numeric: this._numeric, numberingSystem: 'latn' };
+    }
+  }
+
+  // `Intl.Locale`/`Intl.PluralRules`/`Intl.Collator`/`Intl.Segmenter`/
+  // `Intl.RelativeTimeFormat` are only ever *publicly exposed* when the
+  // native primitives actually exist (see each class's own doc comment
+  // above) -- the class declarations themselves stay unconditional.
   if (typeof __thaw_intl_locale_parse === 'function') {
     globalThis.Intl = globalThis.Intl || {};
     globalThis.Intl.Locale = Locale;
     globalThis.Intl.PluralRules = PluralRules;
     globalThis.Intl.Collator = Collator;
     globalThis.Intl.Segmenter = Segmenter;
+    globalThis.Intl.RelativeTimeFormat = RelativeTimeFormat;
   }
 
   globalThis.Intl = Object.assign({ DateTimeFormat, NumberFormat, ListFormat }, globalThis.Intl);

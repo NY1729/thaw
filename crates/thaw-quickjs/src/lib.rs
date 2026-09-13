@@ -513,8 +513,6 @@ include!("quickjs/processes.rs");
 
 include!("quickjs/intl.rs");
 
-include!("quickjs/intl_time_zone_names.rs");
-
 #[cfg(feature = "intl")]
 include!("quickjs/intl_locale.rs");
 
@@ -523,6 +521,9 @@ include!("quickjs/intl_datetime.rs");
 
 #[cfg(feature = "intl")]
 include!("quickjs/intl_number.rs");
+
+#[cfg(feature = "intl")]
+include!("quickjs/intl_number_style.rs");
 
 #[cfg(feature = "intl")]
 include!("quickjs/intl_list.rs");
@@ -535,6 +536,9 @@ include!("quickjs/intl_collator.rs");
 
 #[cfg(feature = "intl")]
 include!("quickjs/intl_segmenter.rs");
+
+#[cfg(feature = "intl")]
+include!("quickjs/intl_relative_time.rs");
 
 include!("quickjs/asymmetric_crypto.rs");
 
