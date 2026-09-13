@@ -31,7 +31,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              module.exports = { Tracing: Tracing, createTracing: createTracing, getEnabledCategories: getEnabledCategories }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
         ),
-        "inspector" => Some(
+        "inspector" => Some(concat!(
             r#"var EventEmitter = require('node:events'), opened = false, inspectorUrl, isolateId = 'thaw-quickjs-main';
              function remoteObject(value, returnByValue) { var type = value === null ? 'object' : typeof value, result = { type: type }; if (value === null) result.subtype = 'null'; else if (type === 'undefined') result.description = 'undefined'; else if (type === 'number' && !Number.isFinite(value)) { result.unserializableValue = String(value); result.description = String(value); } else if (type === 'bigint') { result.unserializableValue = String(value) + 'n'; result.description = String(value) + 'n'; } else if (type === 'symbol' || type === 'function') result.description = String(value); else if (type === 'object' && !returnByValue) { result.className = value.constructor && value.constructor.name || 'Object'; result.description = result.className; } else result.value = value; return result; }
              function Session() { if (!(this instanceof Session)) return new Session(); EventEmitter.call(this); this._connected = false; }
@@ -46,7 +46,10 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function waitForDebugger() { if (!opened) { var error = new Error('Inspector is not active'); error.code = 'ERR_INSPECTOR_NOT_ACTIVE'; throw error; } }
              module.exports = { Session: Session, open: open, close: close, url: url, waitForDebugger: waitForDebugger, console: globalThis.console }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
-        ),
+            r#"var thawInspectorPost = Session.prototype.post;
+             Session.prototype.post = function(method, params, callback) { if (typeof params === 'function') { callback = params; params = {}; } if (method !== 'Network.enable' && method !== 'Network.disable' && method !== 'Schema.getDomains') return thawInspectorPost.call(this, method, params, callback); var session = this; if (typeof callback !== 'function') callback = function(error) { if (error) throw error; }; queueMicrotask(function() { if (!session._connected) { var error = new Error('Session is not connected'); error.code = 'ERR_INSPECTOR_NOT_CONNECTED'; callback(error); } else if (method === 'Schema.getDomains') callback(null, { domains: ['Runtime','Debugger','Profiler','HeapProfiler','Network','Schema'].map(function(name) { return { name: name, version: '1.3' }; }) }); else callback(null, {}); }); };
+"#,
+        )),
         "inspector/promises" => Some(
             r#"var inspector = require('node:inspector');
              function Session() { inspector.Session.call(this); }

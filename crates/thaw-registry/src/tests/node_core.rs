@@ -600,7 +600,7 @@ fn inspector_sessions_evaluate_through_callback_and_promise_protocols() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[null,"ws://localhost:9333/thaw",null,{"type":"number","value":42},"boom","thaw-quickjs-main",["Runtime","Debugger","Profiler","HeapProfiler","Schema"],"ERR_INSPECTOR_COMMAND","ERR_INSPECTOR_NOT_CONNECTED",{"answer":42},true]"#
+        r#"[null,"ws://localhost:9333/thaw",null,{"type":"number","value":42},"boom","thaw-quickjs-main",["Runtime","Debugger","Profiler","HeapProfiler","Network","Schema"],null,"ERR_INSPECTOR_NOT_CONNECTED",{"answer":42},true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
