@@ -825,8 +825,18 @@
     },
     {
       "name": "vm context process isolation",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { runInNewContext } from 'node:vm'; function main(): void { console.log(runInNewContext('typeof process')); }"
+    },
+    {
+      "name": "vm context standard globals",
+      "expect": "matched",
+      "source": "import { runInNewContext } from 'node:vm'; function main(): void { console.log(runInNewContext(`JSON.stringify([Math.max(1, 3), typeof Promise, typeof console, typeof WebAssembly, typeof setTimeout])`)); }"
+    },
+    {
+      "name": "vm context intrinsic isolation",
+      "expect": "unsupported",
+      "source": "import { runInNewContext } from 'node:vm'; function main(): void { runInNewContext(`Object.prototype.thawVmLeak = 1`); console.log(runInNewContext(`typeof Object.prototype.thawVmLeak`)); }"
     },
     {
       "name": "performance event loop delay histogram",
