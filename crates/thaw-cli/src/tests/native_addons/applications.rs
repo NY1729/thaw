@@ -1180,6 +1180,34 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn registry_add_parses_environment_files_with_real_dotenv_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-dotenv-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "dotenv@16.4.5").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { parse } from "dotenv";
+function main(): void {
+    const values = parse<{ BASIC: string; QUOTED: string; EMPTY: string }>("BASIC=basic\nQUOTED=\"hello world\"\nEMPTY=");
+    console.log(values.BASIC, values.QUOTED, values.EMPTY);
+}"#,
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &["dotenv".into()]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "basic hello world \n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A real commander program: an action callback whose parameter type is
 /// inferred, *and* a fluent builder chain (`program.name("x")
 /// .description("y").version("z")`). commander's builder methods return
