@@ -191,7 +191,10 @@ fn run_host_worker(
             &host_worker_bootstrap(&start.worker_data_json, &start.config_json, start.thread_id),
         )?;
         let _ = events.send(HostWorkerEvent::Online);
-        load_impl(ctx.clone(), &start.source)?;
+        load_impl(
+            ctx.clone(),
+            &format!("(function() {{\n{}\n}}).call(globalThis);", start.source),
+        )?;
         loop {
             while ctx.execute_pending_job() {}
             let run_due: Function = ctx
@@ -921,4 +924,3 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
         .to_string(),
     }
 }
-
