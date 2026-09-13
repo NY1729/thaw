@@ -955,7 +955,15 @@ function main(): void {
             .unwrap_or(0)
     };
     let ok_request = |path: &str| {
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut stream = (0..500)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("server stopped accepting connections");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
