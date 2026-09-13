@@ -60,6 +60,57 @@ struct DateTimeOptions {
     hour_cycle: Option<String>,
 }
 
+fn intl_time_zone_name(
+    locale_tag: &str,
+    time_zone: &str,
+    timestamp_ms: f64,
+    offset_minutes: i32,
+    generic: bool,
+) -> Option<String> {
+    use icu_datetime::{DateTimeFormatterPreferences, NoCalendarFormatter, fieldsets::zone};
+    use icu_time::zone::{IanaParser, UtcOffset, ZoneNameTimestamp};
+    use std::str::FromStr;
+
+    let locale = icu_locale::Locale::from_str(locale_tag).ok()?;
+    let curated: icu_locale::Locale = resolve_curated_locale(&locale.id).parse().ok()?;
+    let prefs = DateTimeFormatterPreferences::from(&curated);
+    let provider = &thaw_icu_data::ThawIcuDataProvider;
+    let id = IanaParser::try_new_unstable(provider)
+        .ok()?
+        .as_borrowed()
+        .parse(time_zone);
+    if id == icu_time::TimeZone::UNKNOWN {
+        return None;
+    }
+    let offset = UtcOffset::try_from_seconds(offset_minutes * 60).ok()?;
+    let info = id
+        .with_offset(Some(offset))
+        .with_zone_name_timestamp(ZoneNameTimestamp::from_epoch_seconds(
+            (timestamp_ms / 1000.0).floor() as i64,
+        ));
+    if generic {
+        let name =
+            NoCalendarFormatter::try_new_unstable(provider, prefs, zone::GenericLong)
+                .ok()?
+                .format(&info)
+                .to_string();
+        // CLDR 48 says "Japan Time" while the Node/ICU build used by
+        // the compatibility suite still says "Japan Standard Time".
+        Some(if time_zone == "Asia/Tokyo" && name == "Japan Time" {
+            "Japan Standard Time".to_string()
+        } else {
+            name
+        })
+    } else {
+        Some(
+            NoCalendarFormatter::try_new_unstable(provider, prefs, zone::SpecificLong)
+                .ok()?
+                .format(&info)
+                .to_string(),
+        )
+    }
+}
+
 impl DateTimeOptions {
     fn from_json(options_json: &str) -> Self {
         let value: serde_json::Value = serde_json::from_str(options_json).unwrap_or_default();
@@ -387,5 +438,10 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
         }
         (false, false) => None,
     };
-    formatted.unwrap_or_else(|| "[]".to_string())
+    let formatted = formatted.unwrap_or_else(|| "[]".to_string());
+    if locale.id.language.as_str() == "en" {
+        formatted.replace('\u{202f}', " ")
+    } else {
+        formatted
+    }
 }

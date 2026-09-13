@@ -48,14 +48,8 @@ fn intl_zoned_parts_json(tz_name: &str, timestamp_ms: f64) -> String {
     let weekday = zoned.weekday().to_monday_one_offset();
     let abbreviation = info.abbreviation().replace('"', "");
     let dst = info.dst().is_dst();
-    let json_name = |name: Option<&str>| {
-        name.map(|name| serde_json::to_string(name).unwrap_or_else(|_| "null".to_string()))
-            .unwrap_or_else(|| "null".to_string())
-    };
-    let long_name = json_name(intl_time_zone_long_name(tz_name, dst, false));
-    let generic_name = json_name(intl_time_zone_long_name(tz_name, dst, true));
     format!(
-        r#"{{"valid":true,"year":{},"month":{},"day":{},"hour":{},"minute":{},"second":{},"millisecond":{},"weekday":{},"offsetMinutes":{},"abbreviation":"{}","dst":{},"longName":{},"longGenericName":{}}}"#,
+        r#"{{"valid":true,"year":{},"month":{},"day":{},"hour":{},"minute":{},"second":{},"millisecond":{},"weekday":{},"offsetMinutes":{},"abbreviation":"{}","dst":{},"timeZone":{},"timestampMs":{}}}"#,
         zoned.year(),
         zoned.month(),
         zoned.day(),
@@ -67,7 +61,7 @@ fn intl_zoned_parts_json(tz_name: &str, timestamp_ms: f64) -> String {
         offset_minutes,
         abbreviation,
         dst,
-        long_name,
-        generic_name,
+        serde_json::to_string(tz_name).unwrap_or_else(|_| "\"UTC\"".to_string()),
+        millis,
     )
 }
