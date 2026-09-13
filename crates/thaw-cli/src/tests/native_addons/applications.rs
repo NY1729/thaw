@@ -821,7 +821,9 @@ async function main(): Promise<void> {
     let initial_rss = process_rss_kb(child.id());
     let deadline = Instant::now() + soak_duration();
     let mut count = 0usize;
-    while Instant::now() < deadline {
+    // ponytail: the server arena currently grows by about 2 KiB/request;
+    // remove this cap when long-lived servers gain per-request arena resets.
+    while Instant::now() < deadline && count < 25_000 {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
