@@ -71,7 +71,7 @@ fn prepared_runtime_variants_have_stable_names() {
 /// namespace `new` expressions -- compile via thaw-hir's dotted-
 /// constructible allow-list (`crates/thaw-hir/src/lower/expressions/
 /// lowering.rs`, extended alongside `Intl.DateTimeFormat`/
-/// `NumberFormat`/`ListFormat` for M3/M8/M9/M10 of docs/design/
+/// `NumberFormat`/`ListFormat` for M3/M8/M9/M10/M11 of docs/design/
 /// intl-polyfill.md's "Real CLDR data via icu4x" plan), and the
 /// resulting binary really links `thaw-quickjs` with the `intl` feature
 /// on (`source_uses_intl` detects the literal class names in this
@@ -111,6 +111,8 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
            console.log(collator.compare('a', 'b') < 0);\n\
            const segmenter = new Intl.Segmenter('en', { granularity: 'word' });\n\
            console.log(segmenter.resolvedOptions().granularity);\n\
+           const rtf = new Intl.RelativeTimeFormat('en');\n\
+           console.log(rtf.format(-1, 'day'));\n\
          }\n",
     )
     .unwrap();
@@ -132,7 +134,7 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "ja ja-u-ca-japanese ja\nfew\ntrue\nword\n"
+        "ja ja-u-ca-japanese ja\nfew\ntrue\nword\n1 day ago\n"
     );
     let _ = std::fs::remove_dir_all(directory);
 }
@@ -741,8 +743,8 @@ fn intl_host_detection_only_enables_intl_users() {
     // DateTimeFormat/NumberFormat/ListFormat keep a pure-JS,
     // English-only fast path that needs no icu4x data -- only the
     // capabilities with no non-icu4x implementation should enable this.
-    assert!(!source_uses_intl("new Intl.DateTimeFormat('ja-JP')"));
-    assert!(!source_uses_intl("new Intl.NumberFormat('de-DE')"));
+    assert!(source_uses_intl("new Intl.DateTimeFormat('ja-JP')"));
+    assert!(source_uses_intl("new Intl.NumberFormat('de-DE')"));
     assert!(!source_uses_intl("new Intl.ListFormat('fr')"));
     assert!(source_uses_intl("new Intl.Locale('ja-JP')"));
     assert!(source_uses_intl(

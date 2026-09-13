@@ -139,6 +139,7 @@ pub struct ThawIcuDataProvider;
 include!("data/mod.rs");
 
 impl_data_provider!(ThawIcuDataProvider);
+include!("m12_data.rs");
 
 #[cfg(test)]
 mod tests {

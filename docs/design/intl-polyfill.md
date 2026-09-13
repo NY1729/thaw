@@ -258,7 +258,48 @@ luxon's own results depend on it).
   gated), using fixed historical dates (never `DateTime.now()`, for
   determinism), including `Settings.defaultLocale = "en-US"` (bug 4).
 
-## Real CLDR data via icu4x (in progress)
+## Real CLDR data via icu4x
+
+The `intl` feature now provides curated-locale CLDR rendering through
+icu4x for `DateTimeFormat` (including non-Gregorian calendars and IANA
+zone names), `NumberFormat` (decimal, percent, currency, and localized
+area/duration/length/mass/volume units), `ListFormat`, `Locale`, `PluralRules`,
+`Collator`, `Segmenter`, and `RelativeTimeFormat`. The original
+English-only implementation described above remains only as the small
+no-`intl` fallback; it is not the active path for CLI builds containing
+`Intl.DateTimeFormat` or `Intl.NumberFormat`.
+
+`RelativeTimeFormat`, currency, percent, and unit support use the
+tightly pinned `icu_experimental = 0.6.0`; the other formatters use
+stable icu4x 2.3 components. The former hand-extracted 418-entry English
+timezone table has been removed. `jiff` still owns timezone offset/DST
+calculation, while icu4x owns localized long and generic names.
+
+The baked locale set is:
+
+```text
+en-US en-GB es es-419 fr de it pt pt-BR nl sv pl ru uk tr ar ar-SA he
+hi bn ja ko zh-Hans zh-Hant th vi id ms fil el ro cs hu da fi nb
+```
+
+To add a locale, rerun the `icu4x-datagen` recipe documented in
+`crates/thaw-icu-data/src/lib.rs` with the additional tag and replace
+the generated `.rs.data` files. No formatter code change is needed for
+an API already represented by the generated marker set.
+
+### M14 verification (2026-09-13)
+
+- `cargo test --workspace`, the 95-test QuickJS `intl` suite, and
+  `cargo clippy --workspace --all-targets -- -D warnings` pass.
+- The gated real `luxon@3.7.2` install/build/run integration passes.
+- Three Linux x64 release measurements gave 2-3 ms startup and a
+  416,784-byte generated executable. RSS was 2,532-2,808 KiB, above the
+  existing 2,456 KiB gate; CI must confirm whether that small increase
+  is stable. The generated executable is 3,840 bytes smaller than the
+  recorded baseline, so the CLDR payload is not leaking into programs
+  that do not use `Intl`.
+- Linux arm64 runtime measurement remains a CI-only check because the
+  current host is x64.
 
 Follow-up effort, planned at
 `~/.claude/plans/toasty-percolating-harbor.md` (14 milestones, M0-M14),

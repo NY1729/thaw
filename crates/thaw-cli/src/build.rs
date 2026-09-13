@@ -1014,6 +1014,8 @@ fn source_uses_intl(source: &str) -> bool {
         "Intl.Collator",
         "Intl.Segmenter",
         "Intl.RelativeTimeFormat",
+        "Intl.NumberFormat",
+        "Intl.DateTimeFormat",
     ]
     .iter()
     .any(|marker| source.contains(marker))

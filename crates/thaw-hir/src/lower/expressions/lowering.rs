@@ -1838,6 +1838,7 @@ impl<'a> FnLowerer<'a> {
                                 | "Intl.PluralRules"
                                 | "Intl.Collator"
                                 | "Intl.Segmenter"
+                                | "Intl.RelativeTimeFormat"
                         ) {
                             let args = new_expr.args.as_deref().unwrap_or_default();
                             if args.iter().any(|argument| argument.spread.is_some()) {
