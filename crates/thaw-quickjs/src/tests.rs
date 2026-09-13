@@ -1872,6 +1872,19 @@ fn reuses_a_handle_for_the_same_javascript_object() {
 }
 
 #[test]
+fn reuses_a_released_handle_slot() {
+    assert_eq!(
+        load("globalThis.firstSlot = {}; globalThis.secondSlot = {};"),
+        1
+    );
+    let first = CString::new("firstSlot").unwrap();
+    let second = CString::new("secondSlot").unwrap();
+    let released = thaw_js_get_global(first.as_ptr());
+    assert_eq!(thaw_js_release_handle(released), 1);
+    assert_eq!(thaw_js_get_global(second.as_ptr()), released);
+}
+
+#[test]
 fn assimilates_foreign_thenables_once_and_reports_then_errors() {
     assert_eq!(
             load(

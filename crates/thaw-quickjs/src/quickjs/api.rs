@@ -677,6 +677,7 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
         .map_err(|_| "JavaScript value handle reference registry is empty".to_string())?;
     // ponytail: linear identity lookup keeps the registry simple; replace it
     // with a WeakMap only if live handle counts become measurably large.
+    let mut free = None;
     for index in 0..handles.len() {
         if live.get::<bool>(index).unwrap_or(false) {
             let existing: Value = handles.get(index).map_err(|error| error.to_string())?;
@@ -689,9 +690,11 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
                     .map_err(|error| error.to_string())?;
                 return Ok(index as u64 + 1);
             }
+        } else if free.is_none() {
+            free = Some(index);
         }
     }
-    let index = handles.len();
+    let index = free.unwrap_or_else(|| handles.len());
     handles
         .set(index, value)
         .map_err(|error| error.to_string())?;
@@ -927,6 +930,16 @@ fn retain_dynamic_value_for_js<'js>(ctx: Ctx<'js>, value: Value<'js>) -> u64 {
     retain_value(&ctx, value).unwrap_or(0)
 }
 
+unsafe fn take_owned_string(value: *const c_char) -> String {
+    if value.is_null() {
+        String::new()
+    } else {
+        unsafe { CString::from_raw(value.cast_mut()) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_js_register_native_callback(
     adapter: *const c_void,
@@ -990,7 +1003,7 @@ pub extern "C" fn thaw_js_register_native_callback(
             let adapter_fn: NativeCallbackAdapter = unsafe { std::mem::transmute(adapter) };
             let result = unsafe { adapter_fn(closure as *const c_void, args_json.as_ptr()) };
             if finish == 0 {
-                to_str(result)
+                unsafe { take_owned_string(result) }
             } else {
                 native_promise_mark_handled(result.cast::<c_void>().cast_mut());
                 format!("promise:{:x}", result as usize)
@@ -1022,9 +1035,9 @@ pub extern "C" fn thaw_js_register_native_callback(
                 let result = unsafe { finish_fn(promise, std::ptr::null()) };
                 if state == 2 {
                     return if result.is_null() {
-                        "error:native Promise rejected".to_string()
-                    } else {
-                        let error = to_str(result);
+                    "error:native Promise rejected".to_string()
+                } else {
+                        let error = unsafe { take_owned_string(result) };
                         let message = error
                             .strip_prefix('\u{1}')
                             .and_then(|tagged| tagged.split_once('\u{1}'))
@@ -1035,7 +1048,7 @@ pub extern "C" fn thaw_js_register_native_callback(
                 if result.is_null() {
                     return String::new();
                 }
-                to_str(result)
+                unsafe { take_owned_string(result) }
             })
             .map_err(|error| error.to_string())?;
             ctx.globals()
