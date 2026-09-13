@@ -53,7 +53,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let value = builder
                 .build_load(ty, variable_cell, "captured_stack_value")
                 .map_err(|error| error.to_string())?;
-            if capture.ty == HirType::JsValue {
+            if self.uses_quickjs_handles && capture.ty == HirType::JsValue {
                 builder
                     .build_call(
                         self.module.get_function("thaw_js_retain_handle").unwrap(),
