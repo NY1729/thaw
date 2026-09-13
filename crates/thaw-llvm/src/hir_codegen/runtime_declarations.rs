@@ -917,6 +917,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_error_name",
             "thaw_error_message",
             "thaw_error_cause",
+            "thaw_error_code",
             "thaw_error_to_string",
         ] {
             self.module.add_function(

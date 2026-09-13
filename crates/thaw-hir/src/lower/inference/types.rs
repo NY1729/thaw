@@ -830,6 +830,7 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_error_message"
                     | "__thaw_error_name"
                     | "__thaw_error_cause"
+                    | "__thaw_error_code"
                     | "__thaw_error_to_string" => {
                         let [argument] = args.as_slice() else {
                             return Err(format!("{name} expects one operand"));
