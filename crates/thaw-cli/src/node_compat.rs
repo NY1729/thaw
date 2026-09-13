@@ -60,9 +60,10 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
             EXECUTION_TIMEOUT,
         )
             .map_err(|error| format!("failed to run Node.js: {error}"))?;
-        if !node.status.success()
-            && expected != "failed"
-            && node.status.code().map(i64::from) != expected_exit_code
+        if expected != "failed"
+            && ((!node.status.success()
+                && node.status.code().map(i64::from) != expected_exit_code)
+                || String::from_utf8_lossy(&node.stderr).contains("SyntaxError:"))
         {
             reference_errors += 1;
             results.push(serde_json::json!({
@@ -116,7 +117,7 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
                 Some(format!(
                     "output differs: node={}, thaw={}",
                     String::from_utf8_lossy(&node.stdout).trim(),
-                    String::from_utf8_lossy(&thaw.stdout).trim()
+                    String::from_utf8_lossy(&thaw.stdout).trim(),
                 )),
             ),
             Ok(thaw) => (
