@@ -103,6 +103,31 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_extract_value(result, 1, "js_callback_error")
             .map_err(|error| error.to_string())?;
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "js_callback_value")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[arguments_json.into()],
+                "destroy_js_callback_arguments_string",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[arguments.into()],
+                "destroy_js_callback_arguments",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[value.into()],
+                "destroy_js_callback_result_string",
+            )
+            .map_err(|error| error.to_string())?;
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
@@ -464,6 +489,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .unwrap();
         let null_key = ptr_type.const_null();
         let mut callback_args = vec![context.into()];
+        let mut argument_json = Vec::with_capacity(params.len());
         for (index, param) in params.iter().enumerate() {
             let argument = if rest_start == Some(index) {
                 self.builder.build_call(
@@ -489,6 +515,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
+            argument_json.push(argument);
             callback_args.push(self.compile_json_value_to_native(argument, param)?.into());
         }
         let code = self
@@ -501,6 +528,28 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
             .map_err(|error| error.to_string())?;
+        if defer_promise && !matches!(ret, HirType::Promise(_)) {
+            for (index, param) in params.iter().enumerate() {
+                if *param == HirType::JsValue {
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_js_release_handle").unwrap(),
+                            &[callback_args[index + 1]],
+                            "release_native_callback_argument",
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            for value in argument_json.into_iter().chain(std::iter::once(args_json)) {
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[value.into()],
+                        "destroy_native_callback_json",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let pending_slot = self.pending_exception().as_pointer_value();
         let pending = self
             .builder
