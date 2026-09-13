@@ -1587,7 +1587,11 @@ fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> String {
     let exc = ctx.catch();
     if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
-            let body = format!("`{label}` threw: {message}");
+            let mut body = format!("`{label}` threw: {message}");
+            if let Ok(code) = obj.get::<_, String>("code") {
+                body.push('\u{3}');
+                body.push_str(&code);
+            }
             if let Ok(name) = obj.get::<_, String>("name") {
                 if name != "Error" {
                     return format!("\u{1}{name}\u{1}{body}");

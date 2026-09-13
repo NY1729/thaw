@@ -632,7 +632,7 @@ fn package_qualifier_identifiers<'a>(
 }
 
 fn is_native_builtin(package: &str) -> bool {
-    matches!(package, "node:fs" | "node:http")
+    package == "node:http"
 }
 
 fn observed_member_call_arities(

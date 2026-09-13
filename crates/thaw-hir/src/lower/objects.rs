@@ -1165,6 +1165,10 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_error_cause".to_string())),
                         vec![obj],
                     )),
+                    HirType::Str if prop.sym == *"code" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_code".to_string())),
+                        vec![obj],
+                    )),
                     HirType::Map(_, _) | HirType::Set(_) if prop.sym == *"size" => {
                         Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_map_size".to_string())),

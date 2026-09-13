@@ -162,7 +162,7 @@
   globalThis.SlowBuffer = size => Buffer.alloc(Number(size));
   const normalizeHashAlgorithm = algorithm => {
     const name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
-    if (name !== 'sha1' && name !== 'sha256' && name !== 'sha384' && name !== 'sha512') throw new TypeError(`Unsupported digest: ${algorithm}`);
+    if (name !== 'sha1' && name !== 'sha256' && name !== 'sha384' && name !== 'sha512') throw new Error(`Unsupported digest: ${algorithm}`);
     return name;
   };
   // `createSign`/`createVerify`'s own `algorithm` argument is a *digest*
