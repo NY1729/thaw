@@ -800,12 +800,12 @@
     },
     {
       "name": "filesystem missing file error code",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { readFileSync } from 'node:fs'; function main(): void { try { readFileSync('/tmp/thaw-definitely-missing-file', 'utf8'); } catch (error) { console.log(error.name, error.code); } }"
     },
     {
       "name": "filesystem exclusive create error code",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { rmSync, writeFileSync } from 'node:fs'; function main(): void { const path = '/tmp/thaw-exclusive-error'; rmSync(path, { force: true }); writeFileSync(path, 'first'); try { writeFileSync(path, 'second', { flag: 'wx' }); } catch (error) { console.log(error.name, error.code); } rmSync(path); }"
     },
     {
@@ -815,12 +815,12 @@
     },
     {
       "name": "crypto invalid digest error code",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { createHash } from 'node:crypto'; function main(): void { try { createHash('thaw-invalid-digest'); } catch (error) { console.log(error.name, error.code); } }"
     },
     {
       "name": "zlib invalid data error code",
-      "expect": "unsupported",
+      "expect": "matched",
       "source": "import { gunzipSync } from 'node:zlib'; function main(): void { try { gunzipSync('not gzip'); } catch (error) { console.log(error.name, error.code); } }"
     },
     {

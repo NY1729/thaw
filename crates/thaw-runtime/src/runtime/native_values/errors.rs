@@ -22,6 +22,7 @@
 /// truncate the C string it's embedded in.
 const ERROR_TAG_MARKER: char = '\u{1}';
 const ERROR_CAUSE_MARKER: char = '\u{2}';
+const ERROR_CODE_MARKER: char = '\u{3}';
 
 fn split_error_tag(message: &str) -> (&str, &str) {
     let Some(rest) = message.strip_prefix(ERROR_TAG_MARKER) else {
@@ -30,11 +31,18 @@ fn split_error_tag(message: &str) -> (&str, &str) {
     let (name, body) = rest
         .split_once(ERROR_TAG_MARKER)
         .unwrap_or(("Error", message));
-    (name, body.split_once(ERROR_CAUSE_MARKER).map_or(body, |value| value.0))
+    let body = body.split_once(ERROR_CAUSE_MARKER).map_or(body, |value| value.0);
+    (name, body.split_once(ERROR_CODE_MARKER).map_or(body, |value| value.0))
 }
 
 fn split_error_cause(message: &str) -> Option<&str> {
-    message.split_once(ERROR_CAUSE_MARKER).map(|value| value.1)
+    message
+        .split_once(ERROR_CAUSE_MARKER)
+        .map(|value| value.1.split_once(ERROR_CODE_MARKER).map_or(value.1, |code| code.0))
+}
+
+fn split_error_code(message: &str) -> Option<&str> {
+    message.split_once(ERROR_CODE_MARKER).map(|value| value.1)
 }
 
 /// # Safety
@@ -77,6 +85,18 @@ pub unsafe extern "C" fn thaw_error_cause(message: *const c_char) -> *const c_ch
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     arena_c_string(split_error_cause(&text).unwrap_or_default())
+        .map_or(std::ptr::null(), |value| value.cast())
+}
+
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_code(message: *const c_char) -> *const c_char {
+    if message.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    arena_c_string(split_error_code(&text).unwrap_or("undefined"))
         .map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -148,6 +168,15 @@ mod error_native_tests {
             .into_owned()
     }
 
+    fn call_code(message: &str) -> String {
+        let message = CString::new(message).unwrap();
+        let result = unsafe { thaw_error_code(message.as_ptr()) };
+        assert!(!result.is_null());
+        unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn call_to_string(message: &str) -> String {
         let message = CString::new(message).unwrap();
         let result = unsafe { thaw_error_to_string(message.as_ptr()) };
@@ -181,6 +210,12 @@ mod error_native_tests {
         assert!(!call_is_instance(tagged, "RangeError"));
         assert_eq!(call_to_string(tagged), "TypeError: not a function");
         assert_eq!(call_to_string("plain"), "plain");
+    }
+
+    #[test]
+    fn a_tagged_host_error_preserves_its_code() {
+        assert_eq!(call_code("\u{1}Error\u{1}missing\u{3}ENOENT"), "ENOENT");
+        assert_eq!(call_code("\u{1}Error\u{1}plain"), "undefined");
     }
 
     #[test]
