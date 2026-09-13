@@ -1856,6 +1856,7 @@ fn reuses_a_handle_for_the_same_javascript_object() {
     let value = CString::new("sharedIdentity").unwrap();
     let function = CString::new("returnSharedIdentity").unwrap();
     let original = thaw_js_get_global(value.as_ptr());
+    assert_eq!(thaw_js_retain_handle(original), 1);
     let callable = thaw_js_get_global(function.as_ptr());
     let arguments = CString::new("[]").unwrap();
     let returned = thaw_js_call_handle_handle_result(callable, arguments.as_ptr(), true);
@@ -1867,6 +1868,7 @@ fn reuses_a_handle_for_the_same_javascript_object() {
         unsafe { CStr::from_ptr(text) }.to_str().unwrap(),
         "[object Object]"
     );
+    assert_eq!(thaw_js_release_handle(returned.value), 1);
     assert_eq!(thaw_js_release_handle(returned.value), 1);
     assert_eq!(thaw_js_release_handle(returned.value), 0);
 }
