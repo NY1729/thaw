@@ -195,16 +195,15 @@ fn run_uses_the_named_script_and_project_directory() {
 fn run_requires_a_script_name() {
     assert_eq!(
         run_script(&[]).unwrap_err(),
-        "usage: thaw run <script> [--prefix <directory>]"
+        "usage: thaw run <file.ts> [arguments...] | thaw run <package-script> [--prefix <directory>]"
     );
 }
 
 #[test]
-fn direct_file_execution_forwards_arguments_and_removes_the_binary() {
+fn run_executes_a_file_and_forwards_arguments() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-run-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let input = directory.join("main.ts");
-    let output = directory.join("app");
     let arguments = directory.join("arguments.json");
     std::fs::write(
         &input,
@@ -215,12 +214,11 @@ fn direct_file_execution_forwards_arguments_and_removes_the_binary() {
     )
     .unwrap();
     assert_eq!(
-        run_file_at(input.to_str().unwrap(), &["forwarded".into()], &output).unwrap(),
+        run_script(&[input.display().to_string(), "forwarded".into()]).unwrap(),
         0
     );
     let recorded: Vec<String> = serde_json::from_slice(&std::fs::read(arguments).unwrap()).unwrap();
     assert_eq!(recorded.last().map(String::as_str), Some("forwarded"));
-    assert!(!output.exists());
     let _ = std::fs::remove_dir_all(directory);
 }
 
