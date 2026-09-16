@@ -1043,6 +1043,31 @@ fn resolve_ts_type_with_substitution(
                     in_progress,
                 );
             }
+            // TypeScript's built-in legacy-decorator aliases (`lib.es5.d.ts`)
+            // have no ambient `.d.ts` of their own in thaw, so a package
+            // like class-validator/TypeORM declaring
+            // `IsEmail(...): PropertyDecorator` would otherwise resolve to
+            // `Dynamic`, which blocks calling the factory's returned
+            // decorator as a real function (`make(x)(y)`, see
+            // `lower/invocations/calls.rs`). Give each alias a concrete
+            // shape matching the arguments thaw's own decorator-invocation
+            // lowering (`lower/module/globals.rs`) actually passes: a class
+            // name string for `ClassDecorator`, a class name + property-key
+            // string pair for `PropertyDecorator`/`MethodDecorator` (thaw
+            // does not synthesize a real `descriptor`, so `MethodDecorator`'s
+            // third parameter is omitted here too). `ParameterDecorator` is
+            // left unresolved: thaw does not call parameter decorators yet.
+            if matches!(
+                ref_name,
+                "ClassDecorator" | "PropertyDecorator" | "MethodDecorator"
+            ) {
+                let params = if ref_name == "ClassDecorator" {
+                    vec![HirType::Str]
+                } else {
+                    vec![HirType::Str, HirType::Str]
+                };
+                return Ok(HirType::Function(params, Box::new(HirType::Void)));
+            }
             if matches!(
                 ref_name,
                 "Generator" | "IterableIterator" | "AsyncGenerator" | "AsyncIterableIterator"

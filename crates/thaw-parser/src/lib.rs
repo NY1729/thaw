@@ -37,7 +37,7 @@ pub fn parse_typescript_with_source_map(source: &str) -> Result<(Module, Lrc<Sou
 
     let syntax = Syntax::Typescript(TsSyntax {
         tsx: false,
-        decorators: false,
+        decorators: true,
         ..Default::default()
     });
 
