@@ -995,6 +995,9 @@ fn ensure_context() {
                         .expect("failed to create JavaScript TLS listener closer");
                 let os_info_function = Function::new(ctx.clone(), os_info_json)
                     .expect("failed to create JavaScript OS information source");
+                let os_network_interfaces_function =
+                    Function::new(ctx.clone(), network_interfaces_json)
+                        .expect("failed to create JavaScript OS network interface source");
                 // Backs `Intl.DateTimeFormat` (`platform_globals/intl.js`) --
                 // the one native primitive needed to compute a real,
                 // DST-aware IANA timezone offset/breakdown for a given
@@ -1447,6 +1450,12 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_os_info", os_info_function)
                     .expect("failed to install JavaScript OS information source");
+                ctx.globals()
+                    .set(
+                        "__thaw_os_network_interfaces",
+                        os_network_interfaces_function,
+                    )
+                    .expect("failed to install JavaScript OS network interface source");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
