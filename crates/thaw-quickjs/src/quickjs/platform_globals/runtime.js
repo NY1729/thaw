@@ -104,8 +104,22 @@
   globalThis.Console = class Console {
     constructor(stdout, stderr) {
       const options = stdout && stdout.stdout ? stdout : { stdout, stderr };
-      this._stdout = options.stdout;
-      this._stderr = options.stderr || options.stdout;
+      // Node exposes `console._stdout`/`_stderr` as the real
+      // `process.stdout`/`process.stderr` *streams* (objects with a
+      // `.write(text)` method), not the raw writer this realm starts
+      // with. Code that reaches past the `console` API and writes
+      // directly to them -- real trigger: winston's own Console transport
+      // (`console._stdout.write(...)`) -- got `undefined` for `.write`
+      // and threw "not a function". Wrapped in a minimal stream object
+      // here, while `_write` below keeps accepting either shape (a raw
+      // writer function, or an object with `.write`).
+      const asStream = sink => {
+        if (sink && typeof sink.write === 'function') return sink;
+        const writer = typeof sink === 'function' ? sink : () => {};
+        return { write: writer };
+      };
+      this._stdout = asStream(options.stdout);
+      this._stderr = asStream(options.stderr || options.stdout);
       this._counts = new Map();
       this._timers = new Map();
       this._indent = '';

@@ -551,10 +551,27 @@ fn generate_registry_shims(
             for class in &pkg.classes {
                 let helpers = generate_napi_class_constructors(class, false, &mut shim);
                 if !helpers.is_empty() {
-                    class_targets.insert(
-                        (pkg.name.clone(), class.name.clone()),
-                        helpers[0].1.clone(),
-                    );
+                    // A class reached through a *namespace member alias*
+                    // (real trigger: winston's
+                    // `new winston.transports.Console(options)`, where
+                    // `transports.Console` resolves to the class's own
+                    // type name) never goes through
+                    // `rewrite_external_class_constructors`'s per-arity
+                    // source rewrite -- `package_exports` maps the resolved
+                    // name to one single constructor symbol, so a class
+                    // with more than one constructor arity (an optional
+                    // trailing parameter gives 0..=N) used to always
+                    // resolve to arity 0 and reject any real argument.
+                    // Binds an arity-dispatching wrapper instead, leaving
+                    // the direct-rewrite path's per-arity helpers as they
+                    // are.
+                    let target = generate_class_constructor_dispatcher(
+                        &class.name,
+                        &helpers,
+                        &mut shim,
+                    )
+                    .unwrap_or_else(|| helpers[0].1.clone());
+                    class_targets.insert((pkg.name.clone(), class.name.clone()), target);
                     class_rewrites.push((
                         qualifier_by_package[&pkg.name].clone(),
                         class.name.clone(),

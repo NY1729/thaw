@@ -351,6 +351,22 @@ fn console_formats_groups_counts_and_writes_to_streams() {
 }
 
 #[test]
+fn console_exposes_node_style_stdout_and_stderr_streams() {
+    assert_eq!(
+        load(
+            "function consoleStreams() {\n\
+               return [typeof console._stdout, typeof console._stdout.write, typeof console._stderr.write];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("consoleStreams", "[]"),
+        r#"["object","function","function"]"#
+    );
+}
+
+#[test]
 fn base64_globals_round_trip_latin1_and_validate_input() {
     assert_eq!(
             load(
@@ -360,7 +376,7 @@ fn base64_globals_round_trip_latin1_and_validate_input() {
                    let invalidUnicode = false;\n\
                    try { btoa('雪'); } catch (error) { invalidUnicode = error instanceof DOMException && error.name === 'InvalidCharacterError'; }\n\
                    return [btoa('hello\\u00ff'), atob('aGVs bG//\\n'), invalid, invalidUnicode];\n\
-                 }"
+                  }"
             ),
             1
         );

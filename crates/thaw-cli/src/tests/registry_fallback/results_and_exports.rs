@@ -1985,3 +1985,117 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A class reached only through a *namespace member alias* to a
+/// construct-signature-only interface (real example: winston's own
+/// `declare namespace transports { export { ConsoleTransportInstance as
+/// Console } }`, where `ConsoleTransportInstance` carries the
+/// `new (options?)` signature) must be constructible, with its *own*
+/// argument arity. Before this, `new pkg.Widget("x")` resolved through
+/// `package_exports` to a single fixed constructor symbol (arity 0), so
+/// passing any real argument failed with "function `...$arity0` expects 0
+/// argument(s), got 1".
+#[test]
+fn a_namespace_aliased_construct_signature_class_accepts_constructor_arguments() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-namespace-aliased-constructor-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("widget-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface WidgetInstance {\n\
+             label(): string;\n\
+             new (name?: string): WidgetInstance;\n\
+         }\n\
+         export declare namespace widget {\n\
+             export { WidgetInstance as Widget };\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "class WidgetImpl {\n\
+             constructor(name) { this.name = name || 'w'; }\n\
+             label() { return 'W:' + this.name; }\n\
+         }\n\
+         module.exports.widget = { Widget: WidgetImpl };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { widget } from "widget-kit";
+function main(): void {
+    const w = new widget.Widget("x");
+    console.log(w.label());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "W:x\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A three-level nested-namespace member chain (`pkg.mid.member`) whose
+/// *middle* segment is itself a resolvable package member (real example:
+/// winston's `winston.format.json`/`winston.transports.Console`, where
+/// `winston` is the default-imported whole export table and both `format`
+/// and `transports` are exported namespace aliases) must resolve as a
+/// whole. Resolving the inner `pkg.mid` first left `.member` dangling on a
+/// symbol that no longer named the namespace.
+#[test]
+fn a_three_level_nested_namespace_member_chain_resolves_as_a_whole() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-three-level-namespace-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("chain-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function mid(): string;\n\
+         export declare namespace mid {\n\
+             export { leaf as member };\n\
+         }\n\
+         export declare function leaf(): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.mid = function() { return 'mid-fn'; };\n\
+         module.exports.leaf = function() { return 'leaf'; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import pkg from "chain-kit";
+function main(): void {
+    console.log(pkg.mid.member());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "leaf\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
