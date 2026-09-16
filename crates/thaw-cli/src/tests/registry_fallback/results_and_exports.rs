@@ -505,11 +505,19 @@ function main(): void {
 /// CallableFunction(...)") the moment a program merely constructed the
 /// class, even without ever passing `verbose` itself -- thaw eagerly
 /// generates a typed shim for every declared constructor overload's
-/// full options shape. Only the build-time encoding is asserted here
-/// (the object is constructed with a real rest-parameter callback in
-/// the field, but the field is never invoked); actually *calling* a
-/// rest-parameter callback embedded this way crashes today, a separate,
-/// deeper bug this doesn't yet cover.
+/// full options shape. Fixing the build-time encoding alone wasn't
+/// enough: *calling* a rest-parameter callback embedded this way with
+/// more real arguments than the flattened ABI's fixed `param_count`
+/// (better-sqlite3's own `verbose` is always called with a leading
+/// `message` plus a variable number of extra args) silently dropped
+/// every argument past that cutoff and misdecoded the one landing in
+/// the rest slot as a bare scalar instead of the array the native
+/// decoder expects -- fixed by `compile_register_native_callback_from_
+/// closure_with_rest`/`thaw_js_register_native_callback`'s new
+/// `has_rest` flag, which collects every trailing real argument into
+/// one array instead of truncating. This test actually invokes the
+/// callback with 0, 1, and 3 real arguments to exercise that fix
+/// directly, not just the build-time encoding.
 #[test]
 fn fallback_object_field_with_rest_callback_builds_and_runs() {
     let dir = std::env::temp_dir().join(format!(
@@ -522,13 +530,16 @@ fn fallback_object_field_with_rest_callback_builds_and_runs() {
     std::fs::write(
         package.join("package.d.ts"),
         "export interface Options { verbose?: (...rest: string[]) => void; }\n\
-         export declare class Logger { constructor(options?: Options); label(): string; }\n",
+         export declare class Logger { constructor(options?: Options); label(): string; call0(): void; call1(): void; call3(): void; }\n",
     )
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
         "function Logger(options) { this.verbose = options && options.verbose; } \
          Logger.prototype.label = function() { return typeof this.verbose; }; \
+         Logger.prototype.call0 = function() { if (this.verbose) this.verbose(); }; \
+         Logger.prototype.call1 = function() { if (this.verbose) this.verbose('x'); }; \
+         Logger.prototype.call3 = function() { if (this.verbose) this.verbose('a', 'b', 'c'); }; \
          module.exports = { Logger: Logger };\n",
     )
     .unwrap();
@@ -537,8 +548,11 @@ fn fallback_object_field_with_rest_callback_builds_and_runs() {
         &entry,
         r#"import { Logger } from "logger-kit";
 function main(): void {
-    const logger = new Logger({ verbose: (...rest: string[]) => console.log(rest.length) });
+    const logger = new Logger({ verbose: (...rest: string[]) => console.log(rest.length, rest.join(",")) });
     console.log(logger.label());
+    logger.call0();
+    logger.call1();
+    logger.call3();
 }"#,
     )
     .unwrap();
@@ -559,7 +573,10 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "function\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "function\n0 \n1 x\n3 a,b,c\n"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
