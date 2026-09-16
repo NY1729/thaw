@@ -388,6 +388,62 @@ fn reads_and_writes_json_with_runtime_string_keys() {
     );
 }
 
+/// `draft.count += 1`-style compound assignment on a `Json`/`any`-typed
+/// value used to fail to build ("arithmetic requires F64 operands, got
+/// Json and F64") -- an extremely common real-world pattern (any
+/// mutation of an `any`/`Json`-typed field or variable, the exact shape
+/// `immer`'s standard `draft.count += 1` uses). The compound-assignment
+/// lowering only coerced its *right*-hand operand to a number, and only
+/// when the *left* side (the property being read back) was already
+/// known to be `F64` -- so it silently worked for `n += jsonValue` but
+/// not the far more common `jsonValue += n`, where the left side is the
+/// one that actually needs converting. Fixed by coercing both operands
+/// unconditionally, matching how ordinary (non-compound) arithmetic
+/// already does it (`coerce_primitive_to_number` is a no-op for an
+/// already-`F64` value, so this isn't a behavior change for the
+/// already-working case). Covers every compound arithmetic operator, a
+/// `Json`-typed plain variable (not just an object property), and
+/// confirms ordinary `F64` compound assignment (a ordinary `let`
+/// variable, an array index, a class field) stays unaffected.
+#[test]
+fn compound_assignment_coerces_a_json_or_any_typed_left_hand_side() {
+    let source = r#"
+        class Box {
+            count: number = 0;
+        }
+        function main(): void {
+            const obj: any = { count: 10 };
+            obj.count += 1;
+            obj.count -= 3;
+            obj.count *= 2;
+            obj.count /= 4;
+            console.log(obj.count);
+
+            let x: any = 5;
+            x += 1;
+            console.log(x);
+
+            let y: number = 5;
+            y += 1;
+            y -= 2;
+            y *= 3;
+            console.log(y);
+
+            const arr: number[] = [1, 2, 3];
+            arr[0] += 10;
+            console.log(arr[0]);
+
+            const b = new Box();
+            b.count += 5;
+            console.log(b.count);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_compound_assignment"),
+        "4\n6\n12\n11\n5\n"
+    );
+}
+
 /// A genuinely missing `Json` key/index used to be indistinguishable
 /// from an explicit `null` -- `thaw_json_get`/`thaw_json_index` fell
 /// back to plain `Value::Null` either way. Fixed in `thaw-std` (a new
