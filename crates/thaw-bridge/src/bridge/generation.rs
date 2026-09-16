@@ -588,7 +588,22 @@ fn wrap_as_commonjs_module(
     format!(
         "globalThis.module = {{ exports: {{}} }};\n\
          globalThis.exports = globalThis.module.exports;\n\
-         globalThis.require = function(name) {{ var error = new Error(\"Cannot find module '\" + name + \"'\"); error.code = 'MODULE_NOT_FOUND'; throw error; }};\n\
+         // A package's own JS glue can load its native addon by\n\
+         // computing a filesystem path at runtime and handing it\n\
+         // straight to `require(...)`, rather than a literal\n\
+         // `require('./addon.node')` a bundler's static require map\n\
+         // could ever see ahead of time -- real trigger: better-\n\
+         // sqlite3's own `lib/binding.js`, whose `getBinding()` builds\n\
+         // `path.join(__dirname, '..', 'prebuilds', '<platform>-\n\
+         // <arch>.node')` (or a `build/Release/...` fallback) and\n\
+         // `require()`s that computed string directly. Every `require`\n\
+         // in scope for bundled/wrapped source (this stub, and each\n\
+         // per-module `require` `render_bundle` hands a factory\n\
+         // function, which falls back to this same stub for any spec\n\
+         // its own static map doesn't recognize) ultimately reaches\n\
+         // this one base case, so checking here covers every call site\n\
+         // at once rather than duplicating the check at each fallback.\n\
+         globalThis.require = function(name) {{ if (String(name).endsWith('.node') && typeof globalThis.require.addon === 'function') return globalThis.require.addon(); var error = new Error(\"Cannot find module '\" + name + \"'\"); error.code = 'MODULE_NOT_FOUND'; throw error; }};\n\
          // Real packages commonly *guard* Node-only globals before using\n\
          // them (`Buffer && Buffer.isBuffer(x)`, `Buffer?.from(x)`) for\n\
          // exactly this situation -- a non-Node environment. But an\n\
