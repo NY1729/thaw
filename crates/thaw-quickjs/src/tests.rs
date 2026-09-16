@@ -2610,3 +2610,40 @@ fn intl_relative_time_format_matches_real_node() {
         .unwrap()
     );
 }
+
+/// `node:dns`'s `lookup`/`resolve`/`resolve4`/`resolve6` used to only
+/// recognize an IP literal or `"localhost"`, returning `ENOTFOUND` for
+/// every real hostname -- unlike `net.connect`/`http.request`, which
+/// already resolve real hostnames correctly via `TcpStream::connect`'s
+/// own independent OS-level resolution. `dns_lookup_json` closes that
+/// gap via `std::net::ToSocketAddrs` (stdlib, the same OS resolver).
+/// Resolving `"localhost"` here exercises the real mechanism (the OS
+/// resolver, not a hardcoded shortcut -- that shortcut lives one layer
+/// up, in the JS `addresses()` helper, and deliberately isn't hit by
+/// calling this Rust function directly) while staying fully hermetic:
+/// no external network access is needed to resolve the loopback name.
+#[test]
+fn dns_lookup_json_resolves_localhost_via_the_real_os_resolver() {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&dns_lookup_json("localhost".into())).unwrap();
+    assert_eq!(parsed["ok"], true);
+    let addresses = parsed["addresses"].as_array().unwrap();
+    assert!(
+        addresses
+            .iter()
+            .any(|entry| entry["address"] == "127.0.0.1" && entry["family"] == 4),
+        "{addresses:?}"
+    );
+    assert!(
+        addresses
+            .iter()
+            .any(|entry| entry["address"] == "::1" && entry["family"] == 6),
+        "{addresses:?}"
+    );
+
+    // An empty hostname fails resolution locally (`getaddrinfo` rejects
+    // the format outright, no DNS query dispatched) -- keeps this test
+    // hermetic, unlike a real unresolvable hostname would be.
+    let failure: serde_json::Value = serde_json::from_str(&dns_lookup_json(String::new())).unwrap();
+    assert_eq!(failure["ok"], false);
+}
