@@ -1536,3 +1536,72 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n-5\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A named import whose requested name doesn't exist as an ordinary
+/// function/class/const in a package's flattened `.d.ts` at all, only as
+/// a synthetic `declare namespace NAME { export { ... }; }` re-export
+/// (`thaw_bridge::nested_namespace_members`'s own shape, emitted by
+/// thaw-registry for a real package's `export import transports =
+/// Transports;` inside an `export =`'d namespace -- see
+/// `thaw-registry`'s own `installed_package_resolves_a_namespace_hoisted_
+/// export_import_alias` test for that flattening step in isolation) --
+/// used to fail outright at the *import* statement itself ("`logger-kit`
+/// has no export named `transports`"), since `dependency_exports` (built
+/// from ordinary function/class/const declarations) never had an entry
+/// for it and `external_nested_namespaces` was only ever consulted for a
+/// two-level chain already reached through some *other* bound namespace
+/// import, never for the plain named-import case itself. Fixed in
+/// `module_graph.rs`'s named-import resolution: a name absent from
+/// `dependency_exports` but present in `external_nested_namespaces` now
+/// binds as a namespace over just that alias's own member table.
+#[test]
+fn a_named_import_of_a_synthetic_nested_namespace_reexport_builds_successfully() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-nested-namespace-import-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("logger-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function format(pattern: string): string;\n\
+         export declare class ConsoleTransportInstance {\n    label(): string;\n}\n\
+         declare namespace transports {\n    export { ConsoleTransportInstance as Console };\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function format(p) { return p.toUpperCase(); } \
+         module.exports = { format: format };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { format, transports } from "logger-kit";
+function main(): void {
+    console.log(format("hi"));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["logger-kit".into()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "HI\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

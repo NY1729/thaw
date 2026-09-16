@@ -358,14 +358,12 @@ fn installed_package_follows_a_bare_reexport_to_another_packages_own_types_entry
 /// declarations at all: no error, just every real function/class
 /// reported as "undeclared" the moment anything tried to use one.
 /// Fixed by hoisting the namespace's own body out to look like ordinary
-/// top-level declarations. Known, deliberately out-of-scope remaining
-/// gap found while verifying this against real winston: a namespace
-/// member that's itself a *hoisted alias from another package*
-/// (winston's own `export import format = logform.format;`, `export
-/// import transports = Transports;`) doesn't resolve -- the existing
-/// cross-package `export import NAME = BASE.MEMBER` resolution only
-/// ever scans a module's outer top-level items, not into a hoisted
-/// namespace's own body, a separate, deeper follow-up.
+/// top-level declarations. A namespace member that's itself a *hoisted
+/// alias from another package* (winston's own `export import format =
+/// logform.format;`, `export import transports = Transports;`) is a
+/// separate, deeper follow-up fixed later -- see
+/// `installed_package_resolves_a_namespace_hoisted_export_import_alias`
+/// below.
 #[test]
 fn installed_package_hoists_an_export_equals_namespaces_own_members() {
     let scratch = temp_registry("installed-dts-export-equals-namespace-scratch");
@@ -418,6 +416,115 @@ fn installed_package_hoists_an_export_equals_namespaces_own_members() {
     assert_eq!(
         declarations.matches("let level: string").count(),
         2,
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+/// The deeper follow-up `installed_package_hoists_an_export_equals_
+/// namespaces_own_members` deferred: a namespace member that's itself
+/// `export import NAME = BASE[.MEMBER];`, where `BASE` was imported at
+/// the *entry file's own* top level (`import * as BASE from "..."`) --
+/// real-world example: winston's own `export import format =
+/// logform.format;` (qualified, `BASE.MEMBER`) and `export import
+/// transports = Transports;` (bare, aliasing a whole namespace-imported
+/// module). Before this fix, `named_import_targets` (which resolves
+/// `BASE`) never recorded a `ImportSpecifier::Namespace` entry at all,
+/// and the hoisting step only ever copied such a member's raw source
+/// text -- meaningless to every one of this crate's `.d.ts` extractors,
+/// which never resolve a qualified reference into another *package's*
+/// file. Fixed in two parts: `named_import_targets` now records a
+/// namespace import too, and `hoisted_export_equals_namespace_members`
+/// resolves a namespace member shaped this way into real declaration
+/// text instead of a raw copy -- a genuine function for the qualified
+/// form, or a synthetic `declare namespace NAME { export { ... }; }`
+/// re-export (the same shape `thaw_bridge::nested_namespace_members`
+/// already parses back out for zod's `z.coerce.number(...)`) for the
+/// bare whole-namespace-alias form.
+#[test]
+fn installed_package_resolves_a_namespace_hoisted_export_import_alias() {
+    let scratch = temp_registry("installed-dts-namespace-export-import-alias-scratch");
+    let registry = temp_registry("installed-dts-namespace-export-import-alias-registry");
+    let node_modules = scratch.join("node_modules");
+
+    let format_package = node_modules.join("log-format");
+    fs::create_dir_all(&format_package).unwrap();
+    fs::write(
+        format_package.join("package.json"),
+        r#"{"name":"log-format","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        format_package.join("index.d.ts"),
+        "export declare function format(pattern: string): string;\n",
+    )
+    .unwrap();
+    fs::write(
+        format_package.join("index.js"),
+        "module.exports = { format: function (p) { return p; } };\n",
+    )
+    .unwrap();
+
+    let package = node_modules.join("logger-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"logger-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("transports.d.ts"),
+        "import * as Transport from './transport';\n\
+         declare namespace transportsNs {\n\
+             interface ConsoleTransportInstance extends Transport.Base {\n\
+                 name: string;\n\
+                 new (): ConsoleTransportInstance;\n\
+             }\n\
+             interface Transports {\n\
+                 Console: ConsoleTransportInstance;\n\
+             }\n\
+         }\n\
+         declare const transportsNs: transportsNs.Transports;\n\
+         export = transportsNs;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("transport.d.ts"),
+        "export declare class Base {\n    format?: string;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import * as logFormat from 'log-format';\n\
+         import * as Transports from './transports';\n\
+         declare namespace loggerKit {\n\
+             export import format = logFormat.format;\n\
+             export import transports = Transports;\n\
+             function createLogger(options?: object): object;\n\
+         }\n\
+         export = loggerKit;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { createLogger: function () { return {}; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &node_modules, "logger-kit").unwrap();
+    let declarations = resolve(&registry, "logger-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("export declare function format(pattern: string): string"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("interface ConsoleTransportInstance"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("declare namespace transports {")
+            && declarations.contains("ConsoleTransportInstance as Console"),
         "{declarations}"
     );
     let _ = fs::remove_dir_all(scratch);

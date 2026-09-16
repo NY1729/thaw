@@ -171,8 +171,14 @@ fn export_as_namespace_name(source: &str) -> Result<Option<String>, String> {
 /// and appends them so every other extractor sees them as if they'd
 /// been ordinary top-level declarations all along, rather than
 /// modifying any of those extractors themselves.
-fn hoisted_export_equals_namespace_members(entry_source: &str) -> Result<String, String> {
-    use thaw_parser::ast::{Decl, Expr, ModuleDecl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
+fn hoisted_export_equals_namespace_members(
+    entry_path: &Path,
+    entry_source: &str,
+    visited_namespace_wraps: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<String, String> {
+    use thaw_parser::ast::{
+        Decl, Expr, ModuleDecl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody,
+    };
     use thaw_parser::common::{SourceMapper, Spanned};
 
     let (module, source_map) = thaw_parser::parse_typescript_with_source_map(entry_source)?;
@@ -203,8 +209,35 @@ fn hoisted_export_equals_namespace_members(entry_source: &str) -> Result<String,
     }) else {
         return Ok(String::new());
     };
+    // A namespace member can itself be `export import NAME = BASE[.MEMBER];`
+    // -- winston's real `.d.ts` is exactly this shape (`import * as logform
+    // from 'logform'; declare namespace winston { export import format =
+    // logform.format; export import transports = Transports; ... }`).
+    // `named_import_targets` resolves `BASE` (here `logform`/`Transports`,
+    // themselves ordinary top-level namespace imports of the entry file)
+    // back to the file each was imported from -- the same lookup the
+    // top-level `TsImportEquals` handling below already uses for a
+    // qualified name at the *entry file's own* top level, reused here for
+    // one nested inside the hoisted namespace instead, since a raw
+    // source-text copy of `export import format = logform.format;` (this
+    // function's fallback for every other member shape) means nothing to
+    // any of this crate's `.d.ts` extractors: none of them resolve a
+    // qualified reference into another *package's* file.
+    let named_import_targets = named_import_targets(entry_path, &module);
     let mut output = String::new();
     for item in namespace_body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::TsImportEquals(import)) = item {
+            if import.is_export {
+                if let Some(snippet) = resolve_namespace_hoisted_import_equals(
+                    import,
+                    &named_import_targets,
+                    visited_namespace_wraps,
+                )? {
+                    output.push_str(&snippet);
+                    continue;
+                }
+            }
+        }
         output.push('\n');
         output.push_str(&source_map.span_to_snippet(item.span()).map_err(|error| {
             format!("failed to read a namespace member: {error:?}")
@@ -213,9 +246,213 @@ fn hoisted_export_equals_namespace_members(entry_source: &str) -> Result<String,
     Ok(output)
 }
 
+/// Resolves one namespace member shaped `export import NAME = BASE;` or
+/// `export import NAME = BASE.MEMBER;` into real, already-understood
+/// declaration text, or `None` to fall back to a raw source-text copy
+/// (the caller's default for every other member shape, and for this shape
+/// too when `BASE` can't be resolved at all -- e.g. it refers to something
+/// declared in the same file rather than an import, a case not observed in
+/// any real package yet).
+fn resolve_namespace_hoisted_import_equals(
+    import: &thaw_parser::ast::TsImportEqualsDecl,
+    named_import_targets: &std::collections::HashMap<String, (PathBuf, String)>,
+    visited_namespace_wraps: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<Option<String>, String> {
+    use thaw_parser::ast::{TsEntityName, TsModuleRef};
+
+    let exported = import.id.sym.to_string();
+    let (base, member) = match &import.module_ref {
+        TsModuleRef::TsEntityName(TsEntityName::TsQualifiedName(qualified)) => {
+            let TsEntityName::Ident(base) = &qualified.left else {
+                return Ok(None);
+            };
+            (base.sym.to_string(), Some(qualified.right.sym.to_string()))
+        }
+        TsModuleRef::TsEntityName(TsEntityName::Ident(base)) => (base.sym.to_string(), None),
+        _ => return Ok(None),
+    };
+    let Some((target_path, target_member)) = named_import_targets.get(&base) else {
+        return Ok(None);
+    };
+    let member = member.or_else(|| (!target_member.is_empty()).then(|| target_member.clone()));
+    match member {
+        Some(member) => {
+            let mut visited = std::collections::BTreeSet::new();
+            let mut declarations =
+                reexported_function_declarations(target_path, &member, &mut visited)?;
+            if declarations.is_empty() {
+                declarations = reexported_class_or_interface_declarations(target_path, &member)?;
+            }
+            if declarations.is_empty() {
+                return Ok(None);
+            }
+            let mut snippet = String::new();
+            for mut declaration in declarations {
+                if exported != member {
+                    declaration = rename_declared_function(declaration, &exported);
+                }
+                snippet.push('\n');
+                snippet.push_str(&declaration);
+            }
+            Ok(Some(snippet))
+        }
+        None => {
+            // A bare `export import NAME = BASE;` where `BASE` is itself a
+            // whole namespace import (`import * as BASE from "pkg"`) --
+            // real example: winston's `export import transports =
+            // Transports;` (`import * as Transports from
+            // './lib/winston/transports/index'`), later used as
+            // `transports.Console`. Wraps the target file's own fully
+            // flattened declarations in `declare namespace NAME { ... }` so
+            // a later dotted access resolves the same way any other
+            // `declare namespace` block already does.
+            if !visited_namespace_wraps.insert(target_path.clone()) {
+                return Ok(None);
+            }
+            let target_source = fs::read_to_string(target_path).map_err(|error| {
+                format!(
+                    "failed to read a namespace-aliased module `{}`: {error}",
+                    target_path.display()
+                )
+            })?;
+            let flattened = dts_source_with_reexported_functions_inner(
+                target_path,
+                &target_source,
+                visited_namespace_wraps,
+            )?;
+            let mut snippet = String::new();
+            snippet.push('\n');
+            snippet.push_str(&flattened);
+            // The target file's *own* `export = X;` value can itself be a
+            // plain object-shaped const (`declare const winston: winston.
+            // Transports; export = winston;`, `interface Transports {
+            // Console: ConsoleTransportInstance; ... }`) rather than a
+            // bare namespace whose members are already reachable as plain
+            // top-level names -- real example: winston's own transports
+            // sub-module (`export import transports = Transports;`),
+            // used as `transports.Console`. `interface Transports` is
+            // already a real top-level name in `flattened` by now (hoisted
+            // the same way as every other namespace member above), so
+            // this only needs a synthetic re-export namespace mapping each
+            // property to its already-flattened type name -- the same
+            // shape `thaw_bridge::nested_namespace_members` already parses
+            // back out for zod's `z.coerce.number(...)`.
+            let members = exported_const_object_type_member_names(&flattened);
+            if !members.is_empty() {
+                let re_exports = members
+                    .iter()
+                    .map(|(property, value_type)| format!("{value_type} as {property}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                snippet.push_str(&format!(
+                    "\ndeclare namespace {exported} {{\n    export {{ {re_exports} }};\n}}\n"
+                ));
+            }
+            Ok(Some(snippet))
+        }
+    }
+}
+
+/// The `(property, declared type name)` pairs of the object type a
+/// package's `export = X;` value (`declare const X: TYPE;`, `TYPE` either
+/// a bare interface name or one qualified into a namespace, `NS.TYPE`) is
+/// declared with. See the call site above for the real-world shape this
+/// exists for.
+fn exported_const_object_type_member_names(flattened_source: &str) -> Vec<(String, String)> {
+    use thaw_parser::ast::{
+        Decl, Expr, ModuleDecl, ModuleItem, Pat, Stmt, TsEntityName, TsType, TsTypeElement,
+    };
+
+    let Ok(module) = thaw_parser::parse_typescript(flattened_source) else {
+        return Vec::new();
+    };
+    let Some(exported) = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+            match export.expr.as_ref() {
+                Expr::Ident(ident) => Some(ident.sym.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let Some(type_name) = module.body.iter().find_map(|item| {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl))) = item else {
+            return None;
+        };
+        var_decl.decls.iter().find_map(|declarator| {
+            let Pat::Ident(binding) = &declarator.name else {
+                return None;
+            };
+            if binding.id.sym.as_str() != exported {
+                return None;
+            }
+            let annotation = binding.type_ann.as_ref()?;
+            let TsType::TsTypeRef(ty_ref) = annotation.type_ann.as_ref() else {
+                return None;
+            };
+            match &ty_ref.type_name {
+                TsEntityName::Ident(ident) => Some(ident.sym.to_string()),
+                TsEntityName::TsQualifiedName(qualified) => Some(qualified.right.sym.to_string()),
+            }
+        })
+    }) else {
+        return Vec::new();
+    };
+    module
+        .body
+        .iter()
+        .find_map(|item| {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(interface))) = item else {
+                return None;
+            };
+            if interface.id.sym.as_ref() != type_name {
+                return None;
+            }
+            Some(
+                interface
+                    .body
+                    .body
+                    .iter()
+                    .filter_map(|member| {
+                        let TsTypeElement::TsPropertySignature(property) = member else {
+                            return None;
+                        };
+                        let Expr::Ident(key) = property.key.as_ref() else {
+                            return None;
+                        };
+                        let annotation = property.type_ann.as_ref()?;
+                        let TsType::TsTypeRef(ty_ref) = annotation.type_ann.as_ref() else {
+                            return None;
+                        };
+                        let TsEntityName::Ident(value_type) = &ty_ref.type_name else {
+                            return None;
+                        };
+                        Some((key.sym.to_string(), value_type.sym.to_string()))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or_default()
+}
+
 fn dts_source_with_reexported_functions(
     entry_path: &Path,
     entry_source: &str,
+) -> Result<String, String> {
+    let mut visited_namespace_wraps = std::collections::BTreeSet::new();
+    dts_source_with_reexported_functions_inner(
+        entry_path,
+        entry_source,
+        &mut visited_namespace_wraps,
+    )
+}
+
+fn dts_source_with_reexported_functions_inner(
+    entry_path: &Path,
+    entry_source: &str,
+    visited_namespace_wraps: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<String, String> {
     use thaw_parser::ast::{
         Decl, ExportSpecifier, Expr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem, Stmt,
@@ -223,7 +460,11 @@ fn dts_source_with_reexported_functions(
 
     let module = thaw_parser::parse_typescript(entry_source)?;
     let mut output = entry_source.to_string();
-    output.push_str(&hoisted_export_equals_namespace_members(entry_source)?);
+    output.push_str(&hoisted_export_equals_namespace_members(
+        entry_path,
+        entry_source,
+        visited_namespace_wraps,
+    )?);
     let mut visited_references = std::collections::BTreeSet::new();
     output.push_str(&inline_triple_slash_references(
         entry_path,
@@ -1757,7 +1998,26 @@ fn named_import_targets(
                         (target_path.clone(), "default".to_string()),
                     );
                 }
-                _ => {}
+                // `import * as NAME from "path"` -- a namespace import,
+                // real example: winston's own `.d.ts`, `import * as
+                // logform from 'logform'; declare namespace winston {
+                // export import format = logform.format; ... }`. Every
+                // *caller* of `named_import_targets` reaches this entry
+                // only through a qualified access (`logform.format`,
+                // `TsImportEquals`'s own `TsQualifiedName` handling
+                // below), never a bare reference to `NAME` itself, so
+                // the second field (which real member within `path` a
+                // bare reference to `NAME` alone would mean) is never
+                // actually read for this shape -- unlike the `Named`/
+                // `Default` cases above, which record it because a bare
+                // reference *is* how those get consumed.
+                ImportSpecifier::Namespace(namespace) => {
+                    targets.insert(
+                        namespace.local.sym.to_string(),
+                        (target_path.clone(), String::new()),
+                    );
+                }
+                ImportSpecifier::Named(_) => {}
             }
         }
     }
