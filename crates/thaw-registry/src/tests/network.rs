@@ -975,6 +975,79 @@ fn http_incoming_message_unpipe_does_not_throw_and_emits_unpipe() {
     let _ = fs::remove_dir_all(empty_node_modules);
 }
 
+/// Real Node's own `ServerResponse.write()`/`end()` call `this.writeHead
+/// (...)` internally if headers haven't been sent yet
+/// (`_implicitHeader()`); thaw's own `_head()` built the response head
+/// directly and never called `this.writeHead(...)` at all. This broke
+/// any middleware using the extremely common `on-headers` package to
+/// hook "right before headers are sent" -- real trigger: morgan's own
+/// `response-time` token, which monkey-patches `res.writeHead` to
+/// timestamp `res._startAt`; since `res.writeHead` was never invoked
+/// internally, the hook never fired and `response-time` always printed
+/// `-` instead of a real number (confirmed via reading `on-headers`' and
+/// morgan's own real source, and independently confirming
+/// `process.hrtime()` itself works fine in isolation). Fixed by having
+/// `_head()` call `this.writeHead(this.statusCode)` once, gated on
+/// `!this.headersSent` (mirroring Node's own `_implicitHeader` timing);
+/// a monkey-patched `writeHead` (this test's own stand-in for
+/// `on-headers`) now fires exactly once even across a real end-to-end
+/// request, and an *explicit* `res.writeHead(...)` call from user code
+/// still wins (its own status/headers aren't clobbered by a second,
+/// implicit call) -- covered already by every other test in this file
+/// that calls `response.setHeader`/sets `statusCode` before `.end()`,
+/// still green with this fix in place.
+#[test]
+fn server_response_calls_write_head_once_if_not_already_called() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+
+    let dir = temp_registry("builtin_http_implicit_write_head");
+    fs::write(
+        dir.join("index.js"),
+        "var http = require('node:http'); module.exports = async function (port) { var calls = 0; var server = http.createServer(function(request, response) { var real = response.writeHead; response.writeHead = function(statusCode, headers) { calls++; return real.call(response, statusCode, headers); }; response.end('ok', function() { server.close(); }); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return calls; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_implicit_write_head_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseImplicitWriteHead = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseImplicitWriteHead").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "1");
+    let response = client.join().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response.ends_with("ok"), "{response}");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
 #[test]
 fn http_server_supports_standard_timeout_configuration() {
     use std::ffi::{CStr, CString};
