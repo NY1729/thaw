@@ -450,14 +450,21 @@ pub unsafe extern "C" fn thaw_json_take(value: *mut Value, key: *const c_char) -
 #[no_mangle]
 pub extern "C" fn thaw_json_index(value: *mut Value, index: f64, key: *const c_char) -> *mut Value {
     let value = unsafe { &*value };
+    let valid_index =
+        index.is_finite() && index >= 0.0 && index <= (u32::MAX - 1) as f64 && index.fract() == 0.0;
     let result = match value {
-        Value::Array(items)
-            if index.is_finite()
-                && index >= 0.0
-                && index <= (u32::MAX - 1) as f64
-                && index.fract() == 0.0 =>
-        {
-            items.get(index as usize).cloned()
+        Value::Array(items) if valid_index => items.get(index as usize).cloned(),
+        // A Buffer-shaped object (`{"type":"Buffer","data":[...]}`)
+        // indexed numerically -- see `json_array_or_buffer_data`'s own
+        // doc comment. Only wins when the object is genuinely
+        // Buffer-shaped: an ordinary object with an unrelated
+        // numeric-string key (`{"0": "one", ...}`, a real pattern this
+        // same function already serves) falls through to the plain key
+        // lookup below untouched.
+        Value::Object(_) if valid_index && json_array_or_buffer_data(value).is_some() => {
+            json_array_or_buffer_data(value)
+                .and_then(|items| items.get(index as usize))
+                .cloned()
         }
         Value::Object(fields) => fields.get(&to_str(key)).cloned(),
         _ => None,
@@ -1152,10 +1159,39 @@ pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
     leak(Value::Array(values))
 }
 
+/// `value` as a plain JSON array, *or* -- if it's shaped
+/// `{"type":"Buffer","data":[...]}` (`Buffer.prototype.toJSON()`'s own
+/// real shape, and what `__thaw_json_binary_replacer`, thaw-quickjs,
+/// produces whenever a live Buffer/TypedArray crosses into a native
+/// callback's JSON-encoded arguments) -- its `data` field instead. A
+/// native callback parameter declared `Buffer`/`Uint8Array` has already
+/// been erased to a plain `Array(F64)` by lowering time
+/// (`HirType::Bytes` is a lowering-only distinction, gone by the time
+/// any of this runs), so nothing here can tell from the *declared* type
+/// alone that the real value is a Buffer -- only the JSON shape itself
+/// says so, the same way `__thaw_json_date_reviver` (thaw-quickjs, the
+/// JS-side counterpart for a value flowing the *other* direction)
+/// recognizes it purely structurally too. Without this, a real Buffer
+/// argument reaching a native callback silently decoded as an empty
+/// array (`thaw_json_array_length`/`thaw_json_index` both treat a plain
+/// JSON object as "not an array" and fall back to their own empty/
+/// key-lookup defaults) -- no error, just missing data (found via a real
+/// `req.pipe(nativeCallbackDestination)`, busboy's own `defaultStreamHandler`).
+fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {
+    if let Some(array) = value.as_array() {
+        return Some(array);
+    }
+    let fields = value.as_object()?;
+    if fields.get("type").and_then(Value::as_str) != Some("Buffer") {
+        return None;
+    }
+    fields.get("data")?.as_array()
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_to_number_array(value: *mut Value) -> *mut u8 {
     let values = unsafe { value.as_ref() }
-        .and_then(Value::as_array)
+        .and_then(json_array_or_buffer_data)
         .cloned()
         .unwrap_or_default();
     let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
@@ -1174,7 +1210,7 @@ pub extern "C" fn thaw_json_to_number_array(value: *mut Value) -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn thaw_json_array_length(value: *mut Value) -> i64 {
     unsafe { value.as_ref() }
-        .and_then(Value::as_array)
+        .and_then(json_array_or_buffer_data)
         .map_or(0, |values| values.len() as i64)
 }
 
