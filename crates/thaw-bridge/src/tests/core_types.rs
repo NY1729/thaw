@@ -301,6 +301,50 @@ fn resolves_forward_non_generic_type_aliases() {
     assert_eq!(signature.ret, HirType::Str);
 }
 
+/// A named type alias for a callable type whose own optional parameter's
+/// type is itself unrepresentable (`Data`'s `{ [name: string]: any }`
+/// index signature -- an `any`-valued dictionary classifies as
+/// `Unsupported`, unlike a concretely-typed one) -- real example: ejs's
+/// own `type TemplateFunction = (data?: Data) => string;`, returned from
+/// `compile(...)`. `resolve_interfaces`'s alias-resolution loop
+/// classifies `TemplateFunction`'s right-hand side by calling
+/// `classify_ts_type` directly (unlike an inline callable return type,
+/// classified via `resolve_ts_type_with_substitution`, which already
+/// applied the optional wrap uniformly). `classify_ts_type`'s own
+/// `TsFnOrConstructorType` branch only wrapped a parameter's type in
+/// `Optional` on its `DtsType::Native` branch, never on the
+/// `DtsType::Unsupported -> HirType::Json` fallback -- so an alias like
+/// this degraded its own optional parameter to a *required* `Json` slot
+/// while the parallel `HirOptionalMask` still (correctly) marked it
+/// omittable. A Fallback function returning this alias then built an
+/// adapter that always supplied an argument at that position while the
+/// declared parameter type disagreed about whether one could be
+/// omitted -- reaching all the way to a build-time type-coercion error
+/// or, once that step was made to agree, a mismatched calling
+/// convention that segfaulted the moment the returned closure was
+/// actually invoked with a real argument (confirmed against a real
+/// `thaw build` + run of the reduced repro this test mirrors, not just
+/// re-derived from the type shape).
+#[test]
+fn resolves_an_optional_callback_parameter_through_a_named_alias_even_when_its_own_type_is_unsupported()
+{
+    let funcs = parse_dts(
+        r#"export interface Data { [name: string]: any; }
+            export type TemplateFunction = (data?: Data) => string;
+            export declare function compile(template: string): TemplateFunction;"#,
+    )
+    .unwrap();
+    assert_eq!(
+        funcs[0].ret,
+        DtsType::Native(HirType::CallableFunction(
+            vec![HirType::Optional(Box::new(HirType::Json))],
+            HirOptionalMask::from_bools(&[true]),
+            None,
+            Box::new(HirType::Str),
+        ))
+    );
+}
+
 #[test]
 fn resolves_utility_types_inside_non_generic_aliases() {
     let funcs = parse_dts(
