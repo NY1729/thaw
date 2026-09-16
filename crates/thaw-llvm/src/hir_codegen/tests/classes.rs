@@ -2032,23 +2032,32 @@ fn promise_void_constructor_resolves_and_rejects() {
 /// work, dispatched through the ordinary native call path -- no dynamic
 /// (`JsValue`) machinery is involved for a same-file/native decorator.
 ///
-/// The class name a decorator receives is the real source-level name
-/// (`"Greeter"`), not `thaw-cli`'s internal `__thawmodN_Greeter` module-
-/// flattening symbol -- decorators strip that back off
-/// (`source_class_name` in `lower/module/globals.rs`).
+/// A class decorator receives a real, live "class token" `JsValue`
+/// (`typeof target === "function"`); a property/method decorator
+/// receives that token's own `.prototype` (`typeof target === "object"`,
+/// and `target.constructor === <the class token>`), matching real JS's
+/// own target shape for each decorator kind. Two decorators on the same
+/// class see the *same* token by reference (`===`); a different class
+/// gets its own distinct one -- this identity is what lets a real
+/// `object.constructor`-keyed metadata store (class-validator's own,
+/// see the pinned `class_validator_decorator_metadata_round_trips_
+/// through_a_real_instance` integration test) find its own registration
+/// again later.
 #[test]
-fn decorators_run_with_real_names_in_declaration_order() {
+fn decorators_run_with_real_identity_in_declaration_order() {
     let source = r#"
-        function LogClass(tag: string): (target: string) => void {
-            return function (target: string) {
-                console.log("class:", tag, target);
+        function LogClass(tag: string): (target: JsValue) => void {
+            return function (target: JsValue) {
+                console.log("class:", tag, typeof target);
             };
         }
-        function LogProp(target: string, key: string): void {
-            console.log("prop:", target, key);
+        let lastPropTarget: JsValue = String;
+        function LogProp(target: JsValue, key: string): void {
+            lastPropTarget = target;
+            console.log("prop:", typeof target, key);
         }
-        function LogMethod(target: string, key: string): void {
-            console.log("method:", target, key);
+        function LogMethod(target: JsValue, key: string): void {
+            console.log("method:", typeof target, key, target === lastPropTarget);
         }
 
         @LogClass("greeter")
@@ -2068,7 +2077,47 @@ fn decorators_run_with_real_names_in_declaration_order() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "decorators_real_names_order"),
-        "prop: Greeter name\nmethod: Greeter greet\nclass: greeter Greeter\nhello world\n"
+        compile_and_run(source, "decorators_real_identity_order"),
+        "prop: object name\nmethod: object greet true\nclass: greeter function\nhello world\n"
+    );
+}
+
+/// The same class token identity `decorators_run_with_real_identity_in_
+/// declaration_order` checks in isolation, but across *two different*
+/// classes: each decorated class gets its own distinct token (never
+/// confused with another class's), and the *same* class's property and
+/// class decorators all agree on the one token that class owns.
+#[test]
+fn decorator_class_tokens_are_distinct_per_class() {
+    let source = r#"
+        let seen: JsValue[] = [];
+        function Capture(target: JsValue): void {
+            seen.push(target);
+        }
+        function CaptureProp(target: JsValue, key: string): void {
+            seen.push(target.constructor);
+        }
+
+        @Capture
+        class Foo {
+            @CaptureProp
+            x: number = 1;
+        }
+
+        @Capture
+        class Bar {
+            @CaptureProp
+            y: number = 2;
+        }
+
+        function main(): void {
+            console.log(seen[0] === seen[1]);
+            console.log(seen[2] === seen[3]);
+            console.log(seen[0] === seen[2]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "decorator_class_tokens_distinct"),
+        "true\ntrue\nfalse\n"
     );
 }
