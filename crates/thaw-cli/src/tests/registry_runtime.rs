@@ -209,6 +209,53 @@ fn node_fs_reads_and_writes_real_files_in_a_static_binary() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `readFileSync(path)` -- no `encoding` argument, the single most common
+/// way real code calls it, returning a `Buffer` -- didn't compile at all
+/// against `node:fs`'s ambient fallback `.d.ts` (used whenever no real
+/// `@types/node` is resolved): the only declared overload required a
+/// second `encoding: string` argument. Found auditing real npm packages
+/// for compatibility gaps (archiver's own JS glue calls `fs.readFileSync
+/// (path)` with a single argument). `fs.promises.readFile(path)` had the
+/// identical gap. Fixed by adding the missing 1-argument, `Buffer`-
+/// returning overload to both.
+#[test]
+fn node_fs_read_file_sync_without_an_encoding_argument_returns_a_buffer() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-node-fs-read-buffer-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let data_file = dir.join("message.txt");
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        format!(
+            r#"
+                    import {{ writeFileSync, readFileSync }} from "node:fs";
+                    function main(): void {{
+                        writeFileSync("{}", "hello");
+                        const data = readFileSync("{}");
+                        console.log(data.length);
+                        console.log(data.toString("utf8"));
+                    }}
+                "#,
+            data_file.display(),
+            data_file.display(),
+        ),
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\nhello\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn node_http_serves_a_real_request_from_a_static_binary() {
     if ensure_static_system_libraries().is_err() {
