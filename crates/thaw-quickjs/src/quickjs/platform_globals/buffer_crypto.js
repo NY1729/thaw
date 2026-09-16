@@ -84,6 +84,29 @@
       }
       throw new TypeError(`Unknown encoding: ${encoding}`);
     }
+    // Real Node's own internal, undocumented per-encoding fast paths
+    // (`buf.utf8Slice(start, end)`, `buf.latin1Write(str, offset, length)`,
+    // etc, one pair per encoding) -- not part of any public Buffer spec,
+    // but real, popular packages call them directly as a speed shortcut
+    // around the public `toString`/`write` (real trigger: busboy's own
+    // `lib/utils.js` decoder table, `data.latin1Slice(0, data.length)`,
+    // used while parsing a multipart field's Content-Disposition header).
+    // Thin aliases over the exact same logic `toString`/`write` already
+    // implement per encoding, rather than a second implementation.
+    utf8Slice(start, end) { return this.toString('utf8', start, end); }
+    utf8Write(value, offset, length) { return this.write(value, offset, length, 'utf8'); }
+    latin1Slice(start, end) { return this.toString('latin1', start, end); }
+    latin1Write(value, offset, length) { return this.write(value, offset, length, 'latin1'); }
+    asciiSlice(start, end) { return this.toString('ascii', start, end); }
+    asciiWrite(value, offset, length) { return this.write(value, offset, length, 'ascii'); }
+    base64Slice(start, end) { return this.toString('base64', start, end); }
+    base64Write(value, offset, length) { return this.write(value, offset, length, 'base64'); }
+    base64urlSlice(start, end) { return this.toString('base64url', start, end); }
+    base64urlWrite(value, offset, length) { return this.write(value, offset, length, 'base64url'); }
+    hexSlice(start, end) { return this.toString('hex', start, end); }
+    hexWrite(value, offset, length) { return this.write(value, offset, length, 'hex'); }
+    ucs2Slice(start, end) { return this.toString('ucs2', start, end); }
+    ucs2Write(value, offset, length) { return this.write(value, offset, length, 'ucs2'); }
     toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
     equals(other) { return Buffer.compare(this, other) === 0; }
     compare(other) { return Buffer.compare(this, other); }
