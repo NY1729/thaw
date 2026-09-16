@@ -860,8 +860,17 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             // bare name, and needs the receiver preserved for exactly
             // the same real packages (joi's `Root.string()`, handlebars'
             // `registerHelper`).
+            // A real package can install a *throwing* getter on one of its
+            // own exports (real trigger: winston's own deprecated
+            // `format.padLevels`, whose getter `common.js` installs to
+            // throw "{ padLevels } was removed in winston@3.0.0" -- real
+            // Node never touches it, so `require('winston')` stays
+            // silent). Reading it here just to bind the package-qualified
+            // key would abort this whole snippet; wrapped so one
+            // deprecated/throwing export can't take down module init,
+            // matching the copy loop above's own per-property try/catch.
             let capture_js = format!(
-                "if (typeof globalThis.module !== 'undefined' && globalThis.module && typeof globalThis.module.exports !== 'undefined' && globalThis.module.exports !== null && typeof globalThis.module.exports.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = typeof globalThis.module.exports.{bare_name} === 'function' ? globalThis.__thaw_bind_preserving_statics(globalThis.module.exports.{bare_name}, globalThis.module.exports) : globalThis.module.exports.{bare_name}; }} else if (typeof globalThis.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.{bare_name}; }}",
+                "try {{ if (typeof globalThis.module !== 'undefined' && globalThis.module && typeof globalThis.module.exports !== 'undefined' && globalThis.module.exports !== null && typeof globalThis.module.exports.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = typeof globalThis.module.exports.{bare_name} === 'function' ? globalThis.__thaw_bind_preserving_statics(globalThis.module.exports.{bare_name}, globalThis.module.exports) : globalThis.module.exports.{bare_name}; }} else if (typeof globalThis.{bare_name} !== 'undefined') {{ globalThis[\"{}\"] = globalThis.{bare_name}; }} }} catch (e) {{}}",
                 escape_ts_string_literal(qualified_key),
                 escape_ts_string_literal(qualified_key)
             );
