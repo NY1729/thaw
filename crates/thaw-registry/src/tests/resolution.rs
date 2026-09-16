@@ -1818,7 +1818,7 @@ fn resolves_a_deep_import_subpath_into_a_dependency() {
     )
     .unwrap();
 
-    let (name, relative, abs, dir) = resolve_bare_require(&node_modules, "es-errors/type").unwrap();
+    let (name, relative, abs, dir) = resolve_bare_require(&node_modules, &node_modules, "es-errors/type").unwrap();
     assert_eq!(name, "es-errors");
     assert_eq!(relative, "type.js");
     assert_eq!(abs, node_modules.join("es-errors/type.js"));
@@ -1837,7 +1837,7 @@ fn resolves_a_deep_import_into_a_scoped_package() {
     )
     .unwrap();
 
-    let (name, relative, ..) = resolve_bare_require(&node_modules, "@scope/pkg/lib/util").unwrap();
+    let (name, relative, ..) = resolve_bare_require(&node_modules, &node_modules, "@scope/pkg/lib/util").unwrap();
     assert_eq!(name, "@scope/pkg");
     assert_eq!(relative, "lib/util.js");
 
@@ -1996,4 +1996,70 @@ fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
     let test_reporters = resolve_builtin("node:test/reporters").unwrap().dts_source;
     assert!(test_reporters.contains("class Reporter"));
     assert!(test_reporters.contains("dot(source: Json): Reporter"));
+}
+
+/// `resolve_bare_require` used to resolve every bare specifier against
+/// one flat `node_modules_dir`, regardless of which package was doing
+/// the requiring -- correct for npm's common case (a dependency hoisted
+/// to the top level because every consumer agrees on a compatible
+/// version), but wrong the moment two packages need genuinely
+/// incompatible versions of the same dependency: real npm then nests
+/// the conflicting version under the dependent's own `node_modules`
+/// (found via `cheerio` -> `htmlparser2` -> `entities`: `htmlparser2`
+/// needs `entities@^7`, something else in the tree pins `entities@4`,
+/// which wins the flat top-level slot, leaving `entities@7` nested
+/// under `htmlparser2/node_modules`). The old flat-only lookup always
+/// found the wrong (top-level) version's file layout in that case.
+/// Fixed by walking up from the requiring package's own directory,
+/// checking `<ancestor>/node_modules/<dep_name>` at each level (the
+/// same algorithm real Node's `require` resolution uses), which finds
+/// the nested version before ever reaching the top level.
+#[test]
+fn bare_requires_prefer_a_dependents_own_nested_node_modules_over_the_flat_top_level() {
+    let root = temp_registry("bundle_nested_dependency_conflict");
+    let node_modules = root.join("node_modules");
+    let outer = node_modules.join("outer");
+    let nested_shared = outer.join("node_modules/shared");
+    let top_level_shared = node_modules.join("shared");
+    fs::create_dir_all(&nested_shared).unwrap();
+    fs::create_dir_all(&top_level_shared).unwrap();
+    fs::write(
+        outer.join("package.json"),
+        r#"{"name":"outer","dependencies":{"shared":"^2.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        outer.join("index.js"),
+        "module.exports = require('shared');",
+    )
+    .unwrap();
+    fs::write(
+        nested_shared.join("package.json"),
+        r#"{"name":"shared","version":"2.0.0","main":"index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        nested_shared.join("index.js"),
+        "module.exports = 'nested-v2';",
+    )
+    .unwrap();
+    fs::write(
+        top_level_shared.join("package.json"),
+        r#"{"name":"shared","version":"1.0.0","main":"index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        top_level_shared.join("index.js"),
+        "module.exports = 'wrong-top-level-v1';",
+    )
+    .unwrap();
+
+    let (bundle, _, file_count, versions) =
+        bundle_commonjs_package(&node_modules, "outer", &outer, "index.js").unwrap();
+    assert_eq!(file_count, 2, "outer/index.js + the nested shared/index.js");
+    assert!(bundle.contains("nested-v2"), "{bundle}");
+    assert!(!bundle.contains("wrong-top-level-v1"), "{bundle}");
+    assert_eq!(versions.get("shared").map(String::as_str), Some("2.0.0"));
+
+    let _ = fs::remove_dir_all(root);
 }
