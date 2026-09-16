@@ -112,6 +112,7 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_error_name"
             | "__thaw_error_cause"
             | "__thaw_error_code"
+            | "__thaw_error_stack"
             | "__thaw_error_to_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
