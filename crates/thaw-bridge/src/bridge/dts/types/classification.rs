@@ -263,24 +263,44 @@ fn classify_ts_type(
                         );
                     }
                 };
-                match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces) {
-                    DtsType::Native(mut ty) => {
-                        if is_optional {
-                            ty = match ty {
-                                HirType::Optional(_) | HirType::Nullish(_) => ty,
-                                HirType::Nullable(payload) => HirType::Nullish(payload),
-                                other => HirType::Optional(Box::new(other)),
-                            };
-                        }
-                        params.push(ty);
-                    }
+                // Both branches need the same optional-wrap: an unresolvable
+                // parameter type still degrades to a *real*, callable slot
+                // (`HirType::Json`, matching the comment below), and a
+                // caller-omittable one of those needs the same `Optional`
+                // wrapping a resolved type gets, or the mask (`optional`,
+                // just below) ends up claiming a slot is omittable while
+                // the slot's own declared type says otherwise -- exactly
+                // the mismatch `callback_param_compatible` (thaw-hir)
+                // needs the wrapping for in the first place. Real trigger:
+                // ejs's own `type TemplateFunction = (data?: Data) =>
+                // string;`, where `Data`'s index-signature interface
+                // (`{ [name: string]: any }`) itself classifies as
+                // `Unsupported` (its `any` value type isn't representable)
+                // -- this whole function's *other* caller for a function's
+                // own inline return-type position
+                // (`resolve_ts_type_with_substitution`, generics.rs) always
+                // wraps the same way here already; only this direct path
+                // (reached when a named type alias like `TemplateFunction`
+                // gets resolved, `resolve_interfaces`) skipped it, so a
+                // Fallback function returning the alias built an adapter
+                // expecting an omittable argument while the return value's
+                // own runtime call convention always supplied one --
+                // segfaulting the moment the returned closure was invoked
+                // with a real argument.
+                let mut ty = match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                {
+                    DtsType::Native(ty) => ty,
                     // Callback values cross the JavaScript/N-API boundary as
                     // dynamic JSON. In real Node declarations the error slot
                     // is normally `Error | null` and result slots are often
                     // `any`; neither has a native AOT layout, but both have a
                     // faithful dynamic representation at this boundary.
-                    DtsType::Unsupported(_) => params.push(HirType::Json),
+                    DtsType::Unsupported(_) => HirType::Json,
+                };
+                if is_optional {
+                    ty = optional_hir_type(ty);
                 }
+                params.push(ty);
                 optional.push(is_optional);
             }
             let ret = match classify_ts_type(
