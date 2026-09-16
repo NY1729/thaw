@@ -301,14 +301,16 @@ an API already represented by the generated marker set.
 - Linux arm64 runtime measurement remains a CI-only check because the
   current host is x64.
 
-Follow-up effort, planned at
-`~/.claude/plans/toasty-percolating-harbor.md` (14 milestones, M0-M14),
-to replace the English/Latin-only scope above with real multi-locale CLDR
-data via the `icu4x` Rust crate family, plus new `Intl.Locale`/
-`PluralRules`/`Collator`/`Segmenter`/`RelativeTimeFormat` and non-Gregorian
-calendar support. Locale scope is a **curated list** (not all ~700 CLDR
-locales), chosen to bound binary size; API breadth is the full list above
-in one effort (both explicit user choices, not phased).
+This follow-up effort (planned at `~/.claude/plans/toasty-percolating-
+harbor.md`, 14 milestones, M0-M14, all now complete) replaced the
+English/Latin-only scope above with real multi-locale CLDR data via the
+`icu4x` Rust crate family, plus new `Intl.Locale`/`PluralRules`/
+`Collator`/`Segmenter`/`RelativeTimeFormat` and non-Gregorian calendar
+support. Locale scope is a **curated list** (not all ~700 CLDR locales),
+chosen to bound binary size; API breadth is the full list above in one
+effort (both explicit user choices, not phased). The milestone-by-
+milestone findings below are kept as the historical record of how each
+piece was actually built and verified.
 
 ### M0 spike findings (2026-09-12)
 

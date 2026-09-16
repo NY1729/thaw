@@ -48,8 +48,26 @@ fn intl_zoned_parts_json(tz_name: &str, timestamp_ms: f64) -> String {
     let weekday = zoned.weekday().to_monday_one_offset();
     let abbreviation = info.abbreviation().replace('"', "");
     let dst = info.dst().is_dst();
+    // Real per-zone English long name (e.g. "Eastern Daylight
+    // Time"/"Eastern Standard Time", DST-aware) -- the default,
+    // no-`intl`-feature fallback (`intl_time_zone_names.rs`'s hand-
+    // extracted table). `intl.js`'s `intlTimeZoneName` prefers the
+    // real per-*locale* icu4x path (`__thaw_intl_time_zone_name`, M13)
+    // when the `intl` feature is compiled in, falling back to these
+    // fields (English only) otherwise -- so a program that never
+    // references `Intl.Locale`/`PluralRules`/`Collator`/`Segmenter`/
+    // `RelativeTimeFormat` (and therefore never links `thaw-icu-data`
+    // at all, per `source_uses_intl`) keeps the real English long
+    // zone names it already had, rather than silently degrading to a
+    // synthesized "GMT+H:MM" offset string.
+    let json_name = |name: Option<&str>| {
+        name.map(|name| serde_json::to_string(name).unwrap_or_else(|_| "null".to_string()))
+            .unwrap_or_else(|| "null".to_string())
+    };
+    let long_name = json_name(intl_time_zone_long_name(tz_name, dst, false));
+    let generic_name = json_name(intl_time_zone_long_name(tz_name, dst, true));
     format!(
-        r#"{{"valid":true,"year":{},"month":{},"day":{},"hour":{},"minute":{},"second":{},"millisecond":{},"weekday":{},"offsetMinutes":{},"abbreviation":"{}","dst":{},"timeZone":{},"timestampMs":{}}}"#,
+        r#"{{"valid":true,"year":{},"month":{},"day":{},"hour":{},"minute":{},"second":{},"millisecond":{},"weekday":{},"offsetMinutes":{},"abbreviation":"{}","dst":{},"timeZone":{},"timestampMs":{},"longName":{},"longGenericName":{}}}"#,
         zoned.year(),
         zoned.month(),
         zoned.day(),
@@ -63,5 +81,7 @@ fn intl_zoned_parts_json(tz_name: &str, timestamp_ms: f64) -> String {
         dst,
         serde_json::to_string(tz_name).unwrap_or_else(|_| "\"UTC\"".to_string()),
         millis,
+        long_name,
+        generic_name,
     )
 }

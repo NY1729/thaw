@@ -1,3 +1,22 @@
+/// The real number of minor-unit decimal digits for an ISO 4217
+/// currency code (e.g. 0 for JPY/KRW, 2 for USD/EUR, 3 for BHD/KWD),
+/// via the vendored `CurrencyFractionsV1` singleton data -- not a
+/// hand-picked list of exceptions. Returns `None` (caller falls back to
+/// the ECMA-402 default of 2) if the currency code doesn't parse or the
+/// data fails to resolve.
+fn intl_currency_fraction_digits(currency: &str) -> Option<u8> {
+    use icu_experimental::dimension::provider::currency::fractions::CurrencyFractionsV1;
+    use icu_provider::{DataProvider, DataRequest};
+    use std::str::FromStr;
+
+    let currency_type =
+        icu_experimental::dimension::currency::CurrencyType::from_str(&currency.to_ascii_lowercase()).ok()?;
+    let response =
+        DataProvider::<CurrencyFractionsV1>::load(&thaw_icu_data::ThawIcuDataProvider, DataRequest::default())
+            .ok()?;
+    Some(response.payload.get().resolve(currency_type).digits)
+}
+
 fn intl_percent_format(locale_tag: &str, digits: &str) -> Option<String> {
     use std::str::FromStr;
 

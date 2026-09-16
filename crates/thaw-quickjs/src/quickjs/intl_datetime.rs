@@ -60,6 +60,27 @@ struct DateTimeOptions {
     hour_cycle: Option<String>,
 }
 
+/// Whether an IANA zone's UTC offset ever changes across a year --
+/// i.e. whether it observes DST at all (as opposed to merely not
+/// currently being in DST at whatever instant is being formatted).
+/// Reference instants match `intl_time_zone_names.rs`'s own
+/// now-retired methodology: 2026-01-01 and 2026-07-01 UTC, picked to
+/// be clear of any recent one-off zone-rule change (the pitfall real
+/// Kazakhstan's 2024 restructuring already exposed once for this exact
+/// kind of check).
+fn zone_observes_dst(tz_name: &str) -> bool {
+    let Ok(time_zone) = jiff::tz::TimeZone::get(tz_name) else {
+        return false;
+    };
+    let Ok(january) = jiff::Timestamp::from_millisecond(1_767_225_600_000) else {
+        return false;
+    };
+    let Ok(july) = jiff::Timestamp::from_millisecond(1_782_907_200_000) else {
+        return false;
+    };
+    time_zone.to_offset_info(january).offset() != time_zone.to_offset_info(july).offset()
+}
+
 fn intl_time_zone_name(
     locale_tag: &str,
     time_zone: &str,
@@ -89,18 +110,34 @@ fn intl_time_zone_name(
             (timestamp_ms / 1000.0).floor() as i64,
         ));
     if generic {
-        let name =
+        // Real `Intl`'s `longGeneric` for a zone that *never* observes
+        // DST is identical to its `long` (standard) name (confirmed
+        // against real Node across a sample of non-DST zones: Tokyo,
+        // Seoul, Shanghai, Kolkata, Singapore, Dubai, Hong Kong all
+        // give the same string for both styles -- "Japan Standard
+        // Time", not a separate neutral "Japan Time" -- while a real
+        // DST-observing zone's `longGeneric` genuinely differs from its
+        // `long` name, e.g. `America/New_York` -> "Eastern Time" vs.
+        // "Eastern Standard/Daylight Time", where icu4x's own
+        // `GenericLong` is already correct). `zone_observes_dst` checks
+        // two reference instants for a real offset difference, the same
+        // "two fixed reference instants clear of any one-off zone-rule
+        // change" methodology `intl_time_zone_names.rs`'s now-retired
+        // hand-extracted table used to use.
+        if !zone_observes_dst(time_zone) {
+            return Some(
+                NoCalendarFormatter::try_new_unstable(provider, prefs, zone::SpecificLong)
+                    .ok()?
+                    .format(&info)
+                    .to_string(),
+            );
+        }
+        Some(
             NoCalendarFormatter::try_new_unstable(provider, prefs, zone::GenericLong)
                 .ok()?
                 .format(&info)
-                .to_string();
-        // CLDR 48 says "Japan Time" while the Node/ICU build used by
-        // the compatibility suite still says "Japan Standard Time".
-        Some(if time_zone == "Asia/Tokyo" && name == "Japan Time" {
-            "Japan Standard Time".to_string()
-        } else {
-            name
-        })
+                .to_string(),
+        )
     } else {
         Some(
             NoCalendarFormatter::try_new_unstable(provider, prefs, zone::SpecificLong)
@@ -439,6 +476,16 @@ fn intl_datetime_format_parts_json(locale_tag: &str, options_json: &str, zoned_p
         (false, false) => None,
     };
     let formatted = formatted.unwrap_or_else(|| "[]".to_string());
+    // The vendored CLDR data renders U+202F (narrow no-break space)
+    // between a numeric hour and the day-period marker for English
+    // (e.g. `"4\u{202f}PM"`) -- confirmed against real Node across every
+    // field combination that includes both (hour-only, hour+minute,
+    // hour+minute+second, and a full date+time), real Node always
+    // renders a plain space instead, never U+202F, for English
+    // specifically. Scoped to `en*` only: French's own real grouping
+    // separator legitimately *is* U+202F (confirmed in `intl_number.rs`'s
+    // own cross-checks), so this must not become a blanket global
+    // replace.
     if locale.id.language.as_str() == "en" {
         formatted.replace('\u{202f}', " ")
     } else {

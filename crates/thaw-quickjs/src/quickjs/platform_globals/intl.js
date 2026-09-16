@@ -432,7 +432,19 @@
       let minFrac = this._minimumFractionDigits;
       let maxFrac = this._maximumFractionDigits;
       if (minFrac === undefined && maxFrac === undefined) {
-        minFrac = this._style === 'currency' ? (this._currency === 'JPY' ? 0 : 2) : 0;
+        // The real per-currency minor-unit digit count (e.g. 0 for
+        // JPY/KRW, 2 for USD/EUR, 3 for BHD/KWD), via
+        // `__thaw_intl_currency_fraction_digits`'s vendored CLDR data
+        // -- not a single hand-picked "JPY is the only exception"
+        // guess, which would have been wrong for every other real
+        // zero-decimal currency (confirmed: real Node also gives KRW 0
+        // digits and BHD 3, not just JPY 0/everything-else 2).
+        let currencyDigits = 2;
+        if (this._style === 'currency' && typeof __thaw_intl_currency_fraction_digits === 'function') {
+          const resolved = __thaw_intl_currency_fraction_digits(this._currency);
+          if (resolved !== null && resolved !== undefined) currencyDigits = resolved;
+        }
+        minFrac = this._style === 'currency' ? currencyDigits : 0;
         maxFrac = this._style === 'currency' ? minFrac : (this._style === 'percent' ? 0 : 3);
       } else if (minFrac === undefined) {
         minFrac = 0;

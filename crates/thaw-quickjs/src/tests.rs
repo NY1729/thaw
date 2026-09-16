@@ -1595,7 +1595,6 @@ fn intl_date_time_format_matches_real_node_for_every_field_and_style_luxon_uses(
 /// Sydney`: daylight in the northern winter, standard in the northern
 /// summer -- the reverse of `America/New_York`'s own pattern, so this
 /// isn't just "whichever season happened to be sampled").
-#[cfg(feature = "intl")]
 #[test]
 fn intl_time_zone_name_long_and_long_generic_match_real_node() {
     assert_eq!(
@@ -1616,6 +1615,9 @@ fn intl_time_zone_name_long_and_long_generic_match_real_node() {
                  longName('Australia/Sydney', 1782907200000),\n\
                  longName('Australia/Sydney', 1767268800000),\n\
                  longGenericName('Australia/Sydney', 1782907200000),\n\
+                 longGenericName('Asia/Seoul', 1782907200000),\n\
+                 longGenericName('Asia/Hong_Kong', 1782907200000),\n\
+                 longGenericName('Asia/Dubai', 1782907200000),\n\
                ];\n\
              }"
         ),
@@ -1623,7 +1625,7 @@ fn intl_time_zone_name_long_and_long_generic_match_real_node() {
     );
     assert_eq!(
         call("allCases", "[]"),
-        r#"["Eastern Daylight Time","Eastern Standard Time","Eastern Time","Japan Standard Time","Japan Standard Time","Australian Eastern Standard Time","Australian Eastern Daylight Time","Australian Eastern Time"]"#
+        r#"["Eastern Daylight Time","Eastern Standard Time","Eastern Time","Japan Standard Time","Japan Standard Time","Australian Eastern Standard Time","Australian Eastern Daylight Time","Australian Eastern Time","Korean Standard Time","Hong Kong Standard Time","Gulf Standard Time"]"#
     );
 }
 
@@ -2338,7 +2340,9 @@ fn intl_number_currency_and_percent_match_real_node() {
                  f('de-DE', { style: 'currency', currency: 'EUR' }, 1234.5),\n\
                  f('fr-FR', { style: 'currency', currency: 'USD', currencyDisplay: 'code' }, 1234.5),\n\
                  f('ja-JP', { style: 'currency', currency: 'JPY' }, 1234.5),\n\
-                 f('en-US', { style: 'currency', currency: 'USD', currencyDisplay: 'name' }, 1234.5)\n\
+                 f('en-US', { style: 'currency', currency: 'USD', currencyDisplay: 'name' }, 1234.5),\n\
+                 f('en-US', { style: 'currency', currency: 'KRW' }, 1234.5),\n\
+                 f('en-US', { style: 'currency', currency: 'BHD' }, 1234.5)\n\
                ];\n\
              }"
         ),
@@ -2354,6 +2358,8 @@ fn intl_number_currency_and_percent_match_real_node() {
             "1 234,50 USD",
             "￥1,235",
             "1,234.50 US dollars",
+            "\u{20a9}1,235",
+            "BHD\u{a0}1,234.500",
         ])
         .unwrap()
     );
