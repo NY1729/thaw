@@ -803,6 +803,14 @@ fn child_process_fork_exchanges_ipc_messages_and_disconnects() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+/// `IncomingMessage` had `httpVersion` (a string, `"1.1"`) but never
+/// `httpVersionMajor`/`httpVersionMinor` (the numeric pair real Node
+/// also exposes) -- real trigger: morgan's own `:http-version` token
+/// (`req.httpVersionMajor + '.' + req.httpVersionMinor`), which logged
+/// `HTTP/undefined.undefined` for every request instead of `HTTP/1.1`.
+/// Also missing on the client-response side (`parseResponse`), fixed the
+/// same way for consistency even though nothing this session's audits
+/// hit it there yet.
 #[test]
 fn http_server_parses_and_replies_to_a_real_tcp_client() {
     use std::ffi::{CStr, CString};
@@ -834,7 +842,7 @@ fn http_server_parses_and_replies_to_a_real_tcp_client() {
     let dir = temp_registry("builtin_http_server");
     fs::write(
             dir.join("index.js"),
-            "var http = require('node:http'); module.exports = async function (port) { var observed = []; var server = http.createServer(async function(request, response) { var body = []; observed.push(request.method, request.url, request.headers['x-client'], request.httpVersion); await Promise.resolve(); request.on('data', function(chunk) { body.push(chunk.toString()); }); request.on('end', function() { observed.push(body.join('')); response.statusCode = 201; response.statusMessage = 'Stored'; response.setHeader('X-Server', 'thaw'); response.setHeader('Set-Cookie', ['a=1', 'b=2']); response.write('po'); response.end('ng', function() { server.close(); }); }); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return [observed, server.listening, server instanceof http.Server]; };",
+            "var http = require('node:http'); module.exports = async function (port) { var observed = []; var server = http.createServer(async function(request, response) { var body = []; observed.push(request.method, request.url, request.headers['x-client'], request.httpVersion, request.httpVersionMajor, request.httpVersionMinor); await Promise.resolve(); request.on('data', function(chunk) { body.push(chunk.toString()); }); request.on('end', function() { observed.push(body.join('')); response.statusCode = 201; response.statusMessage = 'Stored'; response.setHeader('X-Server', 'thaw'); response.setHeader('Set-Cookie', ['a=1', 'b=2']); response.write('po'); response.end('ng', function() { server.close(); }); }); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return [observed, server.listening, server instanceof http.Server]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_http_server_node_modules");
@@ -850,7 +858,7 @@ fn http_server_parses_and_replies_to_a_real_tcp_client() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[["POST","/submit","rust","1.1","ping"],false,true]"#
+        r#"[["POST","/submit","rust","1.1",1,1,"ping"],false,true]"#
     );
     let response = client.join().unwrap();
     assert!(response.starts_with("HTTP/1.1 201 Stored\r\n"));
