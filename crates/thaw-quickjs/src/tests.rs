@@ -1409,6 +1409,40 @@ fn crypto_legacy_encrypted_pkcs1_pem_interoperates_with_real_openssl() {
     assert_eq!(call("aes256RoundTrip", "[]"), r#"["rsa",true,true]"#);
 }
 
+/// Passphrase-protected X25519 keys -- the last of 4 previously out-of-
+/// scope `node:crypto` items the user picked up together (see
+/// [[project_crypto_rsa_ecdsa]]'s own "deliberately still out of
+/// scope" note, and this module's own header comment). Decrypts a real
+/// OpenSSL 3.5-produced encrypted key (`openssl genpkey -algorithm
+/// X25519` + `openssl pkey -aes256 -passout pass:hunter2`) and computes
+/// a Diffie-Hellman shared secret against a real peer public key,
+/// cross-checked against `openssl pkeyutl -derive`'s own output for
+/// the same key pair.
+#[test]
+fn crypto_x25519_passphrase_protected_key_interoperates_with_real_openssl() {
+    assert_eq!(
+        load(
+            "function x25519PrivateEncryptedPem() { return '-----BEGIN ENCRYPTED PRIVATE KEY-----\\nMIGjMF8GCSqGSIb3DQEFDTBSMDEGCSqGSIb3DQEFDDAkBBB7tmOZrnczjFnNG9jN\\nYZ1fAgIIADAMBggqhkiG9w0CCQUAMB0GCWCGSAFlAwQBKgQQ7nt4x5kr1Oyp/30P\\nhjd1KwRAPOtfFpXXehOtGmKdUDrNZt0kN1BGoevUg1UaV6IifpLoD/7rx0yKDYi7\\nj3Mlx1DVoubvAvNgDari+t5VGInS5w==\\n-----END ENCRYPTED PRIVATE KEY-----\\n'; }\n\
+             function peerPublicPem() { return '-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VuAyEA6PZLnkCbBlDxzjBJOcUA+J4MLON3SqHkcn7rLRsauks=\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function x25519PassphraseRoundTrip() {\n\
+               let wrongPassphraseThrew = false;\n\
+               try { __thaw_crypto_module.createPrivateKey({ key: x25519PrivateEncryptedPem(), passphrase: 'wrong' }); } catch (error) { wrongPassphraseThrew = true; }\n\
+               const priv = __thaw_crypto_module.createPrivateKey({ key: x25519PrivateEncryptedPem(), passphrase: 'hunter2' });\n\
+               const secret = __thaw_crypto_module.diffieHellman({\n\
+                 privateKey: priv,\n\
+                 publicKey: __thaw_crypto_module.createPublicKey(peerPublicPem())\n\
+               }).toString('hex');\n\
+               return [priv.asymmetricKeyType, secret, wrongPassphraseThrew];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("x25519PassphraseRoundTrip", "[]"),
+        r#"["x25519","8045311ec4d1998f5439eeec2d2eb0616fe269acce92e20d9626f719db2b7707",true]"#
+    );
+}
+
 /// RSA `publicEncrypt`/`privateDecrypt` -- PKCS1v15 and OAEP (default)
 /// padding. Decrypts ciphertexts produced by real OpenSSL for both
 /// schemes (proving cross-implementation correctness of the actual RSA
