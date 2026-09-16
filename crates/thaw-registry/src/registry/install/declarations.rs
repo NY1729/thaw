@@ -1859,14 +1859,38 @@ fn reexported_class_or_interface_declarations_inner(
 }
 
 fn declaration_reexport_path(entry_path: &Path, source: &str) -> Option<PathBuf> {
-    let path = if source == "." || source.starts_with("./") || source.starts_with("../") {
-        entry_path.parent()?.join(source)
-    } else {
-        let node_modules = entry_path
-            .ancestors()
-            .find(|path| path.file_name().is_some_and(|name| name == "node_modules"))?;
-        node_modules.join(source)
-    };
+    if source == "." || source.starts_with("./") || source.starts_with("../") {
+        let path = entry_path.parent()?.join(source);
+        return [path.with_extension("d.ts"), path.join("index.d.ts")]
+            .into_iter()
+            .find(|candidate| candidate.is_file());
+    }
+    // A bare specifier re-exports from a genuinely *different* installed
+    // package, not another file within the same one -- real example:
+    // `@types/ramda`'s entire `index.d.ts` is just `export * from
+    // "types-ramda";`, where `types-ramda` is its own separate npm
+    // package. That target package's own real type entry point can live
+    // anywhere its own `package.json`'s `types`/`typings` field says
+    // (`types-ramda`'s is `./es/index.d.ts`, not a root-level
+    // `index.d.ts` at all) -- reusing `find_own_dts` (the same
+    // resolution already used for a `--use`d package's own entry point)
+    // instead of only ever guessing `<name>.d.ts`/`<name>/index.d.ts`
+    // fixes this the same general way for every package shaped like
+    // this, not just ramda specifically. Falls back to the old guesses
+    // if the target's own `package.json` is missing/unreadable, rather
+    // than narrowing what used to resolve.
+    let node_modules = entry_path
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "node_modules"))?;
+    let package_dir = node_modules.join(source);
+    if let Ok(manifest) = read_manifest(&package_dir) {
+        if let Some((_, absolute)) = find_own_dts(&manifest, &package_dir) {
+            if absolute.is_file() {
+                return Some(absolute);
+            }
+        }
+    }
+    let path = package_dir;
     [path.with_extension("d.ts"), path.join("index.d.ts")]
         .into_iter()
         .find(|candidate| candidate.is_file())
