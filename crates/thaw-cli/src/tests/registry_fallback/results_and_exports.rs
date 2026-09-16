@@ -494,6 +494,161 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "/jit\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Same idea as `fallback_object_callback_runs_as_native_code` just
+/// above, but the callback field's own declared type has a rest
+/// parameter (`HirType::CallableFunction`, not the plain fixed-arity
+/// `HirType::Function` that test already covers) -- real trigger:
+/// `better-sqlite3`'s own `DatabaseOptions.verbose?: (message?: unknown,
+/// ...additionalArgs: unknown[]) => void` option, which used to fail
+/// the whole *build* ("unsupported dynamic object field
+/// CallableFunction(...)") the moment a program merely constructed the
+/// class, even without ever passing `verbose` itself -- thaw eagerly
+/// generates a typed shim for every declared constructor overload's
+/// full options shape. Only the build-time encoding is asserted here
+/// (the object is constructed with a real rest-parameter callback in
+/// the field, but the field is never invoked); actually *calling* a
+/// rest-parameter callback embedded this way crashes today, a separate,
+/// deeper bug this doesn't yet cover.
+#[test]
+fn fallback_object_field_with_rest_callback_builds_and_runs() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-object-rest-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("logger-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Options { verbose?: (...rest: string[]) => void; }\n\
+         export declare class Logger { constructor(options?: Options); label(): string; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Logger(options) { this.verbose = options && options.verbose; } \
+         Logger.prototype.label = function() { return typeof this.verbose; }; \
+         module.exports = { Logger: Logger };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Logger } from "logger-kit";
+function main(): void {
+    const logger = new Logger({ verbose: (...rest: string[]) => console.log(rest.length) });
+    console.log(logger.label());
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["logger-kit".into()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "function\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A `declare class`'s own constructor is already recognized as a real
+/// native-constructor call target -- but a bare `declare const X: {
+/// new (...): X; (...): X; ... }` (a callable *interface* value with a
+/// construct signature, not a `class` declaration at all) isn't a
+/// `class`, so none of that existing recognition applies. Real trigger:
+/// `better-sqlite3`'s own `declare const Database: BetterSqlite3.
+/// DatabaseConstructor` (its whole default export is shaped exactly
+/// this way) -- registry/bridge already rewrites `new Database(...)`
+/// to call its own generated ambient typed-wrapper symbol, but nothing
+/// in `Expr::New`'s lowering recognized *that* rewritten identifier as
+/// constructible, so it fell through every special case to the
+/// catch-all "only `new Promise<T>(...)` is supported" error --
+/// misleading, since the problem had nothing to do with Promises.
+/// Fixed by lowering `new X(...)` as a plain call when `X` already
+/// resolves to an ordinary (non-class) function signature.
+///
+/// Known real limitation, not covered by this fix (thaw-bridge doesn't
+/// classify this declaration shape as `constructible`, so it never gets
+/// the proper `$new$`-prefixed constructor wrapper a real `declare
+/// class` does -- see `shim_support.rs`'s own `generate_napi_class_
+/// constructors`): the underlying JS function is called *without* `new`,
+/// so this only produces the real instance for a factory-style export
+/// that explicitly `return`s its result (as here, and as many real
+/// dual-callable/constructible npm exports do) -- not one that relies
+/// on `new`'s implicit `this`-binding, and not a real N-API class
+/// created via `napi_define_class` (which typically rejects being
+/// called without `new` outright). Fully fixing `new Database(...)`
+/// against real `better-sqlite3` needs thaw-bridge to recognize this
+/// declaration shape as constructible in its own right, generating the
+/// same proper `$new$`-prefixed wrapper a `declare class` gets.
+#[test]
+fn new_on_a_callable_interface_with_a_construct_signature_runs_as_native_code() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-construct-signature-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("db-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Database { path: string; }\n\
+         export interface DatabaseConstructor {\n\
+         \x20\x20\x20\x20new (path: string): Database;\n\
+         \x20\x20\x20\x20(path: string): Database;\n\
+         }\n\
+         declare const Database: DatabaseConstructor;\n\
+         export = Database;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Database(path) { return { path: path }; } module.exports = Database;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import Database from "db-kit";
+function main(): void {
+    const db = new Database(":memory:");
+    console.log(db.path);
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["db-kit".into()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), ":memory:\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn imports_node_builtin_object_values() {
     let dir = std::env::temp_dir().join(format!(

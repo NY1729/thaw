@@ -1881,6 +1881,35 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+                // A bare `new X(...)` whose callee is already a known,
+                // ordinary (non-class) function signature -- real trigger:
+                // an ambient `.d.ts` construct signature (`declare const
+                // Database: { new (...): Database; (...): Database; ...}`,
+                // real `better-sqlite3`) that the registry/bridge already
+                // rewrote to its own generated typed-wrapper symbol
+                // (`__thaw_typed_wrapper_js_<hex>`) *before* thaw-hir ever
+                // sees this source, so none of the special-cased bare-
+                // identifier forms above (real native classes, `Error`,
+                // `Date`, `Map`/`Set`, the bare dynamic globals) can ever
+                // match it by name. Lowered as a plain call to that same
+                // symbol: the wrapper's own JSON-marshaling shim ultimately
+                // reaches a real underlying JS/N-API value that already
+                // knows how to be constructed, and the `.d.ts` shape this
+                // targets always advertises an *identical* plain-call
+                // signature for the exact same instance type, so dropping
+                // `new` here doesn't change the JS semantics for this case.
+                if let Expr::Ident(callee) = new_expr.callee.as_ref() {
+                    let name = self.resolve_binding(callee.sym.as_ref());
+                    if self.signatures.contains_key(&name) {
+                        return self.lower_call(&CallExpr {
+                            span: new_expr.span,
+                            ctxt: new_expr.ctxt,
+                            callee: Callee::Expr(Box::new(Expr::Ident(callee.clone()))),
+                            args: new_expr.args.clone().unwrap_or_default(),
+                            type_args: new_expr.type_args.clone(),
+                        });
+                    }
+                }
                 self.lower_promise_new(new_expr)
             }
 
