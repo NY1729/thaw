@@ -48,11 +48,57 @@ impl<'a> FnLowerer<'a> {
                     .get(&this_name)
                     .cloned()
                     .ok_or("`super(...)` used outside a constructor")?;
-                return Ok(HirExpr::PropAssign(
-                    Box::new(HirExpr::Var(this_name)),
-                    this_type,
+                let assign_message = HirExpr::PropAssign(
+                    Box::new(HirExpr::Var(this_name.clone())),
+                    this_type.clone(),
                     "message".to_string(),
                     Box::new(message),
+                );
+                // Defaults `.name` to the immediate native ancestor's own
+                // name (e.g. `TypeError`), matching real JavaScript's
+                // inherited `Error.prototype.name`/etc. -- see
+                // `lower/module/classes.rs`'s field-layout comment. A
+                // constructor that goes on to assign `this.name = "..."`
+                // itself just overwrites this same real field afterwards.
+                let assign_name = HirExpr::PropAssign(
+                    Box::new(HirExpr::Var(this_name)),
+                    this_type,
+                    "name".to_string(),
+                    Box::new(HirExpr::Lit(HirLit::Str(base_name.clone()))),
+                );
+                // A bare `HirExpr::Block` isn't itself a compilable
+                // expression (only a lambda/function *body* is) --
+                // wrapped as an immediately-invoked, paramless lambda,
+                // the same "IIFE" shape `wrap_call_argument_bindings`
+                // already produces elsewhere for sequencing more than
+                // one effect out of a single expression-returning
+                // call-lowering function. Every outer variable the body
+                // references (`this`, and whatever `message` itself
+                // reads) must be an explicit capture -- a lambda has no
+                // implicit access to its enclosing scope.
+                let body = HirExpr::Block(vec![
+                    HirStmt::Expr(assign_message),
+                    HirStmt::Expr(assign_name),
+                ]);
+                let mut referenced = BTreeSet::new();
+                collect_referenced_bindings(&body, &mut referenced);
+                let captures = referenced
+                    .into_iter()
+                    .filter_map(|referenced| {
+                        self.scope
+                            .get(&referenced)
+                            .cloned()
+                            .map(|ty| HirParam { name: referenced, ty })
+                    })
+                    .collect();
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        captures,
+                        Vec::new(),
+                        HirType::Void,
+                        Box::new(body),
+                    )),
+                    Vec::new(),
                 ));
             }
             let mut signature = self

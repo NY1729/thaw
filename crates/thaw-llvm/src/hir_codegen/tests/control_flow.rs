@@ -994,9 +994,16 @@ fn user_class_extends_error_exposes_message_name_instanceof() {
             }
         }
     "#;
+    // `.name` defaults to `"Error"` (the nearest native ancestor), not
+    // the subclass's own name -- confirmed against real Node: a class
+    // extending `Error` that never assigns `this.name` itself inherits
+    // `Error.prototype.name`, exactly like real JavaScript's own
+    // prototype chain (see `lower/invocations/calls.rs`'s `super(...)`
+    // handling and `lower/declarations.rs`'s implicit-constructor path,
+    // both of which now default `this.name` the same way).
     assert_eq!(
         compile_and_run(source, "user_class_extends_error"),
-        "42\ntrue\nbad thing\nMyError\ntrue\ntrue\nfalse\n"
+        "42\ntrue\nbad thing\nError\ntrue\ntrue\nfalse\n"
     );
 }
 
@@ -1044,9 +1051,51 @@ fn multi_level_error_subclass_instanceof_matches_every_ancestor() {
             }
         }
     "#;
+    // `.name` defaults to `"Error"` here too, for the same reason as
+    // `user_class_extends_error_exposes_message_name_instanceof` above
+    // -- confirmed against real Node even through this two-level chain.
     assert_eq!(
         compile_and_run(source, "multi_level_error_subclass"),
-        "deep failure\nSub\ntrue\ntrue\ntrue\nfalse\n"
+        "deep failure\nError\ntrue\ntrue\ntrue\nfalse\n"
+    );
+}
+
+/// `this.name = "..."` inside an Error-subclass constructor used to fail
+/// to compile outright ("cannot assign to `.name`") -- `name` wasn't in
+/// the class's inherited field list the way `message` already was.
+/// Fixed by adding `name` as an inherited `Str` field (defaulting to the
+/// nearest native ancestor's own name, see the two tests above) and
+/// threading its *runtime* value through the tagged-string throw
+/// mechanism (`lower/expressions/coercions.rs`) as an override, so an
+/// explicit assignment here is what a `catch` block actually observes,
+/// not just a field write with no effect on the thrown/caught value.
+/// Also exercises `.toString()` (the method-call form, not `String(e)`)
+/// to prove it stays consistent with the override too.
+#[test]
+fn explicit_this_name_assignment_overrides_the_default_and_is_observable_when_caught() {
+    let source = r#"
+        class MyError extends Error {
+            constructor(message: string) {
+                super(message);
+                this.name = "MyError";
+            }
+        }
+        function main(): void {
+            try {
+                throw new MyError("oops");
+            } catch (e) {
+                console.log(e.name);
+                console.log(e.message);
+                console.log(e.toString());
+                console.log(e.stack);
+                console.log(e instanceof MyError);
+                console.log(e instanceof Error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "explicit_error_name_assignment"),
+        "MyError\noops\nMyError: oops\nMyError: oops\ntrue\ntrue\n"
     );
 }
 

@@ -463,6 +463,17 @@ fn lower_class_constructor(
                     "message".to_string(),
                     Box::new(HirExpr::Var(message.name.clone())),
                 )));
+                // Same default as the explicit-`super(...)`-call path
+                // (`lower/invocations/calls.rs`) -- a class with no
+                // written constructor at all still needs its `name`
+                // field initialized, or a later read (`.name`, or
+                // `throw`ing it) reads uninitialized memory.
+                initializer_body.push(HirStmt::Expr(HirExpr::PropAssign(
+                    Box::new(HirExpr::Var(this_name.clone())),
+                    instance_type.clone(),
+                    "name".to_string(),
+                    Box::new(HirExpr::Lit(HirLit::Str(base_name.clone()))),
+                )));
                 initializer_body.append(&mut own_initializers);
             } else {
             let signature = &signatures[&base_initializer];

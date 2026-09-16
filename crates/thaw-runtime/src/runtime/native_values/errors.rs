@@ -23,6 +23,16 @@
 const ERROR_TAG_MARKER: char = '\u{1}';
 const ERROR_CAUSE_MARKER: char = '\u{2}';
 const ERROR_CODE_MARKER: char = '\u{3}';
+/// Marks a `.name` override -- the *runtime* value of a thrown Error-
+/// family object's own `name` field (see `lower/expressions/
+/// coercions.rs`'s `HirType::Object` tagging), which takes priority
+/// over the static, compile-time-derived identity chain whenever
+/// present. Always produced by that one path, and always the last
+/// trailing segment (canonical order: name override, then cause, then
+/// code) -- a class-instance throw never also carries a cause/code, so
+/// this never needs to coexist with them in practice, but the split
+/// functions still handle the combination correctly regardless.
+const ERROR_NAME_OVERRIDE_MARKER: char = '\u{4}';
 
 fn split_error_tag(message: &str) -> (&str, &str) {
     let Some(rest) = message.strip_prefix(ERROR_TAG_MARKER) else {
@@ -31,8 +41,30 @@ fn split_error_tag(message: &str) -> (&str, &str) {
     let (name, body) = rest
         .split_once(ERROR_TAG_MARKER)
         .unwrap_or(("Error", message));
+    let body = body
+        .split_once(ERROR_NAME_OVERRIDE_MARKER)
+        .map_or(body, |value| value.0);
     let body = body.split_once(ERROR_CAUSE_MARKER).map_or(body, |value| value.0);
     (name, body.split_once(ERROR_CODE_MARKER).map_or(body, |value| value.0))
+}
+
+/// The runtime `.name` override embedded after the message, if any --
+/// see `ERROR_NAME_OVERRIDE_MARKER`.
+fn split_error_name_override(message: &str) -> Option<&str> {
+    let (_, after) = message.split_once(ERROR_NAME_OVERRIDE_MARKER)?;
+    let after = after.split_once(ERROR_CAUSE_MARKER).map_or(after, |value| value.0);
+    Some(after.split_once(ERROR_CODE_MARKER).map_or(after, |value| value.0))
+}
+
+/// The reported `.name` -- the runtime override when present, otherwise
+/// the static identity chain's most-derived segment (a plain
+/// `new Error(...)`-style tag, which has no override to embed).
+fn resolved_error_name(message: &str) -> String {
+    if let Some(name) = split_error_name_override(message) {
+        return name.to_string();
+    }
+    let (chain, _) = split_error_tag(message);
+    chain.split('$').next().unwrap_or(chain).to_string()
 }
 
 fn split_error_cause(message: &str) -> Option<&str> {
@@ -56,9 +88,8 @@ pub unsafe extern "C" fn thaw_error_name(message: *const c_char) -> *const c_cha
         return std::ptr::null();
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    let (chain, _) = split_error_tag(&text);
-    let name = chain.split('$').next().unwrap_or(chain);
-    arena_c_string(name).map_or(std::ptr::null(), |value| value.cast())
+    let name = resolved_error_name(&text);
+    arena_c_string(&name).map_or(std::ptr::null(), |value| value.cast())
 }
 
 /// # Safety
@@ -113,10 +144,10 @@ pub unsafe extern "C" fn thaw_error_to_string(message: *const c_char) -> *const 
     if !text.starts_with(ERROR_TAG_MARKER) {
         return message;
     }
-    let (chain, body) = split_error_tag(&text);
-    let name = chain.split('$').next().unwrap_or(chain);
+    let (_, body) = split_error_tag(&text);
+    let name = resolved_error_name(&text);
     let rendered = if body.is_empty() {
-        name.to_string()
+        name
     } else {
         format!("{name}: {body}")
     };
@@ -147,10 +178,10 @@ pub unsafe extern "C" fn thaw_error_stack(message: *const c_char) -> *const c_ch
         return std::ptr::null();
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    let (chain, body) = split_error_tag(&text);
-    let name = chain.split('$').next().unwrap_or(chain);
+    let (_, body) = split_error_tag(&text);
+    let name = resolved_error_name(&text);
     let rendered = if body.is_empty() {
-        name.to_string()
+        name
     } else {
         format!("{name}: {body}")
     };
@@ -301,6 +332,30 @@ mod error_native_tests {
         let tagged = "\u{1}TypeError\u{1}not a function";
         assert_eq!(call_stack(tagged), "TypeError: not a function");
         assert_eq!(call_stack(tagged), call_to_string(tagged));
+    }
+
+    #[test]
+    fn a_name_override_takes_priority_over_the_static_identity_chain() {
+        // A user class's `this.name = "..."` (or its real-JS-matching
+        // default, the nearest native ancestor's name -- see
+        // `lower/invocations/calls.rs`) is embedded as a `\u{4}`-tagged
+        // override, read by `.name`/`.stack`/`.toString()` in place of
+        // the *static*, compile-time-derived identity chain (which
+        // `instanceof` still uses unchanged -- an override never
+        // affects `thaw_error_is_instance`).
+        let tagged = "\u{1}MyError$Error\u{1}oops\u{4}MyError";
+        assert_eq!(call_name(tagged), "MyError");
+        assert_eq!(call_message(tagged), "oops");
+        assert_eq!(call_stack(tagged), "MyError: oops");
+        assert_eq!(call_to_string(tagged), "MyError: oops");
+        assert!(call_is_instance(tagged, "MyError"));
+        assert!(call_is_instance(tagged, "Error"));
+
+        // No override present -- falls back to the identity chain's
+        // most-derived segment, exactly like before this marker existed.
+        let unoverridden = "\u{1}MyError$Error\u{1}oops";
+        assert_eq!(call_name(unoverridden), "MyError");
+        assert_eq!(call_stack(unoverridden), "MyError: oops");
     }
 
     #[test]
