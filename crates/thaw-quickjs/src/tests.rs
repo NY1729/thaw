@@ -674,6 +674,40 @@ fn buffer_supports_encodings_views_search_and_numeric_access() {
     );
 }
 
+/// Real Node's own internal, undocumented per-encoding fast paths
+/// (`buf.utf8Slice(start, end)`, `buf.latin1Write(str, offset, length)`,
+/// one pair per encoding) -- not part of any public Buffer spec, but a
+/// real, popular package (busboy's own `lib/utils.js` decoder table,
+/// `data.latin1Slice(0, data.length)`, used while parsing a multipart
+/// field's Content-Disposition header) calls them directly as a speed
+/// shortcut around the public `toString`/`write`, which thaw's own
+/// `Buffer` class (extending `Uint8Array`, reimplementing only the
+/// public API) never had -- `req.pipe(busboy)` crashed with a bare
+/// `not a function` the moment busboy tried to decode any header value
+/// this way, well before its own `field`/`file` events ever fired.
+/// Fixed by adding each as a thin alias over the exact same logic
+/// `toString`/`write` already implement per encoding.
+#[test]
+fn buffer_supports_nodes_internal_per_encoding_slice_and_write_aliases() {
+    assert_eq!(
+        load(
+            "function bufferSliceWriteAliases() {\n\
+               const text = Buffer.from('hello world');\n\
+               const slices = [text.utf8Slice(0, text.length), text.latin1Slice(0, 5), text.asciiSlice(6, 11), Buffer.from('01020304', 'hex').hexSlice(0, 4), Buffer.from('aGVsbG8=', 'base64').base64Slice(0, 8), Buffer.from('aGVsbG8', 'base64url').base64urlSlice(0, 7), Buffer.alloc(4).fill(0x41).ucs2Slice(0, 4)];\n\
+               const utf8Target = Buffer.alloc(5); utf8Target.utf8Write('hello', 0, 5);\n\
+               const latin1Target = Buffer.alloc(3); latin1Target.latin1Write('abc', 0, 3);\n\
+               const hexTarget = Buffer.alloc(2); hexTarget.hexWrite('ff10', 0, 2);\n\
+               return [slices, utf8Target.toString(), latin1Target.toString(), hexTarget.toString('hex')];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("bufferSliceWriteAliases", "[]"),
+        r#"[["hello world","hello","world","01020304","aGVsbG8=","aGVsbG8","䅁䅁"],"hello","abc","ff10"]"#
+    );
+}
+
 #[test]
 fn webassembly_compiles_instantiates_and_exposes_numeric_memory_and_global_values() {
     assert_eq!(
