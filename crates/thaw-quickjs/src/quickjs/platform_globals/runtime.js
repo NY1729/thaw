@@ -300,7 +300,15 @@
           && typeof globalThis.console.warn === 'function') globalThis.console.warn(value);
     },
     exitCode: globalThis.process.exitCode,
-    title: globalThis.process.title || 'thaw'
+    title: globalThis.process.title || 'thaw',
+    // Real Node's diagnostic report API -- only `header.
+    // glibcVersionRuntime` is filled in (the one field a native-addon
+    // loader's own musl-vs-glibc runtime cross-check reads, real trigger:
+    // `better-sqlite3`), matching real Node's own `undefined` value on a
+    // musl build.
+    report: globalThis.process.report || {
+      getReport: () => ({ header: { glibcVersionRuntime: hostInfo.glibcVersionRuntime } })
+    }
   });
 
   // V8 exposes structured CallSite objects while QuickJS exposes stack

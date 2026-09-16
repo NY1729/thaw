@@ -293,6 +293,30 @@ fn process_exposes_time_cwd_and_event_helpers() {
     );
 }
 
+/// `process.report.getReport().header.glibcVersionRuntime` -- real
+/// Node's own way of telling a glibc build apart from a musl one at
+/// runtime, which some native-addon loaders check directly instead of
+/// trusting `process.platform`/`arch` alone (real trigger:
+/// `better-sqlite3`'s own prebuild-selection fallback,
+/// `!process.report.getReport().header.glibcVersionRuntime`, which used
+/// to throw outright -- `process.report` didn't exist at all). This
+/// test environment is a real glibc Linux build, so the field should be
+/// a genuine non-empty version string (`libc::gnu_get_libc_version()`),
+/// not just present-but-empty.
+#[test]
+fn process_report_exposes_the_real_glibc_version() {
+    assert_eq!(
+        load(
+            "function glibcVersion() {\n\
+               const header = process.report.getReport().header;\n\
+               return [typeof header.glibcVersionRuntime, header.glibcVersionRuntime.length > 0];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(call("glibcVersion", "[]"), r#"["string",true]"#);
+}
+
 #[test]
 fn error_prepare_stack_trace_receives_call_sites() {
     assert_eq!(

@@ -535,8 +535,32 @@ fn os_info_json() -> String {
         "version": std::fs::read_to_string("/proc/sys/kernel/version").unwrap_or_default().trim(), "machine": std::env::consts::ARCH,
         "endianness": if cfg!(target_endian = "little") { "LE" } else { "BE" }, "cpus": cpus,
         "totalmem": memory_value("MemTotal:"), "freemem": memory_value("MemAvailable:"), "uptime": uptime, "loadavg": loadavg,
-        "userInfo": { "username": std::env::var("USER").unwrap_or_default(), "homedir": home, "shell": std::env::var("SHELL").unwrap_or_default(), "uid": 0, "gid": 0 }
+        "userInfo": { "username": std::env::var("USER").unwrap_or_default(), "homedir": home, "shell": std::env::var("SHELL").unwrap_or_default(), "uid": 0, "gid": 0 },
+        "glibcVersionRuntime": glibc_version_runtime(),
     }).to_string()
+}
+
+/// Backs `process.report.getReport().header.glibcVersionRuntime` -- real
+/// Node's own way of telling a glibc build apart from a musl one at
+/// runtime (`null`/absent on musl), which some native-addon loaders check
+/// directly instead of trusting `process.platform`/`arch` alone (real
+/// trigger: `better-sqlite3`'s own prebuild-selection fallback,
+/// `!process.report.getReport().header.glibcVersionRuntime`). Thaw's own
+/// binary is itself statically one or the other (a build-time choice, the
+/// same `cfg!(target_env = "musl")` distinction `thaw-registry`'s own
+/// prebuild target-matching already uses) -- `libc::gnu_get_libc_version`
+/// is the real glibc runtime version string on a glibc build; musl has no
+/// such symbol at all.
+fn glibc_version_runtime() -> Option<String> {
+    #[cfg(target_env = "musl")]
+    {
+        None
+    }
+    #[cfg(not(target_env = "musl"))]
+    {
+        let version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) };
+        Some(version.to_string_lossy().into_owned())
+    }
 }
 
 /// Real per-interface addresses, grouped by interface name the way
