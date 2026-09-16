@@ -1509,6 +1509,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.context.i64_type().into(),
                     self.context.i8_type().into(),
                     i8_ptr.into(),
+                    self.context.i8_type().into(),
                 ],
                 false,
             ),

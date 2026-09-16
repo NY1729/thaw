@@ -362,13 +362,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 // a top-level dynamic-call callback argument.
                 HirType::CallableFunction(params, _, rest, ret) => {
                     let mut abi_params = params.clone();
+                    let has_rest = rest.is_some();
                     if let Some(rest) = rest {
                         abi_params.push(HirType::Array(rest.clone()));
                     }
-                    value = self.compile_register_native_callback_from_closure(
+                    value = self.compile_register_native_callback_from_closure_with_rest(
                         value.into_pointer_value(),
                         &abi_params,
                         ret,
+                        has_rest,
                     )?;
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"

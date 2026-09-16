@@ -938,7 +938,7 @@ pub extern "C" fn thaw_js_construct_handle_result(
 /// caller-frees-nothing convention (mirrors `thaw_js_call`'s own return),
 /// so `to_str` below copies it out immediately and nothing is freed here.
 type NativeCallbackAdapter = unsafe extern "C" fn(*const c_void, *const c_char) -> *const c_char;
-type NativeCallbackKey = (usize, u64, u64, u8, usize);
+type NativeCallbackKey = (usize, u64, u64, u8, usize, u8);
 
 thread_local! {
     static NATIVE_CALLBACK_HANDLES: RefCell<HashMap<NativeCallbackKey, u64>> =
@@ -992,13 +992,21 @@ pub extern "C" fn thaw_js_register_native_callback(
     param_count: u64,
     void_result: u8,
     finish: *const c_void,
+    has_rest: u8,
 ) -> ThawHandleResult {
     let adapter = adapter as usize;
     let closure = closure as usize;
     let finish = finish as usize;
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let identity = if closure == 0 { adapter } else { closure };
-        let cache_key = (identity, jsvalue_param_mask, param_count, void_result, finish);
+        let cache_key = (
+            identity,
+            jsvalue_param_mask,
+            param_count,
+            void_result,
+            finish,
+            has_rest,
+        );
         if let Some(handle) = NATIVE_CALLBACK_HANDLES.with(|handles| {
             handles
                 .borrow()
@@ -1135,7 +1143,9 @@ pub extern "C" fn thaw_js_register_native_callback(
              delete globalThis['{raw_name}']; \
              var mask = {jsvalue_param_mask}; \
              var callback = function() {{ \
-             var args = Array.prototype.slice.call(arguments, 0, {param_count}); \
+             var args = {has_rest} \
+             ? Array.prototype.slice.call(arguments, 0, {param_count} - 1).concat([Array.prototype.slice.call(arguments, {param_count} - 1)]) \
+             : Array.prototype.slice.call(arguments, 0, {param_count}); \
              for (var i = 0; i < args.length; i++) {{ \
              if ((mask & (1 << i)) !== 0) {{ \
              args[i] = {{ __thaw_js_handle_id__: globalThis.__thaw_retain_dynamic_value(args[i]) }}; \

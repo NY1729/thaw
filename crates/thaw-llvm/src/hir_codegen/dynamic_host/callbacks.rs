@@ -920,6 +920,32 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirType],
         ret: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_register_native_callback_from_closure_with_rest(closure, params, ret, false)
+    }
+
+    /// Like `compile_register_native_callback_from_closure`, but for a
+    /// callback whose *last* `params` entry (always `HirType::Array
+    /// (element)` here -- callers already flattened a real
+    /// `HirType::CallableFunction`'s rest parameter into this exact
+    /// shape) should collect every *actual* trailing JS argument at call
+    /// time, not just the one at that position. Without `has_rest`, the
+    /// JS-side wrapper (`thaw_js_register_native_callback`, thaw-quickjs)
+    /// sliced `arguments` down to a fixed `param_count` unconditionally
+    /// -- for a rest callback called with more real arguments than the
+    /// flattened ABI's param count (real trigger: better-sqlite3's own
+    /// `DatabaseOptions.verbose?: (message?, ...rest) => void`, called
+    /// with 2+ arguments), every argument past the cutoff was silently
+    /// dropped, and the one argument landing in the rest slot was passed
+    /// through as a bare scalar instead of the array the native decoder
+    /// expects -- a real, reproducible crash/misdecoding, not just lost
+    /// data.
+    pub(super) fn compile_register_native_callback_from_closure_with_rest(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+        has_rest: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let jsvalue_param_mask: u64 = params
@@ -946,6 +972,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let void_result = matches!(ret, HirType::Void)
             || matches!(ret, HirType::Promise(value) if **value == HirType::Void);
         let void_result = self.context.i8_type().const_int(void_result as u64, false);
+        let has_rest = self.context.i8_type().const_int(has_rest as u64, false);
         let result = self
             .builder
             .build_call(
@@ -959,6 +986,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     param_count.into(),
                     void_result.into(),
                     finish.unwrap_or_else(|| self.context.ptr_type(AddressSpace::default()).const_null()).into(),
+                    has_rest.into(),
                 ],
                 "register_native_callback",
             )

@@ -2264,6 +2264,7 @@ fn native_callback_registration_preserves_closure_identity() {
         2,
         0,
         std::ptr::null(),
+        0,
     );
     let second = thaw_js_register_native_callback(
         callback as *const c_void,
@@ -2272,6 +2273,7 @@ fn native_callback_registration_preserves_closure_identity() {
         2,
         0,
         std::ptr::null(),
+        0,
     );
     assert!(first.error.is_null());
     assert_eq!(first.value, second.value);
