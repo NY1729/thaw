@@ -7,6 +7,23 @@ fn run_compat(args: &[String]) -> Result<(), String> {
             .map(String::as_str)
             .unwrap_or("tests/typescript-compat.json"),
     );
+    let report = compatibility_report(path)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+    );
+    let bugs = report["bugs"].as_u64().unwrap_or(0);
+    if bugs == 0 {
+        Ok(())
+    } else {
+        Err(format!("{bugs} compatibility expectation(s) changed"))
+    }
+}
+
+/// Runs a TypeScript compatibility manifest and returns its JSON report --
+/// the same document `thaw compat` prints, shared with `thaw completeness`
+/// so the two can never disagree.
+fn compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
     let document: serde_json::Value = serde_json::from_slice(
         &std::fs::read(path)
             .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?,
@@ -85,7 +102,7 @@ fn run_compat(args: &[String]) -> Result<(), String> {
             .filter(|result| result["classification"] == classification)
             .count()
     };
-    let report = serde_json::json!({
+    Ok(serde_json::json!({
         "total": results.len(),
         "bugs": bugs,
         "counts": {
@@ -94,14 +111,5 @@ fn run_compat(args: &[String]) -> Result<(), String> {
             "out-of-scope": count("out-of-scope"),
         },
         "results": results,
-    });
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
-    );
-    if bugs == 0 {
-        Ok(())
-    } else {
-        Err(format!("{bugs} compatibility expectation(s) changed"))
-    }
+    }))
 }
