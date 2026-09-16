@@ -586,6 +586,38 @@ fn network_interfaces_json() -> String {
     serde_json::to_string(&groups).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Real DNS resolution for `node:dns`'s `lookup`/`resolve`/`resolve4`/
+/// `resolve6`, which otherwise only ever recognized an IP literal or
+/// `"localhost"` and returned `ENOTFOUND` for every real hostname --
+/// unlike `net.connect`/`http.request`, which already resolve real
+/// hostnames correctly because the native `TcpStream::connect` call
+/// they go through does its own OS-level resolution independently of
+/// this module. `std::net::ToSocketAddrs` (stdlib, no new dependency)
+/// already wraps the same OS resolver (`getaddrinfo`); a `port` of `0`
+/// is irrelevant here since only the address half of the result is
+/// used. Deliberately synchronous/blocking, like every other native
+/// primitive this crate exposes to QuickJS (`TcpStream::connect`
+/// itself already blocks the whole runtime during a real connection,
+/// so this isn't a new class of tradeoff) -- real Node offloads DNS to
+/// libuv's threadpool, which this runtime has no equivalent of.
+fn dns_lookup_json(hostname: String) -> String {
+    use std::net::ToSocketAddrs;
+
+    match (hostname.as_str(), 0u16).to_socket_addrs() {
+        Ok(addrs) => {
+            let mut addresses: Vec<serde_json::Value> = addrs
+                .map(|addr| {
+                    let ip = addr.ip();
+                    serde_json::json!({ "address": ip.to_string(), "family": if ip.is_ipv4() { 4 } else { 6 } })
+                })
+                .collect();
+            addresses.dedup();
+            serde_json::json!({ "ok": true, "addresses": addresses }).to_string()
+        }
+        Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+    }
+}
+
 include!("quickjs/processes.rs");
 
 include!("quickjs/intl.rs");
