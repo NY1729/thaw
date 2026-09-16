@@ -862,6 +862,70 @@ fn http_server_parses_and_replies_to_a_real_tcp_client() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+/// `IncomingMessage` never had a `.pipe()` method -- only the hand-rolled
+/// `on`/`pause`/`resume` trio built around a buffer-then-replay
+/// `_pendingBody`. Real multipart-parsing packages (busboy, and by
+/// extension multer) default to exactly `req.pipe(busboy)`
+/// (`defaultStreamHandler` in multer's own `make-middleware.js`), so any
+/// package built this way failed outright the moment a real request
+/// reached it -- `req.pipe is not a function`. Fixed by adding `.pipe()`
+/// as a thin shim over the existing `on('data')`/`on('end')` mechanism
+/// (mirroring `Readable.prototype.pipe`'s basic contract), rather than
+/// rebasing `IncomingMessage` onto a real `Readable` -- the existing
+/// buffer-then-replay design already delivers the whole body as one
+/// synchronous 'data' event before 'end', which is all `.pipe()` needs to
+/// forward correctly.
+#[test]
+fn http_incoming_message_pipe_forwards_the_buffered_body_and_ends() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+
+    let dir = temp_registry("builtin_http_incoming_message_pipe");
+    fs::write(
+        dir.join("index.js"),
+        "var http = require('node:http'); module.exports = async function (port) { var server = http.createServer(function(request, response) { var received = [], ended = false, destination = { write: function(chunk) { received.push(chunk.toString()); return true; }, end: function() { ended = true; response.end(received.join('') + '|' + ended); server.close(); }, emit: function() {} }; request.pipe(destination); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return true; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_incoming_message_pipe_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpIncomingMessagePipe = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpIncomingMessagePipe").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "true");
+    let response = client.join().unwrap();
+    assert!(response.ends_with("hello world|true"), "{response}");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 #[test]
 fn http_server_supports_standard_timeout_configuration() {
     use std::ffi::{CStr, CString};
