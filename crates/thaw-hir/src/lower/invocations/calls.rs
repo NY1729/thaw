@@ -209,7 +209,11 @@ impl<'a> FnLowerer<'a> {
                 return Err("function-value invocation does not accept type arguments".into());
             }
             let callee = self.lower_expr(callee_expr)?;
-            let (params, optional, rest) = match self.infer_expr_type(&callee)? {
+            let callee_ty = self.infer_expr_type(&callee)?;
+            if matches!(callee_ty, HirType::JsValue | HirType::Dynamic) {
+                return self.lower_dynamic_value_call_on(callee, &call.args);
+            }
+            let (params, optional, rest) = match callee_ty {
                 HirType::Function(params, _) => (params, HirOptionalMask::default(), None),
                 HirType::CallableFunction(params, optional, rest, _) => {
                     (params, optional, rest.map(|element| *element))

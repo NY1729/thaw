@@ -457,6 +457,31 @@ fn classify_ts_type(
             {
                 return DtsType::Native(HirType::Bytes);
             }
+            // TypeScript's built-in legacy-decorator aliases (`lib.es5.d.ts`)
+            // aren't backed by any real ambient `.d.ts` thaw ships, so a
+            // package like class-validator/TypeORM declaring
+            // `IsEmail(...): PropertyDecorator` would otherwise classify as
+            // `Unsupported` -> `Dynamic`, which blocks calling the factory's
+            // returned decorator as a real function. Give each alias a
+            // concrete arity/shape matching the arguments thaw's own
+            // decorator-invocation lowering (`lower/module/globals.rs`)
+            // actually passes: a class name string for `ClassDecorator`, a
+            // class name + property-key string pair for `PropertyDecorator`/
+            // `MethodDecorator` (thaw does not synthesize a real
+            // `descriptor`, so `MethodDecorator`'s third parameter is
+            // omitted here too). `ParameterDecorator` is left unsupported:
+            // thaw does not call parameter decorators at all yet.
+            if matches!(
+                ref_name.as_str(),
+                "ClassDecorator" | "PropertyDecorator" | "MethodDecorator"
+            ) {
+                let params = if ref_name == "ClassDecorator" {
+                    vec![HirType::Str]
+                } else {
+                    vec![HirType::Str, HirType::Str]
+                };
+                return DtsType::Native(HirType::Function(params, Box::new(HirType::Void)));
+            }
             if ref_name == "Readonly" {
                 let Some(inner) = ty_ref
                     .type_params

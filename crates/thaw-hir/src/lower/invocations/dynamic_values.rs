@@ -1,9 +1,13 @@
 impl<'a> FnLowerer<'a> {
-    fn lower_dynamic_value_call(
+    /// Marshals a dynamic call's raw AST arguments into the one JSON array
+    /// `callDynamicValue`/`callDynamicValueHandle` both expect. Shared by
+    /// `lower_dynamic_value_call` (callee is a named `JsValue` binding) and
+    /// `lower_dynamic_value_call_on` (callee is an arbitrary already-lowered
+    /// `HirExpr`, e.g. the result of `make(x)` where `make` returns a live
+    /// callable value rather than a native function).
+    fn dynamic_call_args_json(
         &mut self,
-        callee: &str,
         args: &[swc_ecma_ast::ExprOrSpread],
-        expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
         if args.iter().any(|argument| argument.spread.is_some()) {
             return Err("dynamic function calls do not support spread arguments".into());
@@ -25,7 +29,28 @@ impl<'a> FnLowerer<'a> {
                 self.coerce_to_declared(&HirType::Json, value)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let values = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
+        self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))
+    }
+
+    fn lower_dynamic_value_call_on(
+        &mut self,
+        callee: HirExpr,
+        args: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<HirExpr, String> {
+        let values = self.dynamic_call_args_json(args)?;
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueHandle".into())),
+            vec![callee, values],
+        ))
+    }
+
+    fn lower_dynamic_value_call(
+        &mut self,
+        callee: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+        expected: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        let values = self.dynamic_call_args_json(args)?;
         Ok(HirExpr::Call(
             Box::new(HirExpr::Var(
                 if matches!(expected, Some(HirType::JsValue | HirType::Dynamic)) {

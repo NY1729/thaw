@@ -126,6 +126,33 @@ fn lower_top_level_initializers(
                     };
                     steps.push(HirInitStep::StoreGlobal(symbol, init));
                 }
+                let decorator_class_name = source_class_name(class_name);
+                for member in &declaration.class.body {
+                    let (decorators, key) = match member {
+                        ClassMember::ClassProp(property) => {
+                            (&property.decorators, class_property_name(&property.key)?)
+                        }
+                        ClassMember::Method(method) if method.kind == MethodKind::Method => (
+                            &method.function.decorators,
+                            class_property_name(&method.key)?,
+                        ),
+                        _ => continue,
+                    };
+                    for decorator in decorators {
+                        let call = lower_member_decorator_call(
+                            &mut lowerer,
+                            decorator,
+                            decorator_class_name,
+                            &key,
+                        )?;
+                        steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
+                    }
+                }
+                for decorator in &declaration.class.decorators {
+                    let call =
+                        lower_class_decorator_call(&mut lowerer, decorator, decorator_class_name)?;
+                    steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
+                }
                 lowerer.super_initializer = saved_super;
                 lowerer.class_static_context = saved_static_context;
                 lowerer.class_context = saved_class_context;
@@ -306,4 +333,95 @@ fn lower_static_class_globals(
         lowerer.class_context = saved_class_context;
     }
     Ok(globals)
+}
+
+/// A class's own `Ident` symbol is already `__thawmod{N}_`-prefixed by
+/// `thaw-cli`'s module-flattening pass (every top-level declaration is
+/// renamed for cross-file uniqueness, entry file included) by the time
+/// thaw-hir ever sees it. A decorator receiving that raw compiler symbol
+/// as "the class's name" would be a leak of an internal implementation
+/// detail, not the source-level name real Node would hand it -- so strip
+/// it back off for anything a decorator call actually observes.
+fn source_class_name(name: &str) -> &str {
+    let Some(after_marker) = name.strip_prefix("__thawmod") else {
+        return name;
+    };
+    let digits_len = after_marker
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits_len == 0 {
+        return name;
+    }
+    after_marker[digits_len..].strip_prefix('_').unwrap_or(name)
+}
+
+/// A decorator (`@expr`) is a real function value, possibly produced by a
+/// factory call (`@IsEmail()`); either way it is evaluated once and then
+/// called with the class's real name plus (for member decorators) the real
+/// property key, matching TC39/TS legacy decorator call order (member
+/// decorators, top to bottom, then class decorators). Reusing
+/// `lower_call` here -- rather than a bespoke dynamic-value dispatcher --
+/// means a decorator that resolves to a plain compiled function and one
+/// that resolves to a `JsValue` imported from an npm package both get
+/// dispatched correctly for free.
+///
+/// A method/property decorator does not receive a `descriptor` argument:
+/// thaw's natively-compiled methods have no first-class callable JS
+/// representation to put in `descriptor.value`, and hand-waving a
+/// non-functional placeholder object would silently break any decorator
+/// that actually calls it. Decorators that only register metadata by
+/// target+key (the pattern class-validator/TypeORM/NestJS's own decorators
+/// use) work regardless.
+fn lower_member_decorator_call(
+    lowerer: &mut FnLowerer,
+    decorator: &Decorator,
+    class_name: &str,
+    property_key: &str,
+) -> Result<HirExpr, String> {
+    lower_decorator_call(
+        lowerer,
+        decorator,
+        vec![
+            decorator_string_arg(decorator.span, class_name),
+            decorator_string_arg(decorator.span, property_key),
+        ],
+    )
+}
+
+fn lower_class_decorator_call(
+    lowerer: &mut FnLowerer,
+    decorator: &Decorator,
+    class_name: &str,
+) -> Result<HirExpr, String> {
+    lower_decorator_call(
+        lowerer,
+        decorator,
+        vec![decorator_string_arg(decorator.span, class_name)],
+    )
+}
+
+fn lower_decorator_call(
+    lowerer: &mut FnLowerer,
+    decorator: &Decorator,
+    args: Vec<swc_ecma_ast::ExprOrSpread>,
+) -> Result<HirExpr, String> {
+    lowerer.lower_call(&CallExpr {
+        span: decorator.span,
+        ctxt: Default::default(),
+        callee: Callee::Expr(Box::new(decorator.expr.as_ref().clone())),
+        args,
+        type_args: None,
+    })
+}
+
+fn decorator_string_arg(span: swc_common::Span, value: &str) -> swc_ecma_ast::ExprOrSpread {
+    swc_ecma_ast::ExprOrSpread {
+        spread: None,
+        expr: Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+            span,
+            value: value.into(),
+            raw: None,
+        }))),
+    }
 }
