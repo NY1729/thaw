@@ -131,7 +131,19 @@ impl<'a> FnLowerer<'a> {
                         "NaN" => return Ok(HirExpr::Lit(HirLit::F64(f64::NAN))),
                         "Infinity" => return Ok(HirExpr::Lit(HirLit::F64(f64::INFINITY))),
                         "undefined" => return Ok(HirExpr::Lit(HirLit::Undefined)),
-                        global @ ("Atomics" | "crypto" | "process" | "AbortSignal") => {
+                        // `String`/`Number`/`Boolean` referenced bare
+                        // (not called) are real first-class function
+                        // values in JS (`typeof String === 'function'`,
+                        // `schema.name === String`) -- the idiom real
+                        // `mongoose` schemas use (`{ name: String, age:
+                        // Number }`). This never interferes with the
+                        // existing `String(x)`/`Number(x)`/`Boolean(x)`
+                        // call-position coercion intrinsics: those are
+                        // intercepted by `lower_call` reading the callee
+                        // name directly, which never routes through this
+                        // bare-identifier expression lowering at all.
+                        global @ ("Atomics" | "crypto" | "process" | "AbortSignal" | "String"
+                        | "Number" | "Boolean") => {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
                                 vec![HirExpr::Lit(HirLit::Str(global.to_string()))],

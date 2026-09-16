@@ -22,6 +22,38 @@ fn compiles_native_null_literals() {
     );
 }
 
+/// `String`/`Number`/`Boolean` referenced *bare* (not called) used to
+/// fail to compile ("unknown variable `String`") -- only their
+/// call-position coercion form (`String(x)`) was recognized at all.
+/// Real JS treats them as ordinary first-class function values
+/// (`typeof String === 'function'`, `schema.name === String`), the
+/// exact idiom real `mongoose` schemas use (`{ name: String, age:
+/// Number }`). Fixed by bridging a bare reference to the real native
+/// `String`/`Number`/`Boolean` global QuickJS already provides, the
+/// same "dynamic global" mechanism `process`/`crypto`/`Atomics`/
+/// `AbortSignal` already use -- doesn't interfere with the existing
+/// call-position intrinsic, which is intercepted earlier by
+/// `lower_call` reading the callee name directly and never reaches
+/// this bare-identifier path.
+#[test]
+fn bare_string_number_boolean_are_real_first_class_function_values() {
+    let source = r#"
+        function main(): void {
+            console.log(typeof String);
+            console.log(typeof Number);
+            console.log(typeof Boolean);
+            const captured = String;
+            console.log(captured === String);
+            console.log(String("still works"));
+            console.log(Number("42") + 1);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bare_string_number_boolean_values"),
+        "function\nfunction\nfunction\ntrue\nstill works\n43\n"
+    );
+}
+
 #[test]
 fn compiles_native_nullable_values() {
     let source = r#"
