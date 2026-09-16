@@ -28,10 +28,10 @@ use std::fmt;
 use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
     ArrowFunctionBody, AssignOp, AssignTarget, AwaitExpr, BinaryOp, CallExpr, Callee, ClassDecl,
-    ClassMember, ClassMethod, ClassProp, ComputedPropName, Decl, Expr, FnDecl, ForHead, IdentName,
-    KeyValueProp, Lit, MemberExpr, MemberProp, MethodKind, Module, ModuleDecl, ModuleItem,
-    ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop,
-    PropName, PropOrSpread, SimpleAssignTarget, Stmt, SuperProp, TsEntityName,
+    ClassMember, ClassMethod, ClassProp, ComputedPropName, Decl, Decorator, Expr, FnDecl, ForHead,
+    IdentName, KeyValueProp, Lit, MemberExpr, MemberProp, MethodKind, Module, ModuleDecl,
+    ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat,
+    Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, SuperProp, TsEntityName,
     TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsParamPropParam,
     TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclKind,
     VarDeclOrExpr,

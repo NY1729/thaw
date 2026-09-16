@@ -2020,3 +2020,55 @@ fn promise_void_constructor_resolves_and_rejects() {
         "executor\nvoid failure\ndone\n"
     );
 }
+
+/// TypeScript's legacy decorator syntax (`@expr` on a class/property/
+/// method) was previously rejected at the parser level entirely
+/// (`thaw-parser`'s `TsSyntax { decorators: false, .. }`). Decorators are
+/// now real function calls, evaluated in the same order real
+/// `--experimentalDecorators` TS emits: each member's decorators (in
+/// declaration order), then the class's own decorators, last. A bare
+/// identifier (`@LogProp`) and a factory call (`@LogClass("greeter")`,
+/// which must itself be invoked first, then its *result* called) both
+/// work, dispatched through the ordinary native call path -- no dynamic
+/// (`JsValue`) machinery is involved for a same-file/native decorator.
+///
+/// The class name a decorator receives is the real source-level name
+/// (`"Greeter"`), not `thaw-cli`'s internal `__thawmodN_Greeter` module-
+/// flattening symbol -- decorators strip that back off
+/// (`source_class_name` in `lower/module/globals.rs`).
+#[test]
+fn decorators_run_with_real_names_in_declaration_order() {
+    let source = r#"
+        function LogClass(tag: string): (target: string) => void {
+            return function (target: string) {
+                console.log("class:", tag, target);
+            };
+        }
+        function LogProp(target: string, key: string): void {
+            console.log("prop:", target, key);
+        }
+        function LogMethod(target: string, key: string): void {
+            console.log("method:", target, key);
+        }
+
+        @LogClass("greeter")
+        class Greeter {
+            @LogProp
+            name: string = "world";
+
+            @LogMethod
+            greet(): void {
+                console.log("hello", this.name);
+            }
+        }
+
+        function main(): void {
+            const g = new Greeter();
+            g.greet();
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "decorators_real_names_order"),
+        "prop: Greeter name\nmethod: Greeter greet\nclass: greeter Greeter\nhello world\n"
+    );
+}
