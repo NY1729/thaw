@@ -298,6 +298,35 @@ an API already represented by the generated marker set.
   is stable. The generated executable is 3,840 bytes smaller than the
   recorded baseline, so the CLDR payload is not leaking into programs
   that do not use `Intl`.
+
+### RSS gate follow-up (2026-09-16)
+
+Re-measured the same non-`Intl` `benchmarks/runtime/run.sh` sample
+(`hello.ts`, `console.log` only) six times in a row on the same
+machine, after the M11-M13 quality fixes above: 2196, 2580, 2444,
+2516, 2380, 2404 KiB -- straddling the 2,456 KiB gate value in both
+directions, run to run, with no code change in between. This
+contradicts `check_regression.sh`'s own comment ("peak RSS is a
+deterministic property of the built binary and barely moves between
+runs") for this machine; the M14 measurement above was very likely
+this same ordinary noise, not a real regression from the `Intl` work.
+A single `check_regression.sh` run against the checked-in
+`baseline-x64.json` (1,944 KiB) passed cleanly (2,196 KiB, threshold
+2,456 KiB). `executable_bytes` for this sample is unaffected either
+way (417,040 bytes, matching M14's finding that `Intl` code doesn't
+leak into non-`Intl` builds).
+
+Separately, an actual `Intl`-using sample (`new Intl.Locale("ja-JP")`,
+forcing the `intl` Cargo feature to link) measured 7,212-7,708 KiB RSS
+across five runs -- a real, expected cost of loading per-locale CLDR
+data, not covered by CI's gate (the gated sample never uses `Intl`),
+and consistent with the user's explicit curated-locale-list scope
+decision to bound this cost rather than eliminate it.
+
+No code change made here: the evidence points to pre-existing
+measurement noise on this machine, not a regression to fix. The
+open action from M14 -- confirm on the real CI runner -- still stands
+for anyone who wants an authoritative, non-shared-machine number.
 - Linux arm64 runtime measurement remains a CI-only check because the
   current host is x64.
 
