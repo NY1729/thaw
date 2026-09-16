@@ -739,3 +739,34 @@ fn promise_constructor_executor_accepts_a_tuple_spread() {
         "23\n"
     );
 }
+
+/// `new Promise((resolve) => setTimeout(resolve, ms))` -- the standard
+/// zero-dependency "sleep" idiom, ubiquitous in real code (retries,
+/// throttling, tests) -- used to fail to compile: the executor's
+/// resolve-type inference only recognized a literal `resolve(value)`
+/// call anywhere in the executor body, not `resolve` handed off *by
+/// reference* to another function (here, `setTimeout`) that invokes it
+/// later with no arguments. Fixed by defaulting the inferred type to
+/// `void` whenever `resolve` is referenced at all but never directly
+/// called with a value -- the overwhelmingly common reason to hand a
+/// bare `resolve` to something else (a timer, a one-shot event
+/// listener, a "done" callback) is signaling completion, not passing a
+/// value. Also confirms the executor still actually waits for the
+/// timer (not a no-op) by observing the log order around the `await`.
+#[test]
+fn promise_executor_infers_void_when_resolve_is_passed_by_reference_to_settimeout() {
+    let source = r#"
+        function sleep(ms: number): Promise<void> {
+            return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+        async function main(): Promise<void> {
+            console.log("before");
+            await sleep(5);
+            console.log("after");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_executor_resolve_by_reference"),
+        "before\nafter\n"
+    );
+}
