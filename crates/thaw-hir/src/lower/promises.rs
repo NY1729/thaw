@@ -339,8 +339,25 @@ impl<'a> FnLowerer<'a> {
             name: Symbol,
             values: Vec<Expr>,
             locals: HashMap<Symbol, Expr>,
+            // Whether `resolve` is referenced anywhere at all, in any
+            // position -- including handed off *by reference* rather
+            // than called directly (`setTimeout(resolve, ms)`, the
+            // standard zero-dependency "sleep" idiom, or a one-shot
+            // event listener/"done" callback). `values` alone can't see
+            // this: `resolve` never appears in call-callee position at
+            // all in that shape.
+            referenced: bool,
         }
         impl Visit for ResolveCalls {
+            fn visit_expr(&mut self, expr: &Expr) {
+                if let Expr::Ident(ident) = expr {
+                    if ident.sym == self.name {
+                        self.referenced = true;
+                    }
+                }
+                expr.visit_children_with(self);
+            }
+
             fn visit_var_declarator(&mut self, declarator: &swc_ecma_ast::VarDeclarator) {
                 if let (Pat::Ident(binding), Some(initializer)) =
                     (&declarator.name, &declarator.init)
@@ -368,6 +385,7 @@ impl<'a> FnLowerer<'a> {
             name: resolve_binding.id.sym.to_string(),
             values: Vec::new(),
             locals: HashMap::new(),
+            referenced: false,
         };
         arrow.body.visit_with(&mut calls);
 
@@ -412,9 +430,21 @@ impl<'a> FnLowerer<'a> {
                 inferred = Some(actual);
             }
         }
-        inferred.ok_or_else(|| {
-            "cannot infer Promise type because the executor has no resolvable `resolve(value)` call"
-                .into()
-        })
+        if let Some(inferred) = inferred {
+            return Ok(inferred);
+        }
+        if calls.referenced {
+            // `resolve` is handed off by reference (no direct
+            // `resolve(value)` call anywhere in the visible source) --
+            // defaults to `void`, matching the overwhelmingly common
+            // reason to do this (a timer, a one-shot event listener, a
+            // "done" callback signaling completion with no value). An
+            // explicit `new Promise<T>(...)` type argument still
+            // overrides this when the callback truly resolves with a
+            // value some other way this static scan can't see.
+            return Ok(HirType::Void);
+        }
+        Err("cannot infer Promise type because the executor has no resolvable `resolve(value)` call"
+            .into())
     }
 }
