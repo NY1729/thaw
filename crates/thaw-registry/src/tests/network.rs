@@ -1372,3 +1372,49 @@ fn unreferenced_net_server_does_not_hold_the_event_loop_open() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
+
+/// End-to-end confirmation that `dns.lookup`'s new native resolution
+/// path (`dns_lookup_json_resolves_localhost_via_the_real_os_resolver`
+/// in thaw-quickjs covers the mechanism hermetically) is actually wired
+/// through the JS `node:dns` builtin correctly: a real hostname other
+/// than `"localhost"` (which has its own hardcoded fast path,
+/// unaffected either way) now resolves to real addresses instead of
+/// always failing with `ENOTFOUND`. Gated behind the same real-network
+/// opt-in this project's other live-network tests already use, so the
+/// default hermetic suite never depends on external DNS.
+#[test]
+fn node_dns_lookup_resolves_a_real_hostname_when_network_integration_is_enabled() {
+    use std::ffi::{CStr, CString};
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = temp_registry("builtin_dns_real_lookup");
+    fs::write(
+        dir.join("index.js"),
+        "var dns = require('node:dns'); module.exports = function () {\n\
+             return new Promise(function (resolve) {\n\
+                 dns.lookup('dns.google', { all: true }, function (err, addresses) {\n\
+                     if (err) { resolve(['error', err.code]); return; }\n\
+                     resolve(['ok', addresses.length > 0, addresses.every(function (entry) {\n\
+                         return (entry.family === 4 || entry.family === 6) && typeof entry.address === 'string';\n\
+                     })]);\n\
+                 });\n\
+             });\n\
+         };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_dns_real_lookup_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDnsLookup = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseDnsLookup").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["ok",true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}

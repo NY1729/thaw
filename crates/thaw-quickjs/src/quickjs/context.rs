@@ -998,6 +998,8 @@ fn ensure_context() {
                 let os_network_interfaces_function =
                     Function::new(ctx.clone(), network_interfaces_json)
                         .expect("failed to create JavaScript OS network interface source");
+                let dns_lookup_function = Function::new(ctx.clone(), dns_lookup_json)
+                    .expect("failed to create JavaScript DNS lookup source");
                 // Backs `Intl.DateTimeFormat` (`platform_globals/intl.js`) --
                 // the one native primitive needed to compute a real,
                 // DST-aware IANA timezone offset/breakdown for a given
@@ -1456,6 +1458,9 @@ fn ensure_context() {
                         os_network_interfaces_function,
                     )
                     .expect("failed to install JavaScript OS network interface source");
+                ctx.globals()
+                    .set("__thaw_dns_lookup", dns_lookup_function)
+                    .expect("failed to install JavaScript DNS lookup source");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
