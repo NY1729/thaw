@@ -1,5 +1,4 @@
 fn run_node_compat(args: &[String]) -> Result<(), String> {
-    const EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     if args.len() > 1 {
         return Err("usage: thaw node-compat [manifest.json]".into());
     }
@@ -8,6 +7,28 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
             .map(String::as_str)
             .unwrap_or("tests/node-compat.json"),
     );
+    let report = node_compatibility_report(path)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+    );
+    let bugs = report["bugs"].as_u64().unwrap_or(0);
+    let reference_errors = report["referenceErrors"].as_u64().unwrap_or(0);
+    if bugs == 0 && reference_errors == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{bugs} Node compatibility expectation(s) changed; {reference_errors} reference case(s) failed"
+        ))
+    }
+}
+
+/// Runs a Node compatibility manifest (building and executing each case
+/// against both `node` and a compiled Thaw binary) and returns its JSON
+/// report -- the same document `thaw node-compat` prints, shared with
+/// `thaw completeness`.
+fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
+    const EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let document: serde_json::Value = serde_json::from_slice(
         &std::fs::read(path)
             .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?,
@@ -160,23 +181,12 @@ fn run_node_compat(args: &[String]) -> Result<(), String> {
         results.push(result);
     }
     let _ = std::fs::remove_dir_all(root);
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "total": results.len(),
-            "bugs": bugs,
-            "referenceErrors": reference_errors,
-            "results": results,
-        }))
-        .map_err(|error| error.to_string())?
-    );
-    if bugs == 0 && reference_errors == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "{bugs} Node compatibility expectation(s) changed; {reference_errors} reference case(s) failed"
-        ))
-    }
+    Ok(serde_json::json!({
+        "total": results.len(),
+        "bugs": bugs,
+        "referenceErrors": reference_errors,
+        "results": results,
+    }))
 }
 
 fn command_output_with_timeout(
