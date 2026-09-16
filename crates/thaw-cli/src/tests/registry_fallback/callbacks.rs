@@ -912,3 +912,91 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n50\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A rest-parameter callback nested two object levels deep in a Fallback
+/// *class instance method*'s argument, compiled through the untyped
+/// `callDynamicMethod` JSON path (the class method's argument doesn't
+/// score-match its typed declaration once the callback is nested that
+/// deep), lost its rest-ness: a bare object-method/arrow `(...args)` is
+/// lowered with its trailing rest flattened to one `Array(..)` ABI
+/// parameter but inferred as a plain `HirType::Function`, so the
+/// native-to-JS adapter built for it passed real JS arguments through by
+/// position instead of packing the trailing ones into the array the
+/// native side reads -- an uninitialized array, and a segfault the moment
+/// the callback indexed it. Real trigger: `new Marked().use({ renderer: {
+/// heading(...args) { ... } } })`, marked's own modern custom-renderer API.
+///
+/// Both spellings a real package uses are covered: a method-shorthand
+/// field (`heading`, lowered by `lower_object_method`) and an arrow
+/// property (`footnote`, lowered by `lower_arrow`); both are invoked with
+/// 0, 1, and 3 real arguments to confirm every trailing argument is
+/// collected, byte-identical to real Node.
+#[test]
+fn a_rest_callback_nested_in_a_class_method_argument_keeps_its_rest_parameter() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-nested-rest-callback-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("marker-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Renderer {\n\
+             heading?: (...args: any[]) => string;\n\
+             footnote?: (...args: string[]) => string;\n\
+         }\n\
+         export interface Options { renderer?: Renderer; }\n\
+         export declare class Widget {\n\
+             use(opts: Options): void;\n\
+             invoke0(): string;\n\
+             invoke1(): string;\n\
+             invoke3(): string;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Widget() { this.renderer = null; }\n\
+         Widget.prototype.use = function(opts) { this.renderer = opts.renderer || null; };\n\
+         Widget.prototype.invoke0 = function() { return this.renderer.heading(); };\n\
+         Widget.prototype.invoke1 = function() { return this.renderer.footnote('x'); };\n\
+         Widget.prototype.invoke3 = function() { return this.renderer.heading('a', 'b', 'c') + '|' + this.renderer.footnote('p', 'q', 'r'); };\n\
+         module.exports = { Widget: Widget };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Widget } from "marker-kit";
+function main(): void {
+    const w = new Widget();
+    w.use({
+        renderer: {
+            heading(...args: string[]): string {
+                return args.length + ":" + args.join(",");
+            },
+            footnote: (...args: string[]): string => "fn(" + args.length + "):" + args.join(","),
+        },
+    });
+    console.log(w.invoke0());
+    console.log(w.invoke1());
+    console.log(w.invoke3());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "0:\nfn(1):x\n3:a,b,c|fn(3):p,q,r\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

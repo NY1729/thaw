@@ -98,7 +98,8 @@ impl<'a> FnLowerer<'a> {
             })
             .transpose()?
             .or_else(|| contextual.as_ref().map(|(_, ret)| ret.clone()));
-        self.lower_contextual_arrow(&arrow, &params, expected_return.as_ref())
+        let lowered = self.lower_contextual_arrow(&arrow, &params, expected_return.as_ref())?;
+        Ok(rest_aware_closure(&arrow, lowered))
     }
 
     fn lower_computed_dictionary_lit(
