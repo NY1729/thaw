@@ -1314,6 +1314,137 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A Fallback function's declared union return type mixing a plain
+/// scalar with `Promise` of the *same* scalar -- real example: ejs's own
+/// `render(template, data?, opts?): string | Promise<string>` (sync
+/// unless `opts.async` is set, a flag no overload-dispatch narrows
+/// away). `compile_json_to_union_result` (thaw-llvm) rejected any
+/// non-scalar union member outright ("typed dynamic union return does
+/// not support member Promise(Str) yet"), regardless of whether the
+/// call ever actually took the async path -- every declared Fallback
+/// function is compiled unconditionally. Fixed by recognizing a
+/// `Promise<T>` member as a supported member whenever `T` itself is a
+/// plain scalar: a dynamic call's real JS `Promise` result is always
+/// already fully resolved by thaw-quickjs's own `resolve_value_impl`/
+/// `resolve_promise_value` before it ever reaches this decoder, so the
+/// raw JSON value looks exactly like the plain-scalar member either way
+/// -- decoded the same way, then wrapped into a genuine (already-
+/// resolved) native `Promise` via the existing `HirType::Promise`
+/// handling in `compile_typed_dynamic_result`.
+#[test]
+fn a_fallback_functions_union_return_type_supports_a_promise_of_the_same_scalar() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-promise-union-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("asyncish");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function shout(input: string): string | Promise<string>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { shout: function(s) { return s.toUpperCase() + \"!\"; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { shout } from "asyncish";
+function main(): void {
+    console.log(shout("hello"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "HELLO!\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A Fallback function is declared with several overloads, the least
+/// specific of which returns a union of two *callable* types differing
+/// only in their own return type -- real example: ejs's own `compile`,
+/// whose most general overload is `compile(template, opts?):
+/// TemplateFunction | AsyncTemplateFunction` (`TemplateFunction = (data?:
+/// Data) => string`, `AsyncTemplateFunction = (data?: Data) =>
+/// Promise<string>`, the sync-vs-async split depending on `opts.async`).
+/// Every declared Fallback function overload is compiled unconditionally
+/// (whether the user's own code's call site actually resolves to it or
+/// not, `typed_dynamic_declaration`'s own doc comment) -- so this
+/// union-returning overload's own declaration crashed the whole build
+/// ("typed dynamic union return does not support member
+/// CallableFunction(...) yet") even for a program whose only real call
+/// (a single-argument one, matching the *other*, simpler overload
+/// instead) never needed it. A real JS function value's own `typeof`
+/// can't distinguish which of the two callable members it actually is
+/// when this union path *is* taken, so `compile_json_to_union_result`
+/// picks the first declared callable member unconditionally (matching
+/// this codebase's existing "first declared wins when the runtime value
+/// alone can't disambiguate" convention, `union_overload_dispatch_
+/// declaration`'s own doc comment) and decodes/wraps it the normal way
+/// (`compile_json_value_to_native`'s `Function`/`CallableFunction`
+/// handling). Before this, any `Function`/`CallableFunction` union
+/// member failed the same "not supported yet" check `Promise` did.
+#[test]
+fn a_fallback_functions_union_return_type_supports_callable_members() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-callable-union-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("dualcompile");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Data { [name: string]: any; }\n\
+         export type TemplateFunction = (data?: Data) => string;\n\
+         export type AsyncTemplateFunction = (data?: Data) => Promise<string>;\n\
+         export declare function compile(prefix: string, opts: { async: true }): AsyncTemplateFunction;\n\
+         export declare function compile(prefix: string, opts?: { async?: false }): TemplateFunction;\n\
+         export declare function compile(prefix: string, opts?: { async?: boolean }): TemplateFunction | AsyncTemplateFunction;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { compile: function(prefix) { \
+         return function(data) { data = data || {}; return prefix + (data.name || \"\"); }; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { compile } from "dualcompile";
+function main(): void {
+    const rendered = compile("Hello, ");
+    console.log(rendered({ name: "Alice" }));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "Hello, Alice\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Fallback function whose real JS implementation genuinely returns
 /// `undefined` used to have that result marshaled back indistinguishably
 /// from a real `null` (`resolve_value_impl`, `crates/thaw-quickjs/src/

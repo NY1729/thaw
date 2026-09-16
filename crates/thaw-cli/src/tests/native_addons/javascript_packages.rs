@@ -2425,3 +2425,88 @@ async function main(): Promise<void> {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n0\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A real, `thaw registry add`-fetched `ejs@6.0.1` renders templates and
+/// compiles a reusable template function end-to-end -- pins down round
+/// 15's npm-compatibility bug hunt (see [[project_npm_interop_gaps_15]])
+/// as a permanent regression test. Exercises, together, against the real
+/// package: `render(...)`'s own general overload (`string |
+/// Promise<string>` -- see `a_fallback_functions_union_return_type_
+/// supports_a_promise_of_the_same_scalar` for the synthetic, network-free
+/// version), `compile(...)`'s own general overload (`TemplateFunction |
+/// AsyncTemplateFunction`, both callable types -- see `a_fallback_
+/// functions_union_return_type_supports_callable_members`), calling the
+/// *returned* template function with a real argument (a Fallback
+/// function returning a non-void-returning callable -- `compile_js_
+/// callback_from_json`'s generalization from its former void-only
+/// scope), and a named type alias (`TemplateFunction`) resolving an
+/// optional callback parameter correctly even though its own type
+/// (`Data`, an `any`-valued index signature) is itself unrepresentable
+/// (see thaw-bridge's `resolves_an_optional_callback_parameter_through_
+/// a_named_alias_even_when_its_own_type_is_unsupported`) -- plus a real,
+/// thrown EJS compile error surfacing as a real JS exception. Output
+/// verified byte-for-byte against real Node running the same ejs
+/// version (only the thrown error message's own `\`ejs::render\`
+/// threw: ` prefix differs, matching every other dynamic-call-error
+/// test's own wrapping).
+#[test]
+fn registry_add_renders_and_compiles_ejs_templates_end_to_end_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-ejs-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "ejs").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import ejs from "ejs";
+
+function main(): void {
+    const template = "<h1><%= title %></h1>\n<ul>\n<% items.forEach(function(item) { %>\n  <li><%= item %></li>\n<% }); %>\n</ul>\n<% if (extra) { %><p><%- extra %></p><% } %>";
+
+    const result = ejs.render(template, {
+        title: "My List",
+        items: ["apple", "banana", "cherry"],
+        extra: "<b>bold</b>",
+    });
+
+    console.log(result);
+
+    const compiled = ejs.compile("Hello <%= name %>, you are <%= age %> years old.");
+    console.log(compiled({ name: "Alice", age: 30 }));
+
+    try {
+        ejs.render("<%= missing.value %>", {});
+    } catch (e: any) {
+        console.log("error caught:", e && e.message);
+    }
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["ejs".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "<h1>My List</h1>\n<ul>\n\n  <li>apple</li>\n\n  <li>banana</li>\n\n  <li>cherry</li>\n\n</ul>\n<p><b>bold</b></p>\nHello Alice, you are 30 years old.\nerror caught: `ejs::render` threw: ejs:1\n >> 1| <%= missing.value %>\n\nmissing is not defined\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
