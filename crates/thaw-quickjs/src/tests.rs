@@ -1237,6 +1237,70 @@ fn crypto_p521_and_ed25519_sign_and_verify_interoperate_with_real_openssl() {
     );
 }
 
+/// Ed448 (EdDSA over curve448) sign/verify -- one of 4 previously
+/// out-of-scope `node:crypto` items the user picked up together (see
+/// [[project_crypto_rsa_ecdsa]]'s own "deliberately still out of
+/// scope" note). Same methodology as the P-521/Ed25519 test above:
+/// verifies a signature produced by real OpenSSL 3.5
+/// (`openssl genpkey -algorithm ed448` + `openssl pkeyutl -sign
+/// -rawin`), not just an internal round-trip.
+#[test]
+fn crypto_ed448_sign_and_verify_interoperate_with_real_openssl() {
+    assert_eq!(
+        load(
+            "function ed448PrivateKey() { return '-----BEGIN PRIVATE KEY-----\\nMEcCAQAwBQYDK2VxBDsEOWI45zIeyrnS8uNzaeXrUST94qjNL9kNXt+kgTRCpDQ+\\n2z9MswYirqpG3vBlGeJPDeOTwUTjRfgBpg==\\n-----END PRIVATE KEY-----\\n'; }\n\
+             function ed448PublicKey() { return '-----BEGIN PUBLIC KEY-----\\nMEMwBQYDK2VxAzoAsFWCVQcqbRnP1fEgvOSUY+ox4UCiTUB7BBkIi5qa45sFbG+S\\n9Q7VuaLnCrJEg0kZKGFQZNwh2nKA\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function ed448RoundTrip() {\n\
+               const message = 'hello ed448 signature test';\n\
+               const sig = __thaw_crypto_module.sign('sha256', message, ed448PrivateKey());\n\
+               const ok = __thaw_crypto_module.verify('sha256', message, ed448PublicKey(), sig);\n\
+               const tamperedMessage = __thaw_crypto_module.verify('sha256', 'goodbye world', ed448PublicKey(), sig);\n\
+               const opensslSig = Buffer.from('33e1730abda15ccd9421c9692972486b8f5d276ad88c589e55de128c4821a7faa414bd58da8426a9bd4a953387e4277358715f1e7ea2737e80754233aa485b36a9b52dfc405f8c43d6d95cc2e48d90b74c8bd68217410b1be081c7022de70ddf131eea49f012ddf2d7629aad2c4b73761d00', 'hex');\n\
+               const opensslVerifies = __thaw_crypto_module.verify('sha256', message, ed448PublicKey(), opensslSig);\n\
+               return [ok, tamperedMessage, opensslVerifies];\n\
+             }\n\
+             function keyObjectAsymmetricInfoEd448() {\n\
+               const priv = __thaw_crypto_module.createPrivateKey(ed448PrivateKey());\n\
+               const pub = __thaw_crypto_module.createPublicKey(ed448PublicKey());\n\
+               return [priv.asymmetricKeyType, pub.asymmetricKeyType];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(call("ed448RoundTrip", "[]"), "[true,false,true]");
+    assert_eq!(
+        call("keyObjectAsymmetricInfoEd448", "[]"),
+        r#"["ed448","ed448"]"#
+    );
+}
+
+/// A freshly generated Ed448 keypair (`generateKeyPairSync('ed448')`)
+/// signs and verifies correctly, and round-trips through
+/// `createPrivateKey`/`createPublicKey` again -- same shape as the
+/// existing RSA/EC/Ed25519 keygen test.
+#[test]
+fn crypto_generates_ed448_key_pairs_that_round_trip() {
+    assert_eq!(
+        load(
+            "function ed448KeygenRoundTrip() {\n\
+               const { publicKey, privateKey } = __thaw_crypto_module.generateKeyPairSync('ed448', {});\n\
+               const message = 'ed448 keygen round trip';\n\
+               const sig = __thaw_crypto_module.sign('sha256', message, privateKey);\n\
+               const ok = __thaw_crypto_module.verify('sha256', message, publicKey, sig);\n\
+               const privPem = privateKey.export();\n\
+               const pubPem = publicKey.export();\n\
+               const reimportedPriv = __thaw_crypto_module.createPrivateKey(privPem);\n\
+               const reimportedPub = __thaw_crypto_module.createPublicKey(pubPem);\n\
+               const sig2 = __thaw_crypto_module.sign('sha256', message, reimportedPriv);\n\
+               const ok2 = __thaw_crypto_module.verify('sha256', message, reimportedPub, sig2);\n\
+               return [ok, ok2, publicKey.asymmetricKeyType];\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(call("ed448KeygenRoundTrip", "[]"), r#"[true,true,"ed448"]"#);
+}
+
 /// DER-format key input and passphrase-protected PKCS8 private keys --
 /// the two remaining `node:crypto` key-import gaps. Same real-key
 /// methodology as the other crypto tests: a fresh RSA keypair, signed

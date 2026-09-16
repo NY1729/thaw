@@ -3,11 +3,11 @@
 // `privateDecrypt` (`platform_globals/buffer_crypto.js`). Matches this
 // crate's existing "honest partial support" precedent: sign/verify
 // (RSA PKCS1v15+PSS, ECDSA P-256/P-384/P-521 DER-encoded matching real
-// Node's own default `dsaEncoding: 'der'`, Ed25519/EdDSA), RSA
+// Node's own default `dsaEncoding: 'der'`, Ed25519/Ed448 EdDSA), RSA
 // encrypt/decrypt (PKCS1v15 default + OAEP), PEM and DER key input,
 // passphrase-protected PKCS8 private keys, key generation (RSA/EC/
-// Ed25519/X25519, custom RSA `publicExponent`, PKCS8/SPKI or PKCS1
-// (RSA)/SEC1(EC) output -- see `crypto_generate_key_pair_json`),
+// Ed25519/Ed448/X25519, custom RSA `publicExponent`, PKCS8/SPKI or
+// PKCS1(RSA)/SEC1(EC) output -- see `crypto_generate_key_pair_json`),
 // Diffie-Hellman key agreement (EC P-256/P-384/P-521 and X25519 via
 // `crypto.diffieHellman`/`crypto_diffie_hellman_hex`, classic raw-byte
 // EC-only `crypto.createECDH`/`crypto_ecdh_*_hex`). No `publicDecrypt`/
@@ -23,10 +23,24 @@
 // at all (unlike `ed25519-dalek`) -- its PKCS8/SPKI PEM wrapping is
 // hand-built (see `x25519_private_to_pem`/`parse_x25519_private_der`),
 // mirroring the `ed25519` crate's own internal approach for the same
-// RFC 8410 OKP-key shape, just with X25519's OID instead. Still out of
-// scope: Ed448, the legacy OpenSSL "Proc-Type: 4,ENCRYPTED" PKCS#1/
-// SEC1 passphrase format (only modern PKCS#8 `ENCRYPTED PRIVATE KEY`
-// is supported), passphrase-protected X25519 keys.
+// RFC 8410 OKP-key shape, just with X25519's OID instead. Ed448 is
+// backed by `ed448-goldilocks` (RustCrypto's own curve448/EdDSA
+// implementation) -- currently only published as a `0.14.0-pre`
+// series (the only version with real signing/verifying key types at
+// all; the last stable `0.9.0` is curve arithmetic only), which pulls
+// in its own separate `elliptic-curve`/`pkcs8`/`signature`/`sec1`
+// major-version family alongside this module's existing ones (no way
+// to avoid that duplication while depending on this crate at all --
+// `elliptic-curve` is one of its own unconditional dependencies, not
+// just a `pkcs8`-feature side effect). Its `SigningKey`/`VerifyingKey`
+// directly implement that *other* `pkcs8::EncodePrivateKey`/
+// `EncodePublicKey` (re-exported as `ed448_goldilocks::pkcs8`, aliased
+// `EncodePrivateKey as _`/etc. locally wherever used, to avoid
+// colliding with this file's own top-level `pkcs8` (v0.10) import of
+// the same trait names) -- no hand-built DER needed, unlike X25519.
+// Still out of scope: the legacy OpenSSL "Proc-Type: 4,ENCRYPTED"
+// PKCS#1/SEC1 passphrase format (only modern PKCS#8 `ENCRYPTED PRIVATE
+// KEY` is supported), passphrase-protected X25519 keys.
 //
 // Stateless and bytes-in/bytes-out, matching every other native
 // crypto primitive in this crate (`digest_bytes`/`hmac_bytes` in
@@ -58,6 +72,8 @@ enum ParsedKey {
     Ed25519Public(Box<ed25519_dalek::VerifyingKey>),
     X25519Private(Box<x25519_dalek::StaticSecret>),
     X25519Public(Box<x25519_dalek::PublicKey>),
+    Ed448Private(Box<ed448_goldilocks::SigningKey>),
+    Ed448Public(Box<ed448_goldilocks::VerifyingKey>),
 }
 
 impl ParsedKey {
@@ -72,6 +88,7 @@ impl ParsedKey {
             | ParsedKey::EcPublicP521(_) => "ec",
             ParsedKey::Ed25519Private(_) | ParsedKey::Ed25519Public(_) => "ed25519",
             ParsedKey::X25519Private(_) | ParsedKey::X25519Public(_) => "x25519",
+            ParsedKey::Ed448Private(_) | ParsedKey::Ed448Public(_) => "ed448",
         }
     }
 
@@ -84,6 +101,7 @@ impl ParsedKey {
                 | ParsedKey::EcPrivateP521(_)
                 | ParsedKey::Ed25519Private(_)
                 | ParsedKey::X25519Private(_)
+                | ParsedKey::Ed448Private(_)
         )
     }
 
@@ -97,7 +115,9 @@ impl ParsedKey {
             | ParsedKey::Ed25519Private(_)
             | ParsedKey::Ed25519Public(_)
             | ParsedKey::X25519Private(_)
-            | ParsedKey::X25519Public(_) => None,
+            | ParsedKey::X25519Public(_)
+            | ParsedKey::Ed448Private(_)
+            | ParsedKey::Ed448Public(_) => None,
         }
     }
 
@@ -142,6 +162,8 @@ impl ParsedKey {
             ParsedKey::Ed25519Public(key) => key.to_public_key_pem(LineEnding::LF).ok(),
             ParsedKey::X25519Private(key) => x25519_private_to_pem(key),
             ParsedKey::X25519Public(key) => x25519_public_to_pem(key),
+            ParsedKey::Ed448Private(key) => ed448_private_to_pem(key),
+            ParsedKey::Ed448Public(key) => ed448_public_to_pem(key),
         }
     }
 }
@@ -339,6 +361,121 @@ fn parse_x25519_public_der(bytes: &[u8]) -> Option<x25519_dalek::PublicKey> {
     Some(x25519_dalek::PublicKey::from(bytes))
 }
 
+/// Ed448's OID (RFC 8410 -- `id-Ed448`). `ed448-goldilocks`'s own
+/// `SigningKey`/`VerifyingKey` *do* implement `pkcs8`'s encode/decode
+/// traits, but only against a separate, incompatible v0.11 `pkcs8`
+/// instance (`elliptic-curve` 0.14's own dependency -- required
+/// unconditionally by `ed448-goldilocks` itself, not just behind a
+/// feature flag, so there is no way to avoid a second `pkcs8`/
+/// `elliptic-curve`/`signature` version family existing alongside this
+/// file's own v0.10 ones while using this crate at all). Reusing that
+/// v0.11 trait surface directly turned out to be a real dead end (its
+/// own blanket `DecodePublicKey`/`DecodePrivateKey` impls didn't
+/// actually resolve against `SigningKey`/`VerifyingKey`'s narrower
+/// `TryFrom<...Ref<'_>>` impls in this pre-release version -- a rough
+/// edge consistent with it not being a stable release yet). So this
+/// hand-builds the PKCS8/SPKI wrapping instead, exactly the way
+/// X25519's own `x25519_private_to_pem`/`parse_x25519_private_der`
+/// above already do for the same RFC 8410 OKP-key shape -- same
+/// nested-OCTET-STRING private-key layout, same flat-bytes SPKI
+/// `BIT STRING` public-key layout, just Ed448's OID and 57-byte (not
+/// 32-byte) raw key length.
+const ED448_ALGORITHM_ID: pkcs8::AlgorithmIdentifierRef<'static> = pkcs8::AlgorithmIdentifierRef {
+    oid: pkcs8::ObjectIdentifier::new_unwrap("1.3.101.113"),
+    parameters: None,
+};
+
+fn ed448_private_to_pem(key: &ed448_goldilocks::SigningKey) -> Option<String> {
+    let seed = key.as_bytes();
+    let mut private_key = [0u8; 59];
+    private_key[0] = 0x04;
+    private_key[1] = 0x39;
+    private_key[2..].copy_from_slice(seed.as_slice());
+    let public_key = key.verifying_key().to_bytes();
+    let info = pkcs8::PrivateKeyInfo {
+        algorithm: ED448_ALGORITHM_ID,
+        private_key: &private_key,
+        public_key: Some(&public_key),
+    };
+    let document = pkcs8::SecretDocument::encode_msg(&info).ok()?;
+    document
+        .to_pem("PRIVATE KEY", pkcs8::LineEnding::LF)
+        .ok()
+        .map(|pem| pem.to_string())
+}
+
+fn ed448_public_to_pem(key: &ed448_goldilocks::VerifyingKey) -> Option<String> {
+    let bytes = key.to_bytes();
+    let spki = pkcs8::SubjectPublicKeyInfoRef {
+        algorithm: ED448_ALGORITHM_ID,
+        subject_public_key: pkcs8::der::asn1::BitStringRef::new(0, &bytes).ok()?,
+    };
+    let document: pkcs8::Document = spki.try_into().ok()?;
+    document.to_pem("PUBLIC KEY", pkcs8::LineEnding::LF).ok()
+}
+
+fn parse_ed448_private_pem(pem: &str) -> Option<ed448_goldilocks::SigningKey> {
+    let (label, document) = pkcs8::SecretDocument::from_pem(pem).ok()?;
+    if label != "PRIVATE KEY" {
+        return None;
+    }
+    parse_ed448_private_der(document.as_bytes())
+}
+
+fn parse_ed448_private_der(bytes: &[u8]) -> Option<ed448_goldilocks::SigningKey> {
+    use pkcs8::der::Decode;
+    let info = pkcs8::PrivateKeyInfo::from_der(bytes).ok()?;
+    if info.algorithm.oid != ED448_ALGORITHM_ID.oid {
+        return None;
+    }
+    let seed: &[u8] = match info.private_key {
+        [0x04, 0x39, rest @ ..] if rest.len() == 57 => rest,
+        _ => return None,
+    };
+    ed448_goldilocks::SigningKey::try_from(seed).ok()
+}
+
+fn parse_ed448_private_encrypted_pem(
+    pem: &str,
+    passphrase: &str,
+) -> Option<ed448_goldilocks::SigningKey> {
+    let (label, encrypted) = pkcs8::Document::from_pem(pem).ok()?;
+    if label != "ENCRYPTED PRIVATE KEY" {
+        return None;
+    }
+    parse_ed448_private_encrypted_der(encrypted.as_bytes(), passphrase)
+}
+
+fn parse_ed448_private_encrypted_der(
+    bytes: &[u8],
+    passphrase: &str,
+) -> Option<ed448_goldilocks::SigningKey> {
+    let document = pkcs8::EncryptedPrivateKeyInfo::try_from(bytes)
+        .ok()?
+        .decrypt(passphrase)
+        .ok()?;
+    parse_ed448_private_der(document.as_bytes())
+}
+
+fn parse_ed448_public_pem(pem: &str) -> Option<ed448_goldilocks::VerifyingKey> {
+    let (label, document) = pkcs8::Document::from_pem(pem).ok()?;
+    if label != "PUBLIC KEY" {
+        return None;
+    }
+    parse_ed448_public_der(document.as_bytes())
+}
+
+fn parse_ed448_public_der(bytes: &[u8]) -> Option<ed448_goldilocks::VerifyingKey> {
+    use pkcs8::der::Decode;
+    let spki = pkcs8::SubjectPublicKeyInfoRef::from_der(bytes).ok()?;
+    if spki.algorithm.oid != ED448_ALGORITHM_ID.oid {
+        return None;
+    }
+    let raw = spki.subject_public_key.as_bytes()?;
+    let bytes: [u8; 57] = raw.try_into().ok()?;
+    ed448_goldilocks::VerifyingKey::from_bytes(&bytes).ok()
+}
+
 /// Tries every supported private-then-public key shape in turn --
 /// there is no cheap way to know a PEM's real key type without fully
 /// parsing it as each candidate, and this only ever runs on a short,
@@ -368,6 +505,9 @@ fn parse_key(pem: &str) -> Option<ParsedKey> {
     if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_pem(pem) {
         return Some(ParsedKey::Ed25519Private(Box::new(key)));
     }
+    if let Some(key) = parse_ed448_private_pem(pem) {
+        return Some(ParsedKey::Ed448Private(Box::new(key)));
+    }
     if let Some(key) = parse_x25519_private_pem(pem) {
         return Some(ParsedKey::X25519Private(Box::new(key)));
     }
@@ -388,6 +528,9 @@ fn parse_key(pem: &str) -> Option<ParsedKey> {
     }
     if let Ok(key) = ed25519_dalek::VerifyingKey::from_public_key_pem(pem) {
         return Some(ParsedKey::Ed25519Public(Box::new(key)));
+    }
+    if let Some(key) = parse_ed448_public_pem(pem) {
+        return Some(ParsedKey::Ed448Public(Box::new(key)));
     }
     if let Some(key) = parse_x25519_public_pem(pem) {
         return Some(ParsedKey::X25519Public(Box::new(key)));
@@ -415,6 +558,9 @@ fn parse_key_bytes_encrypted(bytes: &[u8], is_der: bool, passphrase: &str) -> Op
         if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_encrypted_der(bytes, passphrase) {
             return Some(ParsedKey::Ed25519Private(Box::new(key)));
         }
+        if let Some(key) = parse_ed448_private_encrypted_der(bytes, passphrase) {
+            return Some(ParsedKey::Ed448Private(Box::new(key)));
+        }
         None
     } else {
         let text = std::str::from_utf8(bytes).ok()?;
@@ -432,6 +578,9 @@ fn parse_key_bytes_encrypted(bytes: &[u8], is_der: bool, passphrase: &str) -> Op
         }
         if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_encrypted_pem(text, passphrase) {
             return Some(ParsedKey::Ed25519Private(Box::new(key)));
+        }
+        if let Some(key) = parse_ed448_private_encrypted_pem(text, passphrase) {
+            return Some(ParsedKey::Ed448Private(Box::new(key)));
         }
         None
     }
@@ -463,6 +612,9 @@ fn parse_key_der(bytes: &[u8]) -> Option<ParsedKey> {
     if let Ok(key) = ed25519_dalek::SigningKey::from_pkcs8_der(bytes) {
         return Some(ParsedKey::Ed25519Private(Box::new(key)));
     }
+    if let Some(key) = parse_ed448_private_der(bytes) {
+        return Some(ParsedKey::Ed448Private(Box::new(key)));
+    }
     if let Some(key) = parse_x25519_private_der(bytes) {
         return Some(ParsedKey::X25519Private(Box::new(key)));
     }
@@ -483,6 +635,9 @@ fn parse_key_der(bytes: &[u8]) -> Option<ParsedKey> {
     }
     if let Ok(key) = ed25519_dalek::VerifyingKey::from_public_key_der(bytes) {
         return Some(ParsedKey::Ed25519Public(Box::new(key)));
+    }
+    if let Some(key) = parse_ed448_public_der(bytes) {
+        return Some(ParsedKey::Ed448Public(Box::new(key)));
     }
     if let Some(key) = parse_x25519_public_der(bytes) {
         return Some(ParsedKey::X25519Public(Box::new(key)));
@@ -582,11 +737,13 @@ pub(crate) fn crypto_asymmetric_sign_hex(
             let signature: ed25519_dalek::Signature = key.sign(data);
             Ok(signature.to_vec())
         }
+        ParsedKey::Ed448Private(key) => Ok(key.sign_raw(data).to_bytes().to_vec()),
         ParsedKey::RsaPublic(_)
         | ParsedKey::EcPublicP256(_)
         | ParsedKey::EcPublicP384(_)
         | ParsedKey::EcPublicP521(_)
-        | ParsedKey::Ed25519Public(_) => Err("a public key cannot sign".to_string()),
+        | ParsedKey::Ed25519Public(_)
+        | ParsedKey::Ed448Public(_) => Err("a public key cannot sign".to_string()),
         ParsedKey::X25519Private(_) | ParsedKey::X25519Public(_) => {
             Err("an X25519 key cannot sign -- it's a Diffie-Hellman key-agreement key, not a signing key".to_string())
         }
@@ -640,6 +797,10 @@ pub(crate) fn crypto_asymmetric_verify(
             .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
         ParsedKey::Ed25519Public(key) => ed25519_dalek::Signature::from_slice(signature)
             .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
+        ParsedKey::Ed448Private(key) => ed448_goldilocks::Signature::from_slice(signature)
+            .is_ok_and(|sig| key.verifying_key().verify_raw(&sig, data).is_ok()),
+        ParsedKey::Ed448Public(key) => ed448_goldilocks::Signature::from_slice(signature)
+            .is_ok_and(|sig| key.verify_raw(&sig, data).is_ok()),
         ParsedKey::X25519Private(_) | ParsedKey::X25519Public(_) => return Err(
             "an X25519 key cannot verify -- it's a Diffie-Hellman key-agreement key, not a signing key".to_string()
         ),
@@ -958,16 +1119,16 @@ where
 }
 
 /// Backs `generateKeyPairSync`/`generateKeyPair`: generates a fresh
-/// keypair for `key_type` (`"rsa"`/`"ec"`/`"ed25519"`). `modulus_bits_
-/// or_curve` is the RSA modulus length (as a string, parsed to
-/// `usize`) for `"rsa"`, or the EC curve name for `"ec"` (ignored for
-/// `"ed25519"`). `public_exponent` is the RSA `publicExponent` option
-/// (as a decimal string; empty defaults to the universal 65537,
-/// ignored for `"ec"`/`"ed25519"`). `private_key_type`/`public_key_
-/// type` are `privateKeyEncoding.type`/`publicKeyEncoding.type`
-/// (empty defaults to `"pkcs8"`/`"spki"`) -- Ed25519 has no PKCS1/SEC1
-/// equivalent (RSA/EC only, matching real Node), so any non-default
-/// request there is an `Err`.
+/// keypair for `key_type` (`"rsa"`/`"ec"`/`"ed25519"`/`"ed448"`).
+/// `modulus_bits_or_curve` is the RSA modulus length (as a string,
+/// parsed to `usize`) for `"rsa"`, or the EC curve name for `"ec"`
+/// (ignored for `"ed25519"`/`"ed448"`). `public_exponent` is the RSA
+/// `publicExponent` option (as a decimal string; empty defaults to the
+/// universal 65537, ignored for `"ec"`/`"ed25519"`/`"ed448"`).
+/// `private_key_type`/`public_key_type` are `privateKeyEncoding.type`/
+/// `publicKeyEncoding.type` (empty defaults to `"pkcs8"`/`"spki"`) --
+/// Ed25519/Ed448 have no PKCS1/SEC1 equivalent (RSA/EC only, matching
+/// real Node), so any non-default request there is an `Err`.
 pub(crate) fn crypto_generate_key_pair_json(
     key_type: &str,
     modulus_bits_or_curve: &str,
@@ -1044,6 +1205,25 @@ pub(crate) fn crypto_generate_key_pair_json(
                 public
                     .to_public_key_pem(LineEnding::LF)
                     .map_err(|error| error.to_string())?,
+            )
+        }
+        "ed448" => {
+            if !matches!(private_key_type, "" | "pkcs8") {
+                return Err(format!(
+                    "unsupported Ed448 privateKeyEncoding.type: {private_key_type}"
+                ));
+            }
+            if !matches!(public_key_type, "" | "spki") {
+                return Err(format!(
+                    "unsupported Ed448 publicKeyEncoding.type: {public_key_type}"
+                ));
+            }
+            use ed448_goldilocks::elliptic_curve::Generate;
+            let key = ed448_goldilocks::SigningKey::generate();
+            let public = key.verifying_key();
+            (
+                ed448_private_to_pem(&key).ok_or("failed to encode Ed448 private key")?,
+                ed448_public_to_pem(&public).ok_or("failed to encode Ed448 public key")?,
             )
         }
         "x25519" => {
