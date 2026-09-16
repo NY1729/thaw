@@ -155,8 +155,11 @@ impl<'a> FnLowerer<'a> {
                     })
                     })
                     .or_else(|| {
-                        matches!(receiver.sym.as_ref(), "Atomics" | "crypto" | "process")
-                            .then_some(HirType::JsValue)
+                        matches!(
+                            receiver.sym.as_ref(),
+                            "Atomics" | "crypto" | "process" | "AbortSignal"
+                        )
+                        .then_some(HirType::JsValue)
                     })
             }
             Expr::New(construction) => construction
