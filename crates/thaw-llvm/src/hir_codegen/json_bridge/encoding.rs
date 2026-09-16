@@ -979,7 +979,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 value = self.compile_dynamic_value_placeholder(value)?;
                 "thaw_json_array_push_json"
             }
-            HirType::Function(params, ret) => {
+            HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => {
                 value = self.compile_register_native_callback_from_closure(
                     value.into_pointer_value(),
                     params,

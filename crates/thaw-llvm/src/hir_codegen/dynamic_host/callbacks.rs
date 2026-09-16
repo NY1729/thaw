@@ -1,8 +1,9 @@
 impl<'ctx> HirCompiler<'ctx> {
-    fn compile_js_void_callback_from_json(
+    fn compile_js_callback_from_json(
         &mut self,
         json: BasicValueEnum<'ctx>,
         params: &[HirType],
+        ret: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let key = self
             .builder
@@ -33,11 +34,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .get_insert_block()
             .ok_or("JS callback must be decoded inside a function")?;
-        let name = format!("__thaw_js_void_callback_{}", self.next_lambda);
+        let name = format!("__thaw_js_callback_{}", self.next_lambda);
         self.next_lambda += 1;
         let adapter = self.module.add_function(
             &name,
-            self.function_type(params, &HirType::Void)?,
+            self.function_type(params, ret)?,
             Some(Linkage::Internal),
         );
         let entry = self.context.append_basic_block(adapter, "entry");
@@ -122,16 +123,43 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         self.builder
-            .build_call(
-                self.module.get_function("thaw_cstring_destroy").unwrap(),
-                &[value.into()],
-                "destroy_js_callback_result_string",
-            )
-            .map_err(|error| error.to_string())?;
-        self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;
-        self.builder.build_return(None).map_err(|error| error.to_string())?;
+        if *ret == HirType::Void {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_cstring_destroy").unwrap(),
+                    &[value.into()],
+                    "destroy_js_callback_result_string",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_return(None)
+                .map_err(|error| error.to_string())?;
+        } else {
+            let result_json = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_parse").unwrap(),
+                    &[value.into()],
+                    "js_callback_result_json",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_parse did not return a callback result")?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_cstring_destroy").unwrap(),
+                    &[value.into()],
+                    "destroy_js_callback_result_string",
+                )
+                .map_err(|error| error.to_string())?;
+            let decoded = self.compile_typed_dynamic_result(result_json, ret)?;
+            self.builder
+                .build_return(Some(&decoded))
+                .map_err(|error| error.to_string())?;
+        }
         self.builder.position_at_end(parent);
 
         let closure = self
@@ -1347,10 +1375,32 @@ impl<'ctx> HirCompiler<'ctx> {
         json: BasicValueEnum<'ctx>,
         elements: &[HirType],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // A `Promise<T>` member is real (e.g. ejs's own `render(...): string
+        // | Promise<string>`, whose sync-vs-async return depends on an
+        // `opts.async` flag no overload-dispatch narrows away) but needs no
+        // special runtime discrimination here: `resolve_value_impl`/
+        // `resolve_promise_value` (thaw-quickjs) already fully resolve any
+        // real Promise a dynamic call's result carries *before* it reaches
+        // this decoder, so `json` is always the final, already-awaited
+        // value -- the same raw shape a plain `T` member would have. Only
+        // `T` itself needs to be a supported scalar; the wrapping back into
+        // a genuine (already-resolved) native Promise object reuses
+        // `compile_typed_dynamic_result`'s own existing `HirType::Promise`
+        // branch, just below.
         for element in elements {
+            let scalar = match element {
+                HirType::Promise(resolved) => resolved.as_ref(),
+                other => other,
+            };
             if !matches!(
-                element,
-                HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined
+                scalar,
+                HirType::F64
+                    | HirType::Str
+                    | HirType::Bool
+                    | HirType::Null
+                    | HirType::Undefined
+                    | HirType::Function(..)
+                    | HirType::CallableFunction(..)
             ) {
                 return Err(format!(
                     "typed dynamic union return does not support member {element:?} yet"
@@ -1383,12 +1433,29 @@ impl<'ctx> HirCompiler<'ctx> {
             if let Some(block) = remaining {
                 self.builder.position_at_end(block);
             }
-            let matches = match element {
+            let scalar = match element {
+                HirType::Promise(resolved) => resolved.as_ref(),
+                other => other,
+            };
+            let matches = match scalar {
                 HirType::Undefined => is_undefined,
                 HirType::Null => is_null,
                 HirType::F64 => self.compile_typeof_matches(typeof_string, "number")?,
                 HirType::Str => self.compile_typeof_matches(typeof_string, "string")?,
                 HirType::Bool => self.compile_typeof_matches(typeof_string, "boolean")?,
+                // A returned JS function's own `typeof` can't tell apart
+                // two callable members that differ only in *their own*
+                // return type (real example: ejs's own `compile(...):
+                // TemplateFunction | AsyncTemplateFunction`, `(data?:
+                // Data) => string | Promise<string>` depending on a flag
+                // no overload-dispatch narrows away) -- whichever callable
+                // member is declared first always wins for a real JS
+                // function value, matching this whole codebase's existing
+                // "first declared wins when the runtime value alone can't
+                // disambiguate" convention.
+                HirType::Function(..) | HirType::CallableFunction(..) => {
+                    self.compile_typeof_matches(typeof_string, "function")?
+                }
                 _ => unreachable!("checked above"),
             };
             let matched_block = self
@@ -1401,7 +1468,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_conditional_branch(matches, matched_block, next_block)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(matched_block);
-            let native = self.compile_json_value_to_native(json, element)?;
+            let native = if matches!(element, HirType::Promise(_)) {
+                self.compile_typed_dynamic_result(json, element)?
+            } else {
+                self.compile_json_value_to_native(json, element)?
+            };
             let value = self.build_union_value(native, index, elements)?;
             self.builder
                 .build_store(result_slot, value)
@@ -1422,7 +1493,11 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(block) = remaining {
             self.builder.position_at_end(block);
             let index = elements.len() - 1;
-            let native = self.compile_json_value_to_native(json, &elements[index])?;
+            let native = if matches!(elements[index], HirType::Promise(_)) {
+                self.compile_typed_dynamic_result(json, &elements[index])?
+            } else {
+                self.compile_json_value_to_native(json, &elements[index])?
+            };
             let value = self.build_union_value(native, index, elements)?;
             self.builder
                 .build_store(result_slot, value)

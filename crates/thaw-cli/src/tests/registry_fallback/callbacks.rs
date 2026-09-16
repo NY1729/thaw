@@ -851,3 +851,64 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Fallback function returns a real, callable closure whose *own*
+/// parameter is itself a callback -- real example: ejs's own
+/// `ClientFunction`/`AsyncClientFunction` (`compile(...)`'s `client:
+/// true` overloads), `(locals?, escape?: EscapeCallback, include?:
+/// IncludeCallback, rethrow?: RethrowCallback) => string`. Calling the
+/// *returned* closure with a real native closure argument pushes that
+/// argument into a JSON arguments array via `compile_json_array_push_
+/// native` (the adapter body `compile_js_callback_from_json`, thaw-llvm,
+/// builds to call back into JS) -- which had a match arm registering a
+/// native callback for a plain `HirType::Function` argument, but not the
+/// `HirType::CallableFunction` shape a callback with its *own* optional
+/// parameter classifies as, crashing the whole build ("cannot serialize
+/// collection element CallableFunction(...) to JSON") regardless of
+/// whether the returned closure was ever actually invoked.
+#[test]
+fn a_returned_callables_own_parameter_can_itself_be_a_real_native_callback() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-returned-callable-callback-param-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("higher-order-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeApplier(): (value: number, transform?: (n: number) => number) => number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeApplier: function() { \
+         return function(value, transform) { \
+         return transform ? transform(value) : value; \
+         }; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeApplier } from "higher-order-kit";
+function main(): void {
+    const apply = makeApplier();
+    console.log(apply(5));
+    console.log(apply(5, (n: number): number => n * 10));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n50\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

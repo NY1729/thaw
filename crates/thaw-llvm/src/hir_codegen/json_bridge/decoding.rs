@@ -142,11 +142,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| "thaw_json_handle_id did not return a value".into())
             }
-            HirType::Function(params, ret) if **ret == HirType::Void => {
-                self.compile_js_void_callback_from_json(json, params)
-            }
-            HirType::CallableFunction(params, _, None, ret) if **ret == HirType::Void => {
-                self.compile_js_void_callback_from_json(json, params)
+            HirType::Function(params, ret) => self.compile_js_callback_from_json(json, params, ret),
+            HirType::CallableFunction(params, _, None, ret) => {
+                self.compile_js_callback_from_json(json, params, ret)
             }
             other => Err(format!("unsupported dynamic result value {other:?}")),
         }
