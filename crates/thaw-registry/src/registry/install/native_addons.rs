@@ -70,18 +70,57 @@ fn target_prebuild_components() -> (&'static str, &'static str, &'static str) {
     (platform, arch, libc)
 }
 
+/// The subdirectory-per-target layout (`prebuilds/<platform>-<arch>/*.node`)
+/// below is `prebuildify`'s own convention (and what `node-gyp-build`
+/// expects at require time) -- but a package can also just vendor a flat
+/// `prebuilds/<platform>-<arch>.node` file directly, no per-target
+/// subdirectory at all (real example: `better-sqlite3` 13 dropped its
+/// `prebuild-install` dependency for exactly this simpler scheme). Same
+/// platform/arch/libc naming rules as `select_optional_dependency_addon`'s
+/// own suffix matching (`linuxmusl-<arch>` for musl, since that's the
+/// literal directory-name convention real optional-dependency packages
+/// already use for the same distinction).
+fn flat_prebuild_file_name(platform: &str, arch: &str, libc: &str) -> String {
+    if platform == "linux" && libc == "musl" {
+        format!("linuxmusl-{arch}.node")
+    } else {
+        format!("{platform}-{arch}.node")
+    }
+}
+
 fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>, String> {
     let prebuilds = package_dir.join("prebuilds");
     if !prebuilds.is_dir() {
         return Ok(None);
     }
     let (platform, arch, libc) = target_prebuild_components();
+    let flat_path = prebuilds.join(flat_prebuild_file_name(platform, arch, libc));
+    if flat_path.is_file() {
+        let relative_path = flat_path
+            .strip_prefix(package_dir)
+            .unwrap_or(&flat_path)
+            .to_string_lossy()
+            .into_owned();
+        return Ok(Some(SelectedPrebuild {
+            path: flat_path,
+            source: relative_path,
+            platform: platform.into(),
+            arch: arch.into(),
+            libc: libc.into(),
+        }));
+    }
     let target_dir = prebuilds.join(format!("{platform}-{arch}"));
     if !target_dir.is_dir() {
         let mut available = fs::read_dir(&prebuilds)
             .map_err(|error| format!("failed to inspect `{}`: {error}", prebuilds.display()))?
             .filter_map(Result::ok)
-            .filter(|entry| entry.path().is_dir())
+            .filter(|entry| {
+                entry.path().is_dir()
+                    || entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "node")
+            })
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         available.sort();

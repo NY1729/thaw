@@ -1420,6 +1420,35 @@ fn selects_the_current_targets_bundled_node_prebuild() {
     let _ = fs::remove_dir_all(package);
 }
 
+/// `prebuildify`'s subdirectory-per-target layout
+/// (`prebuilds/<platform>-<arch>/*.node`) isn't the only real one: a
+/// package can also vendor a flat `prebuilds/<platform>-<arch>.node`
+/// file directly, no per-target subdirectory at all -- real trigger:
+/// `better-sqlite3` 13 dropped its `prebuild-install` dependency for
+/// exactly this simpler scheme, and the registry used to report
+/// "available targets: none" for it (the old subdirectory-listing
+/// diagnostic only looked at directories, never flat `.node` files).
+#[test]
+fn selects_a_flat_bundled_node_prebuild() {
+    let package = temp_registry("select_flat_native_prebuild");
+    let (platform, arch, libc) = target_prebuild_components();
+    fs::create_dir_all(package.join("prebuilds")).unwrap();
+    let filename = if platform == "linux" && libc == "musl" {
+        format!("linuxmusl-{arch}.node")
+    } else {
+        format!("{platform}-{arch}.node")
+    };
+    let file = package.join("prebuilds").join(&filename);
+    fs::write(&file, b"native bytes").unwrap();
+
+    let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+    assert_eq!(selected.path, file);
+    assert_eq!(selected.platform, platform);
+    assert_eq!(selected.arch, arch);
+    assert_eq!(selected.libc, libc);
+    let _ = fs::remove_dir_all(package);
+}
+
 #[test]
 fn prefers_node_over_electron_prebuilds() {
     let package = temp_registry("prefer_node_prebuild");
