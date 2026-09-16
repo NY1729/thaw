@@ -2647,3 +2647,46 @@ fn dns_lookup_json_resolves_localhost_via_the_real_os_resolver() {
     let failure: serde_json::Value = serde_json::from_str(&dns_lookup_json(String::new())).unwrap();
     assert_eq!(failure["ok"], false);
 }
+
+/// `process.nextTick` used to be a plain alias for `queueMicrotask`
+/// (`Promise.resolve().then(callback)`), giving it no priority over an
+/// already-scheduled Promise `.then()` -- real Node fully drains its
+/// own separate nextTick queue before running any pending Promise
+/// microtask, at every checkpoint, so nextTick always wins regardless
+/// of scheduling order. Fixed by queuing into a plain JS array instead
+/// (`platform_globals/runtime.js`), drained by the Rust host
+/// (`drain_next_tick_queue`, thaw-quickjs/src/lib.rs) immediately
+/// before every single `execute_pending_job()` check across this
+/// crate -- not just once per batch, so a nextTick queued from inside
+/// one microtask still runs before the *next* one. Scoped to this
+/// crate's own QuickJS engine (this test drives it directly, the same
+/// way `thaw_js_run_event_loop`-based tests above do); natively
+/// JIT-compiled code has its own separate Promise/timer implementation
+/// (thaw-runtime) this fix does not reach -- a natively-compiled
+/// program's own `Promise`/`setTimeout` still order correctly against
+/// each other (a real, working, separate microtask queue), just not
+/// against a `process.nextTick` call, which still bridges into this
+/// crate's engine. Left as a known, separately-scoped gap: giving
+/// natively-compiled code the same fix needs `process.nextTick` as its
+/// own native compiler intrinsic (parallel to `setTimeout`), not a
+/// small patch to this file.
+#[test]
+fn process_next_tick_runs_before_promise_microtasks_scheduled_earlier() {
+    assert_eq!(
+        load(
+            "globalThis.order = []; \
+             order.push('sync'); \
+             Promise.resolve().then(() => order.push('promise')); \
+             process.nextTick(() => order.push('nextTick')); \
+             setTimeout(() => order.push('timeout0'), 0); \
+             setImmediate(() => order.push('immediate')); \
+             function readOrder() { return order; }"
+        ),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(
+        call("readOrder", "[]"),
+        r#"["sync","nextTick","promise","timeout0","immediate"]"#
+    );
+}

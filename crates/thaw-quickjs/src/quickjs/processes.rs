@@ -196,7 +196,12 @@ fn run_host_worker(
             &format!("(function() {{\n{}\n}}).call(globalThis);", start.source),
         )?;
         loop {
-            while ctx.execute_pending_job() {}
+            loop {
+                drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
+                if !ctx.execute_pending_job() {
+                    break;
+                }
+            }
             let run_due: Function = ctx
                 .globals()
                 .get("__thaw_run_due_timers")
@@ -204,7 +209,12 @@ fn run_host_worker(
             run_due
                 .call::<_, usize>(())
                 .map_err(|error| error.to_string())?;
-            while ctx.execute_pending_job() {}
+            loop {
+                drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
+                if !ctx.execute_pending_job() {
+                    break;
+                }
+            }
             drain_host_worker_events(&ctx, &events)?;
 
             let should_exit: Function = ctx
