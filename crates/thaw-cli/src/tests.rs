@@ -42,6 +42,26 @@ fn compatibility_commands_are_bounded_by_a_timeout() {
     .contains("timed out"));
 }
 
+/// `thaw completeness`'s composite index must stay consistent with the
+/// TypeScript manifest it is derived from: no regressed expectations, a
+/// non-empty measured set, and a bounded percentage. Reads the real
+/// manifest from the repository root (found by walking up from the crate
+/// directory), matching how the command is actually invoked.
+#[test]
+fn completeness_report_matches_the_typescript_manifest() {
+    let report = completeness_report(false).unwrap();
+    let typescript = &report["typescript"];
+    assert_eq!(typescript["bugs"], 0, "{report}");
+    let supported = typescript["supported"].as_u64().unwrap();
+    let unsupported = typescript["unsupported"].as_u64().unwrap();
+    assert!(supported + unsupported > 0, "{report}");
+    let coverage = typescript["coveragePercent"].as_f64().unwrap();
+    assert!((0.0..=100.0).contains(&coverage), "{report}");
+    assert_eq!(percentage(0, 0), 0.0);
+    assert_eq!(percentage(1, 4), 25.0);
+    assert!(report["indexPercent"].as_f64().unwrap() > 0.0, "{report}");
+}
+
 include!("tests/static_build.rs");
 
 include!("tests/acceptance.rs");

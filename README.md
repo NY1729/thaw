@@ -150,6 +150,24 @@ target/release/thaw node-compat tests/typescript-runtime-compat.json
 target/release/thaw node-compat tests/node-compat.json
 ```
 
+A single, trend-tracking snapshot of how much of the target surface is
+covered:
+
+```sh
+target/release/thaw completeness            # fast: TypeScript subset + static repo counts
+target/release/thaw completeness --with-node  # also builds/runs every Node-compat case (slow)
+target/release/thaw completeness --json       # machine-readable, for tracking over time
+```
+
+`completeness` measures the in-scope TypeScript cases the compiler can
+lower (excluding documented `out-of-scope` cases, from
+`tests/typescript-compat.json`) and, with `--with-node`, the share of
+Node-compat cases whose behavior matches real Node. The reported
+`indexPercent` is the mean of those measured axes only -- a rough trend
+indicator, not a precise statement of completeness; the repository counts
+it also prints (pinned npm integration tests, examples, design docs) are
+not scored.
+
 CPU and peak-memory measurements:
 
 ```sh
