@@ -30,20 +30,6 @@ use std::time::{Duration, Instant};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
-/// Prints an uncaught compiled exception before the process exits unsuccessfully.
-///
-/// # Safety
-/// `error` must be null or point to a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
-    if !error.is_null() {
-        eprintln!(
-            "Uncaught: {}",
-            unsafe { CStr::from_ptr(error) }.to_string_lossy()
-        );
-    }
-}
-
 include!("runtime/native_values/numbers.rs");
 include!("runtime/native_values/strings.rs");
 include!("runtime/native_values/arrays.rs");
@@ -53,6 +39,44 @@ include!("runtime/native_values/maps.rs");
 include!("runtime/native_values/errors.rs");
 include!("runtime/native_values/bytes.rs");
 include!("runtime/abi.rs");
+
+/// Prints an uncaught compiled exception before the process exits
+/// unsuccessfully.
+///
+/// `error` is the exception channel's own raw tagged string (see
+/// `errors.rs`'s doc comment: `\u{1}<Name>\u{1}<message>` or an
+/// untagged plain string), never printed as-is before now -- the
+/// control-byte markers aren't visible in a terminal, so `\u{1}Error
+/// \u{1}boom` rendered as the illegible "Errorboom" (missing real
+/// Node's own mandatory "Name: message" separator entirely). Routed
+/// through `thaw_error_to_string` (`.toString()`/`String(error)`'s own
+/// intrinsic) rather than `thaw_error_stack`: real Node prints a bare
+/// `throw "text"`'s uncaught value completely unchanged (no "Error:"
+/// prefix at all, confirmed against real Node -- it's not an `Error`),
+/// and `thaw_error_to_string` already gives exactly that for an
+/// untagged string, while still rendering a real tagged `Error`
+/// correctly as "Name: message". `thaw_error_stack` always applies the
+/// "defaults to `Error`" convention even to an untagged value (correct
+/// for `.stack`, which conceptually only exists on an Error-like
+/// object being coerced) -- using it here would have "fixed" the
+/// tagged case while silently breaking the untagged one, caught by
+/// checking a plain string throw against real Node before settling on
+/// this function instead.
+///
+/// # Safety
+/// `error` must be null or point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
+    if !error.is_null() {
+        let rendered = unsafe { thaw_error_to_string(error) };
+        let text = if rendered.is_null() {
+            unsafe { CStr::from_ptr(error) }.to_string_lossy()
+        } else {
+            unsafe { CStr::from_ptr(rendered) }.to_string_lossy()
+        };
+        eprintln!("Uncaught: {text}");
+    }
+}
 
 #[derive(Clone, Copy)]
 struct PromiseSubscription {

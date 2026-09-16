@@ -521,6 +521,50 @@ fn top_level_exception_skips_main_and_fails_the_process() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An uncaught `new Error(...)`/subclass throw used to print as the
+/// illegible "Errorboom" -- `thaw_runtime_report_uncaught`
+/// (thaw-runtime) printed the exception channel's raw tagged string
+/// directly, whose `\u{1}Error\u{1}boom`-style control-byte markers
+/// aren't visible in a terminal, so the real separator real Node
+/// always includes ("Error: boom") was simply missing. A plain
+/// untagged string throw (the sibling test above,
+/// `top_level_exception_skips_main_and_fails_the_process`) was
+/// already correct and stays that way -- real Node prints a non-Error
+/// thrown value completely unchanged, no "Error:" prefix at all.
+#[test]
+fn top_level_error_throw_reports_name_and_message() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-top-level-error-throw-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"
+                class MyError extends Error {
+                    constructor(message: string) {
+                        super(message);
+                        this.name = "MyError";
+                    }
+                }
+                function main(): void {
+                    throw new MyError("custom oops");
+                }
+            "#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        "Uncaught: MyError: custom oops\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn exports_top_level_destructured_bindings() {
     let dir = std::env::temp_dir().join(format!(
