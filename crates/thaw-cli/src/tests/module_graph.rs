@@ -565,6 +565,92 @@ fn top_level_error_throw_reports_name_and_message() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `await import("./literal-path")` used to fail to compile entirely
+/// ("unsupported callee (super/import calls not supported)") --
+/// thaw-hir rejected every `Callee::Import` outright, with no path at
+/// all for even the most common real-world shape (a literal string
+/// specifier naming a local project file). No runtime module loader
+/// exists in this ahead-of-time-compiled model to build a real
+/// namespace object when the call actually executes, but the target's
+/// exports are already fully known at compile time (the same
+/// information a static `import * as ns from "./other"` already
+/// resolves) -- so `module_graph.rs`'s AST-flattening pass now
+/// recognizes a literal-specifier `import(...)` as a real dependency
+/// edge and rewrites the call itself into the equivalent
+/// `Promise.resolve({ ...already-resolved exports })`, including a
+/// default export. A non-literal specifier (a plain variable, e.g.)
+/// isn't resolvable at compile time and correctly still hits the
+/// original rejection -- no runtime module loader was added, only
+/// this one compile-time-resolvable shape.
+#[test]
+fn dynamic_import_of_a_literal_local_path_resolves_named_and_default_exports() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-dynamic-import-literal-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("other.ts"),
+        r#"
+                export function greet(): string { return "hi"; }
+                export function farewell(): string { return "bye"; }
+                export default function (): string { return "default export"; }
+            "#,
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"
+                async function main(): Promise<void> {
+                    const mod = await import("./other");
+                    console.log(mod.greet());
+                    console.log(mod.farewell());
+                    console.log(mod.default());
+                }
+            "#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "hi\nbye\ndefault export\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_import_of_a_non_literal_specifier_is_still_rejected() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-dynamic-import-non-literal-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"
+                async function main(): Promise<void> {
+                    const name = "other";
+                    const mod = await import(name);
+                    console.log(mod);
+                }
+            "#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let error = build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap_err();
+    assert!(error.contains("import calls not supported"), "{error}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn exports_top_level_destructured_bindings() {
     let dir = std::env::temp_dir().join(format!(
