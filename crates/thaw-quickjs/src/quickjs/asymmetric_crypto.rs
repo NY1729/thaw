@@ -653,6 +653,134 @@ fn parse_key_der(bytes: &[u8]) -> Option<ParsedKey> {
     None
 }
 
+/// The legacy OpenSSL PEM encryption format ("traditional" PKCS#1 RSA/
+/// SEC1 EC private keys, `openssl {rsa,ec} -traditional -des3`/etc. --
+/// predates PKCS#8's own, unrelated `ENCRYPTED PRIVATE KEY` format,
+/// which this module already supports via `pkcs8`'s "encryption"
+/// feature): a plain, un-armored PEM block (`-----BEGIN RSA PRIVATE
+/// KEY-----`/`-----BEGIN EC PRIVATE KEY-----`, not the PKCS#8 header)
+/// with two extra header lines before the base64 body:
+/// ```text
+/// Proc-Type: 4,ENCRYPTED
+/// DEK-Info: <cipher-name>,<hex-iv>
+/// ```
+/// The encryption key itself is derived from the passphrase with
+/// OpenSSL's own legacy (non-PBKDF2) `EVP_BytesToKey`: repeatedly
+/// hashing `MD5(previous_digest || passphrase || salt)` (the `DEK-
+/// Info` IV's first 8 bytes double as the salt) until enough key bytes
+/// exist, then decrypting the body with that cipher/IV directly (no
+/// separate KDF salt/iteration count anywhere in the file, unlike
+/// PKCS#8's own PBES2 -- this format predates it). Real Node itself
+/// does *not* support this format either (`ERR_OSSL_UNSUPPORTED` since
+/// Node stopped linking against OpenSSL's legacy provider by default),
+/// so there is no real-Node behavior to match here -- this is purely
+/// "make real, pre-existing OpenSSL key files usable," cross-checked
+/// against what real OpenSSL 3.5 itself produces and can decrypt back.
+fn legacy_evp_bytes_to_key_md5(passphrase: &[u8], salt: &[u8], key_len: usize) -> Vec<u8> {
+    let mut key = Vec::with_capacity(key_len);
+    let mut previous: Vec<u8> = Vec::new();
+    while key.len() < key_len {
+        let mut round = Vec::with_capacity(previous.len() + passphrase.len() + salt.len());
+        round.extend_from_slice(&previous);
+        round.extend_from_slice(passphrase);
+        round.extend_from_slice(salt);
+        previous = md5::Md5::digest(&round).to_vec();
+        key.extend_from_slice(&previous);
+    }
+    key.truncate(key_len);
+    key
+}
+
+fn legacy_pem_decrypt_cbc(cipher: &str, key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
+    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+    macro_rules! decrypt_with {
+        ($block:ty) => {
+            cbc::Decryptor::<$block>::new_from_slices(key, iv)
+                .ok()?
+                .decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(ciphertext)
+                .ok()
+        };
+    }
+    match cipher {
+        "DES-EDE3-CBC" => decrypt_with!(des::TdesEde3),
+        "AES-128-CBC" => decrypt_with!(aes::Aes128),
+        "AES-192-CBC" => decrypt_with!(aes::Aes192),
+        "AES-256-CBC" => decrypt_with!(aes::Aes256),
+        _ => None,
+    }
+}
+
+/// Parses a legacy-encrypted PEM's own header lines, derives the key,
+/// decrypts the body, and hands back `(label, decrypted DER bytes)` --
+/// e.g. `("RSA PRIVATE KEY", <plain PKCS#1 DER>)` -- for the caller to
+/// feed into the existing (unencrypted) PKCS1/SEC1 parsers below.
+fn parse_legacy_encrypted_pem(pem: &str, passphrase: &str) -> Option<(String, Vec<u8>)> {
+    let mut lines = pem.lines();
+    let label = lines
+        .next()?
+        .trim()
+        .strip_prefix("-----BEGIN ")?
+        .strip_suffix("-----")?
+        .to_string();
+    if !matches!(label.as_str(), "RSA PRIVATE KEY" | "EC PRIVATE KEY") {
+        return None;
+    }
+    let mut dek_info = None;
+    let mut body = String::new();
+    let mut in_body = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("-----END ") {
+            break;
+        }
+        if !in_body {
+            if trimmed.is_empty() {
+                in_body = true;
+            } else if let Some(rest) = trimmed.strip_prefix("DEK-Info: ") {
+                dek_info = Some(rest.to_string());
+            }
+            continue;
+        }
+        body.push_str(trimmed);
+    }
+    let dek_info = dek_info?;
+    let (cipher, iv_hex) = dek_info.split_once(',')?;
+    let iv = hex_decode(iv_hex);
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .ok()?;
+    let key_len = match cipher {
+        "DES-EDE3-CBC" => 24,
+        "AES-128-CBC" => 16,
+        "AES-192-CBC" => 24,
+        "AES-256-CBC" => 32,
+        _ => return None,
+    };
+    let salt = iv.get(..8)?;
+    let key = legacy_evp_bytes_to_key_md5(passphrase.as_bytes(), salt, key_len);
+    let plaintext = legacy_pem_decrypt_cbc(cipher, &key, &iv, &ciphertext)?;
+    Some((label, plaintext))
+}
+
+fn parse_legacy_encrypted_key(pem: &str, passphrase: &str) -> Option<ParsedKey> {
+    let (label, der) = parse_legacy_encrypted_pem(pem, passphrase)?;
+    match label.as_str() {
+        "RSA PRIVATE KEY" => RsaPrivateKey::from_pkcs1_der(&der)
+            .ok()
+            .map(|key| ParsedKey::RsaPrivate(Box::new(key))),
+        "EC PRIVATE KEY" => {
+            if let Ok(key) = p256::ecdsa::SigningKey::from_sec1_der(&der) {
+                return Some(ParsedKey::EcPrivateP256(Box::new(key)));
+            }
+            if let Ok(key) = p384::ecdsa::SigningKey::from_sec1_der(&der) {
+                return Some(ParsedKey::EcPrivateP384(Box::new(key)));
+            }
+            parse_ec_p521_private_der(&der).map(|key| ParsedKey::EcPrivateP521(Box::new(key)))
+        }
+        _ => None,
+    }
+}
+
 /// The single entry point for resolving *any* key material shape this
 /// module supports: PEM or DER, passphrase-protected or not. Tries an
 /// encrypted-private-key parse first when `passphrase` is non-empty
@@ -664,6 +792,13 @@ fn parse_key_bytes(bytes: &[u8], is_der: bool, passphrase: &str) -> Option<Parse
     if !passphrase.is_empty() {
         if let Some(key) = parse_key_bytes_encrypted(bytes, is_der, passphrase) {
             return Some(key);
+        }
+        if !is_der {
+            if let Some(key) =
+                std::str::from_utf8(bytes).ok().and_then(|pem| parse_legacy_encrypted_key(pem, passphrase))
+            {
+                return Some(key);
+            }
         }
     }
     if is_der {
