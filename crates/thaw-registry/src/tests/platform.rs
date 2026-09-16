@@ -164,6 +164,80 @@ fn zlib_builtin_compresses_sync_and_callback_values() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+/// A real npm package (`crc32-stream`, a dependency of `archiver`) does
+/// `class DeflateCRC32Stream extends zlib.DeflateRaw { _transform(chunk,
+/// ...) { ...; super._transform(chunk, ...); } }` -- a genuine, real-
+/// world subclass overriding `_transform` to observe every chunk while
+/// still delegating to the real compression. Two bugs, both found
+/// investigating why the resulting zip's own CRC-32/size metadata came
+/// back all zero even though the compressed *content* round-tripped
+/// correctly:
+///
+/// 1. `ZlibTransform` (`system/runtime.rs`) built every zlib stream
+///    class (`Gzip`/`Deflate`/`DeflateRaw`/...) by passing `{transform:
+///    fn, flush: fn}` as *constructor options* to the base `Transform`
+///    class, which (matching real Node's own documented behavior for
+///    that pattern) sets `this._transform`/`this._flush` as *instance*
+///    properties -- shadowing a subclass's own *prototype* method of the
+///    same name entirely, so the override was silently never called.
+///    Real Node's own internal zlib classes don't use this pattern
+///    (matching an even a bare userland `Zlib.prototype._transform =
+///    ...` isn't overridden this way), which is exactly what let
+///    `crc32-stream` correctly subclass them there. Fixed by moving
+///    `_transform`/`_flush` onto `ZlibTransform.prototype` directly.
+/// 2. Fixing bug 1 alone still hung (`'end'` never fired): the fix's own
+///    accumulator for pending raw bytes was named `this._chunks` --
+///    colliding with `Readable`'s *own* internal buffered-but-unread
+///    data queue, also named `_chunks` on the very same instance (a
+///    `ZlibTransform` is both a `Readable` and a `Writable` via
+///    `Duplex`). Pushing compressed output into the (corrupted, shared)
+///    array left `stream._chunks.length` non-zero forever, so
+///    `emitReadableEnd`'s own "no pending data left" check never passed.
+///    Fixed by renaming the accumulator to `_zlibChunks`.
+#[test]
+fn a_zlib_streams_subclass_overriding_transform_is_actually_called() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_zlib_subclass");
+    fs::write(
+        dir.join("index.js"),
+        "var zlib = require('node:zlib'); \
+         function MyDeflate() { zlib.DeflateRaw.call(this); this.calls = 0; this.observedBytes = 0; } \
+         MyDeflate.prototype = Object.create(zlib.DeflateRaw.prototype); \
+         MyDeflate.prototype.constructor = MyDeflate; \
+         MyDeflate.prototype._transform = function(chunk, encoding, callback) { \
+         \x20\x20this.calls++; \
+         \x20\x20this.observedBytes += chunk ? chunk.length : 0; \
+         \x20\x20zlib.DeflateRaw.prototype._transform.call(this, chunk, encoding, callback); \
+         }; \
+         module.exports = async function () { \
+         \x20\x20var d = new MyDeflate(), out = []; \
+         \x20\x20d.on('data', function(value) { out.push(value); }); \
+         \x20\x20var done = new Promise(function(resolve, reject) { d.on('error', reject); d.on('end', resolve); }); \
+         \x20\x20d.write(Buffer.from('hello ')); \
+         \x20\x20d.end(Buffer.from('world')); \
+         \x20\x20await done; \
+         \x20\x20var restored = zlib.inflateRawSync(Buffer.concat(out)); \
+         \x20\x20return [d.calls > 0, d.observedBytes, restored.toString()]; \
+         };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_zlib_subclass_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseZlibSubclass = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseZlibSubclass").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[true,11,"hello world"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 #[test]
 fn worker_threads_builtin_exchanges_cloned_messages() {
     use std::ffi::{CStr, CString};
