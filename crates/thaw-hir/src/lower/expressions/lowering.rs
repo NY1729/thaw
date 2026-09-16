@@ -131,7 +131,7 @@ impl<'a> FnLowerer<'a> {
                         "NaN" => return Ok(HirExpr::Lit(HirLit::F64(f64::NAN))),
                         "Infinity" => return Ok(HirExpr::Lit(HirLit::F64(f64::INFINITY))),
                         "undefined" => return Ok(HirExpr::Lit(HirLit::Undefined)),
-                        global @ ("Atomics" | "crypto" | "process") => {
+                        global @ ("Atomics" | "crypto" | "process" | "AbortSignal") => {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("getDynamicValue".to_string())),
                                 vec![HirExpr::Lit(HirLit::Str(global.to_string()))],

@@ -1035,6 +1035,36 @@ fn lowers_abort_controller_through_the_dynamic_host() {
     assert!(format!("{:?}", program.functions[0].body).contains("constructDynamicValue"));
 }
 
+/// `AbortSignal.timeout(ms)`/`AbortSignal.any(signals)` used to fail to
+/// compile ("cannot infer the type of ... call to unknown function
+/// AbortSignal.timeout") even though the QuickJS Fallback engine
+/// already implements both correctly (`platform_globals/workers/
+/// abort_timers.js`) -- the native compiler's dynamic-value receiver
+/// inference (`infer_member_receiver_type`) recognized `Atomics`/
+/// `crypto`/`process` as bridgeable global namespace objects but not
+/// `AbortSignal`, and even once that's added, the identifier-lowering
+/// match arm that turns a bare `AbortSignal` reference into a real
+/// `getDynamicValue("AbortSignal")` call needs the same name added
+/// too (found by rebuilding and hitting "unknown variable
+/// `AbortSignal`" after only the first fix).
+#[test]
+fn lowers_abort_signal_static_methods_through_the_dynamic_host() {
+    let program = lower(
+        r#"
+        function main(): void {
+            const timeoutSignal = AbortSignal.timeout(50);
+            console.log(timeoutSignal.aborted);
+            const controller = new AbortController();
+            const combined = AbortSignal.any([controller.signal]);
+            console.log(combined.aborted);
+        }
+        "#,
+    );
+    let body = format!("{:?}", program.functions[0].body);
+    assert!(body.contains("getDynamicValue"));
+    assert!(body.contains("callDynamicMethod"));
+}
+
 #[test]
 fn lowers_json_type_annotation() {
     let program = lower(
