@@ -579,17 +579,22 @@ impl<'a> FnLowerer<'a> {
                     ],
                 )
             } else {
-                let rhs = if self.infer_expr_type(&current)? == HirType::F64
-                    && matches!(
-                        self.infer_expr_type(&rhs)?,
-                        HirType::Json | HirType::JsValue
-                    )
-                {
-                    self.coerce_primitive_to_number(rhs)?
-                } else {
-                    rhs
-                };
-                HirExpr::BinOp(op, Box::new(current), Box::new(rhs))
+                // Coerces *both* operands unconditionally, the same way
+                // the ordinary (non-compound) arithmetic `BinOp` lowering
+                // already does (`coerce_primitive_to_number` is a no-op
+                // for an already-`F64` value) -- the previous version
+                // only coerced `rhs` when `current` (the property being
+                // read back) was already known to be `F64`, so a
+                // `Json`-typed field (any `any`/`Json`-typed value,
+                // ubiquitous in real code: `const draft: any = {...};
+                // draft.count += 1`) hit "arithmetic requires F64
+                // operands, got Json and F64" instead, since `current`
+                // itself was the one needing conversion, not `rhs`.
+                HirExpr::BinOp(
+                    op,
+                    Box::new(self.coerce_primitive_to_number(current)?),
+                    Box::new(self.coerce_primitive_to_number(rhs)?),
+                )
             }
         } else {
             return Err(format!(
