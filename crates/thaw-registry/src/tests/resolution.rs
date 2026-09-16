@@ -293,6 +293,60 @@ fn installed_package_inlines_named_function_reexports() {
     let _ = fs::remove_dir_all(registry);
 }
 
+/// `export * from "bare-specifier"` re-exports from a genuinely
+/// *different* installed package, not another file within the same one
+/// -- real example: `@types/ramda`'s entire `index.d.ts` is just
+/// `export * from "types-ramda";`, where `types-ramda` is its own
+/// separate npm package whose real type entry point (per its own
+/// `package.json`'s `types` field) isn't at its package root at all
+/// (`./es/index.d.ts`, not `index.d.ts`). The old resolution only ever
+/// guessed `<name>.d.ts`/`<name>/index.d.ts`, silently finding neither
+/// and producing zero declarations -- `R.add` (and every other real
+/// ramda function) built with no error at all, just "call to
+/// undeclared function". Fixed by reusing `find_own_dts` (the same
+/// `types`/`typings`-field resolution already used for a `--use`d
+/// package's own entry point) for a bare-specifier target too.
+#[test]
+fn installed_package_follows_a_bare_reexport_to_another_packages_own_types_entry() {
+    let scratch = temp_registry("installed-dts-cross-package-reexport-scratch");
+    let registry = temp_registry("installed-dts-cross-package-reexport-registry");
+    let node_modules = scratch.join("node_modules");
+    let types_wrapper = node_modules.join("types-ramda-like");
+    fs::create_dir_all(&types_wrapper).unwrap();
+    fs::write(
+        types_wrapper.join("package.json"),
+        r#"{"name":"types-ramda-like","version":"1.0.0","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        types_wrapper.join("index.d.ts"),
+        "export * from \"real-types-package\";",
+    )
+    .unwrap();
+    fs::write(types_wrapper.join("index.js"), "module.exports = {};").unwrap();
+    let real_types = node_modules.join("real-types-package");
+    fs::create_dir_all(real_types.join("es")).unwrap();
+    fs::write(
+        real_types.join("package.json"),
+        r#"{"name":"real-types-package","version":"1.0.0","types":"./es/index.d.ts"}"#,
+    )
+    .unwrap();
+    fs::write(
+        real_types.join("es/index.d.ts"),
+        "export declare function add(a: number, b: number): number;",
+    )
+    .unwrap();
+
+    add_installed(&registry, &node_modules, "types-ramda-like").unwrap();
+    let declarations = resolve(&registry, "types-ramda-like").unwrap().dts_source;
+    assert!(
+        declarations.contains("declare function add(a: number, b: number): number"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
 #[test]
 fn installed_package_inlines_default_reexports() {
     // `export { default as v4 } from './v4'` -- the common shape for a
