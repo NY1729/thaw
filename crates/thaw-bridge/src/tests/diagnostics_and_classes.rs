@@ -510,3 +510,30 @@ fn extracts_non_callable_values_without_duplicating_callable_consts() {
         ]
     );
 }
+
+/// `.d.ts` flattening (thaw-registry) concatenates every file a
+/// package's type declarations span into one source string; the same
+/// value name declared in more than one of those files (a genuine
+/// re-export, or the same ambient declaration duplicated across two
+/// concatenated files) used to produce two `DtsValue` entries for the
+/// same binding, which the shim generator's own duplicate-binding
+/// check (rightly) rejected as a hard build error -- real examples:
+/// `marked`'s own `_defaults`, `js-yaml`'s own `binaryTag`. Same class
+/// of bug already fixed for `parse_dts_classes` (yaml's `NodeBase`,
+/// socket.io's `StrictEventEmitter`), just never applied to values
+/// too. First occurrence wins.
+#[test]
+fn deduplicates_a_value_name_declared_more_than_once() {
+    let values = parse_dts_values(
+        r#"export declare const count: number;
+            export declare const count: number;"#,
+    )
+    .unwrap();
+    assert_eq!(
+        values,
+        vec![DtsValue {
+            name: "count".into(),
+            ty: DtsType::Native(HirType::F64)
+        }]
+    );
+}
