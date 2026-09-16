@@ -576,23 +576,26 @@ function main(): void {
 /// constructible, so it fell through every special case to the
 /// catch-all "only `new Promise<T>(...)` is supported" error --
 /// misleading, since the problem had nothing to do with Promises.
-/// Fixed by lowering `new X(...)` as a plain call when `X` already
-/// resolves to an ordinary (non-class) function signature.
-///
-/// Known real limitation, not covered by this fix (thaw-bridge doesn't
-/// classify this declaration shape as `constructible`, so it never gets
-/// the proper `$new$`-prefixed constructor wrapper a real `declare
-/// class` does -- see `shim_support.rs`'s own `generate_napi_class_
-/// constructors`): the underlying JS function is called *without* `new`,
-/// so this only produces the real instance for a factory-style export
-/// that explicitly `return`s its result (as here, and as many real
-/// dual-callable/constructible npm exports do) -- not one that relies
-/// on `new`'s implicit `this`-binding, and not a real N-API class
-/// created via `napi_define_class` (which typically rejects being
-/// called without `new` outright). Fully fixing `new Database(...)`
-/// against real `better-sqlite3` needs thaw-bridge to recognize this
-/// declaration shape as constructible in its own right, generating the
-/// same proper `$new$`-prefixed wrapper a `declare class` gets.
+/// Fixed in two layers. First, `new X(...)` lowers as a plain call when
+/// `X` already resolves to an ordinary (non-class) function signature --
+/// a safety net for any declaration shape thaw-bridge still doesn't
+/// recognize as constructible. Second, and the one this test actually
+/// exercises: `thaw-bridge`'s `parse_dts_classes`
+/// (`constructor_interface_classes`) now also synthesizes a minimal
+/// `DtsClass` (`constructible: true`, one constructor from the
+/// interface's own `new (...)` signature) straight from a bare `declare
+/// const X: { new (...): T; (...): T }`, not just a real `declare
+/// class`. That's enough for `generate_napi_class_constructors`
+/// (`shim_support.rs`) to emit the same `$new$`-prefixed constructor
+/// wrapper a real class gets, which in turn makes
+/// `rewrite_external_class_constructors` (`calls.rs`) rewrite `new
+/// Database(...)` to call it -- and that wrapper performs a genuine
+/// `new`-construct (`thaw_js_construct_handle_result`/
+/// `thaw_napi_construct_handle_typed_result`, `typed_calls.rs`), not a
+/// plain call. So a real `this`-relying constructor function (no
+/// explicit `return`) now works too, not just a factory-style export --
+/// this test's `bundle.js` deliberately uses `this.path = path` (no
+/// `return`) to prove that.
 #[test]
 fn new_on_a_callable_interface_with_a_construct_signature_runs_as_native_code() {
     let dir = std::env::temp_dir().join(format!(
@@ -615,7 +618,7 @@ fn new_on_a_callable_interface_with_a_construct_signature_runs_as_native_code() 
     .unwrap();
     std::fs::write(
         package.join("bundle.js"),
-        "function Database(path) { return { path: path }; } module.exports = Database;\n",
+        "function Database(path) { this.path = path; } module.exports = Database;\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");

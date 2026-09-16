@@ -44,7 +44,95 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
             classes.push(class);
         }
     }
+    for class in constructor_interface_classes(&module, &interfaces, &generic_interfaces) {
+        if !classes.iter().any(|existing| existing.name == class.name) {
+            classes.push(class);
+        }
+    }
     Ok(classes)
+}
+
+/// A bare `declare const X: SomeInterface` whose `SomeInterface` itself
+/// carries a `new (...): T` construct signature (real trigger:
+/// better-sqlite3's own `declare const Database: BetterSqlite3.
+/// DatabaseConstructor`, its entire default export) is a callable
+/// *interface value*, not a `class` declaration -- `extract_class_decls`
+/// never sees it, so it never became `constructible`, and `new Database
+/// (...)` fell through every real constructor path to a plain-call
+/// fallback that drops `new`/`new.target` semantics. Synthesizes a
+/// minimal `DtsClass` directly from the one construct signature so it
+/// gets the same `constructible` treatment (and the same real
+/// `$new$`-prefixed native constructor wrapper,
+/// `shim_support.rs`'s `generate_napi_class_constructors`) an ordinary
+/// `declare class` already does. Only the constructor is synthesized --
+/// the instance type's own methods/properties (e.g. `Database.exec()`)
+/// are resolved separately, through whatever already handles an ordinary
+/// interface-typed Fallback value's own property/method access.
+fn constructor_interface_classes(
+    module: &Module,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Vec<DtsClass> {
+    let interface_bodies = module
+        .body
+        .iter()
+        .flat_map(extract_interface_decls)
+        .map(|iface| (iface.id.sym.to_string(), &iface.body))
+        .collect::<HashMap<_, _>>();
+
+    let var_decls = module.body.iter().filter_map(|item| match item {
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(declaration))) => {
+            Some(declaration.as_ref())
+        }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+            Decl::Var(declaration) => Some(declaration.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    });
+
+    var_decls
+        .flat_map(|declaration| &declaration.decls)
+        .filter_map(|declarator| {
+            let Pat::Ident(binding) = &declarator.name else {
+                return None;
+            };
+            let annotation = binding.type_ann.as_ref()?;
+            let TsType::TsTypeRef(reference) = annotation.type_ann.as_ref() else {
+                return None;
+            };
+            let interface_name = match &reference.type_name {
+                TsEntityName::Ident(name) => name.sym.to_string(),
+                TsEntityName::TsQualifiedName(name) => name.right.sym.to_string(),
+            };
+            let body = interface_bodies.get(&interface_name)?;
+            let construct_signature = body.body.iter().find_map(|member| match member {
+                TsTypeElement::TsConstructSignatureDecl(decl) => Some(decl),
+                _ => None,
+            })?;
+            let type_ann = construct_signature.type_ann.clone()?;
+            let synthetic_fn_type = TsFnType {
+                span: construct_signature.span,
+                params: construct_signature.params.clone(),
+                type_params: construct_signature.type_params.clone(),
+                type_ann,
+            };
+            let name = binding.id.sym.to_string();
+            let function = lower_dts_fn_type(&name, &synthetic_fn_type, interfaces, generic_interfaces);
+            Some(DtsClass {
+                name,
+                extends: None,
+                constructible: true,
+                constructors: vec![DtsConstructor {
+                    params: function.params,
+                    required_params: function.required_params,
+                    overloaded: false,
+                }],
+                methods: Vec::new(),
+                properties: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 /// TypeScript packages often publish a private class through a public
