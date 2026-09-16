@@ -1807,3 +1807,71 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "HI\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A package export that is *both* a function and a `declare namespace`
+/// merged onto the same name (real example: marked's exported `marked`
+/// function, merged with `declare namespace marked { var parse: typeof
+/// marked; let use: (...args: MarkedExtension[]) => typeof marked; }`)
+/// must resolve `marked.member` accesses through the package's own
+/// export table. Left as an ordinary member access on the renamed
+/// function symbol, the build failed outright ("call to unknown function
+/// `__thaw_typed_js_....parse`") -- and once resolved, `use` (an
+/// unsupported-signature *rest* function) must also get a real typed
+/// declaration: falling back to the unpacked `(argsArray: Json)` shim
+/// made a normal call throw "args_json is not a valid JSON array"
+/// because the single object argument arrived unpacked. Both shapes,
+/// a namespace value member (`parseInline`) and a namespace rest
+/// function member (`reset`), are exercised here.
+#[test]
+fn a_namespace_merged_function_value_resolves_its_members() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-namespace-merged-function-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("namespace-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function widget(src: string): string;\n\
+         export declare const parseInline: typeof widget;\n\
+         export declare function reset(...args: any[]): typeof widget;\n\
+         export declare namespace widget {\n\
+             let parseInline: typeof widget;\n\
+             function reset(...args: any[]): typeof widget;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function widget(src) { return 'W:' + src; }\n\
+         widget.widget = widget;\n\
+         widget.parseInline = function(src) { return 'I:' + src; };\n\
+         widget.reset = function(...args) { widget.lastReset = args.length; return widget; };\n\
+         module.exports = widget;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { widget } from "namespace-kit";
+function main(): void {
+    console.log(widget("a"));
+    console.log(widget.parseInline("b"));
+    widget.reset("x", "y", "z");
+    console.log("ok");
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "W:a\nI:b\nok\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

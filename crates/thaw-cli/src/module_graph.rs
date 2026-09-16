@@ -1109,6 +1109,34 @@ pub fn bundle_with_source_transform(
                         )
                     })?;
                     names.insert(local.clone(), target.clone());
+                    // A named export that is *also* a namespace merged
+                    // onto its own binding (real example: marked's
+                    // exported `marked` function, merged with
+                    // `declare namespace marked { var parse; let use;
+                    // }`) must resolve `.member` accesses through the
+                    // package's own export table as well as being
+                    // directly callable -- unlike a pure namespace
+                    // import, it stays in `names` above. The member
+                    // table is keyed by the renamed `target` too,
+                    // because `RenameReferences` renames the member's
+                    // object identifier before resolving the access.
+                    if let Some(members) = external_nested_namespaces
+                        .get(specifier)
+                        .and_then(|nested| nested.get(&requested))
+                    {
+                        let resolved = members
+                            .iter()
+                            .map(|(member, member_target)| {
+                                let resolved_target = dependency_exports
+                                    .get(member_target)
+                                    .cloned()
+                                    .unwrap_or_else(|| member_target.clone());
+                                (member.clone(), resolved_target)
+                            })
+                            .collect::<HashMap<_, _>>();
+                        namespaces.insert(target.clone(), resolved.clone());
+                        namespaces.entry(local.clone()).or_insert(resolved);
+                    }
                     if is_external_default {
                         if let Some(nested) = external_nested_namespaces.get(specifier) {
                             let resolved = resolve_nested_namespaces(nested, dependency_exports);
