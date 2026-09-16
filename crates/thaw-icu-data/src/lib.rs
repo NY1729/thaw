@@ -111,6 +111,43 @@
 //!    real NFD normalization data internally (added `icu_normalizer`
 //!    as a `thaw-icu-data` dependency for this reason), which the M1
 //!    probe never touched at all.
+//! 8. (M11, 2026-09-13) All 24 `{Long,Short,Narrow}{Second,Minute,Hour,
+//!    Day,Week,Month,Quarter,Year}RelativeV1` markers added for `Intl.
+//!    RelativeTimeFormat`, the same way -- `icu_experimental`'s
+//!    `RelativeTimeFormatter` has one constructor per (style, unit)
+//!    pair, not a single dynamic field set the way `icu_datetime` does,
+//!    so every combination needs its own marker. `src/data/mod.rs` was
+//!    regenerated wholesale for this step (the intended, canonical way
+//!    to add markers -- see "Regenerating" below), so it's the
+//!    authoritative source for everything through M11.
+//! 9. (M12, 2026-09-13) Currency/percent/unit markers (`Currency*V1`,
+//!    `PercentEssentialsV1`, `UnitsNames*V1`) plus
+//!    `TimezoneIdentifiersIanaCoreV1`/`TimezoneNamesGenericLongV1` (for
+//!    M13's real per-locale zone names) were added via a **separate**
+//!    file, `src/m12_data.rs` (`include!`d from this file, after
+//!    `impl_data_provider!`), rather than by regenerating `src/data/
+//!    mod.rs` wholesale like every step above. This is a deliberate
+//!    deviation, not an oversight discovered later: regenerating `data/
+//!    mod.rs` again would re-derive *every* already-vendored marker
+//!    fresh against whatever `--cldr-tag latest`/`--icuexport-tag
+//!    latest` resolve to *at that moment* -- a real, already-observed
+//!    risk (the M4/M9-era `en-US` hour+day-period rendering and one
+//!    zone's `longGeneric` name both genuinely shifted between separate
+//!    "latest"-tagged generations days apart, needing their own
+//!    honest-limitation writeups/general fixes in `intl_datetime.rs`
+//!    rather than a moving target every unrelated marker addition
+//!    could re-trigger) -- so M12 avoided re-touching the M0-M11 data
+//!    that was already verified against real Node. The tradeoff: this
+//!    crate now has two parallel data-registration mechanisms (`data/
+//!    mod.rs`'s `impl_data_provider!` and `m12_data.rs`'s per-marker
+//!    `impl_X!` calls) that must both be kept in mind when regenerating.
+//!    **Recommendation for whoever next needs to regenerate for a new
+//!    locale or a new API surface**: fold `m12_data.rs`'s 25 markers
+//!    into a single step-3-style wholesale regeneration at that point
+//!    (pinning explicit, not `latest`, CLDR/icuexport tags this time,
+//!    and re-verifying every existing real-Node cross-check test
+//!    afterward) rather than adding a third parallel file -- the
+//!    two-mechanism state should be temporary, not the new norm.
 //!
 //! ## Regenerating (e.g. to extend the curated locale list)
 //!

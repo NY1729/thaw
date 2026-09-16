@@ -513,6 +513,8 @@ include!("quickjs/processes.rs");
 
 include!("quickjs/intl.rs");
 
+include!("quickjs/intl_time_zone_names.rs");
+
 #[cfg(feature = "intl")]
 include!("quickjs/intl_locale.rs");
 
