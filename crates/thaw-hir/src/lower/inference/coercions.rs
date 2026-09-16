@@ -326,6 +326,47 @@ impl<'a> FnLowerer<'a> {
                     HirType::Json,
                 ));
             }
+            // A `Buffer`/`Uint8Array` (`HirType::Bytes`) has no direct
+            // JSON representation either -- real trigger: archiver's own
+            // `Archiver.append(source: Readable | Buffer | string, ...)`,
+            // called with a real `Buffer.from(...)` value. `Bytes` is a
+            // lowering-time-only distinction (`lower/bytes_erasure.rs`
+            // rewrites every one, program-wide, to a plain `Array(F64)`
+            // *after* lowering finishes) -- deliberately *not* added to
+            // `json_convertible_native_type`'s own generic native-array
+            // path below, since that would just JSON-encode the bytes as
+            // a bare `[n1, n2, ...]` array, indistinguishable from an
+            // ordinary `number[]` argument and silently losing "this was
+            // a Buffer" the same way it already was. Wrapped instead as
+            // the same `{"type":"Buffer","data":[...]}` shape Node's own
+            // `Buffer.prototype.toJSON`/`JSON.stringify` already use --
+            // `__thaw_json_date_reviver` (`platform_globals/dates.js`)
+            // already recognizes this exact shape and reconstructs a
+            // real `Buffer` from it (previously only reachable via a
+            // native addon's own JSON round trip, never a `callDynamic`
+            // argument). The `data` field's own elements erasing to plain
+            // JSON numbers is correct and expected here -- the `"type"`
+            // wrapper is what carries "this was a Buffer", not the
+            // erased element type, so losing `Bytes` as a type tag after
+            // lowering doesn't lose the information this fix depends on.
+            // `infer_expr_type` (used for `actual` above) deliberately
+            // normalizes `Bytes` to `Array(F64)` for every other consumer
+            // (see its own doc comment) -- `infer_expr_type_inner` is the
+            // one place that still sees the real, un-normalized tag,
+            // needed here specifically to tell a `Buffer`/`Uint8Array`
+            // apart from an ordinary `number[]` of the same runtime
+            // layout.
+            if self.infer_expr_type_inner(&value)? == HirType::Bytes {
+                let data = self.wrap_native_value_as_json(value, HirType::Bytes)?;
+                let kind = self.wrap_native_value_as_json(
+                    HirExpr::Lit(HirLit::Str("Buffer".to_string())),
+                    HirType::Str,
+                )?;
+                return Ok(HirExpr::JsonObjectLit(
+                    vec![("type".into(), kind), ("data".into(), data)],
+                    HirType::Json,
+                ));
+            }
             // An instance of a *decorated* class (see `module/globals.rs`'s
             // `lower_class_decorator_tokens`/`DECORATOR_CLASS_TOKENS`) gets
             // one extra `constructor` field pointing at that class's own
