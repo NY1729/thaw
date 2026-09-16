@@ -272,6 +272,42 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<String>, String> {
             specs.push(specifier);
         }
     }
+
+    // `import("literal")` -- only a literal string specifier is
+    // supported (a computed one, e.g. a template literal with
+    // substitutions, would need real runtime module resolution this
+    // ahead-of-time compiler doesn't have); other shapes are simply
+    // left alone here, same as an unresolvable relative `require`
+    // would be, and surface as a real error later when the call itself
+    // is rewritten (see `RenameReferences::visit_mut_expr`).
+    struct DynamicImportSpecs {
+        specs: Vec<String>,
+    }
+    impl Visit for DynamicImportSpecs {
+        fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
+            if matches!(call.callee, Callee::Import(_)) {
+                if let Some(specifier) = call.args.first().and_then(|argument| {
+                    argument
+                        .spread
+                        .is_none()
+                        .then(|| constant_string(&argument.expr))
+                        .flatten()
+                }) {
+                    if !self.specs.contains(&specifier) {
+                        self.specs.push(specifier);
+                    }
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let mut dynamic_imports = DynamicImportSpecs { specs: Vec::new() };
+    module.visit_with(&mut dynamic_imports);
+    for specifier in dynamic_imports.specs {
+        if !specs.contains(&specifier) {
+            specs.push(specifier);
+        }
+    }
     Ok(specs)
 }
 
@@ -360,6 +396,16 @@ struct RenameReferences<'a> {
     /// (`z.number(...)`). See `thaw_bridge::nested_namespace_members`'s
     /// own doc comment; real example: zod's `z.coerce`, `z.core`, `z.iso`.
     nested_namespaces: &'a HashMap<String, HashMap<String, HashMap<String, String>>>,
+    /// `import("literal specifier")` -- specifier string -> that
+    /// dependency's own export map (name -> flattened qualified
+    /// symbol), the exact same shape `namespaces` already holds for a
+    /// *static* `import * as ns from "..."`. Only ever populated for a
+    /// specifier this module already depends on (relative paths this
+    /// compiler resolved ahead of time in `dependency_specifiers`); a
+    /// computed specifier, or one this pass can't resolve, is left
+    /// alone here and falls through to thaw-hir's existing "import
+    /// calls not supported" rejection.
+    dynamic_imports: &'a HashMap<String, HashMap<String, String>>,
     import_meta_url: &'a str,
     import_meta_main: bool,
     module_path: &'a Path,
@@ -457,6 +503,44 @@ impl VisitMut for RenameReferences<'_> {
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
         if let Expr::Call(call) = expr {
+            if matches!(call.callee, Callee::Import(_)) {
+                if let Some(specifier) = call.args.first().and_then(|argument| {
+                    argument
+                        .spread
+                        .is_none()
+                        .then(|| constant_string(&argument.expr))
+                        .flatten()
+                }) {
+                    if let Some(export_map) = self.dynamic_imports.get(&specifier) {
+                        // No runtime module loader exists to build a real
+                        // namespace object at the point this call actually
+                        // executes -- instead, since the target's own
+                        // exports are already fully resolved ahead of time
+                        // (same as a static `import * as ns`), synthesizes
+                        // the equivalent literal object directly and wraps
+                        // it in `Promise.resolve(...)` to keep `await
+                        // import(...)`'s own shape working. Built by
+                        // parsing a small generated snippet rather than
+                        // hand-assembling AST nodes -- every value here is
+                        // an already-qualified `__thawmodN_name` symbol, so
+                        // there's nothing user-controlled to escape.
+                        let mut fields = export_map
+                            .iter()
+                            .map(|(name, target)| format!("{:?}:{target}", name))
+                            .collect::<Vec<_>>();
+                        fields.sort();
+                        let snippet = format!("Promise.resolve({{{}}})", fields.join(","));
+                        if let Ok(mut parsed) = thaw_parser::parse_typescript(&snippet) {
+                            if let Some(ModuleItem::Stmt(thaw_parser::ast::Stmt::Expr(statement))) =
+                                parsed.body.pop()
+                            {
+                                *expr = *statement.expr;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
             let is_resolve = matches!(&call.callee, Callee::Expr(callee)
                 if matches!(callee.as_ref(), Expr::Member(member)
                     if matches!(member.obj.as_ref(), Expr::MetaProp(meta)
@@ -1006,6 +1090,16 @@ pub fn bundle_with_source_transform(
             }
         }
 
+        // `modules[index].dependencies` only ever holds relative-path
+        // specifiers (`load_module` skips anything else outright), so
+        // this is naturally already scoped to local project files, not
+        // npm packages -- exactly `import("literal")`'s supported case.
+        let dynamic_import_exports: HashMap<String, HashMap<String, String>> = modules[index]
+            .dependencies
+            .iter()
+            .map(|(specifier, dependency)| (specifier.clone(), exports[*dependency].clone()))
+            .collect();
+
         let mut public = HashMap::new();
         let mut public_namespaces = HashMap::new();
         let mut explicit_exports = HashSet::new();
@@ -1018,6 +1112,7 @@ pub fn bundle_with_source_transform(
                         names: &names,
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
+                        dynamic_imports: &dynamic_import_exports,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -1034,6 +1129,7 @@ pub fn bundle_with_source_transform(
                         names: &names,
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
+                        dynamic_imports: &dynamic_import_exports,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
@@ -1159,6 +1255,7 @@ pub fn bundle_with_source_transform(
                                 names: &names,
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
+                                dynamic_imports: &dynamic_import_exports,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -1190,6 +1287,7 @@ pub fn bundle_with_source_transform(
                                 names: &names,
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
+                                dynamic_imports: &dynamic_import_exports,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -1222,6 +1320,7 @@ pub fn bundle_with_source_transform(
                                 names: &names,
                                 namespaces: &namespaces,
                                 nested_namespaces: &nested_namespaces,
+                                dynamic_imports: &dynamic_import_exports,
                                 import_meta_url: &import_meta_url,
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
@@ -1252,6 +1351,7 @@ pub fn bundle_with_source_transform(
                         names: &names,
                         namespaces: &namespaces,
                         nested_namespaces: &nested_namespaces,
+                        dynamic_imports: &dynamic_import_exports,
                         import_meta_url: &import_meta_url,
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
