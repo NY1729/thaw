@@ -1169,6 +1169,14 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_error_code".to_string())),
                         vec![obj],
                     )),
+                    // ponytail: no real call-stack frames -- see
+                    // `thaw_error_stack`'s own doc comment (thaw-runtime)
+                    // for why this can't just reuse `.toString()`'s
+                    // intrinsic despite the similar rendering.
+                    HirType::Str if prop.sym == *"stack" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_error_stack".to_string())),
+                        vec![obj],
+                    )),
                     HirType::Map(_, _) | HirType::Set(_) if prop.sym == *"size" => {
                         Ok(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_map_size".to_string())),
