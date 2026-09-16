@@ -1301,6 +1301,36 @@ fn crypto_generates_ed448_key_pairs_that_round_trip() {
     assert_eq!(call("ed448KeygenRoundTrip", "[]"), r#"[true,true,"ed448"]"#);
 }
 
+/// `privateEncrypt`/`publicDecrypt` -- Node's rarer raw-RSA pair, one
+/// of 4 previously out-of-scope `node:crypto` items the user picked up
+/// together (see [[project_crypto_rsa_ecdsa]]'s own "deliberately
+/// still out of scope" note, and this file's own header comment).
+/// Same real-key methodology as the other crypto tests: decrypts a
+/// blob produced by real OpenSSL 3.5 (`openssl pkeyutl -sign`, the
+/// modern name for the deprecated `rsautl -sign` this pair of
+/// functions mirrors), then round-trips thaw's own `privateEncrypt`
+/// output back through `publicDecrypt`.
+#[test]
+fn crypto_rsa_private_encrypt_and_public_decrypt_interoperate_with_real_openssl() {
+    assert_eq!(
+        load(
+            "function rsaPrivateKey() { return '-----BEGIN PRIVATE KEY-----\\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDcIyI5ggrGi37a\\nbJlqjIXhx6C/UdL0343U3O8FCJJ6Zj9P+36zVTyrXmu747AtOmM0XBi9XVKy/GnM\\n2VN4onr9VJUfU0tZOcZ4m4JCOvR0VIlCL/aMnIbz/oRkH4BsJTrDCANr4FaCvqTu\\nT4qdPAOv3fXHfl9R1p4MsJ2aNU8oB1EYsFwAlKBjD6R5CPMmdYgK7BKD/dkmNyPr\\nEXCU8mWbmKYlAVUMZ7LDPQ/7Uaqx2Qn5Ue6twCiaacYlZlQkZg99UrcOzdODV+Gm\\nwU85q3jmazMXa+9/fXhzW2O2m++4CpXIuI9418vr9kIlHNLh82yfWQ19XNUGEAWf\\ne0C7EKhBAgMBAAECggEAAjUdipPYcrpg6Q+SVEUY5SFeql6c5UmS3+rDpsoJbYyW\\nx2M5q2Cuj2jhIGwoL5d6BQpF6yX8PIbHnD8wSF8xXG2TGKqNwE9naxxxWM5A6vZ5\\nYxaaaunGP3g7QcqHY6Zp1auHFx9G7hjpEc1UowMSxp0n3gz2J35NoIWMviY7ZFcj\\nL2iIYULm1dBhCTq7/v9qbPlE4nid0SV2OyV7yhRhIJPVqxxlTSC+4ZX3RZvUozbt\\nV2o3b88LoG0F0wy9hsKCwOnZxhYAf4R9p03qk/jYMeMK1DpZgHvUe6pyNOjxCbK1\\n4R6JJEWN0yfQLMHuuZpaW1SxQynMopwIoXFohJUPxwKBgQD7Q+8K8EjHNv+A7oxF\\nCYEtUYZiWBmqsCXQ18RhTGc75KoX1zsLa2sOHVOUSYHF5EKwxZsXDxV9AnOqm5Z3\\nkUDHGTsu9mxnk/iwv9gnS0IwYpLnm02SY4arXQcGHXUVNWAGIWLaOx78ocg8O1HI\\nx4cGDt8PfO3vp14Jpip9yGKqewKBgQDgSQrkV3NMAHWkPs18f9ugfpv9GSHqNhnO\\n1Sw1LH3hoL43zec6pxoHMF6/CctzyyNomkmKGKEZjdTY8CPWhQM4Djo6I4Wq97mp\\nYjT5v+Z7DCj4e0huS+h4bMl1XTwrKxRMlvAi0c8AczfLAltsCD/PVs0qX9Qg+o6i\\nGoPRtxNJcwKBgHJzc0MsSDpWFvQHtOUNe0XFSM0rDCXvron+fnlDcBKcCc5qP37o\\nIw9+1D9LbE1Tt/0FRauvNz6GC2G/FT7JbxRBre+qV56mjDUWbcMYSMH5ZKkS2LbB\\nluofqb9jU52hfmfMdVaqb2br2mV1L7+hAyQDSh+n7EmplvAWPGynBipZAoGAaxYU\\n8D9c2m3hvYEK5aW6fF/XJLoqOkSIf/vCNsU+eUshZ02VWKjOQZ5zrm0Dyg60ok4A\\nTMJDsQrKFKZbxiIODmakoHuzZ5UN/XTZbGGWryt4KGPcimUN4um2KqZQgx/3ejYb\\nA9T/K+zXN8OxWNx7cwizvsawZuqazYUxaSErQUcCgYBH0pgPF+NGOF7/cD9aIdQc\\nyJMlJHHL71tWf2IvxK3k8caht1LaikXCY2rJGIvMYXwaSb314W+7tvba0UnWjzVp\\nPMEP6voIWudjgD4OoXilwddDxde8owbaPcgDZW4E0R0sutIywPM11s6E62nWQRUu\\n6oI/67AYv1wdhI8IsP0LgQ==\\n-----END PRIVATE KEY-----\\n'; }\n\
+             function rsaPublicKey() { return '-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3CMiOYIKxot+2myZaoyF\\n4cegv1HS9N+N1NzvBQiSemY/T/t+s1U8q15ru+OwLTpjNFwYvV1SsvxpzNlTeKJ6\\n/VSVH1NLWTnGeJuCQjr0dFSJQi/2jJyG8/6EZB+AbCU6wwgDa+BWgr6k7k+KnTwD\\nr931x35fUdaeDLCdmjVPKAdRGLBcAJSgYw+keQjzJnWICuwSg/3ZJjcj6xFwlPJl\\nm5imJQFVDGeywz0P+1GqsdkJ+VHurcAommnGJWZUJGYPfVK3Ds3Tg1fhpsFPOat4\\n5mszF2vvf314c1tjtpvvuAqVyLiPeNfL6/ZCJRzS4fNsn1kNfVzVBhAFn3tAuxCo\\nQQIDAQAB\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function opensslDecrypt() {\n\
+               const cipher = Buffer.from('4bbb92f233871b0feb4b6f8dcc01018d96342275b3159486dad381bd785add5643038ed41e0b30e462c42d9f9ea94ed0030a728453ff4c1e3613acb077a2713f9a88e9fc47937e873d22a95fe4f4ffbf334f3190c8f9948815321a329c68861dd0b8a44040eaa847fd0c0b8409a7d3ec65868e3ef930a76462aaa06fc1dff5c8679cccfaa6f591d1921c29db087373e018d2f476ca942cd9f69764e07bfb4410f6a6c484fcbfd140ab421ade5af4163b80bacb0538b7a52fc9cab5ffa380fc99f0a507a287a370f1bd565330eaed8f21812602ef8543614cac7aa517b9b2950fbca6477c222e92503ebdbfa95465f727c07a5ac43429f6f07a40031fdcc5667c', 'hex');\n\
+               return __thaw_crypto_module.publicDecrypt(rsaPublicKey(), cipher).toString();\n\
+             }\n\
+             function thawRoundTrip() {\n\
+               const cipher = __thaw_crypto_module.privateEncrypt(rsaPrivateKey(), Buffer.from('round trip raw rsa'));\n\
+               return __thaw_crypto_module.publicDecrypt(rsaPublicKey(), cipher).toString();\n\
+             }"
+        ),
+        1
+    );
+    assert_eq!(call("opensslDecrypt", "[]"), r#""hello raw rsa test""#);
+    assert_eq!(call("thawRoundTrip", "[]"), r#""round trip raw rsa""#);
+}
+
 /// DER-format key input and passphrase-protected PKCS8 private keys --
 /// the two remaining `node:crypto` key-import gaps. Same real-key
 /// methodology as the other crypto tests: a fresh RSA keypair, signed

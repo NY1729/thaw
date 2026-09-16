@@ -462,9 +462,7 @@
   // own PKCS1v15 default) is OAEP, defaulting to a SHA-1 `oaepHash`
   // (OpenSSL's own long-standing default) unless `padding:
   // RSA_PKCS1_PADDING` is explicitly requested. RSA only -- an EC/
-  // Ed25519 key throws a clear error, matching real Node. `publicDecrypt`/
-  // `privateEncrypt` (the rarer raw-RSA "encrypt with private key"
-  // operations) are not implemented.
+  // Ed25519 key throws a clear error, matching real Node.
   const resolveEncryptionPadding = key => (key && key.padding === RSA_PKCS1_PADDING)
     ? '' : normalizeHashAlgorithm((key && key.oaepHash) || 'sha1');
   const publicEncrypt = (key, buffer) => {
@@ -476,6 +474,21 @@
     const { pem } = parseAsymmetricKeyMaterial(key);
     const oaepDigest = resolveEncryptionPadding(key);
     return Buffer.from(__thaw_crypto_asymmetric_decrypt_hex(pem, oaepDigest, Buffer.from(buffer).toString('hex')), 'hex');
+  };
+  // `privateEncrypt(key, buffer)` / `publicDecrypt(key, buffer)` --
+  // Node's rarer raw-RSA pair (real use: producing something only the
+  // matching *public* key can recover, not confidentiality). Always
+  // PKCS#1 v1.5 padding (real Node's own default and only supported
+  // choice for this direction -- OAEP is not defined for it, and
+  // there is no `oaepHash`/`padding` option to resolve). RSA only,
+  // same as `publicEncrypt`/`privateDecrypt` above.
+  const privateEncrypt = (key, buffer) => {
+    const { pem } = parseAsymmetricKeyMaterial(key);
+    return Buffer.from(__thaw_crypto_asymmetric_private_encrypt_hex(pem, Buffer.from(buffer).toString('hex')), 'hex');
+  };
+  const publicDecrypt = (key, buffer) => {
+    const { pem } = parseAsymmetricKeyMaterial(key);
+    return Buffer.from(__thaw_crypto_asymmetric_public_decrypt_hex(pem, Buffer.from(buffer).toString('hex')), 'hex');
   };
   // A PEM block is just base64(DER) wrapped in `-----BEGIN/END-----`
   // header/footer lines with fixed-width line wrapping -- no crypto
@@ -585,6 +598,7 @@
     createCipheriv, createDecipheriv, Cipheriv,
     Hash, Hmac, KeyObject, createSecretKey, createPrivateKey, createPublicKey, pbkdf2Sync, scrypt, scryptSync, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
     Sign, Verify, createSign, createVerify, sign, verify, publicEncrypt, privateDecrypt,
+    privateEncrypt, publicDecrypt,
     generateKeyPairSync, generateKeyPair,
     diffieHellman, ECDH, createECDH,
     constants: { RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING, RSA_PKCS1_OAEP_PADDING },

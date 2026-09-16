@@ -1,21 +1,22 @@
 // RSA/ECDSA/EdDSA support for `node:crypto`'s `createSign`/
 // `createVerify`/`crypto.sign`/`crypto.verify`/`publicEncrypt`/
-// `privateDecrypt` (`platform_globals/buffer_crypto.js`). Matches this
-// crate's existing "honest partial support" precedent: sign/verify
-// (RSA PKCS1v15+PSS, ECDSA P-256/P-384/P-521 DER-encoded matching real
-// Node's own default `dsaEncoding: 'der'`, Ed25519/Ed448 EdDSA), RSA
-// encrypt/decrypt (PKCS1v15 default + OAEP), PEM and DER key input,
-// passphrase-protected PKCS8 private keys, key generation (RSA/EC/
-// Ed25519/Ed448/X25519, custom RSA `publicExponent`, PKCS8/SPKI or
-// PKCS1(RSA)/SEC1(EC) output -- see `crypto_generate_key_pair_json`),
+// `privateDecrypt`/`privateEncrypt`/`publicDecrypt`
+// (`platform_globals/buffer_crypto.js`). Matches this crate's existing
+// "honest partial support" precedent: sign/verify (RSA PKCS1v15+PSS,
+// ECDSA P-256/P-384/P-521 DER-encoded matching real Node's own default
+// `dsaEncoding: 'der'`, Ed25519/Ed448 EdDSA), RSA encrypt/decrypt
+// (PKCS1v15 default + OAEP) plus the rarer raw "encrypt with private
+// key"/"decrypt with public key" pair (`privateEncrypt`/
+// `publicDecrypt`, PKCS1v15-only, no OAEP equivalent), PEM and DER key
+// input, passphrase-protected PKCS8 private keys, key generation
+// (RSA/EC/Ed25519/Ed448/X25519, custom RSA `publicExponent`, PKCS8/SPKI
+// or PKCS1(RSA)/SEC1(EC) output -- see `crypto_generate_key_pair_json`),
 // Diffie-Hellman key agreement (EC P-256/P-384/P-521 and X25519 via
 // `crypto.diffieHellman`/`crypto_diffie_hellman_hex`, classic raw-byte
-// EC-only `crypto.createECDH`/`crypto_ecdh_*_hex`). No `publicDecrypt`/
-// `privateEncrypt` (Node's rarer raw-RSA "encrypt with private,
-// decrypt with public" operations -- essentially unused in practice).
-// P-521's own `ecdsa::SigningKey`/`VerifyingKey` newtypes don't
-// implement `pkcs8`'s/`sec1`'s encode/decode traits directly (unlike
-// P-256/P-384, which are plain type aliases of the generic `ecdsa`/
+// EC-only `crypto.createECDH`/`crypto_ecdh_*_hex`). P-521's own
+// `ecdsa::SigningKey`/`VerifyingKey` newtypes don't implement
+// `pkcs8`'s/`sec1`'s encode/decode traits directly (unlike P-256/
+// P-384, which are plain type aliases of the generic `ecdsa`/
 // `elliptic_curve` types that do) -- worked around by round-tripping
 // through the generic `elliptic_curve::SecretKey`/`PublicKey
 // <NistP521>` instead (see `parse_ec_p521_private_pem`/
@@ -25,22 +26,29 @@
 // mirroring the `ed25519` crate's own internal approach for the same
 // RFC 8410 OKP-key shape, just with X25519's OID instead. Ed448 is
 // backed by `ed448-goldilocks` (RustCrypto's own curve448/EdDSA
-// implementation) -- currently only published as a `0.14.0-pre`
-// series (the only version with real signing/verifying key types at
-// all; the last stable `0.9.0` is curve arithmetic only), which pulls
-// in its own separate `elliptic-curve`/`pkcs8`/`signature`/`sec1`
-// major-version family alongside this module's existing ones (no way
-// to avoid that duplication while depending on this crate at all --
-// `elliptic-curve` is one of its own unconditional dependencies, not
-// just a `pkcs8`-feature side effect). Its `SigningKey`/`VerifyingKey`
-// directly implement that *other* `pkcs8::EncodePrivateKey`/
-// `EncodePublicKey` (re-exported as `ed448_goldilocks::pkcs8`, aliased
-// `EncodePrivateKey as _`/etc. locally wherever used, to avoid
-// colliding with this file's own top-level `pkcs8` (v0.10) import of
-// the same trait names) -- no hand-built DER needed, unlike X25519.
-// Still out of scope: the legacy OpenSSL "Proc-Type: 4,ENCRYPTED"
-// PKCS#1/SEC1 passphrase format (only modern PKCS#8 `ENCRYPTED PRIVATE
-// KEY` is supported), passphrase-protected X25519 keys.
+// implementation) -- currently only published as a `0.14.0-pre` series
+// (the only version with real signing/verifying key types at all; the
+// last stable `0.9.0` is curve arithmetic only), which pulls in its own
+// separate `elliptic-curve`/`pkcs8`/`signature`/`sec1` major-version
+// family alongside this module's existing ones (no way to avoid that
+// duplication while depending on this crate at all -- `elliptic-curve`
+// is one of its own unconditional dependencies, not just a `pkcs8`-
+// feature side effect). Its `SigningKey`/`VerifyingKey` *do* implement
+// that other `pkcs8`'s encode/decode traits directly, but reusing them
+// turned out to be a dead end (their own blanket decode impls didn't
+// actually resolve against this pre-release's narrower `TryFrom`
+// impls), so Ed448's own PKCS8/SPKI wrapping is hand-built too, same as
+// X25519's (see `ed448_private_to_pem`/`parse_ed448_private_der`).
+// `privateEncrypt`/`publicDecrypt` are the one place this module goes
+// beneath the `rsa` crate's own safe API: `publicDecrypt`'s "recover
+// the padded message" step isn't exposed there by design (only a
+// yes/no `verify`), so it does its own public-key modular
+// exponentiation plus hand-rolled PKCS#1 v1.5 type-1 unpadding (see
+// `crypto_asymmetric_public_decrypt_hex`) -- `privateEncrypt` itself
+// stays on the safe `rsa::Pkcs1v15Sign::new_unprefixed()` path. Still
+// out of scope: the legacy OpenSSL "Proc-Type: 4,ENCRYPTED" PKCS#1/
+// SEC1 passphrase format (only modern PKCS#8 `ENCRYPTED PRIVATE KEY` is
+// supported), passphrase-protected X25519 keys.
 //
 // Stateless and bytes-in/bytes-out, matching every other native
 // crypto primitive in this crate (`digest_bytes`/`hmac_bytes` in
@@ -970,6 +978,76 @@ pub(crate) fn crypto_asymmetric_decrypt_hex(
         _ => return Err(format!("unsupported OAEP digest: {oaep_digest}")),
     }
     .map_err(|error| error.to_string())
+}
+
+/// RSA `privateEncrypt(key, buffer)` -- Node's rarer "encrypt with the
+/// private key" raw primitive (real use: producing something only the
+/// matching public key can "decrypt", not confidentiality -- the
+/// private key is the one only its owner holds). Always PKCS#1 v1.5
+/// type-1 padding (real Node's own default and only supported padding
+/// for this pair of functions -- OAEP is not defined for this
+/// direction), with *no* digest-OID `DigestInfo` wrapper around the
+/// plaintext, unlike `createSign`'s PKCS1v15 signing -- exactly what
+/// `rsa::Pkcs1v15Sign::new_unprefixed()` already builds, matching real
+/// OpenSSL's own `openssl pkeyutl -sign` (the modern name for the
+/// deprecated `rsautl -sign`) byte-for-byte.
+pub(crate) fn crypto_asymmetric_private_encrypt_hex(
+    pem: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let ParsedKey::RsaPrivate(key) = parse_key(pem).ok_or("invalid or unsupported key")? else {
+        return Err("privateEncrypt requires an RSA private key".to_string());
+    };
+    key.sign(rsa::Pkcs1v15Sign::new_unprefixed(), data)
+        .map_err(|error| error.to_string())
+}
+
+/// RSA `publicDecrypt(key, buffer)` -- the inverse of `privateEncrypt`
+/// above; recovers the original bytes from a `privateEncrypt`-produced
+/// blob. `rsa`'s own `Pkcs1v15Sign` only exposes a yes/no `verify`
+/// (compares a *recovered* message against one already known, never
+/// hands the recovered bytes back) -- by design, to keep textbook-RSA
+/// primitives from being casually available for misuse elsewhere in
+/// that crate's own API. This is exactly the "raw hazmat modexp + hand-
+/// rolled PKCS#1 type-1 unpadding" this project's own scope notes
+/// flagged as the highest-risk, lowest-value item still open here, so
+/// it stays intentionally minimal: one public-key modular
+/// exponentiation (`c^e mod n`, via `rsa`'s own re-exported `BigUint`,
+/// the same bignum type `crypto_generate_key_pair_json`'s custom-
+/// exponent path already uses) followed by validating and stripping
+/// the fixed `0x00 0x01 [0xFF...] 0x00` PKCS#1 v1.5 type-1 padding
+/// structure by hand (RFC 8017 section 9.2, encoding operation EMSA-
+/// PKCS1-v1_5, used here in reverse).
+pub(crate) fn crypto_asymmetric_public_decrypt_hex(
+    pem: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    use rsa::traits::PublicKeyParts;
+    let key = match parse_key(pem).ok_or("invalid or unsupported key")? {
+        ParsedKey::RsaPrivate(key) => key.to_public_key(),
+        ParsedKey::RsaPublic(key) => *key,
+        _ => return Err("publicDecrypt is only supported for RSA keys".to_string()),
+    };
+    let modulus_len = key.size();
+    if data.len() != modulus_len {
+        return Err("data length does not match the RSA modulus size".to_string());
+    }
+    let encoded = rsa::BigUint::from_bytes_be(data)
+        .modpow(key.e(), key.n())
+        .to_bytes_be();
+    let mut padded = vec![0u8; modulus_len - encoded.len()];
+    padded.extend_from_slice(&encoded);
+    if padded.len() < 11 || padded[0] != 0x00 || padded[1] != 0x01 {
+        return Err("invalid PKCS#1 v1.5 padding".to_string());
+    }
+    let mut index = 2;
+    while index < padded.len() && padded[index] == 0xFF {
+        index += 1;
+    }
+    if index < 2 + 8 || index >= padded.len() || padded[index] != 0x00 {
+        return Err("invalid PKCS#1 v1.5 padding".to_string());
+    }
+    Ok(padded[index + 1..].to_vec())
 }
 
 /// Normalizes an EC curve name to one of `"P-256"`/`"P-384"`/`"P-521"`
