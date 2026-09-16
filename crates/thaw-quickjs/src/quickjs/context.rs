@@ -564,6 +564,36 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript asymmetric decrypt function");
+                let crypto_asymmetric_private_encrypt = Function::new(
+                    ctx.clone(),
+                    |pem: String, data: String| {
+                        crypto_asymmetric_private_encrypt_hex(&pem, &hex_decode(&data))
+                            .map(|value| hex_encode(&value))
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "privateEncrypt input",
+                                    "valid RSA private key/data",
+                                    error,
+                                )
+                            })
+                    },
+                )
+                .expect("failed to create JavaScript asymmetric privateEncrypt function");
+                let crypto_asymmetric_public_decrypt = Function::new(
+                    ctx.clone(),
+                    |pem: String, data: String| {
+                        crypto_asymmetric_public_decrypt_hex(&pem, &hex_decode(&data))
+                            .map(|value| hex_encode(&value))
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "publicDecrypt input",
+                                    "valid RSA key/data",
+                                    error,
+                                )
+                            })
+                    },
+                )
+                .expect("failed to create JavaScript asymmetric publicDecrypt function");
                 let crypto_generate_key_pair = Function::new(
                     ctx.clone(),
                     |key_type: String,
@@ -1193,6 +1223,18 @@ fn ensure_context() {
                         crypto_asymmetric_decrypt,
                     )
                     .expect("failed to install JavaScript asymmetric decrypt function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_asymmetric_private_encrypt_hex",
+                        crypto_asymmetric_private_encrypt,
+                    )
+                    .expect("failed to install JavaScript asymmetric privateEncrypt function");
+                ctx.globals()
+                    .set(
+                        "__thaw_crypto_asymmetric_public_decrypt_hex",
+                        crypto_asymmetric_public_decrypt,
+                    )
+                    .expect("failed to install JavaScript asymmetric publicDecrypt function");
                 ctx.globals()
                     .set(
                         "__thaw_crypto_generate_key_pair_json",
