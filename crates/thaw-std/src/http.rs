@@ -351,6 +351,17 @@ struct IncomingMessage {
     /// directly, indexes / iterates / slices them, and hands them back
     /// through `response.endBytes(...)` without an encode/decode detour.
     body_bytes: *const NativeClosure,
+    /// `request.getHeader(name)` -- a single request header's value,
+    /// looked up case-insensitively (matching real Node's own lowercased
+    /// `request.headers`), or `""` if it wasn't sent. Exposed as a
+    /// lookup method rather than a `headers` dictionary field: every
+    /// other computed value on this interface (`body()`/`bodyHex()`/
+    /// `bodyBytes()`) is already a method for the same reason -- a plain
+    /// `Record<string, string>` field would need this native ABI to
+    /// carry a real dynamic-dictionary value, a materially bigger change
+    /// than one more `NativeClosure`, for a shape nothing here already
+    /// needed.
+    get_header: *const NativeClosure,
 }
 
 #[repr(C)]
@@ -412,6 +423,7 @@ struct RequestContext {
     request_body: NativeClosure,
     request_body_hex: NativeClosure,
     request_body_bytes: NativeClosure,
+    request_get_header: NativeClosure,
     write_bytes: NativeClosure,
     end_bytes: NativeClosure,
     /// The request body received so far, appended to as more arrives
@@ -451,6 +463,16 @@ struct RequestContext {
     /// no-op. The real connection-based path's own idempotency is
     /// `ConnectionState::body_complete` instead.
     body_events_delivered: bool,
+    /// Every request header, lowercased, as parsed by `parse_headers` --
+    /// what `getHeader` looks up. Empty for the one-shot helpers (which
+    /// never parse a real request head at all).
+    _headers: Vec<(String, String)>,
+    /// `getHeader`'s cached result -- a single reusable slot (like
+    /// `_body_string`/`_body_hex`), overwritten on every call. Safe
+    /// because a handler always finishes using one call's returned
+    /// pointer (copies it into a native string, compares it, etc.)
+    /// before making the next one; nothing here holds it across a call.
+    _header_return: Option<CString>,
     // Backing storage the `IncomingMessage` pointers borrow from; never
     // read through directly (hence the underscores), just kept alive.
     _method: CString,
@@ -462,6 +484,7 @@ impl RequestContext {
         method: &str,
         target: &str,
         body: &[u8],
+        headers: &[(String, String)],
         connection: *mut ConnectionState,
     ) -> Box<RequestContext> {
         let mut context = Box::new(RequestContext {
@@ -491,6 +514,7 @@ impl RequestContext {
                 on: std::ptr::null(),
                 body_hex: std::ptr::null(),
                 body_bytes: std::ptr::null(),
+                get_header: std::ptr::null(),
             },
             request_on: NativeClosure {
                 code: request_add_listener as *const c_void,
@@ -508,6 +532,10 @@ impl RequestContext {
                 code: request_body_bytes as *const c_void,
                 context: std::ptr::null_mut(),
             },
+            request_get_header: NativeClosure {
+                code: request_get_header as *const c_void,
+                context: std::ptr::null_mut(),
+            },
             write_bytes: NativeClosure {
                 code: response_write_bytes as *const c_void,
                 context: std::ptr::null_mut(),
@@ -523,6 +551,8 @@ impl RequestContext {
             request_data_listeners: Vec::new(),
             request_end_listeners: Vec::new(),
             body_events_delivered: false,
+            _headers: headers.to_vec(),
+            _header_return: None,
             set_header: NativeClosure {
                 code: response_set_header as *const c_void,
                 context: std::ptr::null_mut(),
@@ -554,6 +584,7 @@ impl RequestContext {
         context.request_body.context = context_ptr.cast();
         context.request_body_hex.context = context_ptr.cast();
         context.request_body_bytes.context = context_ptr.cast();
+        context.request_get_header.context = context_ptr.cast();
         context.write_bytes.context = context_ptr.cast();
         context.end_bytes.context = context_ptr.cast();
         context.response.set_header = &context.set_header;
@@ -566,6 +597,7 @@ impl RequestContext {
         context.request.body = &context.request_body;
         context.request.body_hex = &context.request_body_hex;
         context.request.body_bytes = &context.request_body_bytes;
+        context.request.get_header = &context.request_get_header;
         context
     }
 }
@@ -698,6 +730,31 @@ unsafe extern "C" fn request_body_hex(environment: *const c_void) -> *const c_ch
     }
     context
         ._body_hex
+        .as_ref()
+        .map_or(std::ptr::null(), |value| value.as_ptr())
+}
+
+/// `request.getHeader(name)` -- a single request header's value, looked
+/// up case-insensitively (`_headers` is already lowercased by
+/// `parse_headers`, so `name` only needs lowercasing on this side), or
+/// `""` if it wasn't sent -- matching this module's own established
+/// convention for a missing/empty value (`body()` for a bodyless
+/// request) rather than `null`/`undefined`, which this native ABI has no
+/// representation for anyway.
+unsafe extern "C" fn request_get_header(
+    environment: *const c_void,
+    name: *const c_char,
+) -> *const c_char {
+    let context = request_context(environment);
+    let key = string_from_ptr(name).to_ascii_lowercase();
+    let value = context
+        ._headers
+        .iter()
+        .find(|(header_name, _)| *header_name == key)
+        .map_or("", |(_, value)| value.as_str());
+    context._header_return = Some(CString::new(value).unwrap_or_default());
+    context
+        ._header_return
         .as_ref()
         .map_or(std::ptr::null(), |value| value.as_ptr())
 }
@@ -1268,9 +1325,10 @@ fn run_server_callback(
     method: &str,
     target: &str,
     body: &[u8],
+    headers: &[(String, String)],
     connection: *mut ConnectionState,
 ) -> CallbackOutcome {
-    let mut context = RequestContext::new(method, target, body, connection);
+    let mut context = RequestContext::new(method, target, body, headers, connection);
     // Buffer whatever body bytes the very first read already turned up
     // *before* the handler's first line of code -- a handler that calls
     // `bodyBytes()`/`body()`/`bodyHex()` synchronously, with no
@@ -1334,7 +1392,7 @@ fn run_server_callback(
 /// loop and so can only ever see a `Ready` outcome. They don't parse a
 /// request body, so it's always empty here.
 fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -> ResponseSpec {
-    match run_server_callback(callback, method, target, &[], std::ptr::null_mut()) {
+    match run_server_callback(callback, method, target, &[], &[], std::ptr::null_mut()) {
         CallbackOutcome::Ready(spec) => spec,
         CallbackOutcome::Pending(context) => {
             let context = unsafe { Box::from_raw(context) };
@@ -1922,8 +1980,41 @@ fn negotiate_keep_alive(request: &str) -> bool {
     }
 }
 
+/// Every `name: value` header line in a request head, lowercased to match
+/// Node's own `request.headers` (case-insensitive by the HTTP spec, and
+/// Node always exposes it lowercased). A repeated header name keeps only
+/// its *last* occurrence -- unlike Node, which joins repeats with `, `
+/// (or keeps an array for a handful of special headers) -- a real gap
+/// worth closing if a real package is ever found to depend on it, but
+/// `getHeader` returning the single most-recently-sent value already
+/// covers the overwhelmingly common case of a header sent once.
+fn parse_headers(request: &str) -> Vec<(String, String)> {
+    let mut lines = request.lines();
+    lines.next();
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim().to_string();
+        if let Some(existing) = headers
+            .iter_mut()
+            .find(|(key, _): &&mut (String, String)| *key == name)
+        {
+            existing.1 = value;
+        } else {
+            headers.push((name, value));
+        }
+    }
+    headers
+}
+
 /// Parses a complete request head (bytes up to and including `\r\n\r\n`).
-fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan) {
+fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan, Vec<(String, String)>) {
     let head = String::from_utf8_lossy(head);
     let mut request_line = head.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET").to_string();
@@ -1933,6 +2024,7 @@ fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan) {
         target,
         negotiate_keep_alive(&head),
         parse_body_plan(&head),
+        parse_headers(&head),
     )
 }
 
@@ -1959,7 +2051,7 @@ fn try_buffered_request(connection: &mut ConnectionState) -> Option<bool> {
             .windows(4)
             .position(|bytes| bytes == b"\r\n\r\n")?;
         connection.head_end = index + 4;
-        let (_, _, _, body_plan) = parse_head(&connection.request[..connection.head_end]);
+        let (_, _, _, body_plan, _) = parse_head(&connection.request[..connection.head_end]);
         connection.body_plan = body_plan;
         // Deliberately *not* pre-marking `body_complete` here even for
         // `BodyPlan::None` -- `deliver_request_body_listeners`'s first
@@ -2050,7 +2142,8 @@ fn refresh_body_deadline(connection: &mut ConnectionState) {
 }
 
 fn dispatch_request(connection: &mut ConnectionState) -> bool {
-    let (method, target, keep_alive, _) = parse_head(&connection.request[..connection.head_end]);
+    let (method, target, keep_alive, _, headers) =
+        parse_head(&connection.request[..connection.head_end]);
     let callback = unsafe { &*connection.server }.callback as *const c_void;
     // The head is in and the handler is about to run -- cleared
     // unconditionally here; `run_server_callback` re-arms it as a
@@ -2066,6 +2159,7 @@ fn dispatch_request(connection: &mut ConnectionState) -> bool {
         &method,
         &target,
         &[],
+        &headers,
         connection as *mut ConnectionState,
     ) {
         CallbackOutcome::Ready(spec) => {
@@ -2627,7 +2721,7 @@ mod tests {
 
     #[test]
     fn encoded_response_decodes_binary_bytes() {
-        let context = RequestContext::new("GET", "/", b"", std::ptr::null_mut());
+        let context = RequestContext::new("GET", "/", b"", &[], std::ptr::null_mut());
         let content = CString::new("89504e4700ff").unwrap();
         let encoding = CString::new("hex").unwrap();
         assert!(unsafe {
@@ -2795,6 +2889,94 @@ mod tests {
         assert!(fast_response.ends_with("/fast"));
         assert!(slow_response.ends_with("/slow"));
         assert_eq!(CALLBACKS.load(Ordering::Acquire), 2);
+        assert!(unsafe { &*state }.closed.load(Ordering::Acquire));
+    }
+
+    /// `request.getHeader(name)` -- real Node's `request.headers` never
+    /// existed on this native/AOT `IncomingMessage` at all (only
+    /// `method`/`url`/`statusCode`/`body()`/`on()`/`bodyHex()`/
+    /// `bodyBytes()`), so a plain, non-registry `http.createServer`
+    /// program could never read a single request header. Only the real
+    /// connection-based dispatch path (`dispatch_request`) parses
+    /// headers at all -- `serveOnce`/`createServerOnce` (the one-shot
+    /// helpers) never do, so this exercises a real server through
+    /// `server_listen`/`thaw_http_run_servers()`, the same way
+    /// `lifecycle_loop_advances_a_complete_request_past_a_slow_connection`
+    /// does, rather than one of those simpler helpers.
+    #[test]
+    fn request_get_header_reads_a_sent_header_case_insensitively() {
+        unsafe extern "C" fn callback(
+            environment: *const c_void,
+            request: *const IncomingMessage,
+            response: *mut ServerResponse,
+        ) -> bool {
+            let get_header = (*request).get_header;
+            let get_header_fn: unsafe extern "C" fn(*const c_void, *const c_char) -> *const c_char =
+                std::mem::transmute((*get_header).code);
+            let read = |name: &str| {
+                let name = CString::new(name).unwrap();
+                string_from_ptr(get_header_fn(get_header.cast(), name.as_ptr())).to_string()
+            };
+            let body = CString::new(format!(
+                "{}|{}|{}",
+                read("x-custom-header"),
+                read("X-CUSTOM-HEADER"),
+                read("nope")
+            ))
+            .unwrap();
+            let ended = response_end((*response).end.cast(), body.as_ptr());
+            let closure = &*(environment as *const NativeClosure);
+            close_server_state(&*(closure.context as *const ServerState));
+            ended
+        }
+
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let callback = Box::into_raw(Box::new(NativeClosure {
+            code: callback as *const c_void,
+            context: std::ptr::null_mut(),
+        }));
+        let state = Box::into_raw(Box::new(ServerState {
+            callback: callback as usize,
+            closed: AtomicBool::new(false),
+            listener: Mutex::new(None),
+            watcher: AtomicU64::new(0),
+            connections: AtomicUsize::new(0),
+            listening_listeners: Mutex::new(Vec::new()),
+            close_listeners: Mutex::new(Vec::new()),
+            error_listeners: Mutex::new(Vec::new()),
+            pending_listening: AtomicBool::new(false),
+            pending_errors: Mutex::new(Vec::new()),
+            close_requested: AtomicBool::new(false),
+        }));
+        unsafe { (*callback).context = state.cast() };
+        let listen = NativeClosure {
+            code: server_listen as *const c_void,
+            context: state.cast(),
+        };
+        unsafe {
+            let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
+            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+        }
+
+        let client = thread::spawn(move || {
+            let mut stream = loop {
+                match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            };
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Custom-Header: hello123\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+        thaw_http_run_servers();
+        let response = client.join().unwrap();
+        assert!(response.ends_with("hello123|hello123|"), "{response}");
         assert!(unsafe { &*state }.closed.load(Ordering::Acquire));
     }
 
