@@ -126,32 +126,53 @@ fn lower_top_level_initializers(
                     };
                     steps.push(HirInitStep::StoreGlobal(symbol, init));
                 }
-                let decorator_class_name = source_class_name(class_name);
-                for member in &declaration.class.body {
-                    let (decorators, key) = match member {
-                        ClassMember::ClassProp(property) => {
-                            (&property.decorators, class_property_name(&property.key)?)
+                if class_has_decorators(&declaration.class) {
+                    let token_symbol = class_decorator_token_symbol(class_name);
+                    // `lower_class_decorator_tokens` also emits this same
+                    // class token as a `crate::HirGlobal` (needed so
+                    // `declare_globals`, thaw-llvm, allocates it real
+                    // storage) but thaw-llvm's AOT codegen never reads a
+                    // `HirGlobal`'s own `.init` -- every global's *real*
+                    // first value comes from an `HirInitStep::StoreGlobal`
+                    // here in `initializers` instead (see
+                    // `emit_top_level_init`), the same as an ordinary
+                    // top-level `const`/static field. Skipping this would
+                    // leave the token's storage permanently zero (an
+                    // invalid `JsValue` handle) the moment any decorator
+                    // below reads it.
+                    steps.push(HirInitStep::StoreGlobal(
+                        token_symbol.clone(),
+                        class_decorator_token_init(&mut lowerer)?,
+                    ));
+                    for member in &declaration.class.body {
+                        let (decorators, key) = match member {
+                            ClassMember::ClassProp(property) => {
+                                (&property.decorators, class_property_name(&property.key)?)
+                            }
+                            ClassMember::Method(method) if method.kind == MethodKind::Method => (
+                                &method.function.decorators,
+                                class_property_name(&method.key)?,
+                            ),
+                            _ => continue,
+                        };
+                        for decorator in decorators {
+                            let call = lower_member_decorator_call(
+                                &mut lowerer,
+                                decorator,
+                                &token_symbol,
+                                &key,
+                            )?;
+                            steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
                         }
-                        ClassMember::Method(method) if method.kind == MethodKind::Method => (
-                            &method.function.decorators,
-                            class_property_name(&method.key)?,
-                        ),
-                        _ => continue,
-                    };
-                    for decorator in decorators {
-                        let call = lower_member_decorator_call(
+                    }
+                    for decorator in &declaration.class.decorators {
+                        let call = lower_class_decorator_call(
                             &mut lowerer,
                             decorator,
-                            decorator_class_name,
-                            &key,
+                            &token_symbol,
                         )?;
                         steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
                     }
-                }
-                for decorator in &declaration.class.decorators {
-                    let call =
-                        lower_class_decorator_call(&mut lowerer, decorator, decorator_class_name)?;
-                    steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
                 }
                 lowerer.super_initializer = saved_super;
                 lowerer.class_static_context = saved_static_context;
@@ -335,6 +356,69 @@ fn lower_static_class_globals(
     Ok(globals)
 }
 
+/// Builds `new Function()` (via the same `getDynamicValue`/
+/// `constructDynamicValue` pair `new Intl.DateTimeFormat(...)` etc. use) --
+/// a genuine, distinct, live QuickJS object with no ties to thaw's own
+/// (non-existent) prototype-chain machinery, used as a decorated class's
+/// "class token" (see `lower_class_decorator_tokens`/
+/// `class_decorator_token_symbol`).
+fn class_decorator_token_init(lowerer: &mut FnLowerer) -> Result<HirExpr, String> {
+    let constructor = HirExpr::Call(
+        Box::new(HirExpr::Var("getDynamicValue".to_string())),
+        vec![HirExpr::Lit(HirLit::Str("Function".to_string()))],
+    );
+    let no_args = lowerer.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(Vec::new()))?;
+    Ok(HirExpr::Call(
+        Box::new(HirExpr::Var("constructDynamicValue".to_string())),
+        vec![constructor, no_args],
+    ))
+}
+
+/// Gives every decorated class (`class_has_decorators`) one real, live
+/// `JsValue` "class token" -- literally `new Function()`, a genuine
+/// distinct QuickJS object -- stored as an ordinary global
+/// (`class_decorator_token_symbol`). A decorator's `target` argument (see
+/// `lower_class_decorator_call`/`lower_member_decorator_call` below) is
+/// built from this same token, and so is the `constructor` field
+/// `coerce_to_declared`'s `HirType::Json` branch now adds when marshaling
+/// an instance of that same class across a dynamic-call boundary
+/// (`inference/coercions.rs`) -- giving real code like class-validator's
+/// `object.constructor`-keyed metadata storage a genuinely stable,
+/// shared identity to key off, the way real Node's own class/prototype
+/// objects would.
+fn lower_class_decorator_tokens(
+    declarations: &[&ClassDecl],
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
+) -> Result<Vec<crate::HirGlobal>, String> {
+    let mut lowerer = FnLowerer::new(
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        HirType::Void,
+        None,
+    );
+    let mut globals = Vec::new();
+    for declaration in declarations {
+        if !class_has_decorators(&declaration.class) {
+            continue;
+        }
+        let class_name = declaration.ident.sym.as_ref();
+        globals.push(crate::HirGlobal {
+            name: class_decorator_token_symbol(class_name),
+            ty: HirType::JsValue,
+            init: class_decorator_token_init(&mut lowerer)?,
+            mutable: false,
+        });
+    }
+    Ok(globals)
+}
+
 /// A class's own `Ident` symbol is already `__thawmod{N}_`-prefixed by
 /// `thaw-cli`'s module-flattening pass (every top-level declaration is
 /// renamed for cross-file uniqueness, entry file included) by the time
@@ -342,29 +426,20 @@ fn lower_static_class_globals(
 /// as "the class's name" would be a leak of an internal implementation
 /// detail, not the source-level name real Node would hand it -- so strip
 /// it back off for anything a decorator call actually observes.
-fn source_class_name(name: &str) -> &str {
-    let Some(after_marker) = name.strip_prefix("__thawmod") else {
-        return name;
-    };
-    let digits_len = after_marker
-        .bytes()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digits_len == 0 {
-        return name;
-    }
-    after_marker[digits_len..].strip_prefix('_').unwrap_or(name)
-}
-
 /// A decorator (`@expr`) is a real function value, possibly produced by a
 /// factory call (`@IsEmail()`); either way it is evaluated once and then
-/// called with the class's real name plus (for member decorators) the real
-/// property key, matching TC39/TS legacy decorator call order (member
-/// decorators, top to bottom, then class decorators). Reusing
-/// `lower_call` here -- rather than a bespoke dynamic-value dispatcher --
-/// means a decorator that resolves to a plain compiled function and one
-/// that resolves to a `JsValue` imported from an npm package both get
-/// dispatched correctly for free.
+/// called with a real target identity plus (for member decorators) the
+/// real property key, matching TC39/TS legacy decorator call order
+/// (member decorators, top to bottom, then class decorators) and legacy
+/// argument shape: a class decorator receives just its class's own
+/// "class token" (`token_symbol`, see `lower_class_decorator_tokens`); a
+/// property/method decorator receives that same token's `.prototype` --
+/// a real object whose own `.constructor` is the token, exactly the
+/// relationship real JS gives an instance member decorator's `target` --
+/// plus the property key. Reusing `lower_call` here -- rather than a
+/// bespoke dynamic-value dispatcher -- means a decorator that resolves to
+/// a plain compiled function and one that resolves to a `JsValue`
+/// imported from an npm package both get dispatched correctly for free.
 ///
 /// A method/property decorator does not receive a `descriptor` argument:
 /// thaw's natively-compiled methods have no first-class callable JS
@@ -372,18 +447,22 @@ fn source_class_name(name: &str) -> &str {
 /// non-functional placeholder object would silently break any decorator
 /// that actually calls it. Decorators that only register metadata by
 /// target+key (the pattern class-validator/TypeORM/NestJS's own decorators
-/// use) work regardless.
+/// use) work regardless -- and, since `coerce_to_declared` gives an
+/// instance of this same class a `constructor` field pointing at this
+/// exact token when it crosses a dynamic-call boundary, `object.
+/// constructor`-keyed metadata (real class-validator's own storage key)
+/// round-trips correctly too.
 fn lower_member_decorator_call(
     lowerer: &mut FnLowerer,
     decorator: &Decorator,
-    class_name: &str,
+    token_symbol: &str,
     property_key: &str,
 ) -> Result<HirExpr, String> {
     lower_decorator_call(
         lowerer,
         decorator,
         vec![
-            decorator_string_arg(decorator.span, class_name),
+            decorator_token_prototype_arg(decorator.span, token_symbol),
             decorator_string_arg(decorator.span, property_key),
         ],
     )
@@ -392,12 +471,12 @@ fn lower_member_decorator_call(
 fn lower_class_decorator_call(
     lowerer: &mut FnLowerer,
     decorator: &Decorator,
-    class_name: &str,
+    token_symbol: &str,
 ) -> Result<HirExpr, String> {
     lower_decorator_call(
         lowerer,
         decorator,
-        vec![decorator_string_arg(decorator.span, class_name)],
+        vec![decorator_token_arg(decorator.span, token_symbol)],
     )
 }
 
@@ -413,6 +492,36 @@ fn lower_decorator_call(
         args,
         type_args: None,
     })
+}
+
+fn decorator_token_ident(span: swc_common::Span, token_symbol: &str) -> Expr {
+    Expr::Ident(swc_ecma_ast::Ident {
+        span,
+        ctxt: Default::default(),
+        sym: token_symbol.into(),
+        optional: false,
+    })
+}
+
+fn decorator_token_arg(span: swc_common::Span, token_symbol: &str) -> swc_ecma_ast::ExprOrSpread {
+    swc_ecma_ast::ExprOrSpread {
+        spread: None,
+        expr: Box::new(decorator_token_ident(span, token_symbol)),
+    }
+}
+
+fn decorator_token_prototype_arg(
+    span: swc_common::Span,
+    token_symbol: &str,
+) -> swc_ecma_ast::ExprOrSpread {
+    swc_ecma_ast::ExprOrSpread {
+        spread: None,
+        expr: Box::new(Expr::Member(MemberExpr {
+            span,
+            obj: Box::new(decorator_token_ident(span, token_symbol)),
+            prop: MemberProp::Ident(IdentName::new("prototype".into(), span)),
+        })),
+    }
 }
 
 fn decorator_string_arg(span: swc_common::Span, value: &str) -> swc_ecma_ast::ExprOrSpread {

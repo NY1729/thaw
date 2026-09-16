@@ -326,6 +326,47 @@ impl<'a> FnLowerer<'a> {
                     HirType::Json,
                 ));
             }
+            // An instance of a *decorated* class (see `module/globals.rs`'s
+            // `lower_class_decorator_tokens`/`DECORATOR_CLASS_TOKENS`) gets
+            // one extra `constructor` field pointing at that class's own
+            // real, live "class token" `JsValue` -- the exact same token a
+            // decorator's own `target` argument was built from
+            // (`lower_member_decorator_call`/`lower_class_decorator_call`).
+            // That shared identity is what lets real `object.constructor`-
+            // keyed metadata storage (class-validator's own
+            // `MetadataStorage`, keyed by real `Map` reference equality)
+            // find its own registration again once the instance crosses
+            // this same dynamic-call boundary a second time (e.g.
+            // `validate(instance)`). Scoped to only classes that actually
+            // have a decorator -- an ordinary class's instances keep
+            // marshaling exactly as before, so this can't regress any
+            // existing (pre-decorator) dynamic-call argument shape.
+            if let HirType::Object(fields) = &actual {
+                if let Some(token_symbol) = fields.first().and_then(|(marker, _)| {
+                    DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow().get(marker).cloned())
+                }) {
+                    let object_json = self.wrap_native_value_as_json(value, actual.clone())?;
+                    let temp = format!("__thaw_decorator_instance_json_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(temp.clone(), HirType::Json);
+                    let token_as_json =
+                        self.coerce_to_declared(&HirType::Json, HirExpr::Var(token_symbol))?;
+                    let result = HirExpr::Block(vec![
+                        HirStmt::Expr(HirExpr::JsonSet(
+                            Box::new(HirExpr::Var(temp.clone())),
+                            Box::new(HirExpr::Lit(HirLit::Str("constructor".to_string()))),
+                            Box::new(token_as_json),
+                            HirType::Json,
+                            false,
+                        )),
+                        HirStmt::Return(Some(HirExpr::Var(temp.clone()))),
+                    ]);
+                    return self.wrap_call_argument_bindings(
+                        result,
+                        &[(temp, HirType::Json, object_json)],
+                    );
+                }
+            }
             if json_convertible_native_type(&actual) {
                 return self.wrap_native_value_as_json(value, actual);
             }

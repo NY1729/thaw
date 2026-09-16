@@ -2349,3 +2349,79 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A real, `thaw registry add`-fetched class-validator: property
+/// decorators (`@IsEmail()`) register real per-field validation
+/// constraints, and `validate(instance)` genuinely runs them --  not
+/// just "compiles and doesn't crash". This is the end-to-end proof for
+/// this session's decorator-identity work (see the synthetic
+/// `decorators_run_with_real_identity_in_declaration_order`/
+/// `decorator_class_tokens_are_distinct_per_class` in thaw-llvm): a
+/// decorated class's real "class token" `JsValue` (`lower/module/
+/// globals.rs`'s `lower_class_decorator_tokens`) is what a property
+/// decorator's `target` argument is built from, *and* what an instance
+/// of that class gets tagged with (a `constructor` field,
+/// `coerce_to_declared`'s `HirType::Json` branch) the moment it crosses
+/// into `validate(instance)`'s own dynamic call -- the same shared
+/// identity class-validator's own `MetadataStorage` (a real `Map` keyed
+/// by `object.constructor` reference equality) needs to find its
+/// `@IsEmail()` registration again. Before this session's work,
+/// decorator syntax didn't even parse; the identity-linking half alone
+/// (without which this test would still only ever see class-
+/// validator's own defensive "unknown value" fallback, never the real
+/// per-field constraint) is a materially larger claim than "it runs" --
+/// this asserts the actual pass/fail split a bad vs. good email
+/// produces.
+#[test]
+fn registry_add_validates_class_validator_decorators_end_to_end_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-class-validator-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "class-validator").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { IsEmail, validate } from "class-validator";
+
+class User {
+    @IsEmail()
+    email: string = "not-an-email";
+}
+
+class ValidUser {
+    @IsEmail()
+    email: string = "person@example.com";
+}
+
+async function main(): Promise<void> {
+    const bad = await validate(new User());
+    console.log(bad.length);
+    const good = await validate(new ValidUser());
+    console.log(good.length);
+}"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["class-validator".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1\n0\n");
+    let _ = std::fs::remove_dir_all(dir);
+}

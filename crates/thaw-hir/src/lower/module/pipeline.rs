@@ -1,4 +1,47 @@
+thread_local! {
+    /// Maps a decorated class's own identity marker field name (the
+    /// `__thaw_class_identity_<chain>` field every native class carries
+    /// as `fields[0]`, see `module/classes.rs`'s `resolve_layout`) to the
+    /// name of that class's decorator "class token" global -- a real,
+    /// live `JsValue` (`new Function()`, see `lower_class_decorator_
+    /// tokens` in `module/globals.rs`) created once per decorated class
+    /// so a decorator's `target` argument (and, symmetrically, an
+    /// instance of that class crossing a dynamic-call boundary, see
+    /// `coerce_to_declared`'s `HirType::Json` branch) can share one real,
+    /// stable identity -- the same thing real `object.constructor`-keyed
+    /// metadata storage (class-validator, TypeORM, ...) needs to find its
+    /// own registered metadata again at `validate()`/query time.
+    ///
+    /// Read from `coerce_to_declared` (`inference/coercions.rs`), which
+    /// runs inside an arbitrary function's own `FnLowerer` -- reachable
+    /// from anywhere in the program, not just the module-init lowering
+    /// this gets populated from -- so a thread-local (matching thaw-
+    /// bridge's `ALLOW_NATIVE_BYTES_TYPE` precedent) is far less invasive
+    /// than threading a new parameter through every lowering entry
+    /// point. Single-threaded, sequential-per-program compilation makes
+    /// this safe; cleared at the top of `lower_module` (the one, non-
+    /// recursive entry point for a whole compilation) so no stale entry
+    /// from an earlier, unrelated compilation on the same thread can
+    /// leak into this one.
+    static DECORATOR_CLASS_TOKENS: RefCell<HashMap<String, Symbol>> =
+        RefCell::new(HashMap::new());
+}
+
+fn class_has_decorators(class: &swc_ecma_ast::Class) -> bool {
+    !class.decorators.is_empty()
+        || class.body.iter().any(|member| match member {
+            ClassMember::ClassProp(property) => !property.decorators.is_empty(),
+            ClassMember::Method(method) => !method.function.decorators.is_empty(),
+            _ => false,
+        })
+}
+
+fn class_decorator_token_symbol(class_name: &str) -> Symbol {
+    class_static_field_symbol(class_name, "__thaw_decorator_target__")
+}
+
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
+    DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
     let merged = normalize_interface_merges(module)?;
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
@@ -1086,6 +1129,18 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 immutable_globals.insert(symbol);
             }
         }
+        if class_has_decorators(&declaration.class) {
+            let token_symbol = class_decorator_token_symbol(class_name);
+            global_types.insert(token_symbol.clone(), HirType::JsValue);
+            immutable_globals.insert(token_symbol.clone());
+            let HirType::Object(class_fields) = &interfaces[class_name] else {
+                unreachable!("a native class always resolves to an Object layout")
+            };
+            let identity_marker = class_fields[0].0.clone();
+            DECORATOR_CLASS_TOKENS.with(|tokens| {
+                tokens.borrow_mut().insert(identity_marker, token_symbol);
+            });
+        }
     }
 
     // Inherited static fields share their declaring class's single storage.
@@ -1432,6 +1487,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         &class_decls,
         &global_types,
         &immutable_globals,
+        &signatures,
+        &interfaces,
+        &generic_interfaces,
+        &enum_values,
+        &enum_reverse_values,
+    )?);
+    globals.extend(lower_class_decorator_tokens(
+        &class_decls,
         &signatures,
         &interfaces,
         &generic_interfaces,
