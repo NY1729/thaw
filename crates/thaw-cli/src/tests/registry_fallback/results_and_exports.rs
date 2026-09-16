@@ -1461,3 +1461,78 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A dynamic method call's argument that's a real `Buffer` (`HirType::
+/// Bytes`) had no JSON representation preserving that fact whenever the
+/// callee's own declared parameter type wasn't specifically `Buffer`-
+/// shaped -- real trigger: archiver's own `Archiver.append(source:
+/// stream.Readable | Buffer | string, ...)`, called with a real `Buffer.
+/// from(...)` value. `HirType::Bytes` is a lowering-time-only
+/// distinction (erased program-wide to `Array(F64)` right after
+/// lowering finishes, and `infer_expr_type` itself already normalizes it
+/// away for every other consumer), so a `Buffer` argument silently
+/// JSON-encoded as a bare `[n1, n2, ...]` array -- indistinguishable
+/// from an ordinary `number[]` argument, so the receiving package's own
+/// `Buffer.isBuffer(source)` check (or, as here, a bare identity probe)
+/// came back `false`. Fixed by wrapping a `Bytes`-typed dynamic-call
+/// argument as the same `{"type":"Buffer","data":[...]}` shape Node's
+/// own `Buffer.prototype.toJSON` already uses -- `__thaw_json_date_
+/// reviver` (`platform_globals/dates.js`) already recognized this exact
+/// shape (previously only reachable via a native addon's own JSON round
+/// trip) and reconstructs a real `Buffer` from it.
+#[test]
+fn a_dynamic_method_calls_buffer_argument_keeps_its_buffer_identity() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-buffer-argument-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("buffer-sink");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Sink { constructor(); accept(source: Buffer | string): number; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Sink() {} \
+         Sink.prototype.accept = function(source) { \
+         \x20\x20if (Buffer.isBuffer(source)) return source.length; \
+         \x20\x20if (typeof source === 'string') return -source.length; \
+         \x20\x20return 0; \
+         }; \
+         module.exports = { Sink: Sink };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Sink } from "buffer-sink";
+function main(): void {
+    const sink = new Sink();
+    console.log(sink.accept(Buffer.from("hello")));
+    console.log(sink.accept("world"));
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["buffer-sink".into()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n-5\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
