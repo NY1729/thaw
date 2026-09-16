@@ -1031,6 +1031,12 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl number formatter");
                 #[cfg(feature = "intl")]
+                let intl_currency_fraction_digits_function =
+                    Function::new(ctx.clone(), |currency: String| {
+                        intl_currency_fraction_digits(&currency).map(i32::from)
+                    })
+                    .expect("failed to create JavaScript Intl currency fraction-digit resolver");
+                #[cfg(feature = "intl")]
                 let intl_percent_format_function = Function::new(
                     ctx.clone(),
                     |locale: String, digits: String| {
@@ -1235,6 +1241,13 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_intl_number_format", intl_number_format_function)
                     .expect("failed to install JavaScript Intl number formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set(
+                        "__thaw_intl_currency_fraction_digits",
+                        intl_currency_fraction_digits_function,
+                    )
+                    .expect("failed to install JavaScript Intl currency fraction-digit resolver");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_percent_format", intl_percent_format_function)
