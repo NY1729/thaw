@@ -212,7 +212,7 @@ fn bundle_commonjs_package_cached(
                     continue;
                 }
                 if let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
-                    resolve_bare_require(node_modules_dir, &specifier)
+                    resolve_bare_require(node_modules_dir, &pkg_dir, &specifier)
                 {
                     let dep_key = format!("{dep_name}/{dep_relative}");
                     requires.push((specifier.clone(), dep_key.clone()));
@@ -226,7 +226,7 @@ fn bundle_commonjs_package_cached(
                             continue;
                         }
                         if let Some((sub_name, relative, absolute, directory)) =
-                            resolve_bare_require(node_modules_dir, &subpath)
+                            resolve_bare_require(node_modules_dir, &pkg_dir, &subpath)
                         {
                             let target = format!("{sub_name}/{relative}");
                             requires.push((subpath, target.clone()));
@@ -321,7 +321,7 @@ fn bundle_commonjs_package_cached(
                 continue;
             }
             if let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
-                resolve_bare_require(node_modules_dir, resolution_spec)
+                resolve_bare_require(node_modules_dir, &pkg_dir, resolution_spec)
             {
                 let dep_key = format!("{dep_name}/{dep_relative}{suffix}");
                 requires.push((spec, dep_key.clone()));

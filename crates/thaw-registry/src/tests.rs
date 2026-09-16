@@ -584,9 +584,14 @@ fn bare_subpaths_honor_exact_and_wildcard_export_conditions() {
     )
     .unwrap();
 
-    let (_, exact, ..) = resolve_bare_require(&node_modules, "conditional-pkg/feature").unwrap();
-    let (_, wildcard, ..) =
-        resolve_bare_require(&node_modules, "conditional-pkg/features/math").unwrap();
+    let (_, exact, ..) =
+        resolve_bare_require(&node_modules, &node_modules, "conditional-pkg/feature").unwrap();
+    let (_, wildcard, ..) = resolve_bare_require(
+        &node_modules,
+        &node_modules,
+        "conditional-pkg/features/math",
+    )
+    .unwrap();
     assert_eq!(exact, "./dist/feature.cjs");
     assert_eq!(wildcard, "./dist/features/math.cjs");
     let _ = fs::remove_dir_all(&node_modules);
