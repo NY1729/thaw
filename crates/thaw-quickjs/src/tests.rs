@@ -1618,6 +1618,8 @@ fn intl_time_zone_name_long_and_long_generic_match_real_node() {
                  longGenericName('Asia/Seoul', 1782907200000),\n\
                  longGenericName('Asia/Hong_Kong', 1782907200000),\n\
                  longGenericName('Asia/Dubai', 1782907200000),\n\
+                 longName('Asia/Kolkata', 1782907200000),\n\
+                 longGenericName('Asia/Kolkata', 1782907200000),\n\
                ];\n\
              }"
         ),
@@ -1625,7 +1627,7 @@ fn intl_time_zone_name_long_and_long_generic_match_real_node() {
     );
     assert_eq!(
         call("allCases", "[]"),
-        r#"["Eastern Daylight Time","Eastern Standard Time","Eastern Time","Japan Standard Time","Japan Standard Time","Australian Eastern Standard Time","Australian Eastern Daylight Time","Australian Eastern Time","Korean Standard Time","Hong Kong Standard Time","Gulf Standard Time"]"#
+        r#"["Eastern Daylight Time","Eastern Standard Time","Eastern Time","Japan Standard Time","Japan Standard Time","Australian Eastern Standard Time","Australian Eastern Daylight Time","Australian Eastern Time","Korean Standard Time","Hong Kong Standard Time","Gulf Standard Time","India Standard Time","India Standard Time"]"#
     );
 }
 

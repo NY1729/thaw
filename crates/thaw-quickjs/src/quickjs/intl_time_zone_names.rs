@@ -266,6 +266,14 @@ const TIME_ZONE_LONG_NAMES: &[(&str, &str, &str, &str)] = &[
     ("Asia/Karachi", "Pakistan Standard Time", "Pakistan Standard Time", "Pakistan Standard Time"),
     ("Asia/Katmandu", "Nepal Time", "Nepal Time", "Nepal Time"),
     ("Asia/Khandyga", "Yakutsk Standard Time", "Yakutsk Standard Time", "Yakutsk Standard Time"),
+    // `Asia/Kolkata` is the modern canonical IANA name (`Asia/Calcutta`
+    // above is the pre-1993 backward-compatibility alias real tzdata's
+    // `backward` file still links to it) -- the real Node/ICU build used
+    // for this table's extraction happens to list only `Asia/Calcutta`
+    // in `Intl.supportedValuesOf('timeZone')`, but both names are real,
+    // valid `Intl` `timeZone` inputs and resolve identically (confirmed
+    // against real Node), so both need their own exact-match row here.
+    ("Asia/Kolkata", "India Standard Time", "India Standard Time", "India Standard Time"),
     ("Asia/Krasnoyarsk", "Krasnoyarsk Standard Time", "Krasnoyarsk Standard Time", "Krasnoyarsk Standard Time"),
     ("Asia/Kuala_Lumpur", "Malaysia Time", "Malaysia Time", "Malaysia Time"),
     ("Asia/Kuching", "Malaysia Time", "Malaysia Time", "Malaysia Time"),
