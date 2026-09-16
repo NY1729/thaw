@@ -702,3 +702,116 @@ fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A JS function value passed into native code (`__thaw_napi_reference_
+/// N`'s wrapper, `generation.rs`) can itself be called and *return
+/// another function* -- real trigger: better-sqlite3's own `rowFactory`
+/// argument to `addon.initialize(...)`, called once per distinct column
+/// set to build a row-shape-specific constructor closure, which the
+/// native side then calls repeatedly and persists across calls
+/// (`Napi::Persistent`/`Napi::FunctionReference`). The wrapper's own
+/// return value went straight through `resolve_value_impl`'s plain
+/// `JSON.stringify`-based encoding, which cannot represent a function at
+/// all -- `JSON.stringify(fn)` is JS's own literal `undefined` -- so the
+/// returned function silently became the undefined sentinel. The native
+/// side never noticed (no exception, no crash): it just held a
+/// `Napi::Persistent` around `undefined` cast to a function, which
+/// failed with `napi_function_expected` the moment it was later
+/// *called*, an error `Napi::Function::New`-style helpers throw away
+/// silently (real better-sqlite3's own `SafeCall`), so the whole call
+/// site silently produced `undefined` instead. Fixed by having the
+/// reference wrapper re-run its own return value through
+/// `__thaw_napi_argument` (the same encoder already used for a JS value
+/// handed to native code as an *argument*) whenever that return value is
+/// itself a function, registering it as its own callable reference
+/// rather than losing it to JSON.
+#[test]
+fn native_callback_returning_a_function_keeps_it_callable() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-native-returned-function-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("napi-returned-function");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function roundTripsReturnedFunction(): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "const native = require.addon();\n\
+         module.exports.roundTripsReturnedFunction = function() {\n\
+         \x20\x20native.storeFactory(function() { return function(x) { return x + 1; }; });\n\
+         \x20\x20return native.callStored(41);\n\
+         };\n",
+    )
+    .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(
+        &addon_c,
+        r#"
+            #include <stddef.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info; typedef void* napi_ref;
+            typedef int napi_status;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
+            extern napi_status napi_get_undefined(napi_env, napi_value*);
+            extern napi_status napi_create_reference(napi_env, napi_value, unsigned, napi_ref*);
+            extern napi_status napi_get_reference_value(napi_env, napi_ref, napi_value*);
+            extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            static napi_ref stored_ref;
+            static napi_value store_factory(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value factory, self, result;
+                napi_get_cb_info(env, info, &argc, &factory, &self, 0);
+                napi_call_function(env, self, factory, 0, 0, &result);
+                napi_create_reference(env, result, 1, &stored_ref);
+                napi_value undef; napi_get_undefined(env, &undef); return undef;
+            }
+            static napi_value call_stored(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, self, fn, result;
+                napi_get_cb_info(env, info, &argc, &arg, &self, 0);
+                napi_get_reference_value(env, stored_ref, &fn);
+                napi_status status = napi_call_function(env, self, fn, 1, &arg, &result);
+                if (status != 0) { napi_get_undefined(env, &result); }
+                return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value fn;
+                napi_create_function(env, "storeFactory", 12, store_factory, 0, &fn);
+                napi_set_named_property(env, exports, "storeFactory", fn);
+                napi_create_function(env, "callStored", 10, call_stored, 0, &fn);
+                napi_set_named_property(env, exports, "callStored", fn);
+                return exports;
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&addon_c)
+        .arg("-o")
+        .arg(package.join("native.node"))
+        .status()
+        .unwrap()
+        .success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "import { roundTripsReturnedFunction } from \"napi-returned-function\"; function main(): void { console.log(roundTripsReturnedFunction()); }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
