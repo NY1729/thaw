@@ -1374,6 +1374,41 @@ fn crypto_der_and_passphrase_protected_key_import_interoperate_with_real_openssl
     );
 }
 
+/// The legacy OpenSSL "traditional" PKCS#1 PEM encryption format
+/// (`Proc-Type: 4,ENCRYPTED` / `DEK-Info: <cipher>,<iv>`, predating
+/// PKCS#8's own unrelated `ENCRYPTED PRIVATE KEY` header) -- the third
+/// of 4 previously out-of-scope `node:crypto` items the user picked up
+/// together (see [[project_crypto_rsa_ecdsa]]'s own "deliberately
+/// still out of scope" note, and this module's own header comment).
+/// Two real OpenSSL 3.5-produced key files
+/// (`openssl rsa -in plain.pem -des3/-aes256 -traditional -passout
+/// pass:hunter2`), one per supported cipher family (3DES, AES) --
+/// decrypted and used to sign, verified against the plain (unencrypted)
+/// public key derived from the same original key.
+#[test]
+fn crypto_legacy_encrypted_pkcs1_pem_interoperates_with_real_openssl() {
+    assert_eq!(
+        load(
+            "function rsaPublicPem() { return '-----BEGIN PUBLIC KEY-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsFF0EaFZ+6scQKkIVSoa\\nf8oy5gXO8TDhBbKh7SK0P8ALHEB4flyKVaL4Qvzbh5aRrfpOLwCmlo9ucr4V95SH\\nOX7dZ5eo2fONA5CNIaMNY5NzebjV8+kYj4ICRTLugR654Bf22EqCOtMsy4EJ15Ce\\nuNfY6+N54bj8pPDyO81NEwn3bRdZr6Wn3Nut6mRG30j/etwNGSFxXoChUAhCbcfL\\nxdGzEdIOpL3qBLFnJ2cmurC02wVEx6F1eJt2G6fedxoAgogCtDDtMa89FmeKNh11\\nCVxjc6Ma/vGh3jzO5zZegP5yuPGm9mKGsvmNYm6GHCQJUhUmdNNJx0hqDP+gC3X7\\nXQIDAQAB\\n-----END PUBLIC KEY-----\\n'; }\n\
+             function rsaPrivateDes3Pem() { return '-----BEGIN RSA PRIVATE KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: DES-EDE3-CBC,B000B3DC7910EE4F\\n\\nERnhRI/uyDWAr0JB9jmi8KtmYYV7cUFvVYAIIv7iUSeH3o18T+jLHKvxb5rQDXKy\\nSj+sjFWzf/+DaJo/6SXp81RzS3hvIHj0TG5JzGZT8nPk18JOIXB5BUQ6CbFBtfON\\nE+wPTU4+cwUlL0ugbbHiKx7tdrtuQT5fUjvWhpZOER+fKyi7uCUyrpZyhPGvlsMA\\n2rEv5DfWk494rCnHUg+da2mFT0PKtPGDPUBxIcNwlfwNZERMuwlFYiVTKIclncAn\\n0K1PjIskNixOG3SkYVhp8YOKfVar/sFaU7DzPQTXqGJIGOhHQeT9ILUcY4Yb17jx\\ngPMtH7gw8j5B68F/r4hl+KIQXSg05G1SkGXKM2zvWu1UUIpW2LlYlD5D4UxtiCit\\nNSeV5xVpv4wZZzDTLZAZjRS0SUZ8plY16k9SNQdfTCB+/biFxI/kIHv/hQqB8+ML\\nTe8W0rzxDRIwYjc0MB0nhjsfnb+dT6EiNSW4jZEWS5Z5G88CUVjFNI2UOFjwlIO0\\nOd0e6d0vuMPJ9rRQMGKA0TfPyioYkJUQ0ED+13ML1W9wC+MvkG7SjtQKLJDQzRMk\\nyYGHiToYI9DktYTGipbB2YEt5I/07YWKgEa++dkGYsQZOqFoOGvOvdwZeo2laZjG\\nAAp2Q1F2ji5wQR5mUZOtqBWjFJc0VRYA3S26wwqaOk1axydFt6ilk/E1BeblJNzN\\nxfmtsg1ZQJof3YTYtlkn2ur/3PWsmerip8H5TgyAIsF3bHVy4hWn/GdFE+LCPkgb\\nVIO0Qekz1nANYjl4kfPi/ImCB6VtHkp7aOAC/2QvFu8rs4F/+Mtyxsx+OjRH9LEM\\nplyiA3hNmyccMXlSLnVJA7tQ1ub0fkGb9y9xRwKM7SP8CA+xvnsVjoq3qFp/Wyft\\ngDyB/gLZE/TlXH5NftHi7qkSSb3ZHslFJjJbuG6q/Byv8/VgVk7rwpHRkGH6lPRm\\nTZvAqI0nSR3+4eq586598kJcylrxFgcRysZRQUVVInnmKZcQqZIl24l4D5o0Q5al\\na+RN1ICirl9Gc7TVjxntbt3JpSjFbFkN+LQNz3fiim+N6+jOC/CURQf9T45AWyWM\\n+8zZCiMm20EA+WUGqbiSV4LAPT+3QMOGJZHhbwauipyww2s7Cg+2WJQOnJRzqQ6/\\no0DQqX8v4otuhAPrDFvdex9tIJiFjicOrBTsuMe8DSPHMqYh8EktuI4WSKVHXs95\\nujyVq1BFWfFacE4PyVXjbWXMBHC9Ln/HnwIbMmHNxZQF1vgPZitWITYGuODrZgaV\\naNiNmnrgwlwxETidQlcgz7vbVdm6AQJjg8b8mGzI8Ms1w9JPx3HWjmHUW+bKgbHM\\nTiOEKdwK1R+0yYUpcdaUb8g5tgH9QtBD+zz3amI9bncYjUYBzD9x9lJ5qEFg8F7z\\nHhV8PolH4R9IoDZdJ5NW7hzfw2itcfGiNAn6FOwqjDRvfZz7T4GprFU4r6A5PIrW\\nvXxayS0owhGxa46wjg0h+Pwz2ykuMJwXc6f7LQ2YfO83DAT/BdpA7NEKBA/u3cKG\\ngANfOLN5Qx2EPnPvQ7QzQkhk+ICOVRdga5n8JL4FXK9anDSCdBNjrw==\\n-----END RSA PRIVATE KEY-----\\n'; }\n\
+             function rsaPrivateAes256Pem() { return '-----BEGIN RSA PRIVATE KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: AES-256-CBC,520C22EC6F81EC4DA4E87A99C3B0EDBB\\n\\nkXE+R6HCuJ+Pl1O79NeU0Zpx/NGzD51NxmHAN6R2ky7zyX3DHhzXvnrVEfXdTIAm\\np7Ptg+BMiZyynLPYP3C5okveUm0RL+K0SLdcssczxYMw8Xrvo1wNVsX4M0ISy+h5\\nvPPLlDlot7BQwWWlnXC4rqJIo0N6Z2KYtDXiDCXTQA870PHGEGHTTey7Cpi82tOS\\nrBVZElzIJ0rVc1i+CSjAFlyctvD75fy+ixZ45Npl50UUMOfHCu8zc3jetLU+1jxy\\nbBkGvhKhhCuUhaNRjhhITiqJcvfNzvuVmjaiIFVC4LWX9p5aq8c2aDPtt10gqRKZ\\n6sH5t3DUYSwvsPQUPrIDpeGapfs3wifeqmdyTkOynk43fvurENUM2MLX4WTs5VG1\\nAHZHAMWR2HeX1nECDGaAr2Qkw5B9y1gUbIugDoq9rD27EDwqbfiCmJWJfWTsePtJ\\nGNvckfDEkAkmlPg1j0oWpMM4G0ojFV/oiyKePebG82rZDuUINM5UFNd+z3jXe+0J\\nw67ZKJvOtneITWL3MKsyjJbc9V6LlsH3xJcGKsSrfFhXF4iPPaHjsGC5q6Snx6IX\\nd/S9RUcmddcmNnZHW48v8MI8wWc+ysEyodPM+zPOk+pyBVPkUcMmpv1HVaNdv3sZ\\nhTij2VxXfuBKU9wp83PtQf3vZcMFkD2J/JHuuAYXrvhxOAHrIl6TWsJBuZa6CChZ\\nB9myNPbPb8b14VuYNjdjec8USsnZPt3U6QP38cEO2WUZeLVBsk9zUZK5Dkj5phy5\\nPBqlIBL0u+EmcUubYYD86aqTomdH5uQkM2wMCdNmM7Xb1g5j06lpyRfdSISZG/ps\\nNu4KxxJGCWa6i5NswtbkyuXExXOjt8CeCLvBjotysUYPnL0AC56bWQG1LNanV3Ef\\nIUip05vJTFSz9jIoB5tCrjSyb4vZ9WtFhOF5I5w9sPmhvinD+AjT//FLF4+O6Wue\\nWQxt0Gyj5BSOjh7nOrQZGVXHNhrQJkAQZMv07OXMoJjgeA7I87Y6WWukv+9QRXn2\\nviBN5I7Iq63VQXzN2RVUHKbZPIgu9P0IwyMHrnfUwnDN8074NeDpRPw6snSAsarZ\\nPzh0ZuvxXV4iS17P4VnGJ1oCZnkKPU4phvH00ZkQg0mXIy4tH9tn/MhQpy9GQEmh\\n//PtfKKAp7s9ctVqDNwNjt1GY++gHP9GmLOdFS2AJFipQqj6mzM+foOsNyhalIqS\\ntXXLaSUAt89F4JED6A8xDJMFANUm5NKmNOTFcbeNzeEjq8gxPZXtCMxyH8k77vwR\\n9oLKZMtToD8yF09sCAM9vQyztwEgV/u7n+9x1t51YnODmVrIsvQbYBU/HxmMUQd7\\nqNkfCugPprJ7OhMNbWafnTeyPacr30AsEcJ7IgOxGPY3rt2VPxObI14clPbVEz+1\\nO4NMzbaSYHwILAkxyNIrnf0ZzXOXKkgN0elMxnc2AwDkjm79R0KGAh4+yLxWPlxo\\nfPgzxmo+3lI7fpILxwotzXnPXV2YxI7QIeFA+/q0kC8NTw2d0WoSDm4m8N0J7MR6\\npbO6Mu0/vl5u6p8WhJKnxPOrSWVtTsDo2vm99fSkBHyUnbqqJr/FwUvaTWBAh/Lk\\n-----END RSA PRIVATE KEY-----\\n'; }\n\
+             function legacyRoundTrip(pem) {\n\
+               const priv = __thaw_crypto_module.createPrivateKey({ key: pem, passphrase: 'hunter2' });\n\
+               const sig = __thaw_crypto_module.createSign('sha256').update('legacy pem test').sign(priv, 'hex');\n\
+               const ok = __thaw_crypto_module.createVerify('sha256').update('legacy pem test').verify(rsaPublicPem(), sig, 'hex');\n\
+               let wrongPassphraseThrew = false;\n\
+               try { __thaw_crypto_module.createPrivateKey({ key: pem, passphrase: 'wrong' }); } catch (error) { wrongPassphraseThrew = true; }\n\
+               return [priv.asymmetricKeyType, ok, wrongPassphraseThrew];\n\
+             }\n\
+             function des3RoundTrip() { return legacyRoundTrip(rsaPrivateDes3Pem()); }\n\
+             function aes256RoundTrip() { return legacyRoundTrip(rsaPrivateAes256Pem()); }"
+        ),
+        1
+    );
+    assert_eq!(call("des3RoundTrip", "[]"), r#"["rsa",true,true]"#);
+    assert_eq!(call("aes256RoundTrip", "[]"), r#"["rsa",true,true]"#);
+}
+
 /// RSA `publicEncrypt`/`privateDecrypt` -- PKCS1v15 and OAEP (default)
 /// padding. Decrypts ciphertexts produced by real OpenSSL for both
 /// schemes (proving cross-implementation correctness of the actual RSA
