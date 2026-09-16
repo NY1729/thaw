@@ -177,6 +177,36 @@ fn poll_napi_bridge(ctx: &Ctx<'_>) {
         poll();
     }
 }
+
+/// `process.nextTick` (`platform_globals/runtime.js`) queues into a
+/// plain JS array rather than through `queueMicrotask`/`Promise.then`
+/// -- real Node fully drains its own separate nextTick queue before
+/// running *any* pending Promise microtask, at every checkpoint, and
+/// nothing routed through the engine's real (opaque, native) Promise
+/// job queue could ever jump ahead of a job already sitting in that
+/// queue: whichever `.then()` calls first wins, always, no matter how
+/// process.nextTick's own callback got there. Called right before
+/// every `ctx.execute_pending_job()` check across this crate so a
+/// nextTick queued while handling one microtask still runs before the
+/// *next* one, matching Node's per-tick interleaving, not just once
+/// per whole batch.
+///
+/// Returns whether it actually ran a callback -- a caller polling "is
+/// some condition met yet, else give up" (`finish_with_platform_events`,
+/// `thaw_js_run_until_native_resolved`) must `continue` its loop
+/// immediately when this is `true` to re-check that condition, since a
+/// nextTick callback may be the very thing that just resolved the
+/// promise it's waiting on; falling through to an exhaustion check in
+/// the same iteration first would misreport it as deadlocked.
+fn drain_next_tick_queue(ctx: &Ctx<'_>) -> Result<bool, rquickjs::Error> {
+    if let Ok(drain) = ctx
+        .globals()
+        .get::<_, Function>("__thaw_drain_next_tick_queue")
+    {
+        return drain.call::<_, bool>(());
+    }
+    Ok(false)
+}
 #[cfg(feature = "tls")]
 type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 #[cfg(feature = "tls")]

@@ -133,7 +133,15 @@ fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
             rquickjs::Error::Exception => describe_exception(&ctx),
             error => format!("module initialization failed: {error}"),
         })?;
-        while ctx.execute_pending_job() {}
+        loop {
+            drain_next_tick_queue(&ctx).map_err(|error| match error {
+                rquickjs::Error::Exception => describe_exception_with_stack(&ctx),
+                error => error.to_string(),
+            })?;
+            if !ctx.execute_pending_job() {
+                break;
+            }
+        }
         let _ = ctx
             .globals()
             .set("__thaw_module_ready", Value::new_undefined(ctx.clone()));
@@ -395,6 +403,15 @@ fn finish_with_platform_events<'js>(
         if let Some(result) = promise.result() {
             return result;
         }
+        // A nextTick callback may be exactly what resolves `promise` --
+        // loop back to the `promise.result()` check above immediately
+        // rather than falling through to the exhaustion check below,
+        // which would otherwise misreport a just-resolved promise as
+        // deadlocked (`Error::WouldBlock`) whenever nothing else happens
+        // to be scheduled.
+        if drain_next_tick_queue(ctx)? {
+            continue;
+        }
         if ctx.execute_pending_job() {
             continue;
         }
@@ -440,7 +457,20 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
             let _ = poll.call::<_, ()>(());
         }
         poll_napi_bridge(&ctx);
-        while ctx.execute_pending_job() {}
+        loop {
+            if let Err(error) = drain_next_tick_queue(&ctx) {
+                let message = if matches!(error, rquickjs::Error::Exception) {
+                    describe_exception_with_stack(&ctx)
+                } else {
+                    error.to_string()
+                };
+                eprintln!("{message}");
+                return 1;
+            }
+            if !ctx.execute_pending_job() {
+                break;
+            }
+        }
         let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
             return process_exit_code(&ctx);
         };
@@ -491,6 +521,20 @@ pub extern "C" fn thaw_js_run_until_native_resolved(promise: *const c_void) {
             let _ = poll.call::<_, ()>(());
         }
         poll_napi_bridge(&ctx);
+        // This FFI function returns `()` with no error-reporting path
+        // of its own -- matches the same silent-ignore convention the
+        // neighboring `poll_platform_events` call above already uses
+        // for this specific function, unlike `thaw_js_run_event_loop`/
+        // `load_impl`, which do have one and use it. Still needs to act
+        // on a successful drain, though: a nextTick callback may be
+        // exactly what settles `promise` (checked via `native_promise_
+        // state` at the top of this same loop), so loop back
+        // immediately rather than falling through to the timer/
+        // platform-activity exhaustion check below, which would
+        // otherwise silently give up on an already-settled promise.
+        if drain_next_tick_queue(&ctx).unwrap_or(false) {
+            continue;
+        }
         if ctx.execute_pending_job() {
             continue;
         }

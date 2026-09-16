@@ -156,11 +156,50 @@
     globalThis.console = new Console(globalThis.__thaw_console_stdout,
                                      globalThis.__thaw_console_stderr);
   }
+  // Real Node fully drains its own separate nextTick queue before
+  // running *any* pending Promise microtask, at every checkpoint --
+  // routing through `queueMicrotask` (itself `Promise.resolve().then
+  // (callback)`, see above) would only ever give plain FIFO ordering
+  // against whatever `.then()` calls already happened to be scheduled
+  // first, never the "nextTick always wins" guarantee real code relies
+  // on. `nextTickQueue` is a plain array, drained by
+  // `__thaw_drain_next_tick_queue` (thaw-quickjs's Rust host calls this
+  // immediately before every single native Promise-job execution, not
+  // just once per batch, so a nextTick queued from inside one
+  // microtask still runs before the *next* one).
+  let nextTickQueue = [];
   const nextTick = (callback, ...args) => {
     if (typeof callback !== 'function') {
       throw new TypeError('process.nextTick callback must be a function');
     }
-    queueMicrotask(() => callback(...args));
+    nextTickQueue.push({ callback, args });
+  };
+  // Returns whether it actually ran anything -- callers that poll "is
+  // some condition met yet, else give up" (`finish_with_platform_events`,
+  // `thaw_js_run_until_native_resolved` in api.rs) need to re-check that
+  // condition immediately after a nextTick callback runs (it may be the
+  // very thing that resolves the promise they're waiting on), not fall
+  // through to their own "nothing left to do" exhaustion check first.
+  globalThis.__thaw_drain_next_tick_queue = () => {
+    let ranAny = false;
+    while (nextTickQueue.length) {
+      ranAny = true;
+      const batch = nextTickQueue;
+      nextTickQueue = [];
+      for (const { callback, args } of batch) {
+        try {
+          callback(...args);
+        } catch (error) {
+          // Matches `__thaw_run_due_timers`'s own uncaught-exception
+          // handling (workers/abort_timers.js) -- a nextTick callback's
+          // thrown error is exactly as fatal as a timer callback's.
+          if (typeof process === 'undefined' || !process.emit) throw error;
+          process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
+          if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
+        }
+      }
+    }
+    return ranAny;
   };
   if (typeof globalThis.process === 'undefined') globalThis.process = {};
   const hostInfo = typeof globalThis.__thaw_os_info === 'function'
