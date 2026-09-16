@@ -84,6 +84,20 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
         .map(|class| class.name)
         .collect::<HashSet<_>>();
     let mut values = Vec::new();
+    // The same name can legitimately appear more than once in `source`:
+    // thaw-registry's own `.d.ts` flattening concatenates every file a
+    // package's type declarations span into this one string, and a
+    // value re-exported (or separately ambient-declared) from more than
+    // one of those files under its own name produces two declarations
+    // for the same binding here -- real examples: `marked`'s own
+    // `_defaults`, `js-yaml`'s own `binaryTag`. Undeduplicated, this
+    // emitted the same `declare function .../let ...` shim pair twice,
+    // which the shim generator's own duplicate-binding check (rightly)
+    // rejects as a hard error -- the exact same class of bug already
+    // fixed for `parse_dts_classes` (see its own doc comment: yaml's
+    // `NodeBase`, socket.io's `StrictEventEmitter`), just never applied
+    // here too. First occurrence wins, matching that precedent.
+    let mut seen_names = HashSet::new();
     for item in &module.body {
         let declaration = match item {
             ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Var(declaration))) => {
@@ -103,6 +117,9 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
             let Some(annotation) = &binding.type_ann else {
                 continue;
             };
+            if !seen_names.insert(name.clone()) {
+                continue;
+            }
             if callable.contains(&name) {
                 let callable_object = matches!(
                     annotation.type_ann.as_ref(),
