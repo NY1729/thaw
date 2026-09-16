@@ -103,6 +103,100 @@ fn registry_native_addon_builds_and_runs_end_to_end() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A package's own JS glue can load its native addon by computing a
+/// filesystem path at runtime and passing it straight to `require(...)`
+/// -- real trigger: `better-sqlite3`'s own `lib/binding.js`, whose
+/// `getBinding()` builds `path.join(__dirname, '..', 'prebuilds',
+/// '<platform>-<arch>.node')` (or a `build/Release/...` fallback) and
+/// calls `require(filename)` on it, rather than a literal `require('./
+/// addon.node')` the bundler's own static require map (`__thaw_bundle_
+/// require_maps`) could see ahead of time. `__thaw_bundle_require`
+/// itself already special-cased a `.node`-suffixed *static* require key
+/// (`render_bundle`'s own `factoryKey`), but the *fallback* path taken
+/// for a spec the static map doesn't recognize at all (`localRequire`'s
+/// `return require(spec);`, and `__thaw_bundle_create_require`'s
+/// matching fallback) still fell through to the base `globalThis.
+/// require` stub, which throws `Cannot find module` unconditionally --
+/// even though the embedded addon (`require.addon()`) was right there.
+/// Fixed by applying the same `.node`-suffix check to a dynamically
+/// computed spec too, in both fallback sites (`render.rs`).
+#[test]
+fn require_resolves_a_dynamically_computed_node_path_to_the_embedded_addon() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-native-dynamic-require-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("native-dynamic-path");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function add(a: number, b: number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.add = function(a, b) {\n\
+         \x20\x20var filename = '/definitely/not/a/real/directory/' + 'native' + '.node';\n\
+         \x20\x20var addon = require(filename);\n\
+         \x20\x20return addon.add(a, b);\n\
+         };\n",
+    )
+    .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(
+        &addon_c,
+        r#"
+            #include <stddef.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef int napi_status;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_get_value_double(napi_env, napi_value, double*);
+            extern napi_status napi_create_double(napi_env, double, napi_value*);
+            extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            static napi_value add(napi_env env, napi_callback_info info) {
+                size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_get_value_double(env, argv[0], &a); napi_get_value_double(env, argv[1], &b);
+                napi_create_double(env, a + b, &result); return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value fn;
+                napi_create_function(env, "add", 3, add, 0, &fn);
+                napi_set_named_property(env, exports, "add", fn);
+                return exports;
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&addon_c)
+        .arg("-o")
+        .arg(package.join("native.node"))
+        .status()
+        .unwrap()
+        .success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "import { add } from \"native-dynamic-path\"; function main(): void { console.log(add(20, 22)); }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_javascript_wrapper_calls_bundled_native_addon() {
     let dir = std::env::temp_dir().join(format!(
