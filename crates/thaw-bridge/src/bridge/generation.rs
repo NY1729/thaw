@@ -666,7 +666,21 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20return {{ __thaw_napi_object__: id, value: properties }};\n\
          \x20\x20}};\n\
          \x20\x20var __thaw_napi_arguments = function(args) {{ return Array.prototype.map.call(args, __thaw_napi_argument); }};\n\
-         \x20\x20var __thaw_napi_sync_arguments = function(args) {{ var seen = typeof WeakSet === 'function' ? new WeakSet() : null; var sync = function(value) {{ if (value === null || typeof value !== 'object' || (seen && seen.has(value)) || __thaw_napi_handles.has(value) || (typeof Buffer !== 'undefined' && Buffer.isBuffer(value))) return; if (seen) seen.add(value); if (Array.isArray(value)) {{ value.forEach(sync); return; }} var id = __thaw_napi_reference_ids.get(value); if (!id) return; var updated = __thaw_napi_handle('sync_reference', id, '', []).value || {{}}; Object.keys(value).forEach(function(key) {{ if (!Object.prototype.hasOwnProperty.call(updated, key)) delete value[key]; }}); Object.keys(updated).forEach(function(key) {{ if (value[key] && typeof value[key] === 'object') sync(value[key]); else value[key] = updated[key]; }}); }}; Array.prototype.forEach.call(args, sync); }};\n\
+         \x20\x20// A plain object argument can carry a getter-only accessor\n\
+         \x20\x20// property (real trigger: better-sqlite3's own `Database`\n\
+         \x20\x20// instance, passed as `prepare(sql, this, ...)`'s second\n\
+         \x20\x20// argument, whose `name`/`open`/`inTransaction`/`readonly`/\n\
+         \x20\x20// `memory` are all getter-only via `Object.defineProperties`)\n\
+         \x20\x20// -- syncing the native side's echoed-back value onto it\n\
+         \x20\x20// with a plain `=` assignment threw a real engine\n\
+         \x20\x20// `TypeError: no setter for property` the moment any such\n\
+         \x20\x20// key came back, even though the native round trip never\n\
+         \x20\x20// actually changed it. A getter-only property is always\n\
+         \x20\x20// freshly computed on the next real read anyway, so there is\n\
+         \x20\x20// nothing meaningful to \"sync\" for one -- skip a key the\n\
+         \x20\x20// assignment itself rejects instead of crashing the whole\n\
+         \x20\x20// call.\n\
+         \x20\x20var __thaw_napi_sync_arguments = function(args) {{ var seen = typeof WeakSet === 'function' ? new WeakSet() : null; var sync = function(value) {{ if (value === null || typeof value !== 'object' || (seen && seen.has(value)) || __thaw_napi_handles.has(value) || (typeof Buffer !== 'undefined' && Buffer.isBuffer(value))) return; if (seen) seen.add(value); if (Array.isArray(value)) {{ value.forEach(sync); return; }} var id = __thaw_napi_reference_ids.get(value); if (!id) return; var updated = __thaw_napi_handle('sync_reference', id, '', []).value || {{}}; Object.keys(value).forEach(function(key) {{ if (!Object.prototype.hasOwnProperty.call(updated, key)) {{ try {{ delete value[key]; }} catch (e) {{}} }} }}); Object.keys(updated).forEach(function(key) {{ if (value[key] && typeof value[key] === 'object') {{ sync(value[key]); return; }} try {{ value[key] = updated[key]; }} catch (e) {{}} }}); }}; Array.prototype.forEach.call(args, sync); }};\n\
          \x20\x20var __thaw_napi_handle = function(operation, target, name, args) {{\n\
          \x20\x20\x20\x20var result = JSON.parse(globalThis.__thaw_napi_bridge_handle(operation, String(target), name || '', JSON.stringify(__thaw_napi_arguments(args || []))), globalThis.__thaw_json_date_reviver);\n\
          \x20\x20\x20\x20if (result && result.__thaw_error__) throw new Error(result.__thaw_error__);\n\

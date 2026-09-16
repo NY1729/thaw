@@ -197,6 +197,101 @@ fn require_resolves_a_dynamically_computed_node_path_to_the_embedded_addon() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// After a native call returns, `__thaw_napi_sync_arguments` writes back
+/// whatever the native side reports as each object argument's *current*
+/// properties, in case the call mutated it (real, working use case:
+/// `registry_javascript_wrapper_calls_bundled_native_addon`'s own
+/// `mutatesObject`/`roundTripsObject`). But an object argument can carry
+/// a getter-only accessor property instead of a plain writable one --
+/// real trigger: better-sqlite3's own `Database` instance, passed as
+/// `prepare(sql, this, ...)`'s second argument, whose `name`/`open`/
+/// `inTransaction`/`readonly`/`memory` are all getter-only via
+/// `Object.defineProperties`. The native side never actually changes
+/// such a property (there's nothing to write back for a value that's
+/// always freshly computed), but the sync step didn't know that and
+/// still tried a plain `object.value = ...` assignment, which threw a
+/// real, uncatchable-from-JS `TypeError: no setter for property` --
+/// crashing the *whole call*, not just losing the sync. Fixed by
+/// wrapping that one assignment (and the matching stray-key `delete`) in
+/// a `try`/`catch` that silently skips a key the engine itself rejects,
+/// since a getter-only property was never going to reflect an external
+/// write anyway.
+#[test]
+fn native_call_argument_with_a_getter_only_property_does_not_crash_the_sync() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-native-getter-sync-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("native-getter-sync");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function readGetterOnly(): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "const native = require.addon();\n\
+         module.exports.readGetterOnly = function() {\n\
+         \x20\x20var object = {};\n\
+         \x20\x20Object.defineProperty(object, 'value', { get: function() { return 42; }, enumerable: true });\n\
+         \x20\x20return native.objectValue(object);\n\
+         };\n",
+    )
+    .unwrap();
+    let addon_c = dir.join("addon.c");
+    std::fs::write(
+        &addon_c,
+        r#"
+            #include <stddef.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef int napi_status;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_get_named_property(napi_env, napi_value, const char*, napi_value*);
+            extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            static napi_value object_value(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value object, result;
+                napi_get_cb_info(env, info, &argc, &object, 0, 0);
+                napi_get_named_property(env, object, "value", &result); return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value fn;
+                napi_create_function(env, "objectValue", 11, object_value, 0, &fn);
+                napi_set_named_property(env, exports, "objectValue", fn);
+                return exports;
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(&addon_c)
+        .arg("-o")
+        .arg(package.join("native.node"))
+        .status()
+        .unwrap()
+        .success());
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        "import { readGetterOnly } from \"native-getter-sync\"; function main(): void { console.log(readGetterOnly()); }\n",
+    )
+    .unwrap();
+    build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn registry_javascript_wrapper_calls_bundled_native_addon() {
     let dir = std::env::temp_dir().join(format!(
