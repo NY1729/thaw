@@ -531,6 +531,63 @@ fn installed_package_resolves_a_namespace_hoisted_export_import_alias() {
     let _ = fs::remove_dir_all(registry);
 }
 
+/// A class referenced only through a bare *type* use -- not a `declare
+/// const x: Name; export = x;` value binding (`inline_import_equals_
+/// value_type`'s own narrower shape), and not a local `export { Name }`
+/// re-export either -- of an `import Name = require("./path")` (a TS
+/// import-equals declaration to a *relative* path) still needs that
+/// sibling file's declarations inlined, or the class's own members
+/// (real trigger: nodemailer's `Mail`, with `sendMail`) are unreachable.
+/// Real shape: `import Mail = require("./lib/mailer"); export type
+/// Transporter<T = any, D = TransportOptions> = Mail<T, D>;
+/// export declare function createTransport(): Transporter;` -- `Mail`
+/// is named only inside a *generic* type alias's own right-hand side,
+/// never directly exported or bound to a `declare const`.
+#[test]
+fn installed_package_inlines_a_class_referenced_only_through_a_type_alias() {
+    let scratch = temp_registry("installed-dts-import-equals-referenced-type-scratch");
+    let registry = temp_registry("installed-dts-import-equals-referenced-type-registry");
+    let package = scratch.join("node_modules/mail-kit");
+    fs::create_dir_all(package.join("lib")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"mail-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import Mail = require(\"./lib/mailer\");\n\
+         export type Transporter<T = any, D = object> = Mail<T, D>;\n\
+         export declare function createTransport(): Transporter;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("lib/mailer.d.ts"),
+        "declare class Mail<T = any, D = object> {\n\
+         \x20\x20\x20\x20sendMail(opts: { to: string }): T;\n\
+         }\n\
+         export = Mail;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "function Mail() {}\n\
+         Mail.prototype.sendMail = function (opts) { return opts.to; };\n\
+         module.exports = { createTransport: function () { return new Mail(); } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "mail-kit").unwrap();
+    let declarations = resolve(&registry, "mail-kit").unwrap().dts_source;
+    assert!(
+        declarations.contains("declare class Mail<")
+            && declarations.contains("sendMail(opts: { to: string }): T;"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
 #[test]
 fn installed_package_inlines_default_reexports() {
     // `export { default as v4 } from './v4'` -- the common shape for a

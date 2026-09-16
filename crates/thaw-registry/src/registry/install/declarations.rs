@@ -487,6 +487,11 @@ fn dts_source_with_reexported_functions_inner(
         &module,
         &import_equals_targets,
     )?);
+    output.push_str(&inline_import_equals_referenced_types(
+        &module,
+        &import_equals_targets,
+        export_assignment_value_type_name(&module).as_deref(),
+    )?);
     let named_import_targets = named_import_targets(entry_path, &module);
     let mut local_export_visited = std::collections::BTreeSet::new();
     let local_exports = all_reexported_function_declarations(
@@ -2308,4 +2313,81 @@ fn inline_import_equals_value_type(
         1,
     );
     Ok(format!("\n{source}\n"))
+}
+
+/// Inlines the file backing *any* `import Name = require("./path")` (see
+/// `import_equals_targets`) whose bound `Name` is referenced as a bare
+/// type name anywhere else in this same entry file -- not just the one
+/// `declare const x: Name; export = x;` shape `inline_import_equals_
+/// value_type` above already covers. Real-world example: nodemailer's
+/// own `import Mail = require("./lib/mailer"); ... export type
+/// Transporter<T = any, D extends TransportOptions = TransportOptions> =
+/// Mail<T, D>;` -- `Mail`'s entire class (with `sendMail`, the actual
+/// reason anyone imports this package) lives only in that sibling file,
+/// reachable *only* through a generic type alias, never via a `declare
+/// const`/`export {}` re-export any existing mechanism here follows.
+/// Without this, every call to a method on a value whose declared type
+/// traces back through `Transporter` failed to build ("call to unknown
+/// function `transporter.sendMail`") regardless of whether the method
+/// itself was ever the problem.
+///
+/// `already_inlined` skips a name `inline_import_equals_value_type`
+/// already spliced in (its own single-name shape is a special case of
+/// this one, just with a `export default class` rewrite this general
+/// version doesn't need) so a package matching *both* shapes doesn't get
+/// the same file's declarations duplicated.
+///
+/// Deliberately shallow: only scans for a bare `TsTypeRef` naming an
+/// import-equals-bound identifier, once, in the *entry* file. A referenced
+/// file's own further cross-file references (nodemailer's `Mail` file
+/// itself imports `DKIM`/`MimeNode`/`XOAuth2` from further sibling files)
+/// are not chased -- thaw-bridge's classification already degrades an
+/// unresolved type to `Unsupported`/`JsValue`/`Json` gracefully rather
+/// than failing the whole file, so a peripheral type staying unresolved
+/// is an acceptable, honest gap, not a crash.
+fn inline_import_equals_referenced_types(
+    module: &thaw_parser::ast::Module,
+    import_equals_targets: &std::collections::HashMap<String, PathBuf>,
+    already_inlined: Option<&str>,
+) -> Result<String, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{TsEntityName, TsTypeRef};
+
+    struct TypeRefNames {
+        names: std::collections::BTreeSet<String>,
+    }
+    impl Visit for TypeRefNames {
+        fn visit_ts_type_ref(&mut self, type_ref: &TsTypeRef) {
+            if let TsEntityName::Ident(ident) = &type_ref.type_name {
+                self.names.insert(ident.sym.to_string());
+            }
+            type_ref.visit_children_with(self);
+        }
+    }
+    let mut finder = TypeRefNames {
+        names: std::collections::BTreeSet::new(),
+    };
+    module.visit_with(&mut finder);
+
+    let mut targets = import_equals_targets
+        .iter()
+        .filter(|(name, _)| {
+            Some(name.as_str()) != already_inlined && finder.names.contains(*name)
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|(name, _)| *name);
+
+    let mut output = String::new();
+    for (name, target_path) in targets {
+        let source = fs::read_to_string(target_path).map_err(|error| {
+            format!(
+                "failed to read `{}`'s imported type `{name}`: {error}",
+                target_path.display()
+            )
+        })?;
+        output.push('\n');
+        output.push_str(&source);
+        output.push('\n');
+    }
+    Ok(output)
 }
