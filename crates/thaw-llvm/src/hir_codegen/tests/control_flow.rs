@@ -289,6 +289,7 @@ fn caught_errors_expose_message_name_and_instanceof() {
             } catch (e) {
                 console.log(e.message);
                 console.log(e.name);
+                console.log(e.stack);
                 console.log(e instanceof TypeError);
                 console.log(e instanceof Error);
                 console.log(e instanceof RangeError);
@@ -298,6 +299,7 @@ fn caught_errors_expose_message_name_and_instanceof() {
             } catch (e) {
                 console.log(e.message);
                 console.log(e.name);
+                console.log(e.stack);
                 console.log(e instanceof Error);
                 console.log(e instanceof TypeError);
             }
@@ -305,7 +307,7 @@ fn caught_errors_expose_message_name_and_instanceof() {
     "#;
     assert_eq!(
         compile_and_run(source, "caught_error_properties"),
-        "wrong type\nTypeError\ntrue\ntrue\nfalse\nplain string\nError\ntrue\nfalse\n"
+        "wrong type\nTypeError\nTypeError: wrong type\ntrue\ntrue\nfalse\nplain string\nError\nError: plain string\ntrue\nfalse\n"
     );
 }
 

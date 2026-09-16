@@ -123,6 +123,40 @@ pub unsafe extern "C" fn thaw_error_to_string(message: *const c_char) -> *const 
     arena_c_string(&rendered).map_or(std::ptr::null(), |value| value.cast())
 }
 
+/// # Safety
+/// `message` must be null or a valid, NUL-terminated C string.
+///
+/// The returned pointer, if non-null, is arena-allocated and must not be
+/// freed by the caller.
+///
+/// ponytail: no real call-stack frames -- compiled native code has no
+/// JS-style frame tracking to walk, so this only ever renders the
+/// mandatory first line real `Error.prototype.stack` always starts
+/// with (`"name: message"`), never the frame list after it. Unlike
+/// `thaw_error_to_string` (`.toString()`/`String(error)`, where an
+/// *untagged* plain-string throw's real JS semantics return the string
+/// itself unchanged), `.stack` always applies the same "defaults to
+/// `Error`" convention `.name`/`.message` already use, tagged or not --
+/// a bare `throw "boom"`'s `.stack` reads `"Error: boom"`, matching how
+/// its `.name`/`.message` already read `"Error"`/`"boom"`. Upgrade
+/// path: capture real frames if/when this compiler grows stack-
+/// unwinding support.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_stack(message: *const c_char) -> *const c_char {
+    if message.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    let (chain, body) = split_error_tag(&text);
+    let name = chain.split('$').next().unwrap_or(chain);
+    let rendered = if body.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}: {body}")
+    };
+    arena_c_string(&rendered).map_or(std::ptr::null(), |value| value.cast())
+}
+
 /// Whether `message`'s tagged (or defaulted) identity chain includes
 /// `class_name`, or `class_name` is `"Error"` -- every tagged/untagged
 /// exception this channel can carry is some kind of `Error`, matching real
@@ -180,6 +214,15 @@ mod error_native_tests {
     fn call_to_string(message: &str) -> String {
         let message = CString::new(message).unwrap();
         let result = unsafe { thaw_error_to_string(message.as_ptr()) };
+        assert!(!result.is_null());
+        unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn call_stack(message: &str) -> String {
+        let message = CString::new(message).unwrap();
+        let result = unsafe { thaw_error_stack(message.as_ptr()) };
         assert!(!result.is_null());
         unsafe { CStr::from_ptr(result) }
             .to_string_lossy()
@@ -245,6 +288,19 @@ mod error_native_tests {
         let tagged = "\u{1}RangeError\u{1}";
         assert_eq!(call_name(tagged), "RangeError");
         assert_eq!(call_message(tagged), "");
+    }
+
+    #[test]
+    fn stack_always_applies_the_error_default_unlike_to_string() {
+        // Unlike `.toString()`/`String(error)`, whose real JS semantics
+        // return an untagged plain string unchanged, `.stack` always
+        // applies the same "defaults to `Error`" convention `.name`/
+        // `.message` already use.
+        assert_eq!(call_stack("boom"), "Error: boom");
+        assert_eq!(call_to_string("boom"), "boom");
+        let tagged = "\u{1}TypeError\u{1}not a function";
+        assert_eq!(call_stack(tagged), "TypeError: not a function");
+        assert_eq!(call_stack(tagged), call_to_string(tagged));
     }
 
     #[test]
