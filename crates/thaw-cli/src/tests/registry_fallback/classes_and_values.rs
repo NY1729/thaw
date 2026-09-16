@@ -81,6 +81,80 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A bare (non-`new`) factory function's declared return type names a
+/// real class only through a *type alias* (`type Transporter = Mail;
+/// createTransport(): Transporter;`) rather than the class name
+/// directly or a `declare const x: Name;` value binding -- real example:
+/// nodemailer's own `createTransport(...): Transporter<...>`, `type
+/// Transporter<T = any, D = TransportOptions> = Mail<T, D>`.
+/// `function_return_named_types` (thaw-bridge) recorded the return
+/// type's own bare name verbatim (`"Transporter"`, the alias, not
+/// `"Mail"`, the real class), so `factory_class_returns` never matched
+/// any real class and the returned value's own methods (`sendMail`)
+/// were never reachable ("call to unknown function
+/// `transporter.sendMail`") regardless of whether the method itself had
+/// any problem. Fixed by following a bare (non-substituting) alias
+/// chain down to the first name that isn't itself an alias before
+/// recording it.
+///
+/// Deliberately uses a *non-generic* alias, unlike nodemailer's real
+/// `Transporter<T, D>`: giving the alias its own (here-unused) type
+/// parameters reproduces a second, separate bug -- the resolved
+/// method's own argument then fails marshaling ("value has type Json,
+/// expected JsValue") even once this fix correctly finds the class.
+/// Confirmed while writing this test; not chased further here (out of
+/// scope for what this fix targets), left for a future round.
+#[test]
+fn a_factory_functions_generic_type_alias_return_resolves_to_its_real_class() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-factory-generic-alias-return-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("mail-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Mail {\n\
+         \x20\x20\x20\x20sendMail(opts: { to: string; subject: string }): string;\n\
+         }\n\
+         export type Transporter = Mail;\n\
+         export declare function createTransport(): Transporter;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Mail() {}\n\
+         Mail.prototype.sendMail = function(opts) { return 'sent:' + opts.to + ':' + opts.subject; };\n\
+         module.exports = { createTransport: function() { return new Mail(); } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { createTransport } from "mail-kit";
+function main(): void {
+    const transporter = createTransport();
+    console.log(transporter.sendMail({ to: "a@example.com", subject: "hi" }));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "sent:a@example.com:hi\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A class with **no public constructor** (real example: luxon's
 /// `DateTime`/`Duration`/`Interval`, each `private constructor(...)`,
 /// built only via static factories like `DateTime.fromISO(...)`) --

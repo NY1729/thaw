@@ -1003,10 +1003,52 @@ fn namespace_value_member_names(item: &ModuleItem) -> Vec<String> {
     }
 }
 
+/// Follows a bare (non-generic-substituting) type alias chain from
+/// `name` down to the first name that isn't itself an alias -- e.g.
+/// `type Transporter<T, D> = Mail<T, D>;` resolves `"Transporter"` to
+/// `"Mail"`, ignoring the alias's own type parameters and the concrete
+/// arguments the reference supplies (this only ever needs the bare
+/// class *name* a factory function's return type ultimately names, not
+/// a real generic substitution). `visited` guards a self-referential or
+/// mutually-referential alias cycle. Real example: nodemailer's own
+/// `createTransport(...): Transporter<...>`, where `Transporter` is
+/// this exact generic alias and the class doing the real work
+/// (`Mail`, with `sendMail`) lives only under its own name.
+fn resolve_bare_type_alias_chain(
+    name: &str,
+    aliases: &HashMap<String, String>,
+    visited: &mut HashSet<String>,
+) -> String {
+    if !visited.insert(name.to_string()) {
+        return name.to_string();
+    }
+    match aliases.get(name) {
+        Some(target) => resolve_bare_type_alias_chain(target, aliases, visited),
+        None => name.to_string(),
+    }
+}
+
 pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
     let Ok(module) = thaw_parser::parse_typescript(source) else {
         return HashMap::new();
     };
+    // `type Alias<T, ...> = Target<...>;` -> `Alias -> Target`, bare
+    // names only (see `resolve_bare_type_alias_chain`'s own doc comment).
+    let type_aliases: HashMap<String, String> = module
+        .body
+        .iter()
+        .flat_map(extract_type_alias_decls)
+        .filter_map(|alias| {
+            let TsType::TsTypeRef(ty_ref) = alias.type_ann.as_ref() else {
+                return None;
+            };
+            let target = match &ty_ref.type_name {
+                TsEntityName::Ident(ident) => ident.sym.to_string(),
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
+            };
+            Some((alias.id.sym.to_string(), target))
+        })
+        .collect();
     module
         .body
         .iter()
@@ -1020,6 +1062,8 @@ pub fn function_return_named_types(source: &str) -> HashMap<String, String> {
                 TsEntityName::Ident(ident) => ident.sym.to_string(),
                 TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
             };
+            let type_name =
+                resolve_bare_type_alias_chain(&type_name, &type_aliases, &mut HashSet::new());
             Some((
                 name.rsplit('.').next().unwrap_or(name).to_string(),
                 type_name,

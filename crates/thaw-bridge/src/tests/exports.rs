@@ -663,3 +663,29 @@ fn falls_back_on_extends_field_collision() {
     ));
 }
 
+/// `function_return_named_types` feeds `factory_class_returns`
+/// (thaw-cli), used to track a bare (non-`new`) factory call the same
+/// way `new ClassName(...)` already is, so the returned value's own
+/// methods stay reachable. A function whose declared return type names
+/// a real class only through a *type alias* -- `type Transporter<T, D>
+/// = Mail<T, D>; declare function createTransport(): Transporter;` --
+/// used to record the alias's own bare name (`"Transporter"`) verbatim,
+/// which never matches any real class name, so the factory was never
+/// tracked at all ("call to unknown function `transporter.sendMail`",
+/// regardless of whether the method itself had any problem). Real
+/// trigger: nodemailer's own `createTransport(...): Transporter<...>`.
+/// Fixed by following a bare (non-substituting) alias chain down to the
+/// first name that isn't itself an alias before recording it.
+#[test]
+fn factory_return_type_resolves_through_a_generic_type_alias_to_its_real_class() {
+    let source = r#"
+            export declare class Mail<T = any, D = object> {
+                sendMail(opts: { to: string }): T;
+            }
+            export type Transporter<T = any, D = object> = Mail<T, D>;
+            export declare function createTransport(): Transporter;
+        "#;
+    let returns = function_return_named_types(source);
+    assert_eq!(returns.get("createTransport"), Some(&"Mail".to_string()));
+}
+
