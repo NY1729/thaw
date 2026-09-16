@@ -350,6 +350,29 @@ impl<'ctx> HirCompiler<'ctx> {
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
                 }
+                // Same idea as `HirType::Function` just above, but for a
+                // callback field with optional/rest parameters (real
+                // trigger: `better-sqlite3`'s own `DatabaseOptions.verbose?:
+                // (message?: unknown, ...additionalArgs: unknown[]) => void`
+                // option) -- flattens to the same fixed-`params` shape
+                // `compile_register_native_callback_from_closure` expects,
+                // appending a rest parameter as a trailing `Array(element)`
+                // entry, mirroring `dynamic_host/typed_calls.rs`'s own
+                // identical `CallableFunction` -> ABI-params flattening for
+                // a top-level dynamic-call callback argument.
+                HirType::CallableFunction(params, _, rest, ret) => {
+                    let mut abi_params = params.clone();
+                    if let Some(rest) = rest {
+                        abi_params.push(HirType::Array(rest.clone()));
+                    }
+                    value = self.compile_register_native_callback_from_closure(
+                        value.into_pointer_value(),
+                        &abi_params,
+                        ret,
+                    )?;
+                    value = self.compile_dynamic_value_placeholder(value)?;
+                    "thaw_json_object_set_json"
+                }
                 other => return Err(format!("unsupported dynamic object field {other:?}")),
             };
         if owned && setter == "thaw_json_object_set_json" {
