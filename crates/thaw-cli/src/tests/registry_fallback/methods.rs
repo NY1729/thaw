@@ -746,3 +746,75 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `infer_member_receiver_type`'s `Expr::Call(inner)` arm, used to
+/// classify a chained method call's receiver (`receiver.method(...)`
+/// where `receiver` is itself a call expression), only recognized the
+/// inner call's callee as dynamic when it was a *declared top-level
+/// function* (looked up in `self.signatures`) -- real example: cheerio's
+/// `const $ = cheerio.load(html); $("li").each(cb)`. `$` is a local
+/// `JsValue`-typed variable (both callable and property-bearing, so it
+/// collapses to one opaque handle like any other Fallback value with no
+/// single compiled shape), not a declared top-level function, so
+/// `self.signatures.get("$")` found nothing and the whole chain fell
+/// through to `lower_call`'s final "unsupported member call target"
+/// error -- even though calling a bare `JsValue`-typed local directly
+/// (`$("li")` with no `.each(...)` chained on it) already worked fine.
+/// Fixed by also checking whether the identifier is a locally scoped
+/// `JsValue`, in which case calling it is assumed to yield another
+/// `JsValue` too -- the same "calling/chaining a `JsValue` produces
+/// another `JsValue`" convention already used one arm down for a
+/// member-expression callee.
+#[test]
+fn a_method_can_be_called_on_the_result_of_calling_a_local_dynamic_value() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-call-then-method-on-local-dynamic-value-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("dom-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function load(html: string): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function load(html) {\n\
+             return function (selector) {\n\
+                 return {\n\
+                     each: function (cb) {\n\
+                         cb(0, 'a');\n\
+                         cb(1, 'b');\n\
+                     }\n\
+                 };\n\
+             };\n\
+         }\n\
+         module.exports.load = load;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { load } from "dom-kit";
+function main(): void {
+    const $ = load("<ul><li>a</li><li>b</li></ul>");
+    $("li").each((i: number, text: any) => {
+        console.log(i, text);
+    });
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "0 a\n1 b\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
