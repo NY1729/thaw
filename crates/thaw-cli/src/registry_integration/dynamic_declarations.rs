@@ -356,10 +356,18 @@ fn typed_dynamic_rest_declaration(
         {
             thaw_hir::HirType::Json
         }
-        thaw_bridge::DtsType::Unsupported(_) if function.generic.is_some() => {
-            thaw_hir::HirType::JsValue
-        }
-        thaw_bridge::DtsType::Unsupported(_) => return None,
+        // Any other unclassifiable return (a class instance, a `typeof`
+        // query, ...) still crosses the boundary as a retained handle,
+        // exactly like the non-rest `typed_dynamic_declaration`'s own
+        // identical fallback. Bailing to the untyped `(argsArray: Json)`
+        // shim instead made a *rest*-parameter function with such a
+        // return (real example: marked's own `use(...args:
+        // MarkedExtension[]): typeof marked`, merged onto the exported
+        // `marked` function) reject every real call -- the shim expects
+        // its caller to have already packed the arguments, so a single
+        // object argument arrived unpacked and threw `args_json is not a
+        // valid JSON array`.
+        thaw_bridge::DtsType::Unsupported(_) => thaw_hir::HirType::JsValue,
     };
     let ret = if matches!(
         &ret_ty,
