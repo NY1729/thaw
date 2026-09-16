@@ -45,10 +45,13 @@
 // yes/no `verify`), so it does its own public-key modular
 // exponentiation plus hand-rolled PKCS#1 v1.5 type-1 unpadding (see
 // `crypto_asymmetric_public_decrypt_hex`) -- `privateEncrypt` itself
-// stays on the safe `rsa::Pkcs1v15Sign::new_unprefixed()` path. Still
-// out of scope: the legacy OpenSSL "Proc-Type: 4,ENCRYPTED" PKCS#1/
-// SEC1 passphrase format (only modern PKCS#8 `ENCRYPTED PRIVATE KEY` is
-// supported), passphrase-protected X25519 keys.
+// stays on the safe `rsa::Pkcs1v15Sign::new_unprefixed()` path. The
+// legacy OpenSSL "Proc-Type: 4,ENCRYPTED" PKCS#1/SEC1 passphrase format
+// (predates PKCS#8's own, unrelated `ENCRYPTED PRIVATE KEY` header --
+// see `parse_legacy_encrypted_pem`) and passphrase-protected X25519
+// keys (`parse_x25519_private_encrypted_der`, reusing the same generic
+// `pkcs8::EncryptedPrivateKeyInfo::decrypt` Ed448 already does) are
+// both supported too now.
 //
 // Stateless and bytes-in/bytes-out, matching every other native
 // crypto primitive in this crate (`digest_bytes`/`hmac_bytes` in
@@ -350,6 +353,39 @@ fn parse_x25519_private_der(bytes: &[u8]) -> Option<x25519_dalek::StaticSecret> 
     Some(x25519_dalek::StaticSecret::from(scalar))
 }
 
+/// Passphrase-protected X25519 keys: `x25519-dalek` never had a
+/// `pkcs8` feature to derive `from_pkcs8_encrypted_pem`/`_der` from in
+/// the first place (this whole module's own X25519 PKCS8 wrapping is
+/// hand-built, see `X25519_ALGORITHM_ID`'s doc comment above), but the
+/// *decryption* step itself has nothing curve-specific about it --
+/// `pkcs8::EncryptedPrivateKeyInfo::decrypt` (modern PBES2, the same
+/// primitive Ed448's own `parse_ed448_private_encrypted_der` already
+/// reuses for the identical reason) hands back a plain decrypted PKCS8
+/// `SecretDocument` regardless of what algorithm is inside, ready for
+/// `parse_x25519_private_der` exactly as if it had never been
+/// encrypted at all.
+fn parse_x25519_private_encrypted_pem(
+    pem: &str,
+    passphrase: &str,
+) -> Option<x25519_dalek::StaticSecret> {
+    let (label, encrypted) = pkcs8::Document::from_pem(pem).ok()?;
+    if label != "ENCRYPTED PRIVATE KEY" {
+        return None;
+    }
+    parse_x25519_private_encrypted_der(encrypted.as_bytes(), passphrase)
+}
+
+fn parse_x25519_private_encrypted_der(
+    bytes: &[u8],
+    passphrase: &str,
+) -> Option<x25519_dalek::StaticSecret> {
+    let document = pkcs8::EncryptedPrivateKeyInfo::try_from(bytes)
+        .ok()?
+        .decrypt(passphrase)
+        .ok()?;
+    parse_x25519_private_der(document.as_bytes())
+}
+
 fn parse_x25519_public_pem(pem: &str) -> Option<x25519_dalek::PublicKey> {
     let (label, document) = pkcs8::Document::from_pem(pem).ok()?;
     if label != "PUBLIC KEY" {
@@ -569,6 +605,9 @@ fn parse_key_bytes_encrypted(bytes: &[u8], is_der: bool, passphrase: &str) -> Op
         if let Some(key) = parse_ed448_private_encrypted_der(bytes, passphrase) {
             return Some(ParsedKey::Ed448Private(Box::new(key)));
         }
+        if let Some(key) = parse_x25519_private_encrypted_der(bytes, passphrase) {
+            return Some(ParsedKey::X25519Private(Box::new(key)));
+        }
         None
     } else {
         let text = std::str::from_utf8(bytes).ok()?;
@@ -589,6 +628,9 @@ fn parse_key_bytes_encrypted(bytes: &[u8], is_der: bool, passphrase: &str) -> Op
         }
         if let Some(key) = parse_ed448_private_encrypted_pem(text, passphrase) {
             return Some(ParsedKey::Ed448Private(Box::new(key)));
+        }
+        if let Some(key) = parse_x25519_private_encrypted_pem(text, passphrase) {
+            return Some(ParsedKey::X25519Private(Box::new(key)));
         }
         None
     }
