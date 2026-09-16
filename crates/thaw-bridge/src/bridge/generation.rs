@@ -562,7 +562,7 @@ fn wrap_as_commonjs_module(
     let bind_default_export = |name: &str| {
         format!(
             "if (typeof module.exports === 'function' && typeof globalThis.{name} !== 'function') {{ globalThis.{name} = module.exports; }}\n\
-             else if (typeof module.exports === 'object' && module.exports !== null && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n"
+             else if (typeof module.exports === 'object' && module.exports !== null && module.exports.__esModule && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n"
         )
     };
     let bind_default_exports: String = fallback_names
@@ -710,7 +710,7 @@ fn wrap_as_commonjs_module(
          }}\n\
          {js_source}\n\
          var __thaw_bind_module_exports = function() {{\n\
-         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ try {{ if (typeof globalThis[k] === 'undefined') globalThis[k] = typeof module.exports[k] === 'function' ? globalThis.__thaw_bind_preserving_statics(module.exports[k], module.exports) : module.exports[k]; }} catch (e) {{}} }} }}\n\
+         \x20\x20if (module.exports !== null && (typeof module.exports === 'object' || typeof module.exports === 'function')) {{ for (var k in module.exports) {{ if (k === 'default' || k === '__esModule') continue; try {{ if (typeof globalThis[k] === 'undefined') globalThis[k] = typeof module.exports[k] === 'function' ? globalThis.__thaw_bind_preserving_statics(module.exports[k], module.exports) : module.exports[k]; }} catch (e) {{}} }} }}\n\
          {bind_nested_namespaces}\
          {bind_default_exports}\
          }};\n\

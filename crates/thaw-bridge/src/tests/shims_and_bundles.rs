@@ -358,6 +358,50 @@ fn binds_esm_default_export_under_the_fallback_name() {
     assert_eq!(result, "\"[hi]\"");
 }
 
+/// `__thaw_bind_module_exports`'s own `for (var k in module.exports)`
+/// loop (binding every named export as a bare global) used to read
+/// *every* enumerable property's value just to bind it -- including a
+/// literal `"default"` key, even though `default` is a reserved word no
+/// user code could ever reference as a bare identifier anyway, and its
+/// own binding is handled entirely separately (`bind_default_export`,
+/// gated on `__esModule`). Real trigger: morgan's own exported function
+/// has a `.default` property implemented as a getter with a real side
+/// effect (`deprecate.property`, logging a deprecation warning on every
+/// *read*, regardless of whether the value is ever used) -- importing
+/// morgan printed a spurious "deprecated default format" warning at
+/// startup, before a single request ever arrived, for every user who
+/// merely imported the package. Fixed by skipping `"default"` (and
+/// `"__esModule"`, the same kind of marker-only property) in the loop
+/// entirely; `bind_default_export`'s own separate `.default` read is
+/// also now gated on `__esModule` being set, matching real Node's own
+/// ESM/CJS interop convention (a plain CJS package's own `"default"`-
+/// named property is not a real default export unless the package
+/// declares itself an ES module).
+#[test]
+fn a_getter_named_default_is_never_read_while_binding_named_exports() {
+    use std::ffi::{CStr, CString};
+
+    let js_source = "var reads = 0;\n\
+                      Object.defineProperty(module.exports, 'default', { enumerable: true, configurable: true, get: function() { reads++; return 'ignored'; } });\n\
+                      module.exports.combined = function(s) { return '[' + s + ':' + reads + ']'; };";
+    let wrapped = wrap_as_commonjs_module(js_source, &["combined".to_string()], &[], &[]);
+
+    let source = CString::new(wrapped).unwrap();
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        1,
+        "failed to load"
+    );
+
+    let func = CString::new("combined").unwrap();
+    let args = CString::new("[\"hi\"]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(result, "\"[hi:0]\"");
+}
+
 /// A key whose assignment to `globalThis` throws (e.g. a schema-builder
 /// function literally named `undefined`, `z.undefined()` -- real zod
 /// exports exactly this, and `globalThis.undefined` is non-writable, so
