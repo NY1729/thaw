@@ -361,11 +361,9 @@ impl<'a> FnLowerer<'a> {
                         .map(|ty| HirParam { name, ty })
                 })
                 .collect();
-            Ok(HirExpr::Lambda(
-                captures,
-                params,
-                return_type,
-                Box::new(body),
+            Ok(rest_aware_closure(
+                arrow,
+                HirExpr::Lambda(captures, params, return_type, Box::new(body)),
             ))
         })();
         self.scope = saved_scope;
@@ -929,4 +927,53 @@ impl<'a> FnLowerer<'a> {
         self.ret_type = saved_return;
         result
     }
+}
+
+/// A JavaScript `(...rest) => ...` function's own logical type is a
+/// `CallableFunction` with a rest parameter -- the flattened trailing
+/// `Array(element)` parameter is only its *native* ABI, produced by
+/// `lower_param` packing `Pat::Rest`. When an arrow is lowered without a
+/// declared callback type to carry that distinction (the bare call site
+/// of `lower_expr`, e.g. a `callDynamicMethod` argument object's own
+/// field -- unlike a typed Fallback signature slot, which reaches
+/// `coerce_to_declared`'s `CallableFunction` branch and is wrapped there),
+/// the rest would otherwise disappear into a plain `Function([Array(..)])`.
+/// A native-to-JS callback adapter built from that fixed type then passes
+/// each real JS argument through positionally instead of collecting the
+/// trailing ones into the array the native ABI expects -- the callback
+/// reads an uninitialized array (real trigger: `new Widget().use({
+/// renderer: { heading(...args) { ... } } })`, the modern marked API,
+/// where the class method call is compiled through the untyped
+/// `callDynamicMethod` JSON path). Re-tagging the closure's own inferred
+/// type here keeps `has_rest` intact through every downstream consumer
+/// (`compile_json_object_set_native_with_undefined`'s `CallableFunction`
+/// arm, `compile_register_native_callback_from_closure_with_rest`).
+fn rest_aware_closure(arrow: &swc_ecma_ast::ArrowExpr, closure: HirExpr) -> HirExpr {
+    if !matches!(arrow.params.last(), Some(Pat::Rest(_))) {
+        return closure;
+    }
+    let HirExpr::Lambda(_, params, ret, _) = &closure else {
+        return closure;
+    };
+    let Some((last, fixed)) = params.split_last() else {
+        return closure;
+    };
+    let HirType::Array(element) = &last.ty else {
+        return closure;
+    };
+    let optional = arrow.params[..fixed.len()]
+        .iter()
+        .map(|parameter| match parameter {
+            Pat::Assign(_) => true,
+            Pat::Ident(binding) => binding.id.optional,
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    let callable = HirType::CallableFunction(
+        fixed.iter().map(|parameter| parameter.ty.clone()).collect(),
+        optional_parameter_mask(&optional),
+        Some(element.clone()),
+        Box::new(ret.clone()),
+    );
+    HirExpr::TypedClosure(callable, Box::new(closure))
 }
