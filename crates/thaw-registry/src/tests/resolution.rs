@@ -347,6 +347,83 @@ fn installed_package_follows_a_bare_reexport_to_another_packages_own_types_entry
     let _ = fs::remove_dir_all(registry);
 }
 
+/// A package whose entire real API lives inside a TypeScript `declare
+/// namespace X { ... }` block, exported wholesale via `export = X;` --
+/// real example: `winston`'s complete `.d.ts` is exactly this shape
+/// (`declare namespace winston { class Logger {...} function
+/// createLogger(...): Logger; let level: string; } export = winston;`).
+/// None of `thaw_bridge`'s own `.d.ts` extractors ever looked inside a
+/// namespace's own body -- they only scan a module's direct top-level
+/// items -- so a package shaped like this silently produced zero
+/// declarations at all: no error, just every real function/class
+/// reported as "undeclared" the moment anything tried to use one.
+/// Fixed by hoisting the namespace's own body out to look like ordinary
+/// top-level declarations. Known, deliberately out-of-scope remaining
+/// gap found while verifying this against real winston: a namespace
+/// member that's itself a *hoisted alias from another package*
+/// (winston's own `export import format = logform.format;`, `export
+/// import transports = Transports;`) doesn't resolve -- the existing
+/// cross-package `export import NAME = BASE.MEMBER` resolution only
+/// ever scans a module's outer top-level items, not into a hoisted
+/// namespace's own body, a separate, deeper follow-up.
+#[test]
+fn installed_package_hoists_an_export_equals_namespaces_own_members() {
+    let scratch = temp_registry("installed-dts-export-equals-namespace-scratch");
+    let registry = temp_registry("installed-dts-export-equals-namespace-registry");
+    let package = scratch.join("node_modules/logger-kit");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"logger-kit","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "declare namespace loggerKit {\n\
+             class Logger {\n\
+                 log(message: string): void;\n\
+             }\n\
+             function createLogger(options?: object): Logger;\n\
+             let level: string;\n\
+         }\n\
+         export = loggerKit;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "function createLogger() { return { log: function (m) { console.log(m); } }; }\n\
+         module.exports = { createLogger: createLogger, level: 'info' };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "logger-kit").unwrap();
+    let declarations = resolve(&registry, "logger-kit").unwrap().dts_source;
+    // The raw, *unmodified* source text (namespace wrapper included)
+    // always ends up in `declarations` verbatim -- checking a member's
+    // text merely appears somewhere would pass even without hoisting,
+    // since it's already sitting there, still nested. A real check
+    // needs the member's own snippet to appear a *second* time, hoisted
+    // out to its own top-level-shaped copy alongside the untouched
+    // original.
+    assert_eq!(
+        declarations.matches("function createLogger(options?: object): Logger").count(),
+        2,
+        "{declarations}"
+    );
+    assert_eq!(
+        declarations.matches("class Logger").count(),
+        2,
+        "{declarations}"
+    );
+    assert_eq!(
+        declarations.matches("let level: string").count(),
+        2,
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
 #[test]
 fn installed_package_inlines_default_reexports() {
     // `export { default as v4 } from './v4'` -- the common shape for a
