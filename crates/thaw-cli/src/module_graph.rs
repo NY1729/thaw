@@ -1002,6 +1002,38 @@ pub fn bundle_with_source_transform(
                             continue;
                         }
                     };
+                    // A named import whose requested name is itself a
+                    // synthetic nested-namespace alias from an external
+                    // package (`thaw_bridge::nested_namespace_members`,
+                    // e.g. winston's own `export import transports =
+                    // Transports;`, later used as `transports.Console`)
+                    // rather than a real top-level function/class -- bind
+                    // it as a namespace over just that alias's own member
+                    // table (not the whole package's `dependency_exports`,
+                    // unlike a namespace import) so a later dotted access
+                    // like `transports.Console` resolves the same way any
+                    // other namespace-imported dotted access already does.
+                    if !modules[index].dependencies.contains_key(specifier)
+                        && !dependency_exports.contains_key(&requested)
+                    {
+                        if let Some(members) = external_nested_namespaces
+                            .get(specifier)
+                            .and_then(|nested| nested.get(&requested))
+                        {
+                            let resolved = members
+                                .iter()
+                                .map(|(member, target)| {
+                                    let resolved_target = dependency_exports
+                                        .get(target)
+                                        .cloned()
+                                        .unwrap_or_else(|| target.clone());
+                                    (member.clone(), resolved_target)
+                                })
+                                .collect();
+                            namespaces.insert(local, resolved);
+                            continue;
+                        }
+                    }
                     if let Some(namespace) = modules[index]
                         .dependencies
                         .get(specifier)
