@@ -40,6 +40,56 @@ fn os_builtin_reports_real_host_shapes() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+/// `os.networkInterfaces()` used to be hardcoded to a loopback-only
+/// literal, regardless of the host's real interfaces -- unlike every
+/// other `os.*` accessor in the same module (`arch`/`platform`/`cpus`/
+/// etc.), all of which already read real host data. Fixed via
+/// `getifaddrs` (the standard POSIX interface-enumeration call,
+/// already available through the existing `libc` dependency). This
+/// machine always has at least loopback plus one more interface in CI
+/// (the runner's own network device), so asserting more than one
+/// interface name comes back is a real, non-hardcoded-loopback-only
+/// check rather than a tautology.
+#[test]
+fn os_network_interfaces_reports_more_than_loopback_with_real_shapes() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_os_network_interfaces");
+    fs::write(
+        dir.join("index.js"),
+        "var os = require('node:os'); module.exports = function () {\n\
+             var interfaces = os.networkInterfaces();\n\
+             var names = Object.keys(interfaces);\n\
+             var macPattern = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;\n\
+             var shapesOk = names.every(function (name) {\n\
+                 return interfaces[name].every(function (entry) {\n\
+                     return (entry.family === 'IPv4' || entry.family === 'IPv6')\n\
+                         && typeof entry.address === 'string' && entry.address.length > 0\n\
+                         && typeof entry.netmask === 'string' && entry.netmask.length > 0\n\
+                         && macPattern.test(entry.mac)\n\
+                         && typeof entry.internal === 'boolean'\n\
+                         && entry.cidr === entry.address + '/' + entry.cidr.split('/')[1];\n\
+                 });\n\
+             });\n\
+             return [names.length > 1, shapesOk, interfaces.lo[0].mac === '00:00:00:00:00:00'];\n\
+         };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_os_network_interfaces_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetworkInterfaces = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseNetworkInterfaces").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[true,true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 /// The exact real-world pattern that motivated `path`/`os`/`fs`: a real
 /// native addon package (`bcrypt`, `utf-8-validate`, ...) depends on
 /// `node-gyp-build`, whose real, unmodified source reads

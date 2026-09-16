@@ -509,6 +509,83 @@ fn os_info_json() -> String {
     }).to_string()
 }
 
+/// Real per-interface addresses, grouped by interface name the way
+/// `os.networkInterfaces()` shapes its result -- via POSIX
+/// `getifaddrs` (already available through the existing `libc`
+/// dependency, no new crate needed), the same "walk one C struct list"
+/// approach `/proc`/`/sys` reads elsewhere in this file use in spirit.
+/// The MAC address isn't in `getifaddrs`' own `AF_INET`/`AF_INET6`
+/// entries (Linux only exposes it via a separate `AF_PACKET` entry for
+/// the same interface name); reading `/sys/class/net/<name>/address`
+/// instead is the same value without needing to also parse those
+/// `AF_PACKET` entries, confirmed against real Node's own output for
+/// every interface on a real multi-NIC machine, loopback (all zero)
+/// included.
+fn network_interfaces_json() -> String {
+    use std::ffi::CStr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let mut groups: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return "{}".to_string();
+    }
+    let mut entry = head;
+    while !entry.is_null() {
+        let ifa = unsafe { &*entry };
+        entry = ifa.ifa_next;
+        if ifa.ifa_addr.is_null() {
+            continue;
+        }
+        let family = unsafe { (*ifa.ifa_addr).sa_family } as i32;
+        if family != libc::AF_INET && family != libc::AF_INET6 {
+            continue;
+        }
+        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        let internal = ifa.ifa_flags & (libc::IFF_LOOPBACK as libc::c_uint) != 0;
+        let mac = std::fs::read_to_string(format!("/sys/class/net/{name}/address"))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "00:00:00:00:00:00".to_string());
+        let entries = groups.entry(name).or_default();
+        if family == libc::AF_INET {
+            let address = unsafe { *(ifa.ifa_addr as *const libc::sockaddr_in) };
+            let ip = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
+            let mask_bits = if ifa.ifa_netmask.is_null() {
+                0
+            } else {
+                let mask = unsafe { *(ifa.ifa_netmask as *const libc::sockaddr_in) };
+                u32::from_be(mask.sin_addr.s_addr)
+            };
+            let netmask = Ipv4Addr::from(mask_bits);
+            entries.push(serde_json::json!({
+                "address": ip.to_string(), "netmask": netmask.to_string(), "family": "IPv4",
+                "mac": mac, "internal": internal, "cidr": format!("{ip}/{}", mask_bits.count_ones()),
+            }));
+        } else {
+            let address = unsafe { *(ifa.ifa_addr as *const libc::sockaddr_in6) };
+            let ip = Ipv6Addr::from(address.sin6_addr.s6_addr);
+            let mask_bytes = if ifa.ifa_netmask.is_null() {
+                [0u8; 16]
+            } else {
+                let mask = unsafe { *(ifa.ifa_netmask as *const libc::sockaddr_in6) };
+                mask.sin6_addr.s6_addr
+            };
+            let prefix: u32 = mask_bytes.iter().map(|byte| byte.count_ones()).sum();
+            entries.push(serde_json::json!({
+                "address": ip.to_string(), "netmask": Ipv6Addr::from(mask_bytes).to_string(), "family": "IPv6",
+                "mac": mac, "internal": internal, "cidr": format!("{ip}/{prefix}"), "scopeid": address.sin6_scope_id,
+            }));
+        }
+    }
+    unsafe { libc::freeifaddrs(head) };
+    serde_json::to_string(&groups).unwrap_or_else(|_| "{}".to_string())
+}
+
 include!("quickjs/processes.rs");
 
 include!("quickjs/intl.rs");
