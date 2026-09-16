@@ -501,6 +501,44 @@ impl VisitMut for RenameReferences<'_> {
     }
 
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        // Resolve a three-level nested-namespace chain (`ns.sub.member`)
+        // *before* visiting children. The inner `ns.sub` is often itself
+        // resolvable as a single-level namespace member (real trigger:
+        // winston's `winston.format.json`/`winston.transports.Console`,
+        // where `winston` is the default-imported `export = winston`
+        // namespace over its whole export table and both `format` and
+        // `transports` are themselves exported namespace aliases), so the
+        // child pass below would rewrite `ns.sub` first and leave
+        // `.member` dangling on a symbol that no longer names the
+        // namespace -- producing e.g. "call to unknown function
+        // `__thaw_typed_js_....format.json`". The identical lookup is kept
+        // after the child pass too, for a chain whose middle segment is
+        // *only* a nested namespace (zod's `z.coerce.number`, where
+        // `z.coerce` has no single-level target to begin with).
+        if let Expr::Member(member) = expr {
+            if let thaw_parser::ast::MemberProp::Ident(property) = &member.prop {
+                if let Expr::Member(inner) = member.obj.as_ref() {
+                    if let (Expr::Ident(namespace), thaw_parser::ast::MemberProp::Ident(sub)) =
+                        (inner.obj.as_ref(), &inner.prop)
+                    {
+                        if !self.shadowed.contains(namespace.sym.as_ref()) {
+                            if let Some(target) = self
+                                .nested_namespaces
+                                .get(namespace.sym.as_ref())
+                                .and_then(|namespaces| namespaces.get(sub.sym.as_ref()))
+                                .and_then(|members| members.get(property.sym.as_ref()))
+                            {
+                                *expr = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
+                                    target.clone().into(),
+                                    member.span,
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         expr.visit_mut_children_with(self);
         if let Expr::Call(call) = expr {
             if matches!(call.callee, Callee::Import(_)) {
