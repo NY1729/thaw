@@ -639,17 +639,28 @@ impl<'a> FnLowerer<'a> {
             }
             HirType::Object(fields) => {
                 // A class extending `Error`/`TypeError`/etc. (see
-                // `lower/module/classes.rs`) is a real object with an
-                // inherited `message: Str` field, not the tagged string
-                // `new Error(...)` produces directly -- but `throw`ing one
-                // (or any other string coercion: `String(value)`, `+`,
-                // template literals) needs to recover that same tagged
-                // form (`\u{1}<Name>[$<AncestorName>...]\u{1}<message>`, the
-                // full identity chain rather than just the most-derived
-                // name, so `instanceof` on an intermediate ancestor still
-                // matches -- see `thaw_error_is_instance`) so every
-                // existing exception reader still understands it, instead
-                // of falling into the generic `[object Object]` conversion.
+                // `lower/module/classes.rs`) is a real object with
+                // inherited `message`/`name: Str` fields, not the tagged
+                // string `new Error(...)` produces directly -- but
+                // `throw`ing one (or any other string coercion:
+                // `String(value)`, `+`, template literals) needs to
+                // recover that same tagged form
+                // (`\u{1}<Name>[$<AncestorName>...]\u{1}<message>\u{4}
+                // <runtime name>`) so every existing exception reader
+                // still understands it, instead of falling into the
+                // generic `[object Object]` conversion. The identity
+                // chain (`<Name>[$<AncestorName>...]`) is a *static*,
+                // compile-time-derived string, used only for
+                // `instanceof` matching against an intermediate
+                // ancestor (`thaw_error_is_instance`); `.name`/`.stack`/
+                // `.toString()` instead read the *runtime* value of the
+                // object's own `name` field (a `\u{4}`-tagged override
+                // segment, see `thaw_error_name` in thaw-runtime) so a
+                // constructor's `this.name = "MyError"` -- or the
+                // real-JS-matching default `lower/invocations/calls.rs`'s
+                // `super(...)` handling already assigned -- is what
+                // actually gets reported, not the (possibly compiler-
+                // mangled) class identity string.
                 let error_chain = object_type_is_error_family(&HirType::Object(fields.clone()))
                     .then(|| {
                         let (marker, _) = &fields[0];
@@ -659,21 +670,47 @@ impl<'a> FnLowerer<'a> {
                             .to_string()
                     });
                 match error_chain {
-                    Some(name)
+                    Some(chain)
                         if fields
                             .iter()
-                            .any(|(field, ty)| field == "message" && *ty == HirType::Str) =>
+                            .any(|(field, ty)| field == "message" && *ty == HirType::Str)
+                            && fields
+                                .iter()
+                                .any(|(field, ty)| field == "name" && *ty == HirType::Str) =>
                     {
+                        let object_type = HirType::Object(fields);
+                        let binding = format!("__thaw_error_tag_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(binding.clone(), object_type.clone());
+                        let bound = HirExpr::Var(binding.clone());
                         let message = HirExpr::PropAccess(
-                            Box::new(value),
-                            HirType::Object(fields),
+                            Box::new(bound.clone()),
+                            object_type.clone(),
                             "message".to_string(),
                         );
-                        let tag = HirExpr::Lit(HirLit::Str(format!("\u{1}{name}\u{1}")));
-                        Ok(HirExpr::Call(
+                        let name = HirExpr::PropAccess(
+                            Box::new(bound),
+                            object_type.clone(),
+                            "name".to_string(),
+                        );
+                        let tag = HirExpr::Lit(HirLit::Str(format!("\u{1}{chain}\u{1}")));
+                        let tagged_message = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                             vec![tag, message],
-                        ))
+                        );
+                        let name_marker = HirExpr::Lit(HirLit::Str("\u{4}".to_string()));
+                        let tagged_name = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![name_marker, name],
+                        );
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![tagged_message, tagged_name],
+                        );
+                        self.wrap_call_argument_bindings(
+                            result,
+                            &[(binding, object_type, value)],
+                        )
                     }
                     _ => Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_object_to_string".to_string())),
