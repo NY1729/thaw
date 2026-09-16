@@ -230,6 +230,22 @@ impl<'a> FnLowerer<'a> {
                                 || signature.ret == HirType::JsValue
                         })
                         .map(|signature| signature.ret.clone())
+                        .or_else(|| {
+                            // Not a declared top-level function -- maybe a
+                            // local variable holding a callable dynamic
+                            // value instead (real example: cheerio's
+                            // `const $ = cheerio.load(html)`, whose `$` is
+                            // itself both callable -- `$("li")` -- and
+                            // property-bearing, so it collapses to a
+                            // `JsValue` like any other Fallback value with
+                            // no single compiled shape). By the same
+                            // "calling/chaining a `JsValue` yields another
+                            // `JsValue`" convention the sibling arm below
+                            // already uses for member-call chains.
+                            let name = self.resolve_binding(identifier.sym.as_ref());
+                            (self.scope.get(&name) == Some(&HirType::JsValue))
+                                .then_some(HirType::JsValue)
+                        })
                 }
                 // The callee is itself a member expression -- this call
                 // is a chained method call (`z.string().min(2)`, itself
