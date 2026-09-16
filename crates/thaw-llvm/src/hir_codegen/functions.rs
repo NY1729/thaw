@@ -1,7 +1,26 @@
 impl<'ctx> HirCompiler<'ctx> {
+    /// LLVM symbols the runtime declares with external C linkage (libc,
+    /// libm, and thaw-runtime's own `thaw_*` set, which never starts with
+    /// a plain libc name). A HIR function that happens to share one of
+    /// these names -- real trigger: a package exporting a function
+    /// literally named `printf` (logform's own `format.printf`, reached
+    /// through winston's `winston.format.printf(...)`) -- must not be
+    /// emitted under that same symbol, or LLVM reuses the existing
+    /// external declaration for it and the body's own return type
+    /// disagrees with libc's ("Function return type does not match
+    /// operand type of return inst"). Mangled instead, consistently,
+    /// everywhere `llvm_symbol_for` maps a HIR name to its LLVM symbol.
+    const RESERVED_EXTERNAL_SYMBOLS: &'static [&'static str] = &[
+        "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "cosh", "dprintf",
+        "expm1", "fflush", "getenv", "hypot", "log1p", "memcpy", "pow", "printf", "puts", "sinh",
+        "strcmp", "strlen", "tan", "tanh",
+    ];
+
     fn llvm_symbol_for(name: &str) -> String {
         if name == "main" {
             USER_MAIN_SYMBOL.to_string()
+        } else if Self::RESERVED_EXTERNAL_SYMBOLS.contains(&name) {
+            format!("__thaw_user_{name}")
         } else {
             name.to_string()
         }

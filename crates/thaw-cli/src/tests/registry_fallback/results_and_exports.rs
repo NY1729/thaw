@@ -1875,3 +1875,113 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "W:a\nI:b\nok\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A package function whose name collides with a libc symbol the runtime
+/// declares for `console.log` (real trigger: a function literally named
+/// `printf` -- logform's own `format.printf`, reached through winston's
+/// `winston.format.printf(...)`) must not be emitted under that same LLVM
+/// symbol. Doing so reused libc's own external `i32 (i8*, ...)`
+/// declaration for the function's body and failed module verification
+/// ("Function return type does not match operand type of return inst").
+/// The shim generates a bare alias under the package function's own name
+/// for *every* Fallback function whether or not it is called, so this
+/// reproduces with a program that only imports a different export.
+#[test]
+fn a_package_function_named_like_a_libc_symbol_still_compiles() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-libc-named-function-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("printf-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Format { transform: (info: string) => string; }\n\
+         export declare function printf(templateFunction: string): Format;\n\
+         export declare function good(): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.printf = function(t) { return { transform: function(i) { return i; } }; };\n\
+         module.exports.good = function() { return 'good'; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { good } from "printf-kit";
+function main(): void {
+    console.log(good());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "good\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A package that installs a throwing getter on one of its own exports
+/// (real trigger: winston's deprecated `format.padLevels`, whose getter
+/// `common.js` installs to throw "{ padLevels } was removed in
+/// winston@3.0.0" -- real Node never touches it, so `require('winston')`
+/// stays silent) must not abort module init or report a spurious load
+/// error. The generated package-qualified capture reads every export,
+/// including that one; other exports from the same package must still
+/// bind and stay callable.
+#[test]
+fn a_throwing_export_getter_does_not_abort_module_init() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-throwing-export-getter-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("getter-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function bad(): void;\n\
+         export declare function good(): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "Object.defineProperty(module.exports, 'bad', { get: function() { throw new Error('deprecated boom'); } });\n\
+         module.exports.good = function() { return 'good'; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { good } from "getter-kit";
+function main(): void {
+    console.log(good());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "good\n");
+    assert!(
+        !String::from_utf8_lossy(&result.stderr).contains("deprecated boom"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
