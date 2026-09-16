@@ -49,6 +49,26 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
             classes.push(class);
         }
     }
+    for class in self_constructible_interface_classes(
+        source,
+        &module,
+        &interfaces,
+        &generic_interfaces,
+    ) {
+        if !classes.iter().any(|existing| existing.name == class.name) {
+            classes.push(class);
+        }
+    }
+    // thaw-registry's flattening concatenates every file a package's type
+    // declarations span, so the same class can be declared more than once
+    // (real example: winston's own `Logger`/`Container`, emitted both
+    // inside `declare namespace winston { ... }` and again as a hoisted
+    // top-level `class`). First occurrence wins, matching `parse_dts_values`/
+    // `parse_dts_classes`'s existing duplicate-binding precedent -- a
+    // duplicate would otherwise emit the same generated constructor
+    // helpers (and any arity dispatcher) twice.
+    let mut seen_names = HashSet::new();
+    classes.retain(|class| seen_names.insert(class.name.clone()));
     Ok(classes)
 }
 
@@ -119,6 +139,69 @@ fn constructor_interface_classes(
             };
             let name = binding.id.sym.to_string();
             let function = lower_dts_fn_type(&name, &synthetic_fn_type, interfaces, generic_interfaces);
+            Some(DtsClass {
+                name,
+                extends: None,
+                constructible: true,
+                constructors: vec![DtsConstructor {
+                    params: function.params,
+                    required_params: function.required_params,
+                    overloaded: false,
+                }],
+                methods: Vec::new(),
+                properties: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// An `interface X { new (...): Y }` that is only ever reached through a
+/// *namespace member alias* (real trigger: winston's own `declare
+/// namespace transports { export { ConsoleTransportInstance as Console,
+/// ... } }`, where `ConsoleTransportInstance` carries the construct
+/// signature) has no `declare class` and no top-level `declare const`
+/// binding it -- `extract_class_decls` only sees `class`, and
+/// `constructor_interface_classes` only sees a top-level
+/// `const X: SomeInterface` -- so `new transports.Console(...)` never
+/// reached a real constructor. Synthesizes the same constructible shape
+/// from the interface's own construct signature. The real runtime value
+/// is bound as a JS global under the interface's own type name by
+/// `nested_namespace_aliases` (`wrap_as_commonjs_module` reads
+/// `module.exports.<namespace>.<member>`), which is exactly the name
+/// `thaw_js_get_global` looks up for a Fallback `$new$` constructor.
+fn self_constructible_interface_classes(
+    source: &str,
+    module: &Module,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Vec<DtsClass> {
+    let alias_targets: HashSet<String> = nested_namespace_members(source)
+        .values()
+        .flat_map(|members| members.values().cloned())
+        .collect();
+    if alias_targets.is_empty() {
+        return Vec::new();
+    }
+    module
+        .body
+        .iter()
+        .flat_map(extract_interface_decls)
+        .filter(|interface| alias_targets.contains(&interface.id.sym.to_string()))
+        .filter_map(|interface| {
+            let construct_signature = interface.body.body.iter().find_map(|member| match member {
+                TsTypeElement::TsConstructSignatureDecl(decl) => Some(decl),
+                _ => None,
+            })?;
+            let type_ann = construct_signature.type_ann.clone()?;
+            let synthetic_fn_type = TsFnType {
+                span: construct_signature.span,
+                params: construct_signature.params.clone(),
+                type_params: construct_signature.type_params.clone(),
+                type_ann,
+            };
+            let name = interface.id.sym.to_string();
+            let function =
+                lower_dts_fn_type(&name, &synthetic_fn_type, interfaces, generic_interfaces);
             Some(DtsClass {
                 name,
                 extends: None,

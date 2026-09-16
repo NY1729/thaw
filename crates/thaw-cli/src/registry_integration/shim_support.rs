@@ -235,6 +235,48 @@ fn generate_napi_class_constructors(
     helpers
 }
 
+/// A single callable that dispatches a Fallback class construction to the
+/// right per-arity `$new$` helper by the number of real arguments.
+///
+/// `generate_napi_class_constructors` emits one ambient
+/// `$new${class}$arityN` symbol per constructor arity. A *direct*
+/// `new Class(...)` never needs this wrapper: the source-level
+/// `rewrite_external_class_constructors` picks the matching arity at the
+/// call site. But a class reached through a namespace member alias
+/// (`new winston.transports.Console(options)`) resolves through
+/// `package_exports` to exactly one symbol, so `class_targets` needs a
+/// single entry that accepts every arity this class declares. Without it,
+/// the alias always bound arity 0 and any real argument was rejected
+/// ("function `...$arity0` expects 0 argument(s), got 1").
+///
+/// Constructs through the ordinary `getDynamicValue`/
+/// `constructDynamicValue` pair (the same `new Intl.DateTimeFormat(...)`
+/// mechanism) rather than forwarding to a typed per-arity helper: the
+/// class's own constructor parameters are JSON-marshaled at the *user*
+/// call site, so a parameter object carrying a callback field still
+/// crosses correctly as a live-handle placeholder -- forwarding a `Json`
+/// argument to a typed helper instead tried to decode it back into a
+/// native `CallableFunction` and failed codegen.
+fn generate_class_constructor_dispatcher(
+    class: &str,
+    helpers: &[(usize, String, Vec<thaw_hir::HirType>)],
+    shim: &mut String,
+) -> Option<String> {
+    if helpers.len() <= 1 {
+        return None;
+    }
+    let encoded = format!("$new${class}")
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let name = format!("__thaw_class_ctor_{encoded}");
+    shim.push_str(&format!(
+        "function {name}(...args: Json[]): JsValue {{\n    return constructDynamicValue(getDynamicValue(\"{class}\"), JSON.parse(JSON.stringify(args)));\n}}\n"
+    ));
+    Some(name)
+}
+
 fn generate_napi_class_property_getter(
     class: &str,
     property: &str,
