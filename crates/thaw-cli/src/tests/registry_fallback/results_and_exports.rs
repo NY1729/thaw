@@ -1537,6 +1537,77 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The reverse crossing of the fix above: a *native* callback (a real
+/// compiled TS closure, not a registry function) whose own declared
+/// parameter is `Buffer`-shaped, invoked *by* JS code with a real Buffer
+/// argument -- real trigger: `req.pipe(nativeCallbackDestination)`
+/// (busboy's own `defaultStreamHandler`), where a `Writable`-shaped
+/// object's `write(chunk: Buffer)` method is a native closure JS calls
+/// directly. `HirType::Bytes` is erased to a plain `Array(F64)` well
+/// before this callback's own JSON-argument-decoding is compiled
+/// (`compile_json_value_to_native`, thaw-llvm), so by the time the
+/// native side parses the incoming JSON, there's no type information
+/// left saying "this should be Buffer-shaped, not `Buffer.prototype.
+/// toJSON()`'s own `{"type":"Buffer","data":[...]}` object shape" --
+/// `thaw_json_array_length`/`thaw_json_index` (thaw-std) both treated a
+/// plain JSON object as "not an array" and silently decoded an empty
+/// array, no error, just missing bytes.
+#[test]
+fn a_native_callbacks_buffer_typed_parameter_decodes_real_byte_content() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-native-callback-buffer-argument-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("buf-callback");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function withBuffer(callback: (chunk: Buffer) => number): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function withBuffer(callback) { \
+         \x20\x20var buf = Buffer.from([104, 101, 108, 108, 111]); \
+         \x20\x20return callback(buf); \
+         } \
+         module.exports = { withBuffer: withBuffer };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { withBuffer } from "buf-callback";
+function main(): void {
+    const result = withBuffer((chunk: Buffer) => {
+        return chunk.length;
+    });
+    console.log(result);
+}"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(
+        &entry,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["buf-callback".into()],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A named import whose requested name doesn't exist as an ordinary
 /// function/class/const in a package's flattened `.d.ts` at all, only as
 /// a synthetic `declare namespace NAME { export { ... }; }` re-export
