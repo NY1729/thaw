@@ -148,6 +148,71 @@ fn export_as_namespace_name(source: &str) -> Result<Option<String>, String> {
     }))
 }
 
+/// A package whose entire real API lives inside a TypeScript
+/// `declare namespace X { ... }` block, exported wholesale via
+/// `export = X;` -- real example: `winston`'s complete `.d.ts` is
+/// exactly this shape (`declare namespace winston { class Logger
+/// {...} let createLogger: ...; ... } export = winston;`). None of
+/// this crate's own `.d.ts` extractors
+/// (`thaw_bridge::parse_dts`/`parse_dts_values`/`parse_dts_classes`)
+/// ever look inside a `TsModuleDecl`'s own body -- they only scan a
+/// module's direct top-level items -- so a package shaped like this
+/// silently produced zero declarations at all: no error, just every
+/// one of its real functions/classes reported as "undeclared"
+/// (or, for a bare value reference, "cannot infer the type") the
+/// moment anything tried to use one.
+///
+/// Scoped to a namespace actually `export =`'d as the package's own
+/// primary export (not just any incidentally-declared auxiliary
+/// namespace with a different real export elsewhere) -- extracts each
+/// of its own top-level items' raw source text via a span snippet
+/// (this file's own established idiom for "make this look like it was
+/// already at the top level", see `all_reexported_type_declarations`)
+/// and appends them so every other extractor sees them as if they'd
+/// been ordinary top-level declarations all along, rather than
+/// modifying any of those extractors themselves.
+fn hoisted_export_equals_namespace_members(entry_source: &str) -> Result<String, String> {
+    use thaw_parser::ast::{Decl, Expr, ModuleDecl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(entry_source)?;
+    let Some(exported_name) = module.body.iter().find_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref()
+        {
+            Expr::Ident(ident) => Some(ident.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }) else {
+        return Ok(String::new());
+    };
+    let Some(namespace_body) = module.body.iter().find_map(|item| {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
+            return None;
+        };
+        let TsModuleName::Ident(id) = &module_decl.id else {
+            return None;
+        };
+        if id.sym.as_ref() != exported_name {
+            return None;
+        }
+        match &module_decl.body {
+            Some(TsNamespaceBody::TsModuleBlock(block)) => Some(&block.body),
+            _ => None,
+        }
+    }) else {
+        return Ok(String::new());
+    };
+    let mut output = String::new();
+    for item in namespace_body {
+        output.push('\n');
+        output.push_str(&source_map.span_to_snippet(item.span()).map_err(|error| {
+            format!("failed to read a namespace member: {error:?}")
+        })?);
+    }
+    Ok(output)
+}
+
 fn dts_source_with_reexported_functions(
     entry_path: &Path,
     entry_source: &str,
@@ -158,6 +223,7 @@ fn dts_source_with_reexported_functions(
 
     let module = thaw_parser::parse_typescript(entry_source)?;
     let mut output = entry_source.to_string();
+    output.push_str(&hoisted_export_equals_namespace_members(entry_source)?);
     let mut visited_references = std::collections::BTreeSet::new();
     output.push_str(&inline_triple_slash_references(
         entry_path,
