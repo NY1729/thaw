@@ -22,6 +22,35 @@ impl<'a> FnLowerer<'a> {
             if expected == actual {
                 return true;
             }
+            // `expected`'s own omittable slots (a `CallableFunction`'s
+            // `fixed` params, e.g. `TemplateFunction = (data?: Data) =>
+            // string`) are wrapped in `Optional`/`Nullish`
+            // (`optional_parameter_type`, thaw-hir's `lower_ts_type` for a
+            // `TsFnType`) so the callable's *own body* can synthesize a
+            // real default when a caller omits that argument -- a
+            // parallel `HirOptionalMask` already conveys the same
+            // omittability to any external arity check, which is all that
+            // matters when checking whether some other value's parameter
+            // list can stand in for this one. A plain adapter `Function`
+            // (the generated wrapper around a dynamic call's returned JS
+            // closure, real example: ejs's own `compile(...):
+            // TemplateFunction`) always supplies a definite value at every
+            // declared slot, so its own matching param position stays
+            // unwrapped -- `Optional(Json)` has no direct match against a
+            // bare `Json` above, rejecting every such returned-callable
+            // value outright, whether it was ever invoked or not (an
+            // unconditionally-processed Fallback declaration). Retry
+            // against the unwrapped inner type before giving up; checked
+            // *after* the exact-match attempt above so two independently
+            // wrapped shapes (a callback-typed slot, which this same
+            // wrapping applies to on both sides) still compare equal
+            // first, rather than each losing its wrapper and potentially
+            // matching something it shouldn't.
+            if let HirType::Optional(inner) | HirType::Nullish(inner) = expected {
+                if callback_param_compatible(inner, actual) {
+                    return true;
+                }
+            }
             if let (HirType::Object(expected_fields), HirType::Object(actual_fields)) =
                 (expected, actual)
             {
