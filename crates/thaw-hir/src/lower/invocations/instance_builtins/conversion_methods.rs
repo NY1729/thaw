@@ -269,6 +269,25 @@ impl<'a> FnLowerer<'a> {
                             vec![timestamp],
                         ));
                     }
+                    // `coerce_primitive_to_string`'s own `HirType::Str`
+                    // case is plain identity (correct for ordinary
+                    // string coercion, e.g. `"" + str`, which must never
+                    // rewrite an already-`Str` value) -- but a *method
+                    // call* `.toString()` needs the error-aware
+                    // rendering real JS gives every `Error.prototype.
+                    // toString()` (`"Name: message"` for a tagged value,
+                    // an untagged plain string unchanged), the same
+                    // rendering `String(value)`'s own `HirType::Str`
+                    // special case already applies (see
+                    // `lower/invocations/calls.rs`) -- without this,
+                    // `e.toString()` and `String(e)` would disagree,
+                    // even though real JS guarantees they're identical.
+                    if receiver_type == HirType::Str {
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_error_to_string".to_string())),
+                            vec![receiver],
+                        ));
+                    }
                     return self.coerce_primitive_to_string(receiver);
                 }
                 if property.sym == *"valueOf" {

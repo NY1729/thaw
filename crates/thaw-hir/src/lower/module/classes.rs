@@ -119,14 +119,28 @@ fn collect_native_classes<'a>(
                 // `new Error(message)` lowers straight to a tagged string
                 // (see `lower/expressions/lowering.rs`), not an object. A
                 // user class extending one of them still gets a real
-                // object layout here (an inherited `message: Str` field
-                // plus its own identity marker), so normal construction,
-                // field access, and `instanceof` on the object all work
-                // the usual way; `throw`ing such an instance is what
-                // recovers the tagged-string form other exception readers
-                // (`.message`/`.name`/`instanceof` on the *caught* value,
-                // console.log, N-API, Lambda error reporting) already
-                // understand -- see `lower/statements/lowering.rs`.
+                // object layout here (inherited `message`/`name: Str`
+                // fields plus its own identity marker), so normal
+                // construction, field access, and `instanceof` on the
+                // object all work the usual way; `throw`ing such an
+                // instance is what recovers the tagged-string form other
+                // exception readers (`.message`/`.name`/`instanceof` on
+                // the *caught* value, console.log, N-API, Lambda error
+                // reporting) already understand -- see
+                // `lower/statements/lowering.rs`.
+                //
+                // `name` defaults to `base_name` itself (the immediate
+                // native ancestor, e.g. `TypeError`) -- assigned by the
+                // generated `super(...)` handling in
+                // `lower/invocations/calls.rs` -- matching real
+                // JavaScript's own inherited `Error.prototype.name`/
+                // `TypeError.prototype.name`/etc. default for a subclass
+                // that never sets `this.name` itself (confirmed against
+                // real Node: `class Foo extends TypeError {}`'s default
+                // `.name` is `"TypeError"`, not `"Error"` and not the
+                // subclass's own name). A constructor assigning
+                // `this.name = "MyError"` afterwards just overwrites this
+                // same real field, same as any other class field.
                 if !matches!(
                     base_name,
                     "Error"
@@ -143,6 +157,7 @@ fn collect_native_classes<'a>(
                 }
                 identities.push(base_name.to_string());
                 inherited_fields.push(("message".to_string(), HirType::Str));
+                inherited_fields.push(("name".to_string(), HirType::Str));
             } else {
                 resolve_layout(
                     base_name,
