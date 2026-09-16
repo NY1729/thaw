@@ -818,3 +818,75 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "0 a\n1 b\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `Json`-typed dynamic-call argument that itself contains bare
+/// `String`/`Number`/`Boolean` values (a mongoose-style schema
+/// definition object, `{ name: String, age: Number }`) round-trips
+/// correctly through the existing `JsValue`-as-a-JSON-placeholder
+/// mechanism (`HirExpr::JsValueAsJson`, `lower/inference/
+/// coercions.rs`'s `HirType::Json`-declared branch): each bare
+/// constructor value becomes a live-handle placeholder object, JSON-
+/// encoded and sent across in one call, and the QuickJS-side reviver
+/// splices the real function references back in before the callee
+/// ever sees them -- confirmed by checking each field's real
+/// `typeof`/`.name` from inside the called function itself, not just
+/// that the call didn't crash.
+///
+/// Known, deliberately out-of-scope companion gap found while writing
+/// this test: the *same* object literal coerced to a declared
+/// `JsValue` parameter (rather than `Json`) still fails
+/// ("value has type Object(...), expected JsValue") -- there is no
+/// existing HIR node for "materialize a live JsValue directly from an
+/// object literal with mixed native/JsValue fields" the way
+/// `JsValueAsJson` already covers the reverse direction. Left for a
+/// separate effort: it would need a new HIR node threaded through both
+/// codegen backends, not a small extension of this fix.
+#[test]
+fn json_dynamic_call_argument_carries_real_string_number_boolean_values() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-json-argument-carries-ctor-values-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("schema-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function describeSchema(shape: Json): string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function describeSchema(shape) {\n\
+             return Object.keys(shape).map(function (key) {\n\
+                 var value = shape[key];\n\
+                 return key + ':' + typeof value + ':' + (typeof value === 'function' ? value.name : '');\n\
+             }).join(',');\n\
+         }\n\
+         module.exports.describeSchema = describeSchema;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { describeSchema } from "schema-kit";
+function main(): void {
+    console.log(describeSchema({ name: String, age: Number, active: Boolean }));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "name:function:String,age:function:Number,active:function:Boolean\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
