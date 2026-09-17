@@ -2750,3 +2750,105 @@ run();
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Round 20's npm compat audit (glob). `globSync` (brace expansion,
+/// `ignore`, `dot`, `absolute`) and the async `glob(...)` all match
+/// real Node's own glob output.
+///
+/// One general regression caught and fixed the same day, before it
+/// ever reached a real user: round 19's Date-on-a-dynamic-value fix
+/// briefly widened a native-builtin dispatch gate from `JsValue` to
+/// `JsValue | Json`, which made glob's own async `glob(...)` (resolving
+/// to a plain JSON array) lose its clear "`.sort`/`.includes` requires
+/// an array receiver, got Json" error in favor of an opaque "call to
+/// undeclared function" -- narrowed back to `JsValue` only, with a
+/// regression test (`a_json_valued_array_method_call_keeps_its_native_
+/// builtin_error`, `crates/thaw-hir/src/lower/tests/values.rs`). See
+/// `[[project_npm_interop_gaps_20]]`.
+///
+/// The async result's own element order isn't asserted -- real
+/// filesystem traversal order isn't guaranteed identical to the sync
+/// form's, confirmed against real Node itself (order differed there
+/// too) -- only its length is checked.
+#[test]
+fn registry_add_matches_real_glob_patterns_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-glob-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "glob").unwrap();
+    let fixtures = dir.join("fixtures");
+    std::fs::create_dir_all(fixtures.join("src/a")).unwrap();
+    std::fs::create_dir_all(fixtures.join("src/b")).unwrap();
+    std::fs::write(fixtures.join("src/a/one.txt"), "").unwrap();
+    std::fs::write(fixtures.join("src/a/two.txt"), "").unwrap();
+    std::fs::write(fixtures.join("src/a/skip.log"), "").unwrap();
+    std::fs::write(fixtures.join("src/b/three.txt"), "").unwrap();
+    std::fs::write(fixtures.join("root.txt"), "").unwrap();
+    std::fs::write(fixtures.join(".hidden.txt"), "").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        format!(
+            r#"import {{ glob, globSync }} from "glob";
+
+const cwd = {cwd:?};
+
+async function run(): Promise<void> {{
+    const brace = globSync("src/{{a,b}}/*.txt", {{ cwd }});
+    brace.sort();
+    console.log(JSON.stringify(brace));
+
+    const ignored = globSync("src/**/*", {{ cwd, ignore: "**/*.log", nodir: true }});
+    ignored.sort();
+    console.log(JSON.stringify(ignored));
+
+    const withDot = globSync("*.txt", {{ cwd, dot: true }});
+    withDot.sort();
+    console.log(JSON.stringify(withDot));
+    const withoutDot = globSync("*.txt", {{ cwd }});
+    withoutDot.sort();
+    console.log(JSON.stringify(withoutDot));
+
+    const asyncMatches = await glob("src/**/*.txt", {{ cwd }});
+    console.log(asyncMatches.length);
+
+    const abs = globSync("root.txt", {{ cwd, absolute: true }});
+    console.log(abs[0] === cwd + "/root.txt");
+}}
+run();
+"#,
+            cwd = fixtures.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["glob".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[\"src/a/one.txt\",\"src/a/two.txt\",\"src/b/three.txt\"]\n\
+         [\"src/a/one.txt\",\"src/a/two.txt\",\"src/b/three.txt\"]\n\
+         [\".hidden.txt\",\"root.txt\"]\n\
+         [\"root.txt\"]\n\
+         3\n\
+         true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
