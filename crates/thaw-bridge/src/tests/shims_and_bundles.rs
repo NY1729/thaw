@@ -292,6 +292,35 @@ fn large_module_init_compresses_embedded_javascript() {
     assert!(!init.contains(&source));
 }
 
+/// thaw-cli's `source_uses_intl` (build.rs) decides whether to link
+/// `__thaw_intl_locale_parse` (gating `Intl.Segmenter` et al. in
+/// `platform_globals/intl.js`) with a substring scan over the
+/// generated shim text -- invisible once a real dependency's own
+/// bundled source (not the user's typed source) is gzip+base64'd past
+/// the 1KB threshold above. Real trigger: yargs -> cliui ->
+/// string-width's own `new Intl.Segmenter()`, which crashed at runtime
+/// ("not a function") since the feature never got linked. Mirrors the
+/// existing tls/wasm/brotli marker re-emission below.
+#[test]
+fn large_module_init_reemits_an_intl_marker_from_a_compressed_bundle() {
+    let source = format!(
+        "{}\nconst segmenter = new Intl.Segmenter();\n",
+        "module.exports.value = 1;\n".repeat(200)
+    );
+    let init = generate_module_init(&[ModuleBundle {
+        package_name: "large-intl-package",
+        js_source: &source,
+        fallback_names: &[],
+        class_names: &[],
+        qualified_aliases: &[],
+        nested_namespace_aliases: &[],
+        value_exports: &[],
+    }]);
+
+    assert!(init.contains("loadScript(\"gz:"));
+    assert!(init.contains("// uses Intl.Segmenter"));
+}
+
 /// `p-queue`'s actual published shape: `module.exports = PQueue;
 /// module.exports.default = PQueue;` (a default-exported class, `for
 /// (var k in module.exports)` never sees a property literally named
