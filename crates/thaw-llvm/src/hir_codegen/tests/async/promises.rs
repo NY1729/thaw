@@ -770,3 +770,36 @@ fn promise_executor_infers_void_when_resolve_is_passed_by_reference_to_settimeou
         "before\nafter\n"
     );
 }
+
+/// The identical `setTimeout(resolve, ms)` idiom above works when
+/// awaited directly inside `main()` -- but a *bare, unawaited* call to
+/// some other async function (real trigger: found auditing a real npm
+/// package's own internal "fire and forget" pattern) never resumed past
+/// its own `await`, even though the `setTimeout` callback itself ran.
+/// `main()`'s own completion is driven by a continuation-aware event-
+/// loop variant (`thaw_js_run_until_native_resolved`); any other,
+/// unawaited async call's completion is only driven by the generic
+/// `thaw_js_run_event_loop`, which never polled the native continuation
+/// queue a `setTimeout`-resolved native `Promise<T>` pushes its resume
+/// callback onto -- so the resume callback (here, printing "after")
+/// simply never ran, and the process exited as soon as `main()`
+/// (synchronous, returning immediately) itself completed.
+#[test]
+fn a_bare_unawaited_async_call_resumes_after_a_settimeout_resolved_promise() {
+    let source = r#"
+        async function helper(): Promise<void> {
+            console.log("before");
+            await new Promise<void>((resolve) => {
+                setTimeout(() => resolve(), 5);
+            });
+            console.log("after");
+        }
+        function main(): void {
+            helper();
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "bare_unawaited_async_call_settimeout"),
+        "before\nafter\n"
+    );
+}
