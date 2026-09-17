@@ -189,8 +189,62 @@ fn rewrites_import_meta_url_without_touching_text() {
         "export const url = import.meta.url; const text = 'import.meta.url';",
     )
     .unwrap();
-    assert!(rewritten.contains("const url = ('file://' + __filename)"));
-    assert!(rewritten.contains("const text = 'import.meta.url'"));
+    assert!(
+        rewritten.contains("const url = {url: ('file://' + __filename)"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const text = 'import.meta.url'"),
+        "{rewritten}"
+    );
+}
+
+/// A common ESM/CJS dual-package shim (`const __dirname =
+/// fileURLToPath(dirname(import.meta.url));`, `const require =
+/// createRequire(import.meta.url);`) redeclares the exact same names
+/// this bundler's own per-module wrapper function already provides as
+/// real parameters (`module`/`exports`/`require`/`requireAsync`/
+/// `__filename`/`__dirname`, see `bundle/render.rs`). Real trigger:
+/// yargs's own `platform-shims/esm.mjs`. QuickJS (like real JS) rejects
+/// a lexical redeclaration of a parameter name outright ("invalid
+/// redefinition of parameter name"); the fix drops the `const`/`let`
+/// keyword, turning it into a plain reassignment of the existing
+/// parameter instead of a colliding new binding.
+#[test]
+fn strips_a_top_level_const_that_redeclares_a_reserved_wrapper_parameter() {
+    let rewritten = rewrite_esm_to_commonjs(
+        "const __dirname = 'computed'; const require = 'also computed'; export const kept = 1;",
+    )
+    .unwrap();
+    assert!(!rewritten.contains("const __dirname ="), "{rewritten}");
+    assert!(!rewritten.contains("const require ="), "{rewritten}");
+    assert!(rewritten.contains("__dirname = 'computed';"), "{rewritten}");
+    assert!(
+        rewritten.contains("require = 'also computed';"),
+        "{rewritten}"
+    );
+    assert!(rewritten.contains("const kept = 1;"), "{rewritten}");
+}
+
+/// `import.meta.resolve(...)` (or any `import.meta.*` access besides
+/// `.url`) used to survive the CJS rewrite untouched -- QuickJS's
+/// script-mode parser (this bundler always evaluates as a script, not
+/// real ESM) rejects a literal `import.meta` outright with "import.meta
+/// only valid in module code", even on a code path the program never
+/// actually reaches (real trigger: yargs's own unused `.config()`
+/// "extends" feature). Every `import.meta` expression, not just
+/// `.url`, must be replaced with something QuickJS can parse.
+#[test]
+fn rewrites_import_meta_resolve_so_the_bundle_still_parses() {
+    let rewritten = rewrite_esm_to_commonjs(
+        "export function extend(spec) { return import.meta.resolve(spec); }",
+    )
+    .unwrap();
+    assert!(
+        !rewritten.contains("import.meta.resolve(spec)"),
+        "{rewritten}"
+    );
+    assert!(rewritten.contains("resolve: function()"), "{rewritten}");
 }
 
 #[test]
