@@ -734,31 +734,45 @@ fn rewrite_live_import_references(source: &str) -> Option<String> {
 
 fn rewrite_import_meta_urls(source: &str) -> String {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{Expr, MemberExpr, MemberProp, MetaPropKind};
+    use thaw_parser::ast::{Expr, MetaPropKind};
     use thaw_parser::common::Spanned;
 
+    // `import.meta` itself (bare, or as the object of `.url`/`.resolve`/
+    // any other member access) is rejected outright by QuickJS's
+    // script-mode parser -- it's only valid in real ESM module code,
+    // and this bundler's CJS-rewritten output is evaluated as a plain
+    // script. A real package's source can reference it even on a path
+    // this build never actually executes (e.g. yargs's `.config()`
+    // "extends" feature uses `import.meta.resolve(...)`) -- since
+    // QuickJS parses the whole file eagerly, an unreached reference
+    // still blocks every other statement in the bundle from loading at
+    // all. Replace every `import.meta` expression with a plain object
+    // literal exposing the one property this codebase already
+    // synthesizes a value for (`url`) plus a `resolve` that throws if
+    // actually called, rather than special-casing only `.url` and
+    // leaving every other member access to hard-fail the whole parse.
     #[derive(Default)]
-    struct ImportMetaUrls(Vec<(u32, u32)>);
-    impl Visit for ImportMetaUrls {
-        fn visit_member_expr(&mut self, member: &MemberExpr) {
-            if matches!(member.obj.as_ref(), Expr::MetaProp(meta) if meta.kind == MetaPropKind::ImportMeta)
-                && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "url")
-            {
-                let span = member.span();
-                self.0.push((span.lo.0, span.hi.0));
-                return;
+    struct ImportMetaExprs(Vec<(u32, u32)>);
+    impl Visit for ImportMetaExprs {
+        fn visit_expr(&mut self, expr: &Expr) {
+            if let Expr::MetaProp(meta) = expr {
+                if meta.kind == MetaPropKind::ImportMeta {
+                    let span = meta.span();
+                    self.0.push((span.lo.0, span.hi.0));
+                    return;
+                }
             }
-            member.visit_children_with(self);
+            expr.visit_children_with(self);
         }
     }
 
     let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
         return source.to_string();
     };
-    let mut urls = ImportMetaUrls::default();
-    module.visit_with(&mut urls);
+    let mut metas = ImportMetaExprs::default();
+    module.visit_with(&mut metas);
     let mut output = source.to_string();
-    for (lo, hi) in urls.0.into_iter().rev() {
+    for (lo, hi) in metas.0.into_iter().rev() {
         let lo = source_map
             .lookup_byte_offset(thaw_parser::common::BytePos(lo))
             .pos
@@ -767,7 +781,88 @@ fn rewrite_import_meta_urls(source: &str) -> String {
             .lookup_byte_offset(thaw_parser::common::BytePos(hi))
             .pos
             .0 as usize;
-        output.replace_range(lo..hi, "('file://' + __filename)");
+        output.replace_range(
+            lo..hi,
+            "{url: ('file://' + __filename), resolve: function() { throw new Error('import.meta.resolve is not supported'); }}",
+        );
+    }
+    output
+}
+
+/// Each module is wrapped as `function(module, exports, require,
+/// requireAsync, __filename, __dirname) { <body> }` (see
+/// `bundle/render.rs`) so a real CommonJS-style `module`/`exports`/
+/// `require` and Node's own `__filename`/`__dirname` globals are
+/// available without any import. A common real-world ESM idiom
+/// re-derives exactly these same names at the top of a file as local
+/// `const`/`let` bindings (`const __dirname = fileURLToPath(dirname(
+/// import.meta.url));`, `const require = createRequire(import.meta.
+/// url);`) as an ESM/CJS-dual-package shim -- since ESM has no such
+/// globals natively. Once wrapped, that redeclaration collides with
+/// the wrapper's own parameter of the identical name, which QuickJS
+/// (like real JS) rejects outright ("invalid redefinition of parameter
+/// name") -- even though the value it computes is equivalent to what
+/// the wrapper already supplies.
+///
+/// Rather than reason about whether the shim's own computation matches
+/// the wrapper's value, just drop the `const`/`let` keyword from a
+/// top-level (module-body-scope, not nested in any block or function)
+/// declaration whose sole binding is exactly one of these reserved
+/// names, turning it into a plain reassignment of the existing
+/// parameter -- same runtime effect the shim always intended, no new
+/// lexical binding, no collision.
+fn strip_reserved_wrapper_redeclarations(source: &str) -> String {
+    use thaw_parser::ast::{Decl, ModuleItem, Pat, Stmt, VarDeclKind};
+    use thaw_parser::common::Spanned;
+
+    const RESERVED: [&str; 6] = [
+        "module",
+        "exports",
+        "require",
+        "requireAsync",
+        "__filename",
+        "__dirname",
+    ];
+
+    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
+        return source.to_string();
+    };
+    let mut edits: Vec<(u32, u32)> = Vec::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl))) = item else {
+            continue;
+        };
+        if !matches!(var_decl.kind, VarDeclKind::Const | VarDeclKind::Let) {
+            continue;
+        }
+        let [declarator] = var_decl.decls.as_slice() else {
+            continue;
+        };
+        if declarator.init.is_none() {
+            continue;
+        }
+        let Pat::Ident(ident) = &declarator.name else {
+            continue;
+        };
+        if !RESERVED.contains(&ident.id.sym.as_str()) {
+            continue;
+        }
+        edits.push((var_decl.span().lo.0, ident.id.span().lo.0));
+    }
+    if edits.is_empty() {
+        return source.to_string();
+    }
+    let mut output = source.to_string();
+    for (lo, hi) in edits.into_iter().rev() {
+        let lo = source_map
+            .lookup_byte_offset(thaw_parser::common::BytePos(lo))
+            .pos
+            .0 as usize;
+        let hi = source_map
+            .lookup_byte_offset(thaw_parser::common::BytePos(hi))
+            .pos
+            .0 as usize;
+        output.replace_range(lo..hi, "");
     }
     output
 }
@@ -1027,7 +1122,7 @@ fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<Str
         }
     }
 
-    Some(rewrite_import_meta_urls(&format!(
-        "module.exports.__esModule = true;\n{local_export_prologue}{prologue}{rest}"
+    Some(strip_reserved_wrapper_redeclarations(&rewrite_import_meta_urls(
+        &format!("module.exports.__esModule = true;\n{local_export_prologue}{prologue}{rest}"),
     )))
 }
