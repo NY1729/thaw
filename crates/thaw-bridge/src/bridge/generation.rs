@@ -759,7 +759,28 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
         // (pre-compression) source contains, in plain uncompressed
         // text that never executes, keeps that scan working regardless
         // of bundle size.
-        for marker in ["__thaw_tls_", "WebAssembly", "brotli", "Brotli"] {
+        // `Intl.Locale`/`Intl.PluralRules`/`Intl.Collator`/`Intl.
+        // Segmenter`/`Intl.RelativeTimeFormat` markers mirror thaw-cli's
+        // own `source_uses_intl` (`build.rs`) for the same reason as
+        // the tls/wasm/brotli markers above: a real dependency's own
+        // bundled use (not the user's own typed source) is otherwise
+        // invisible to that scan once compressed, silently leaving
+        // `__thaw_intl_locale_parse` unlinked -- `Intl.Segmenter` (and
+        // its siblings) then stay ungated-false in `platform_globals/
+        // intl.js`, so `new Intl.Segmenter()` fails "not a function"
+        // for any package that uses it internally (real trigger:
+        // yargs -> cliui -> string-width).
+        for marker in [
+            "__thaw_tls_",
+            "WebAssembly",
+            "brotli",
+            "Brotli",
+            "Intl.Locale",
+            "Intl.PluralRules",
+            "Intl.Collator",
+            "Intl.Segmenter",
+            "Intl.RelativeTimeFormat",
+        ] {
             if bundle.js_source.contains(marker) {
                 out.push_str(&format!("    // uses {marker}\n"));
             }
