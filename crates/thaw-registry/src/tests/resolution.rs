@@ -293,6 +293,65 @@ fn installed_package_inlines_named_function_reexports() {
     let _ = fs::remove_dir_all(registry);
 }
 
+/// A `declare const NAME: import("./sibling.js").SomeType<Args>;` --
+/// real example: `tar`'s own `create.d.ts`, `export declare const
+/// create: import("./make-command.js").TarCommand<Pack, PackSync>;`.
+/// `make-command.js`/`.d.ts` isn't a `package.json` exports-map entry,
+/// so nothing else would ever fetch it -- confirms it's resolved the
+/// same way an ordinary `export * from "./x.js"` re-export already is,
+/// its declarations inlined, and the const's own annotation rewritten
+/// to a plain, re-parseable `TypeName<Args>` (no `import(...)` prefix
+/// left in the flattened output for thaw-bridge to trip over).
+#[test]
+fn installed_package_inlines_a_cross_file_import_type_on_a_callable_const() {
+    let scratch = temp_registry("installed-dts-import-type-scratch");
+    let registry = temp_registry("installed-dts-import-type-registry");
+    let package = scratch.join("node_modules/tar-like");
+    fs::create_dir_all(package.join("dist")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"tar-like","version":"1.0.0","types":"./dist/index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/index.d.ts"),
+        "export * from './create';",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/create.d.ts"),
+        "export declare const create: import(\"./make-command.js\").TarCommand<string>;",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/make-command.d.ts"),
+        "export type TarCommand<T> = {\n    (opt: T): void;\n};",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { create: function () {} };",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "tar-like").unwrap();
+    let declarations = resolve(&registry, "tar-like").unwrap().dts_source;
+    assert!(
+        declarations.contains("export declare const create: TarCommand<string>;"),
+        "{declarations}"
+    );
+    assert!(
+        !declarations.contains("import("),
+        "the flattened output should have no remaining `import(...)` type reference: {declarations}"
+    );
+    assert!(
+        declarations.contains("type TarCommand<T> = {\n    (opt: T): void;\n};"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
 /// `export * from "bare-specifier"` re-exports from a genuinely
 /// *different* installed package, not another file within the same one
 /// -- real example: `@types/ramda`'s entire `index.d.ts` is just

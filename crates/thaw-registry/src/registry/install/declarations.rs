@@ -1199,11 +1199,83 @@ fn callable_const_declaration_snippet(
     source_map: &thaw_parser::common::SourceMap,
     decl_span: thaw_parser::common::Span,
     binding: &thaw_parser::ast::BindingIdent,
+    path: &Path,
 ) -> Result<Option<String>, String> {
     use thaw_parser::ast::{
         Decl, ModuleDecl, ModuleItem, TsEntityName, TsFnOrConstructorType, TsType, TsTypeElement,
     };
     use thaw_parser::common::{SourceMapper, Spanned};
+
+    /// Every top-level `type NAME = T;`/`interface NAME { ... }` in the
+    /// file at `path` (bare or exported), as re-parseable snippets --
+    /// used to inline a sibling `.d.ts` file's declarations after
+    /// chasing a cross-file `import("./sibling.js").Name<Args>` type
+    /// reference. `.d.ts` type declarations are erasable and side-
+    /// effect-free, so including every one (not just the referenced
+    /// `Name`) is harmless even when most turn out unrelated -- same
+    /// reasoning this function's own local-alias branch below already
+    /// uses. Also recurses into every relative `import ... from
+    /// "./other.js"` this file itself has (type-only or not -- a plain
+    /// value import can equally carry a type used only in a type
+    /// position, and re-deriving that distinction isn't worth it when
+    /// over-including is free), the same "chase one hop, inline
+    /// everything found, let unrelated declarations sit unused" policy
+    /// one level deeper -- real example: `tar`'s own `make-command.
+    /// d.ts` imports `TarOptions`/`TarOptionsWithAliasesAsyncFile`/etc.
+    /// from `./options.js`, which never gets fetched otherwise (no
+    /// `package.json` exports-map entry reaches it either). `visited`
+    /// guards against re-visiting the same file twice (a cycle, or two
+    /// different imports resolving to the same path).
+    fn local_type_declaration_snippets(
+        path: &Path,
+        visited: &mut std::collections::BTreeSet<PathBuf>,
+    ) -> Result<Vec<String>, String> {
+        use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt};
+        use thaw_parser::common::{SourceMapper, Spanned};
+
+        if !visited.insert(path.to_path_buf()) {
+            return Ok(Vec::new());
+        }
+        let source = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "failed to read `{}`'s type declarations: {error}",
+                path.display()
+            )
+        })?;
+        let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+        let mut declarations = module
+            .body
+            .iter()
+            .filter_map(|item| {
+                let decl = match item {
+                    ModuleItem::Stmt(Stmt::Decl(decl)) => decl,
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+                    _ => return None,
+                };
+                let span = match decl {
+                    Decl::TsInterface(iface) => iface.span(),
+                    Decl::TsTypeAlias(alias) => alias.span(),
+                    _ => return None,
+                };
+                Some(source_map.span_to_snippet(span).map_err(|error| {
+                    format!("failed to read a local type declaration: {error:?}")
+                }))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for item in &module.body {
+            let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+                continue;
+            };
+            let Some(specifier) = import.src.value.as_str() else {
+                continue;
+            };
+            let Some(target) = declaration_reexport_path(path, specifier) else {
+                continue;
+            };
+            declarations.extend(local_type_declaration_snippets(&target, visited)?);
+        }
+        Ok(declarations)
+    }
 
     let Some(annotation) = binding.type_ann.as_ref() else {
         return Ok(None);
@@ -1313,6 +1385,58 @@ fn callable_const_declaration_snippet(
             }
             Ok(Some(combined))
         }
+        // A cross-file inline import type (`import("./make-command.js").
+        // TarCommand<Pack, PackSync>`) -- real example: `tar`'s own
+        // `create.d.ts`/`extract.d.ts`/`list.d.ts`/`update.d.ts`, each a
+        // bare `export declare const NAME: import("./make-command.js").
+        // TarCommand<...>;` with no local type at all. `make-command.d.ts`
+        // isn't a `package.json` exports-map entry, so nothing else ever
+        // fetches it. Resolved the same way an ordinary `export * from
+        // "./x.js"` re-export already is (`declaration_reexport_path`),
+        // then every local type alias/interface in that sibling file is
+        // inlined (see `local_type_declaration_snippets`'s own doc
+        // comment for why "every one", not just the referenced name).
+        //
+        // The const's own declaration is re-synthesized (name + bare
+        // qualifier + its original type-argument text) rather than
+        // string-replacing the `import("...").` prefix out of the
+        // original snippet -- simpler than locating exactly where the
+        // qualifier starts within the snippet's own span arithmetic, and
+        // just as correct: nothing downstream cares about the const
+        // declaration's exact original formatting.
+        TsType::TsImportType(import_type) => {
+            let Some(qualifier) = import_type.qualifier.as_ref() else {
+                return Ok(None);
+            };
+            let Some(specifier) = import_type.arg.value.as_str() else {
+                return Ok(None);
+            };
+            let Some(sibling_path) = declaration_reexport_path(path, specifier) else {
+                return Ok(None);
+            };
+            let qualifier_name = match qualifier {
+                TsEntityName::Ident(ident) => ident.sym.to_string(),
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.to_string(),
+            };
+            let type_args = import_type
+                .type_args
+                .as_ref()
+                .map(|args| source_map.span_to_snippet(args.span()))
+                .transpose()
+                .map_err(|error| format!("failed to read a type argument list: {error:?}"))?
+                .unwrap_or_default();
+            let mut combined = format!(
+                "export declare const {}: {qualifier_name}{type_args};\n",
+                binding.id.sym
+            );
+            for snippet in
+                local_type_declaration_snippets(&sibling_path, &mut std::collections::BTreeSet::new())?
+            {
+                combined.push_str(&snippet);
+                combined.push('\n');
+            }
+            Ok(Some(combined))
+        }
         _ => Ok(None),
     }
 }
@@ -1324,6 +1448,7 @@ fn callable_const_declaration_snippet(
 fn callable_const_declarations(
     module: &thaw_parser::ast::Module,
     source_map: &thaw_parser::common::SourceMap,
+    path: &Path,
 ) -> Result<Vec<(String, String)>, String> {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Pat};
     use thaw_parser::common::Spanned;
@@ -1340,9 +1465,13 @@ fn callable_const_declarations(
             let Pat::Ident(binding) = &declarator.name else {
                 continue;
             };
-            if let Some(snippet) =
-                callable_const_declaration_snippet(module, source_map, export.span(), binding)?
-            {
+            if let Some(snippet) = callable_const_declaration_snippet(
+                module,
+                source_map,
+                export.span(),
+                binding,
+                path,
+            )? {
                 declarations.push((binding.id.sym.to_string(), snippet));
             }
         }
@@ -1468,9 +1597,13 @@ fn all_reexported_function_declarations(
             let thaw_parser::ast::Pat::Ident(binding) = &declarator.name else {
                 continue;
             };
-            if let Some(snippet) =
-                callable_const_declaration_snippet(&module, &source_map, var_decl.span(), binding)?
-            {
+            if let Some(snippet) = callable_const_declaration_snippet(
+                &module,
+                &source_map,
+                var_decl.span(),
+                binding,
+                path,
+            )? {
                 local_declarations
                     .entry(binding.id.sym.to_string())
                     .or_default()
@@ -1592,7 +1725,7 @@ fn all_reexported_function_declarations(
             _ => {}
         }
     }
-    declarations.extend(callable_const_declarations(&module, &source_map)?);
+    declarations.extend(callable_const_declarations(&module, &source_map, path)?);
     Ok(declarations)
 }
 
@@ -1633,7 +1766,7 @@ fn reexported_function_declarations(
         }
     }
     if declarations.is_empty() {
-        for (const_name, snippet) in callable_const_declarations(&module, &source_map)? {
+        for (const_name, snippet) in callable_const_declarations(&module, &source_map, path)? {
             if const_name == name {
                 declarations.push(snippet);
             }
@@ -1680,6 +1813,7 @@ fn reexported_function_declarations(
                             &source_map,
                             var_decl.span(),
                             binding,
+                            path,
                         )? {
                             declarations.push(snippet);
                         }
