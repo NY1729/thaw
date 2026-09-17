@@ -556,28 +556,6 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_indirect_call(closure_type, code, &callback_args, "invoke_napi_value_callback")
             .map_err(|error| error.to_string())?;
-        if defer_promise && !matches!(ret, HirType::Promise(_)) {
-            for (index, param) in params.iter().enumerate() {
-                if *param == HirType::JsValue {
-                    self.builder
-                        .build_call(
-                            self.module.get_function("thaw_js_release_handle").unwrap(),
-                            &[callback_args[index + 1]],
-                            "release_native_callback_argument",
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            for value in argument_json.into_iter().chain(std::iter::once(args_json)) {
-                self.builder
-                    .build_call(
-                        self.module.get_function("thaw_json_destroy").unwrap(),
-                        &[value.into()],
-                        "destroy_native_callback_json",
-                    )
-                    .map_err(|error| error.to_string())?;
-            }
-        }
         let pending_slot = self.pending_exception().as_pointer_value();
         let pending = self
             .builder
@@ -703,6 +681,47 @@ impl<'ctx> HirCompiler<'ctx> {
                     .unwrap()
             }
         };
+        // Cleans up every decoded argument (the `Json` values from
+        // `thaw_json_index`/`thaw_json_array_slice`, and any retained
+        // `JsValue` parameter handle) only *after* `result_json` has
+        // been fully built above -- not right after `call` returns.
+        // `compile_json_array_push_native`/`thaw_json_array_push_json`
+        // (used to build `result_json` from the closure's own return
+        // value) clone defensively, but only if the source they clone
+        // from is still alive: a callback that returns one of its own
+        // parameters unchanged (a real, common pattern -- e.g. `qs`'s
+        // own `filter: (prefix, value) => value`) makes the return
+        // value alias one of these same `argument_json` pointers.
+        // Destroying them first (the original ordering here) freed
+        // that memory before the clone ever read it -- a real,
+        // reproducible segfault, not just a leak. Moving cleanup to
+        // here instead means nothing downstream ever needs the
+        // original argument pointers again, so this is always safe
+        // regardless of aliasing (including a *nested* alias, e.g.
+        // `(x) => ({ wrapped: x })` -- `serde_json::Value::clone` is a
+        // real recursive clone, so the nested copy is independent too).
+        if defer_promise {
+            for (index, param) in params.iter().enumerate() {
+                if *param == HirType::JsValue {
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_js_release_handle").unwrap(),
+                            &[callback_args[index + 1]],
+                            "release_native_callback_argument",
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            for value in argument_json.into_iter().chain(std::iter::once(args_json)) {
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_json_destroy").unwrap(),
+                        &[value.into()],
+                        "destroy_native_callback_json",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let result = self
             .builder
             .build_call(
