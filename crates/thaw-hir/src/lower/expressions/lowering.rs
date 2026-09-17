@@ -423,6 +423,50 @@ impl<'a> FnLowerer<'a> {
                             .interfaces
                             .get(class.sym.as_ref())
                             .is_some_and(object_type_is_error_family);
+                    // `Date` has no entry in `self.signatures` at all --
+                    // `new Date()` compiles to a bespoke `HirType::F64`
+                    // timestamp, not a real registered class -- so a
+                    // *dynamic* (`JsValue`) value from a real npm package
+                    // (real trigger: a Fallback function whose return
+                    // type couldn't be classified -- see
+                    // `[[project_npm_interop_gaps_19]]`) needs a faithful
+                    // runtime check instead of the compile-time class-
+                    // identity check every other native class gets below.
+                    // Checked via `peek_type_without_lowering` (not the
+                    // ordinary `lower_expr` + `infer_expr_type` below) so
+                    // this can dispatch before the value is lowered the
+                    // ordinary way.
+                    //
+                    // Deliberately `JsValue` only, not `Json` too: a
+                    // `Json`-typed value (e.g. js-yaml's `load(): unknown`
+                    // -- classified `Json` by the established "a bare
+                    // `any`/`unknown` return is real JSON data" heuristic,
+                    // see `dynamic_declarations.rs`) has already been
+                    // JSON-decoded by the time it reaches here -- for a
+                    // genuine `Date`, that decode step itself already
+                    // lost the live object identity (a `Date` serializes
+                    // to a plain ISO string, indistinguishable from one
+                    // in the JSON snapshot). There's no live handle left
+                    // to check at that point, and no reliable way to
+                    // "undo" a JSON decode after the fact -- that's a
+                    // separate, deeper gap in how a `Json`-classified
+                    // Fallback return preserves (or doesn't) a non-JSON-
+                    // native value's identity, left open. Falling through
+                    // to the ordinary "not a known class" error for a
+                    // `Json` receiver keeps that case exactly as before
+                    // (a clean compile-time error, not a crash).
+                    if class.sym == *"Date"
+                        && matches!(
+                            self.peek_type_without_lowering(&bin.left),
+                            Some(HirType::JsValue)
+                        )
+                    {
+                        let value = self
+                            .lower_expr_with_expected_type(&bin.left, Some(&HirType::JsValue))?;
+                        return Ok(
+                            self.dynamic_value_check("__thaw_instanceof_date_dynamic_value", value)
+                        );
+                    }
                     let value = self.lower_expr(&bin.left)?;
                     let value_type = self.infer_expr_type(&value)?;
                     if let HirType::Union(elements) = &value_type {
@@ -479,6 +523,25 @@ impl<'a> FnLowerer<'a> {
                         return self.wrap_call_argument_bindings(
                             call,
                             &[(name, value_type, value)],
+                        );
+                    }
+                    // Fallback for the same `Date`-against-a-dynamic-value
+                    // case the early `peek_type_without_lowering` check
+                    // above already handles for the common case (a
+                    // property-access chain) -- this catches a `JsValue`
+                    // receiver that peek couldn't determine without
+                    // lowering (e.g. itself a call expression), now that
+                    // `value` has already been lowered normally above. A
+                    // `Json`-typed `value` here can't be retroactively
+                    // coerced into a real handle (a JSON snapshot has
+                    // already lost whatever live identity it had), so
+                    // only `JsValue` is handled -- a `Json` value peek
+                    // couldn't catch falls through to the same "not a
+                    // known class" error as before, same as any other
+                    // unrecognized class.
+                    if class.sym == *"Date" && value_type == HirType::JsValue {
+                        return Ok(
+                            self.dynamic_value_check("__thaw_instanceof_date_dynamic_value", value)
                         );
                     }
                     if !extends_error_family

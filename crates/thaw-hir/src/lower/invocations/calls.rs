@@ -380,6 +380,19 @@ impl<'a> FnLowerer<'a> {
                 // instead of erroring the way an unrecognized *class*
                 // method above does, since there's no fixed method list
                 // to have missed from.
+                //
+                // Deliberately `JsValue` only, not `Json` too: a `Json`-
+                // typed receiver has already been JSON-decoded, and
+                // `lower_expr_with_expected_type`'s `JsValue` hint (which
+                // `lower_dynamic_value_method_call` uses on its own
+                // receiver) doesn't reach into a plain member-access
+                // chain to undo that -- attempting it crashes at LLVM
+                // verification (a `Json` pointer handed to a native call
+                // expecting a real handle) rather than erroring cleanly.
+                // See `[[project_npm_interop_gaps_19]]` for the deeper,
+                // left-open gap this traces back to (js-yaml's `load():
+                // unknown` losing a real `Date`'s identity the moment
+                // it's classified `Json`).
                 if matches!(receiver_type, Some(HirType::JsValue)) {
                     return self.lower_dynamic_value_method_call(
                         &member.obj,
@@ -480,7 +493,25 @@ impl<'a> FnLowerer<'a> {
                         return self.lower_static_builtin_call(object, property, call);
                     }
                 }
-                if Self::is_native_instance_builtin(property.sym.as_ref()) {
+                // A confirmed `JsValue`/`Json` receiver (real trigger:
+                // js-yaml's date resolver handing back a genuine dynamic
+                // `Date` object) is never a native thaw value under any
+                // circumstance, so a name this codebase also happens to
+                // use for a native builtin (`toISOString`, `getTime`, ...)
+                // must fall through to the generic dynamic method-call
+                // path below instead of `lower_native_instance_builtin`,
+                // which unconditionally assumes a native receiver shape
+                // and hard-errors otherwise. `peek_type_without_lowering`
+                // returning `None` (receiver type not staticall
+                // knowable without lowering, e.g. itself a call
+                // expression) leaves this exactly as permissive as
+                // before -- only a *positively confirmed* dynamic
+                // receiver changes the outcome.
+                let receiver_is_dynamic = matches!(
+                    self.peek_type_without_lowering(&member.obj),
+                    Some(HirType::JsValue | HirType::Json)
+                );
+                if Self::is_native_instance_builtin(property.sym.as_ref()) && !receiver_is_dynamic {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
                 if matches!(

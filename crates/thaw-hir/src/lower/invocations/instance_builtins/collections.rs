@@ -11,11 +11,33 @@ impl<'a> FnLowerer<'a> {
     /// chain is recognized; anything else (for example a receiver that is
     /// itself a call, like `getMap().get(x)`) safely falls through to
     /// ordinary property/method-call handling instead.
+    ///
+    /// Checks `self.narrowings`/`nullable_narrowings`/`nullish_narrowings`
+    /// before falling back to `self.scope`'s declared type, matching the
+    /// same priority order this file's own generic method-call resolution
+    /// already uses for an identifier receiver. Needed once this
+    /// function's own caller started using it to gate a *dynamic*-value
+    /// fallback path too (`calls.rs`'s Date-method dispatch): a `typeof
+    /// value === "string"` guard narrows an `unknown` parameter (declared
+    /// `JsValue`) to `Str` for its `if` branch, and skipping narrowing
+    /// here made a real, statically-known-safe `value.toUpperCase()`
+    /// call inside that branch wrongly look dynamic, since `self.scope`
+    /// alone still reported the parameter's original, un-narrowed type.
     fn peek_type_without_lowering(&self, expr: &Expr) -> Option<HirType> {
         match expr {
             Expr::Ident(ident) => {
                 let resolved = self.resolve_binding(ident.sym.as_ref());
-                self.scope.get(&resolved).cloned()
+                self.narrowings
+                    .get(&resolved)
+                    .or_else(|| self.nullable_narrowings.get(&resolved))
+                    .or_else(|| self.nullish_narrowings.get(&resolved))
+                    // `typeof value === "string"` on an `unknown`
+                    // (`HirType::Json`) parameter narrows through this
+                    // separate map, not `self.narrowings` -- see
+                    // `json_typeof_narrowing`.
+                    .or_else(|| self.json_narrowings.get(&resolved))
+                    .or_else(|| self.scope.get(&resolved))
+                    .cloned()
             }
             Expr::This(_) => {
                 let resolved = self.resolve_binding("this");
@@ -25,8 +47,19 @@ impl<'a> FnLowerer<'a> {
                 let MemberProp::Ident(field) = &member.prop else {
                     return None;
                 };
-                let HirType::Object(fields) = self.peek_type_without_lowering(&member.obj)?
-                else {
+                let base_type = self.peek_type_without_lowering(&member.obj)?;
+                // A property read off an already-dynamic value stays
+                // dynamic itself, regardless of which property -- there
+                // is no fixed field list to consult. Needed so a
+                // multi-hop dynamic chain (`load(...).d`, `load(...)` in
+                // turn typed `any` and so `JsValue`/`Json` itself) is
+                // still recognized as dynamic by this function's own
+                // caller (`is_native_instance_builtin`'s dispatch gate),
+                // not just a single-hop `let x: JsValue = ...; x.d`.
+                if matches!(base_type, HirType::JsValue | HirType::Json) {
+                    return Some(base_type);
+                }
+                let HirType::Object(fields) = base_type else {
                     return None;
                 };
                 fields
