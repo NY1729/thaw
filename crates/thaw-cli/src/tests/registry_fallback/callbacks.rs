@@ -1000,3 +1000,116 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A generic "typed EventEmitter" method -- `on<Event extends keyof
+/// Events>(ev: Event, handler: (...args: Events[Event]) => any): this`,
+/// the real shape `minipass`'s own `Minipass<RType, WType, Events>` class
+/// declares (used by `@isaacs/fs-minipass`'s `ReadStream`/`WriteStream`,
+/// among other real packages) -- used to reject an inline callback
+/// literal outright: `error: contextual callback accepts at most 0
+/// parameter(s), got 1`. A named function reference passed to the
+/// identical call already worked; only an inline literal
+/// (`function(chunk) {...}`/`(chunk) => ...`) hit this.
+///
+/// Two independent bugs, both in `contextual_dynamic_type`
+/// (`crates/thaw-bridge/src/bridge/dts/classes.rs`), the deliberately
+/// lenient re-classification pass a generic class method's own
+/// parameters go through after their ordinary (non-generic)
+/// classification fails because `Events[Event]` can't resolve `Event` to
+/// a literal at `.d.ts`-classification time:
+///
+/// 1. Its `TsFnOrConstructorType::TsFnType` handling only ever processed
+///    `TsFnParam::Ident` parameters, silently dropping a `TsFnParam::
+///    Rest` one (`handler`'s only parameter, `...args: Events[Event]`)
+///    via `continue` -- `params` stayed empty, producing a zero-argument
+///    `HirType::Function` for the whole callback. Fixed by handling
+///    `TsFnParam::Rest` and building a `HirType::CallableFunction` with a
+///    `JsValue` rest element instead (the same "stay dynamic" fallback
+///    `classify_ts_type`'s own non-generic rest-callback handling already
+///    uses, just with a `JsValue`, not `Json`, leaf, matching every other
+///    leaf in this same function).
+/// 2. The caller only reapplied a parameter's substituted (contextual)
+///    type when it happened to look like a callback
+///    (`hir_type_contains_callback`) -- a *plain* parameter typed
+///    directly as the method's own type parameter (`ev: Event`) never
+///    got the substitution either, leaving it at its original,
+///    unresolvable classification. Fixed by also reapplying it whenever
+///    the original classification was `Unsupported`.
+///
+/// A third, related gap surfaced verifying this end to end once both of
+/// the above compiled: a real inline callback with no explicit `return`
+/// infers `Void`, but the handler's classified return type (`any`) widens
+/// to `JsValue` -- and `return_compatible` (`crates/thaw-hir/src/lower/
+/// inference/types.rs`) only ever accepted the reverse direction (a
+/// `Void`-*expected* return accepting anything), not a `JsValue`-expected
+/// return accepting `Void`. Fixed by extending `return_compatible`'s
+/// wildcard to `JsValue` too.
+#[test]
+fn a_generic_events_map_method_accepts_an_inline_callback_literal() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-generic-events-map-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("event-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface WidgetEvents {\n\
+             data: [chunk: string];\n\
+             end: [];\n\
+         }\n\
+         export declare class Widget {\n\
+             on<Event extends keyof WidgetEvents>(ev: Event, handler: (...args: WidgetEvents[Event]) => any): this;\n\
+             emitData(value: string): void;\n\
+             emitEnd(): void;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Widget() { this._data = null; this._end = null; }\n\
+         Widget.prototype.on = function(ev, handler) {\n\
+         \x20\x20if (ev === 'data') this._data = handler;\n\
+         \x20\x20else if (ev === 'end') this._end = handler;\n\
+         \x20\x20return this;\n\
+         };\n\
+         Widget.prototype.emitData = function(value) { if (this._data) this._data(value); };\n\
+         Widget.prototype.emitEnd = function() { if (this._end) this._end(); };\n\
+         module.exports = { Widget: Widget };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Widget } from "event-kit";
+function main(): void {
+    const w = new Widget();
+    let total = "";
+    w.on("data", function (chunk: any) {
+        total += chunk;
+    });
+    w.on("end", function () {
+        console.log("end, total:", total);
+    });
+    w.emitData("hello ");
+    w.emitData("world");
+    w.emitEnd();
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "end, total: hello world\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

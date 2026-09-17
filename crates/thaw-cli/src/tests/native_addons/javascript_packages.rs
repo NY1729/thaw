@@ -3169,6 +3169,79 @@ run();
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Follow-up to round 22/25's `tar` audit: investigating why an isolated
+/// `@isaacs/fs-minipass` `ReadStream` (`tar`'s own gzip/extract
+/// dependency) couldn't compile `.on("data", function(chunk) {...})`
+/// with an inline callback literal surfaced a real, general compiler bug
+/// -- see `a_generic_events_map_method_accepts_an_inline_callback_
+/// literal` (thaw-cli's own synthetic-package unit test, in `tests/
+/// registry_fallback/callbacks.rs`) for the full root-cause writeup.
+/// This is the same fix, confirmed against the real npm package that
+/// found it.
+#[test]
+fn registry_add_delivers_real_read_stream_data_to_an_inline_callback_literal_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-js-fs-minipass-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "@isaacs/fs-minipass").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let data_path = dir.join("data.txt");
+    std::fs::write(&data_path, "hello world").unwrap();
+    std::fs::write(
+        &source,
+        format!(
+            r#"import {{ ReadStream }} from "@isaacs/fs-minipass";
+
+function run(): void {{
+    const rs = new ReadStream("{data_path}", {{}});
+    let total = "";
+    rs.on("data", function (chunk: any) {{
+        total += chunk.toString();
+    }});
+    rs.on("end", function () {{
+        console.log("end:", total);
+    }});
+    rs.on("error", (e: any) => {{
+        console.log("error:", String(e));
+    }});
+}}
+run();
+"#,
+            data_path = data_path.display(),
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["@isaacs/fs-minipass".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "end: hello world\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Round 24's npm compat audit (`ws`). A real client/server round trip
 /// (echo message, then a full client-initiated close handshake) crashed
 /// twice in a row on the client's own `net.Socket` teardown, both fixed
