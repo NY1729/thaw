@@ -1126,6 +1126,35 @@ fn assigns_a_native_value_into_a_json_indexed_slot() {
     assert!(lower_module(&module).is_ok());
 }
 
+/// A `Json`-typed receiver (from `JSON.parse`, same as the sibling test
+/// above) calling a name this codebase also uses for a native array
+/// builtin (`includes`) must still reach `lower_native_instance_
+/// builtin`'s own clear "requires ... receiver, got Json" error --
+/// not fall through to a generic dynamic-value dispatch path that
+/// only actually supports a genuine `JsValue` receiver, which would
+/// otherwise regress this into an opaque "call to undeclared function"
+/// at codegen time instead. A real regression while fixing
+/// `instanceof Date`/Date-method dispatch on a genuine `JsValue`
+/// receiver (round 19's Date fix broadened this same gate to `JsValue
+/// | Json` at first, catching a `Json` case it was never meant to
+/// touch -- found via glob's own async `glob(...)` resolving to a
+/// plain JSON array, see `[[project_npm_interop_gaps_20]]`).
+#[test]
+fn a_json_valued_array_method_call_keeps_its_native_builtin_error() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): boolean {
+            const data = JSON.parse("[1, 2, 3]");
+            return data.includes(2);
+        }"#,
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("requires"), "{error}");
+    assert!(error.contains("Json"), "{error}");
+    assert!(!error.contains("undeclared"), "{error}");
+    assert!(!error.contains("unknown function"), "{error}");
+}
+
 #[test]
 fn lowers_calls_through_function_typed_object_properties() {
     let program = lower(

@@ -493,23 +493,33 @@ impl<'a> FnLowerer<'a> {
                         return self.lower_static_builtin_call(object, property, call);
                     }
                 }
-                // A confirmed `JsValue`/`Json` receiver (real trigger:
-                // js-yaml's date resolver handing back a genuine dynamic
-                // `Date` object) is never a native thaw value under any
+                // A confirmed `JsValue` receiver (real trigger: a Date-
+                // valued Fallback return, see `[[project_npm_interop_
+                // gaps_19]]`) is never a native thaw value under any
                 // circumstance, so a name this codebase also happens to
                 // use for a native builtin (`toISOString`, `getTime`, ...)
                 // must fall through to the generic dynamic method-call
                 // path below instead of `lower_native_instance_builtin`,
                 // which unconditionally assumes a native receiver shape
                 // and hard-errors otherwise. `peek_type_without_lowering`
-                // returning `None` (receiver type not staticall
+                // returning `None` (receiver type not statically
                 // knowable without lowering, e.g. itself a call
                 // expression) leaves this exactly as permissive as
                 // before -- only a *positively confirmed* dynamic
                 // receiver changes the outcome.
+                //
+                // Deliberately `JsValue` only, not `Json`: a `Json`
+                // receiver (real trigger: glob's async `glob(...)`
+                // resolving to a plain JSON array) still has a real,
+                // useful native-builtin error path below (e.g. `.sort`'s
+                // own "requires an array receiver, got Json") -- skipping
+                // straight to the dynamic path instead left it with no
+                // path at all (`lower_dynamic_value_method_call` also
+                // requires `HirType::JsValue`, further down), regressing
+                // a working error into "call to undeclared function".
                 let receiver_is_dynamic = matches!(
                     self.peek_type_without_lowering(&member.obj),
-                    Some(HirType::JsValue | HirType::Json)
+                    Some(HirType::JsValue)
                 );
                 if Self::is_native_instance_builtin(property.sym.as_ref()) && !receiver_is_dynamic {
                     return self.lower_native_instance_builtin(member, property, call);
