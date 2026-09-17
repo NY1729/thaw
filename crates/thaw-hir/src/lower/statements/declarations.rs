@@ -432,7 +432,7 @@ impl<'a> FnLowerer<'a> {
                     )?,
                 };
 
-                let actual_type = self.infer_expr_type(&value).map_err(|error| {
+                let actual_type = self.infer_expr_type_inner(&value).map_err(|error| {
                     format!(
                         "cannot infer the type of `{name}`: {error} \
                          (add an explicit type annotation)"

@@ -1603,3 +1603,30 @@ fn buffer_is_a_distinct_type_that_erases_to_a_number_array() {
         "a `Bytes` marker survived the erase pass into the lowered program"
     );
 }
+
+#[test]
+fn unannotated_buffer_binding_still_dispatches_byte_specific_methods() {
+    // Storing a `let`/`const` binding's *declared* type from the erasing
+    // `infer_expr_type` (instead of `infer_expr_type_inner`) used to
+    // permanently downgrade an unannotated `Bytes` value to `Array(F64)`
+    // in `scope` the moment it was bound -- `.length`/spread/indexing
+    // still worked (they're written for `Array` either way), but a
+    // byte-specific method (`bytes_methods.rs`) or `Buffer.isBuffer`
+    // (`static_builtins.rs`) misdispatched or hard-errored, since both
+    // read the receiver's type back out of `scope`. This would fail to
+    // even lower (`` `.readUInt8()` is only supported on a Buffer /
+    // Uint8Array ``) without the fix.
+    let program = lower(
+        r#"
+        declare function raw(): Buffer;
+        function main(): void {
+            const b = raw();
+            console.log(Buffer.isBuffer(b), b.readUInt8(0));
+        }
+        "#,
+    );
+    assert!(
+        !format!("{program:?}").contains("Bytes"),
+        "a `Bytes` marker survived the erase pass into the lowered program"
+    );
+}
