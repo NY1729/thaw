@@ -3052,3 +3052,91 @@ run();
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Round 24's npm compat audit (`ws`). A real client/server round trip
+/// (echo message, then a full client-initiated close handshake) crashed
+/// twice in a row on the client's own `net.Socket` teardown, both fixed
+/// generally (not `ws`-specific):
+///
+/// 1. `net.Socket` had no `.pause()`/`.resume()`/`.isPaused()` at all --
+///    `ws`'s own close-handshake cleanup defensively calls `stream.
+///    resume()` on the underlying socket, which failed to compile as a
+///    dynamic call at all (`call to undeclared function`). Fixed by
+///    adding real (not no-op) pause/resume semantics to the socket's
+///    existing polling read loop.
+/// 2. Neither `net.Socket` nor the generic `Readable`/`Writable` stream
+///    base classes exposed `_readableState`/`_writableState` (real
+///    Node's own internal stream introspection objects, which several
+///    packages -- not just `ws` -- read directly): `ws`'s own
+///    `socketOnClose` reads `this._readableState.endEmitted`/`.length`
+///    on the socket and `receiver._writableState.errorEmitted`/
+///    `.finished` on its internal `Receiver` stream, both `undefined`.
+///    Fixed by adding a real, mutated `_readableState` object to
+///    `net.Socket` and `_readableState`/`_writableState` getters
+///    (derived from each class's own existing flat tracking properties)
+///    to the shared `Readable`/`Writable` base.
+#[test]
+fn registry_add_echoes_messages_and_completes_a_real_websocket_close_handshake_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-js-ws-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "ws").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { WebSocketServer, WebSocket } from "ws";
+
+function run(): void {
+    const wss = new WebSocketServer({ port: 18199 });
+
+    wss.on("connection", (socket: any) => {
+        socket.on("message", (data: any) => {
+            socket.send("echo:" + data.toString());
+        });
+    });
+
+    wss.on("listening", () => {
+        const client = new WebSocket("ws://127.0.0.1:18199");
+        client.on("open", () => {
+            client.send("hello");
+        });
+        client.on("message", (data: any) => {
+            console.log("client received:", data.toString());
+            client.close();
+            wss.close(() => {
+                console.log("server closed");
+            });
+        });
+    });
+}
+run();
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["ws".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "client received: echo:hello\nserver closed\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

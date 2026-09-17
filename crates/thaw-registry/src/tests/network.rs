@@ -270,6 +270,61 @@ fn net_socket_timeout_fires_without_closing_the_connection() {
     let _ = fs::remove_dir_all(empty_node_modules);
 }
 
+/// A real npm package's own internal WebSocket close handshake (`ws`)
+/// calls `stream.resume()` on the underlying `net.Socket` defensively
+/// after tearing it down, and separately reads `this._readableState.
+/// endEmitted`/`.length` directly (real Node's own internal stream
+/// introspection, which several packages depend on beyond just the
+/// public `.pause()`/`.resume()`/`.isPaused()` API) -- neither existed
+/// on thaw's `net.Socket` at all: `.pause`/`.resume` weren't declared
+/// (`call to undeclared function 'resume'`), and `_readableState` was
+/// `undefined` (`cannot read property 'endEmitted' of undefined`).
+/// Confirms `.pause()` actually suppresses `'data'` events (not a
+/// no-op) and that `_readableState.endEmitted` becomes `true` only
+/// once `'end'` has actually fired, matching real Node.
+#[test]
+fn net_socket_pause_and_resume_gate_data_events_and_track_readable_state() {
+    use std::ffi::{CStr, CString};
+    use std::io::Write;
+    use std::net::{Shutdown, TcpListener};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        stream.write_all(b"hello").unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+    });
+
+    let dir = temp_registry("builtin_net_socket_pause_resume");
+    fs::write(
+        dir.join("index.js"),
+        "var net = require('node:net'); module.exports = function (port) { return new Promise(function(resolve, reject) { var events = [], gotData = false; var socket = net.connect(port, '127.0.0.1'); socket.on('error', reject); socket.on('connect', function() { events.push('endEmittedBeforeData:' + socket._readableState.endEmitted); socket.pause(); events.push('isPaused:' + socket.isPaused()); }); socket.on('data', function() { gotData = true; }); setTimeout(function() { events.push('gotDataWhilePaused:' + gotData); socket.resume(); events.push('isPausedAfterResume:' + socket.isPaused()); }, 40); socket.on('end', function() { events.push('gotDataAfterResume:' + gotData); events.push('endEmittedAfterEnd:' + socket._readableState.endEmitted); resolve(events); }); }); };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_net_socket_pause_resume_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetPauseResume = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseNetPauseResume").unwrap().as_ptr(),
+        CString::new(format!("[{port}]")).unwrap().as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        concat!(
+            r#"["endEmittedBeforeData:false","isPaused:true","#,
+            r#""gotDataWhilePaused:false","isPausedAfterResume:false","#,
+            r#""gotDataAfterResume:true","endEmittedAfterEnd:true"]"#
+        )
+    );
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
 #[test]
 fn http_client_request_timeout_fires() {
     use std::ffi::{CStr, CString};
