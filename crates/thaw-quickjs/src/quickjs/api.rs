@@ -31,6 +31,34 @@ fn native_promise_state(_promise: *const c_void) -> u8 {
 #[cfg(not(unix))]
 fn native_promise_mark_handled(_promise: *mut c_void) {}
 
+/// Drains one ready native continuation or I/O event (`thaw_runtime_
+/// poll_one`, dlsym'd the same soft-dependency way as `native_promise_
+/// state` above -- thaw-quickjs has no hard link on thaw-runtime).
+/// Unlike `native_promise_state`, this doesn't watch one specific
+/// promise: it's for `thaw_js_run_event_loop`, the generic top-level
+/// driver with no single completion to check, which otherwise never
+/// polls this queue at all -- a native `Promise<T>` resolved from
+/// inside a `setTimeout`-fired callback (the common "wrap a timer in a
+/// promise" idiom) settles correctly (pushing its resume callback onto
+/// `READY_CONTINUATIONS`) but nothing ever runs that callback for a
+/// bare, unawaited top-level async call, which only this driver loop
+/// (not `main()`'s own tracked completion) ever drives.
+#[cfg(unix)]
+fn poll_native_continuations() -> bool {
+    unsafe {
+        let poll = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_poll_one".as_ptr());
+        if poll.is_null() {
+            return false;
+        }
+        std::mem::transmute::<*mut c_void, extern "C" fn() -> u8>(poll)() != 0
+    }
+}
+
+#[cfg(not(unix))]
+fn poll_native_continuations() -> bool {
+    false
+}
+
 /// Evaluates `source` in the (per-thread) global QuickJS context. Top-level
 /// function declarations become callable afterwards via `thaw_js_call`.
 /// Returns `1` on success, `0` on failure (syntax error, thrown exception).
@@ -457,19 +485,58 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
             let _ = poll.call::<_, ()>(());
         }
         poll_napi_bridge(&ctx);
+        {
+            // A resumed continuation may itself need to make a further
+            // dynamic call back into this same context (real example:
+            // `fs.existsSync`/`fs.readFileSync` after an `@isaacs/fs-
+            // minipass` `WriteStream`'s `close` event resolves the
+            // native `Promise<T>` this loop just woke up) -- entering
+            // `ActiveNapiContext` here (matching `thaw_js_run_until_
+            // native_resolved`'s identical, already-working pattern)
+            // lets that reentrant call reuse this active `Ctx` via
+            // `with_active_or_context` instead of calling `with_context`
+            // again, which would panic ("RefCell already borrowed")
+            // trying to re-lock a context this same closure already
+            // holds -- confirmed via a real crash without this guard.
+            let _active = ActiveNapiContext::enter(&ctx);
+            while poll_native_continuations() {}
+        }
+        // Tracks whether the drain below actually ran a next-tick batch
+        // or a microtask job -- either can itself resolve a native
+        // `Promise<T>` (real example: a `close`/`ready` event fired via
+        // `process.nextTick` from a native `fs`-backed stream,
+        // `@isaacs/fs-minipass`'s own `WriteStream`), which needs another
+        // pass through `poll_native_continuations()` to actually run the
+        // now-ready resume callback. Loops back to the *top* of the
+        // outer loop instead of polling again from here directly --
+        // found, via a real crash, that re-entering `poll_native_
+        // continuations`'s own callback dispatch from this inner call
+        // frame reenters a `RefCell` this same `with_context` closure
+        // already holds; looping back reuses the already-proven-safe
+        // poll call above instead of adding a second call site.
+        let mut drained_any = false;
         loop {
-            if let Err(error) = drain_next_tick_queue(&ctx) {
-                let message = if matches!(error, rquickjs::Error::Exception) {
-                    describe_exception_with_stack(&ctx)
-                } else {
-                    error.to_string()
-                };
-                eprintln!("{message}");
-                return 1;
+            match drain_next_tick_queue(&ctx) {
+                Ok(true) => drained_any = true,
+                Ok(false) => {}
+                Err(error) => {
+                    let message = if matches!(error, rquickjs::Error::Exception) {
+                        describe_exception_with_stack(&ctx)
+                    } else {
+                        error.to_string()
+                    };
+                    eprintln!("{message}");
+                    return 1;
+                }
             }
-            if !ctx.execute_pending_job() {
+            if ctx.execute_pending_job() {
+                drained_any = true;
+            } else {
                 break;
             }
+        }
+        if drained_any {
+            continue;
         }
         let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
             return process_exit_code(&ctx);
