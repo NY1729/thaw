@@ -185,7 +185,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             (object, property),
             ("Array", "of" | "from" | "isArray")
-                | ("Buffer", "from" | "alloc" | "concat" | "byteLength")
+                | ("Buffer", "from" | "alloc" | "concat" | "byteLength" | "isBuffer")
                 | ("Map", "groupBy")
                 | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
                 | ("JSON", "stringify")
@@ -205,6 +205,41 @@ impl<'a> FnLowerer<'a> {
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
                     if object.sym == *"Buffer" {
+                        if property.sym == *"isBuffer" {
+                            let (arguments, mut bindings) =
+                                self.lower_native_spread_values(&call.args, "Buffer.isBuffer")?;
+                            let [value] = arguments.as_slice() else {
+                                return Err("`Buffer.isBuffer` expects exactly one argument".into());
+                            };
+                            let value = value.clone();
+                            // `infer_expr_type_inner`, not `infer_expr_
+                            // type`: the outer helper always erases
+                            // `HirType::Bytes` to `Array(F64)` for
+                            // generic Array-shaped consumers (indexing,
+                            // `.length`, iteration, ...) -- every other
+                            // method *dispatch* that must actually tell a
+                            // real Buffer apart from a plain number array
+                            // (`bytes_methods.rs`, `conversion_methods.
+                            // rs`, ...) already reads the receiver's real
+                            // type this same way, not through the erased
+                            // one.
+                            let ty = self.infer_expr_type_inner(&value)?;
+                            if ty == HirType::Json {
+                                let result = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_is_buffer".to_string())),
+                                    vec![value],
+                                );
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
+                            let name = format!("__thaw_is_buffer_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            bindings.push((name, ty.clone(), value));
+                            return self.wrap_call_argument_bindings(
+                                HirExpr::Lit(HirLit::Bool(ty == HirType::Bytes)),
+                                &bindings,
+                            );
+                        }
                         if property.sym == *"byteLength" {
                             // `Buffer.byteLength(string, encoding?)` -- how
                             // many bytes the string occupies once encoded

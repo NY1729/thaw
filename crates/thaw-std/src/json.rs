@@ -764,6 +764,30 @@ pub unsafe extern "C" fn thaw_json_is_array(value: *const Value) -> u8 {
 }
 
 #[no_mangle]
+/// `Buffer.isBuffer(value)` for a `Json`-typed operand -- recognizes
+/// the same `{"type":"Buffer","data":[...]}` shape `__thaw_json_
+/// binary_replacer` (thaw-quickjs) produces for a live Buffer/
+/// TypedArray crossing into JSON, mirroring `json_array_or_buffer_
+/// data`'s own check below (kept separate rather than shared, since
+/// that one also needs to unwrap a plain array, which this doesn't).
+///
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_is_buffer(value: *const Value) -> u8 {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return 0;
+    };
+    let Some(fields) = value.as_object() else {
+        return 0;
+    };
+    u8::from(
+        fields.get("type").and_then(Value::as_str) == Some("Buffer")
+            && fields.get("data").is_some_and(Value::is_array),
+    )
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `value` must be null or point to a valid JSON `Value`.

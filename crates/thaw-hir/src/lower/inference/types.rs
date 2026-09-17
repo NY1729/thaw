@@ -1161,6 +1161,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "Array.isArray JSON operand")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_json_is_buffer" => {
+                        let [value] = args.as_slice() else {
+                            return Err("Buffer.isBuffer expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "Buffer.isBuffer JSON operand")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_json_keys" => {
                         let [value] = args.as_slice() else {
                             return Err("Object.keys expects one operand".into());
