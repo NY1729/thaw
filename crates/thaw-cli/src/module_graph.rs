@@ -501,6 +501,27 @@ impl VisitMut for RenameReferences<'_> {
     }
 
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        // `a instanceof B`'s right operand is a bare class-identifier
+        // *type* reference, not a value read -- renaming it the way
+        // every other `Expr::Ident` gets renamed below (to a package's
+        // real flattened value symbol, or a module-qualified local)
+        // breaks thaw-hir's own `instanceof` lowering, which needs the
+        // identifier exactly as written to recognize a built-in
+        // special case (`Date`, the fixed Error-family name list) or
+        // look up a real class's `self.interfaces` entry by its own
+        // bare name (real trigger: a real npm-exported `class
+        // YAMLException extends Error {}`, imported as a value
+        // elsewhere in the same file -- see `[[project_npm_interop_
+        // gaps_19]]`; `thaw-cli`'s own shim for it, `push_error_
+        // family_ambient_declarations`, declares it under this exact
+        // same bare name). Visits the left operand normally; the right
+        // operand is intentionally left completely untouched.
+        if let Expr::Bin(binary) = expr {
+            if binary.op == thaw_parser::ast::BinaryOp::InstanceOf {
+                binary.left.visit_mut_with(self);
+                return;
+            }
+        }
         // Resolve a three-level nested-namespace chain (`ns.sub.member`)
         // *before* visiting children. The inner `ns.sub` is often itself
         // resolvable as a single-level namespace member (real trigger:

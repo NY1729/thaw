@@ -2257,3 +2257,86 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "leaf\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A real npm-exported class extending `Error` (real trigger: js-yaml's
+/// own `class YAMLException extends Error {...}`, see `[[project_npm_
+/// interop_gaps_19]]`) previously had no entry in thaw-hir's
+/// `self.interfaces` under any name, so `error instanceof CustomError`
+/// against a caught (string-tagged) exception hit the ordinary "not a
+/// known class" error, even though every other piece needed to
+/// recognize it already generalized correctly. Fixed in shim
+/// generation: `push_error_family_ambient_declarations` walks each
+/// package class's `.extends` chain and emits a real (non-ambient)
+/// `class Name extends Base {}` stub for any class transitively
+/// extending a built-in Error name, giving thaw-hir's own existing
+/// Error-family recognition something to find.
+///
+/// Also exercises a real, separate bug this fix's own verification
+/// surfaced: the generic import-rename pass (`RenameReferences`,
+/// `module_graph.rs`) used to rewrite `instanceof`'s right operand the
+/// same as any other identifier reference -- fine for `error instanceof
+/// Error` (a bare global, never renamed), but not for `error instanceof
+/// CustomError` where `CustomError` is *also* imported as a value
+/// elsewhere in the same file (exactly this test's own shape, and
+/// real js-yaml's `import { load, YAMLException } from "js-yaml"`) --
+/// the rewrite pass now leaves an `instanceof` right operand
+/// completely untouched.
+#[test]
+fn instanceof_recognizes_a_real_npm_exported_error_subclass() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-error-family-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("errkit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class MyError extends Error {}\n\
+         export declare function throwIt(): void;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function MyError(message) {\n\
+         \x20\x20Error.call(this, message);\n\
+         \x20\x20this.name = 'MyError';\n\
+         \x20\x20this.message = message;\n\
+         }\n\
+         MyError.prototype = Object.create(Error.prototype);\n\
+         MyError.prototype.constructor = MyError;\n\
+         module.exports.MyError = MyError;\n\
+         module.exports.throwIt = function throwIt() { throw new MyError('boom'); };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { throwIt, MyError } from "errkit";
+function main(): void {
+    try {
+        throwIt();
+    } catch (error) {
+        console.log(error instanceof MyError);
+        console.log(error instanceof Error);
+        console.log(typeof (error as MyError).message);
+        console.log((error as MyError).name);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\ntrue\nstring\nMyError\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
