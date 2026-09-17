@@ -2950,3 +2950,105 @@ async function main(): Promise<void> {{
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Round 22's npm compat audit (adm-zip). `Buffer.isBuffer` was missing
+/// entirely (fixed, `fac4a4ae`), then constructing an archive from a
+/// `Buffer` (`new AdmZip(buffer)`, where `buffer` comes from an
+/// unannotated `fs.readFileSync(path)`) surfaced a much deeper, general
+/// bug: an unannotated `let`/`const` initialized from a `Bytes`-typed
+/// value permanently lost its `Bytes` identity in `scope` (stored as
+/// the erased `Array(F64)` at declaration time instead of the real
+/// type), so `.length`/`.toString` kept working but any byte-specific
+/// consumer (`Buffer.isBuffer`, `.readUInt8`, or downstream native code
+/// like adm-zip's own buffer parsing) silently misbehaved. Fixed in
+/// `crates/thaw-hir/src/lower/statements/declarations.rs` (use
+/// `infer_expr_type_inner`, not the erasing `infer_expr_type`, for an
+/// unannotated binding's stored type).
+///
+/// A second, related gap surfaced verifying this end to end:
+/// `toBuffer()` -- a real npm class method declared to return `Buffer`
+/// -- never classifies as `HirType::Bytes` at all (only thaw's own
+/// hand-authored `node:` ambients do), so its result stays a retained
+/// `JsValue`; `Buffer.isBuffer` on that `JsValue` was a static,
+/// always-`false` literal. Fixed by asking the live QuickJS engine
+/// (`__thaw_is_buffer_dynamic_value`, mirroring the existing
+/// `instanceof Date`-on-`JsValue` check).
+#[test]
+fn registry_add_reads_writes_and_rebuilds_real_zip_archives_with_adm_zip_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-js-adm-zip-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "adm-zip").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let zip_path = dir.join("out.zip");
+    let extract_dir = dir.join("extracted");
+    std::fs::write(
+        &source,
+        format!(
+            r#"import AdmZip from "adm-zip";
+import * as fs from "node:fs";
+
+function run(): void {{
+    const zip = new AdmZip();
+    zip.addFile("hello.txt", Buffer.from("hello world"));
+    zip.addFile("dir/nested.txt", Buffer.from("nested content"));
+    zip.addZipComment("archive comment");
+    zip.writeZip("{zip_path}");
+
+    // load from a Buffer, not a path -- exercises the readFileSync fix
+    const buffer = fs.readFileSync("{zip_path}");
+    const fromBuffer = new AdmZip(buffer);
+    console.log(fromBuffer.getEntryCount());
+    console.log(fromBuffer.getZipComment());
+
+    fromBuffer.extractAllTo("{extract_dir}", true);
+    console.log(fs.readFileSync("{extract_dir}/hello.txt", "utf8"));
+    console.log(fs.readFileSync("{extract_dir}/dir/nested.txt", "utf8"));
+
+    fromBuffer.deleteFile("hello.txt");
+    console.log(fromBuffer.getEntryCount());
+
+    const zip2 = new AdmZip("{zip_path}");
+    zip2.updateFile("hello.txt", Buffer.from("updated content"));
+    console.log(zip2.readAsText("hello.txt"));
+
+    const rebuilt = new AdmZip();
+    rebuilt.addFile("a.txt", Buffer.from("A"));
+    const asBuffer = rebuilt.toBuffer();
+    console.log(Buffer.isBuffer(asBuffer));
+    console.log(asBuffer.length > 0);
+}}
+run();
+"#,
+            zip_path = zip_path.display(),
+            extract_dir = extract_dir.display(),
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["adm-zip".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2\narchive comment\nhello world\nnested content\n2\nupdated content\ntrue\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
