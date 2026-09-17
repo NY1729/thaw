@@ -2852,3 +2852,87 @@ run();
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Round 21's npm compat audit (chokidar). Real `watch(dir).on("add"|
+/// "change"|"unlink", ...)` matches real Node's own chokidar output
+/// exactly -- no compiler bug found in chokidar itself. Found no new
+/// gaps, but see `[[feedback_thaw_main_auto_invoke]]`'s "important
+/// exception" for a real methodology pitfall this round hit and fixed
+/// in the *test*, not the compiler: the scratch repro's entry point
+/// must be named `main` (not renamed to dodge double-invocation) since
+/// this program's own `await new Promise(resolve => watcher.on("ready",
+/// resolve))`/`sleep()` calls suspend via a *native* Promise -- only
+/// `main`'s own returned promise is driven to completion by the
+/// compiled program's C entry point.
+#[test]
+fn registry_add_reports_real_file_system_events_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-chokidar-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "chokidar").unwrap();
+    let watched = dir.join("watched");
+    std::fs::create_dir_all(&watched).unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::write(
+        &source,
+        format!(
+            r#"import {{ watch }} from "chokidar";
+import * as fs from "node:fs";
+
+const dir = {watched:?};
+
+function sleep(ms: number): Promise<void> {{
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}}
+
+async function main(): Promise<void> {{
+    const events: string[] = [];
+    const watcher = watch(dir, {{ persistent: true, ignoreInitial: true }});
+
+    watcher.on("add", (path: string) => {{ events.push("add:" + path.split("/").pop()); }});
+    watcher.on("change", (path: string) => {{ events.push("change:" + path.split("/").pop()); }});
+    watcher.on("unlink", (path: string) => {{ events.push("unlink:" + path.split("/").pop()); }});
+
+    await new Promise<void>((resolve) => {{ watcher.on("ready", () => resolve()); }});
+
+    fs.writeFileSync(dir + "/file.txt", "hello");
+    await sleep(300);
+    fs.writeFileSync(dir + "/file.txt", "hello world");
+    await sleep(300);
+    fs.unlinkSync(dir + "/file.txt");
+    await sleep(300);
+
+    await watcher.close();
+    console.log(JSON.stringify(events));
+}}
+"#,
+            watched = watched.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["chokidar".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[\"add:file.txt\",\"change:file.txt\",\"unlink:file.txt\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
