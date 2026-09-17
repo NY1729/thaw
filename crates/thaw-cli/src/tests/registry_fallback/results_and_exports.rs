@@ -1008,6 +1008,93 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `instanceof Date` on a live `JsValue` (an opaque handle -- a
+/// Fallback function's return type couldn't be classified as anything
+/// JSON-representable) always errored "not a known class" at build
+/// time, since `Date` has no entry in `self.signatures` the way a real
+/// user-defined/npm-exported class does -- `new Date()` compiles to a
+/// bespoke `HirType::F64` timestamp representation, not a registered
+/// class, so the ordinary compile-time class-identity check this
+/// codebase uses for every other native class can't apply to a
+/// genuinely dynamic value either. Calling a Date-prototype-named
+/// method (`toISOString`, `getTime`, ...) on the same kind of value hit
+/// a *different* hard error, since this codebase's own native-builtin
+/// dispatch claims those names by text alone, unconditionally assuming
+/// a native `Date`-shaped receiver.
+///
+/// Both fixed generally: `instanceof Date` against a confirmed
+/// `JsValue` dispatches into QuickJS via the same `dynamic_value_check`
+/// mechanism `typeof`/`== null` already use for a live value
+/// (`__thaw_instanceof_date_dynamic_value`, `platform_globals/
+/// runtime.js`); a Date-prototype-named method call on a confirmed
+/// `JsValue` receiver now falls through to the generic dynamic
+/// method-call path instead of the native-builtin one.
+///
+/// (A `Json`-typed value reaching either of these -- e.g. a real npm
+/// package's Fallback function declared to return bare `unknown`,
+/// classified `Json` by an established heuristic -- stays a scoped-out
+/// gap: the JSON encode/decode boundary between QuickJS and this
+/// codebase's own `Json` representation already collapses a real
+/// `Date` to a plain ISO string, the same way `JSON.stringify` would,
+/// before ever reaching this check -- there's no live identity left by
+/// then to ask QuickJS about. See `[[project_npm_interop_gaps_19]]`.)
+#[test]
+fn instanceof_date_and_date_methods_work_on_a_dynamic_value() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-dynamic-date-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("datekit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        // A class whose own type is otherwise unclassifiable degrades
+        // its factory's return to `JsValue` (round 17's generic-alias
+        // fix established this same convention) -- mirrors a real
+        // package's factory-returning-an-opaque-instance shape without
+        // needing a genuinely unresolvable generic alias to trigger it.
+        "export declare class Opaque { private constructor(); }\n\
+         export type Wrapped<T = any> = Opaque;\n\
+         export declare function makeDate(): Wrapped;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        // A UTC-anchored literal, not `new Date(year, month, date)` --
+        // the latter is local-time in real JS/QuickJS semantics, which
+        // would make this test's expected output depend on the
+        // machine's own timezone.
+        "module.exports = { makeDate: function() { return new Date('2020-01-15T00:00:00.000Z'); } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeDate } from "datekit";
+function main(): void {
+    const d = makeDate();
+    console.log(d instanceof Date);
+    console.log(d.toISOString());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\n2020-01-15T00:00:00.000Z\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `value === undefined` (and `!==`, either operand order) for a live
 /// `JsValue` unconditionally returned `false` -- even when the value
 /// genuinely *is* `undefined` -- because `lower_optional_undefined_

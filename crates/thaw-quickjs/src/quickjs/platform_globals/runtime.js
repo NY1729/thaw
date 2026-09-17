@@ -33,6 +33,7 @@
   globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
+  globalThis.__thaw_instanceof_date_dynamic_value = value => value instanceof Date;
   const timers = new Map();
   const normalizeDelay = value => {
     const number = Number(value);
