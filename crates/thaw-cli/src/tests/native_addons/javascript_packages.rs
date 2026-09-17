@@ -2678,3 +2678,75 @@ run();
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Round 19's npm compat audit (js-yaml). Basic `load`/`dump`,
+/// anchors/merge keys, and multi-document `loadAll` all match real
+/// Node's own js-yaml output byte for byte.
+///
+/// Two deeper, general gaps found and deliberately left scoped out,
+/// see `[[project_npm_interop_gaps_19]]`: js-yaml's date resolver
+/// (`load("d: 2020-01-15")`) and `.nan`/`.inf` tags both lose their
+/// real JS identity (a live `Date`, `NaN`, `Infinity`) the moment a
+/// Fallback function declared to return bare `unknown` gets classified
+/// `Json` -- the JSON encode this codebase's own QuickJS boundary uses
+/// for a `Json`-typed value already collapses a `Date` to a plain ISO
+/// string and `NaN`/`Infinity` to `null`, the same lossy conversion
+/// real `JSON.stringify` performs, before any `instanceof`/`Number.
+/// isNaN` check downstream ever sees it. Two general, unrelated fixes
+/// *did* land this round for a *`JsValue`*-typed dynamic value (not
+/// `Json`) reaching the identical checks -- `instanceof Date` and
+/// calling a Date-prototype-named method -- covered by
+/// `instanceof_date_and_date_methods_work_on_a_dynamic_value`
+/// (`crates/thaw-cli/src/tests/registry_fallback/results_and_exports.rs`).
+#[test]
+fn registry_add_loads_and_dumps_real_yaml_documents_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-js-yaml-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "js-yaml").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { load, loadAll, dump } from "js-yaml";
+
+function run(): void {
+    const anchored = load("base: &base\n  a: 1\n  b: 2\nderived:\n  <<: *base\n  c: 3\n") as any;
+    console.log(JSON.stringify(anchored.derived));
+
+    const docs = loadAll("---\nx: 1\n---\nx: 2\n---\nx: 3\n") as any[];
+    console.log(docs.length);
+    console.log(JSON.stringify(docs.map((d) => d.x)));
+
+    console.log(dump({ z: 1, a: 2, m: 3 }, { sortKeys: true }));
+}
+run();
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["js-yaml".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "{\"<<\":{\"a\":1,\"b\":2},\"c\":3}\n3\n[1,2,3]\na: 2\nm: 3\nz: 1\n\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
