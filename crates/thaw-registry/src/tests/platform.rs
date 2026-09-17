@@ -238,6 +238,73 @@ fn a_zlib_streams_subclass_overriding_transform_is_actually_called() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+/// Real `tar` with `gzip: true` crashed (`cannot read property 'close'
+/// of undefined`) because its dependency `minizlib` never uses the
+/// ordinary Transform-stream API (`.write()`/`.pipe()`) on a
+/// `zlib.Gzip`/`Gunzip` instance at all -- it constructs one purely to
+/// reach into its *private* synchronous-compression contract, the same
+/// one real Node's own C++ zlib binding exposes. That contract is a
+/// `._handle` object (temporarily neutered via `._handle.close`/
+/// `.close()` around each call, to stop the real binding from tearing
+/// itself down mid-operation) plus a `._processChunk(chunk, flushFlag)`
+/// method that synchronously compresses/decompresses one chunk and
+/// returns the newly produced output bytes directly, with no events and
+/// no stream machinery involved. Neither existed on thaw's
+/// `ZlibTransform` -- reading `._handle` off `undefined` (there was no
+/// `._handle` at all) is exactly the observed crash.
+///
+/// Fixed in `crates/thaw-registry/src/registry/builtins/system/
+/// runtime.rs`: `ZlibTransform` now allocates a real incremental
+/// compression stream via the same native `__thaw_zlib_stream_create`/
+/// `_write`/`_drop` bridge the Web `CompressionStream` API already uses
+/// (`WebZlibStream`, thaw-quickjs), and exposes it through `._handle`
+/// (a harmless `{ close: fn() {} }` stub -- there's no real native
+/// handle to actually own) and `._processChunk`. Also added `zlib.Unzip`/
+/// `createUnzip` (real Node's auto-detecting gzip-or-deflate decompressor,
+/// used by tar's *extraction* side) -- it didn't exist here at all
+/// (`Compression method not supported: Unzip`), sniffing the gzip magic
+/// bytes (`0x1f 0x8b`) on the first chunk to lazily pick the real format.
+#[test]
+fn zlib_gzip_exposes_the_private_handle_and_process_chunk_contract_minizlib_needs() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_zlib_handle");
+    fs::write(
+        dir.join("index.js"),
+        "var zlib = require('node:zlib'); \
+         module.exports = async function () { \
+         \x20\x20var source = Buffer.from('thaw compression '.repeat(64)); \
+         \x20\x20var gzip = new zlib.Gzip(); \
+         \x20\x20var handle = gzip._handle, closeStub = handle.close; \
+         \x20\x20handle.close = function() {}; \
+         \x20\x20var first = gzip._processChunk(source, zlib.constants.Z_NO_FLUSH); \
+         \x20\x20var last = gzip._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH); \
+         \x20\x20gzip._handle = handle; \
+         \x20\x20handle.close = closeStub; \
+         \x20\x20var compressed = Buffer.concat([first, last]); \
+         \x20\x20var restored = zlib.gunzipSync(compressed); \
+         \x20\x20var unzip = new zlib.Unzip(); \
+         \x20\x20var unzipped = Buffer.concat([unzip._processChunk(compressed, zlib.constants.Z_NO_FLUSH), unzip._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)]); \
+         \x20\x20return [compressed[0], compressed[1], restored.toString() === source.toString(), unzipped.toString() === source.toString()]; \
+         };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_zlib_handle_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseZlibHandle = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseZlibHandle").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[31,139,true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 #[test]
 fn worker_threads_builtin_exchanges_cloned_messages() {
     use std::ffi::{CStr, CString};
