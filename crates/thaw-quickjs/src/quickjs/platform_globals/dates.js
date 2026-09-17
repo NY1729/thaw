@@ -148,6 +148,22 @@
     const ancestors = [];
     return JSON.stringify(value, function (key, nested) {
       nested = globalThis.__thaw_json_binary_replacer.call(this, key, nested);
+      // `NaN`/`Infinity`/`-Infinity` have no JSON representation --
+      // real `JSON.stringify` collapses them to `null`, indistinguishable
+      // from an explicit `null`. Tag them the same way the sibling
+      // `undefined` sentinel above is tagged, so a `Json`-typed value on
+      // the native side (`thaw_json_as_number`/`thaw_json_typeof`,
+      // thaw-std) can recover the real value instead of losing it.
+      const source = this[key];
+      if (typeof source === 'number' && !Number.isFinite(source)) {
+        return {
+          $__thaw_non_finite$: Number.isNaN(source)
+            ? 'NaN'
+            : source > 0
+              ? 'Infinity'
+              : '-Infinity',
+        };
+      }
       if (nested && typeof nested === 'object') {
         while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
         if (ancestors.includes(nested)) return undefined;

@@ -426,46 +426,55 @@ impl<'a> FnLowerer<'a> {
                     // `Date` has no entry in `self.signatures` at all --
                     // `new Date()` compiles to a bespoke `HirType::F64`
                     // timestamp, not a real registered class -- so a
-                    // *dynamic* (`JsValue`) value from a real npm package
-                    // (real trigger: a Fallback function whose return
-                    // type couldn't be classified -- see
-                    // `[[project_npm_interop_gaps_19]]`) needs a faithful
-                    // runtime check instead of the compile-time class-
-                    // identity check every other native class gets below.
-                    // Checked via `peek_type_without_lowering` (not the
-                    // ordinary `lower_expr` + `infer_expr_type` below) so
-                    // this can dispatch before the value is lowered the
-                    // ordinary way.
+                    // *dynamic* value from a real npm package (real
+                    // trigger: a Fallback function whose return type
+                    // couldn't be classified -- see `[[project_npm_
+                    // interop_gaps_19]]`) needs a faithful runtime check
+                    // instead of the compile-time class-identity check
+                    // every other native class gets below. Checked via
+                    // `peek_type_without_lowering` (not the ordinary
+                    // `lower_expr` + `infer_expr_type` below) so this can
+                    // dispatch before the value is lowered the ordinary
+                    // way.
                     //
-                    // Deliberately `JsValue` only, not `Json` too: a
-                    // `Json`-typed value (e.g. js-yaml's `load(): unknown`
-                    // -- classified `Json` by the established "a bare
-                    // `any`/`unknown` return is real JSON data" heuristic,
-                    // see `dynamic_declarations.rs`) has already been
-                    // JSON-decoded by the time it reaches here -- for a
-                    // genuine `Date`, that decode step itself already
-                    // lost the live object identity (a `Date` serializes
-                    // to a plain ISO string, indistinguishable from one
-                    // in the JSON snapshot). There's no live handle left
-                    // to check at that point, and no reliable way to
-                    // "undo" a JSON decode after the fact -- that's a
-                    // separate, deeper gap in how a `Json`-classified
-                    // Fallback return preserves (or doesn't) a non-JSON-
-                    // native value's identity, left open. Falling through
-                    // to the ordinary "not a known class" error for a
-                    // `Json` receiver keeps that case exactly as before
-                    // (a clean compile-time error, not a crash).
-                    if class.sym == *"Date"
-                        && matches!(
-                            self.peek_type_without_lowering(&bin.left),
-                            Some(HirType::JsValue)
-                        )
-                    {
-                        let value = self
-                            .lower_expr_with_expected_type(&bin.left, Some(&HirType::JsValue))?;
-                        return Ok(
-                            self.dynamic_value_check("__thaw_instanceof_date_dynamic_value", value)
-                        );
+                    // Two cases, two different checks:
+                    // - `JsValue` (an opaque live handle): dispatch into
+                    //   QuickJS via `dynamic_value_check`, same as
+                    //   `typeof`/`== null` already do.
+                    // - `Json` (e.g. js-yaml's `load(): unknown`,
+                    //   classified `Json` by the established "a bare
+                    //   `any`/`unknown` return is real JSON data"
+                    //   heuristic, see `dynamic_declarations.rs`): the
+                    //   value has already been JSON-decoded by this
+                    //   point, but a real `Date` survives that decode as
+                    //   a structurally-recognizable `{"timestamp": N}`
+                    //   shape (`Date.prototype.toJSON` is overridden
+                    //   globally, `platform_globals/dates.js`) --
+                    //   `__thaw_json_is_date_shape` recognizes it
+                    //   directly, no live handle needed.
+                    if class.sym == *"Date" {
+                        match self.peek_type_without_lowering(&bin.left) {
+                            Some(HirType::JsValue) => {
+                                let value = self.lower_expr_with_expected_type(
+                                    &bin.left,
+                                    Some(&HirType::JsValue),
+                                )?;
+                                return Ok(self.dynamic_value_check(
+                                    "__thaw_instanceof_date_dynamic_value",
+                                    value,
+                                ));
+                            }
+                            Some(HirType::Json) => {
+                                let value = self.lower_expr(&bin.left)?;
+                                return Ok(HirExpr::Call(
+                                    Box::new(HirExpr::Var(
+                                        "__thaw_json_is_date_shape".to_string(),
+                                    )),
+                                    vec![value],
+                                ));
+                            }
+                            _ => {}
+                        }
                     }
                     let value = self.lower_expr(&bin.left)?;
                     let value_type = self.infer_expr_type(&value)?;

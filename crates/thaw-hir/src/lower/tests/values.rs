@@ -1139,6 +1139,71 @@ fn assigns_a_native_value_into_a_json_indexed_slot() {
 /// | Json` at first, catching a `Json` case it was never meant to
 /// touch -- found via glob's own async `glob(...)` resolving to a
 /// plain JSON array, see `[[project_npm_interop_gaps_20]]`).
+/// A `Json`-typed value shaped `{"timestamp": N}` -- the shape a real
+/// `Date` survives the QuickJS boundary as (`Date.prototype.toJSON` is
+/// overridden globally, see `platform_globals/dates.js`) -- must be
+/// recognized by `instanceof Date`, not hit the "not a known class"
+/// error every other unrecognized class gets. Real trigger: js-yaml's
+/// `load(input): unknown` (classified `Json`) with `YAML11_SCHEMA`,
+/// yielding a real `Date`, see `[[project_npm_interop_gaps_19]]`.
+#[test]
+fn instanceof_date_recognizes_the_timestamp_shape_on_a_json_value() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): boolean {
+            const data = JSON.parse('{"timestamp": 1579046400000}');
+            return data instanceof Date;
+        }"#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_ok());
+}
+
+/// The same `{"timestamp": N}`-shaped `Json` value calling a Date-
+/// prototype-named method (`toISOString`) must be promoted to a real
+/// native Date object and dispatch through the existing native Date
+/// method machinery, rather than hitting `lower_native_instance_
+/// builtin`'s own "receiver has type Json, expected Object(...)" error.
+#[test]
+fn date_method_call_promotes_a_json_timestamp_shape_to_native() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): string {
+            const data = JSON.parse('{"timestamp": 1579046400000}');
+            return data.toISOString();
+        }"#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_ok());
+}
+
+/// `Number.isNaN`/`isFinite` on a `Json`-typed value must actually
+/// inspect the decoded runtime value (via `JsonAsNumber`, backed by
+/// `thaw_json_as_number`), not unconditionally return the compile-time
+/// literal `false` the way every other non-`F64` type still does. A
+/// bare `lower_module(...).is_ok()` check can't tell these two outcomes
+/// apart -- lowering succeeds either way, only the *runtime answer*
+/// differs -- so this inspects the compiled `main` body directly,
+/// confirming it actually calls the same `__thaw_number_is_nan`
+/// intrinsic the `F64` case already uses (via `HirExpr::JsonAsNumber`),
+/// not a hardcoded `false` literal.
+#[test]
+fn number_is_nan_inspects_a_json_valued_operand_at_runtime() {
+    let program = lower(
+        r#"function main(): boolean {
+            const value = JSON.parse('{"$__thaw_non_finite$": "NaN"}');
+            return Number.isNaN(value);
+        }"#,
+    );
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    let body = format!("{:?}", main.body);
+    assert!(body.contains("__thaw_number_is_nan"), "{body}");
+    assert!(body.contains("JsonAsNumber"), "{body}");
+    assert!(!body.contains("Bool(false)"), "{body}");
+}
+
 #[test]
 fn a_json_valued_array_method_call_keeps_its_native_builtin_error() {
     let module = thaw_parser::parse_typescript(

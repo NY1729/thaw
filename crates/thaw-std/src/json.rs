@@ -509,7 +509,10 @@ pub unsafe extern "C" fn thaw_json_index_set(
 #[no_mangle]
 pub extern "C" fn thaw_json_as_number(value: *mut Value) -> f64 {
     let value = unsafe { &*value };
-    value.as_f64().unwrap_or(0.0)
+    value
+        .as_f64()
+        .or_else(|| non_finite_number(value))
+        .unwrap_or(0.0)
 }
 
 #[no_mangle]
@@ -536,6 +539,9 @@ pub unsafe extern "C" fn thaw_json_typeof(value: *const Value) -> *const c_char 
     let value = unsafe { &*value };
     if is_napi_undefined(value) {
         return c"undefined".as_ptr();
+    }
+    if non_finite_number(value).is_some() {
+        return c"number".as_ptr();
     }
     match value {
         Value::Null | Value::Array(_) | Value::Object(_) => c"object".as_ptr(),
@@ -570,6 +576,62 @@ fn is_napi_undefined(value: &Value) -> bool {
         Value::Object(object)
             if object.get("$__thaw_napi_undefined$") == Some(&Value::Bool(true))
     )
+}
+
+/// `NaN`/`Infinity`/`-Infinity` have no JSON representation at all --
+/// real `JSON.stringify` collapses them to `null`, and even if it
+/// didn't, `serde_json::Number` structurally cannot hold a non-finite
+/// value (`Number::from_f64` returns `None` for one). `platform_globals/
+/// dates.js`'s `__thaw_json_safe_stringify` replacer tags one of these
+/// as `{"$__thaw_non_finite$": "NaN" | "Infinity" | "-Infinity"}`
+/// instead of letting it collapse silently -- this recognizes that
+/// shape and recovers the real `f64` it stands for, mirroring
+/// `is_napi_undefined`'s exact pattern for the sibling `undefined`
+/// sentinel.
+fn non_finite_number(value: &Value) -> Option<f64> {
+    let Value::Object(object) = value else {
+        return None;
+    };
+    match object.get("$__thaw_non_finite$")?.as_str()? {
+        "NaN" => Some(f64::NAN),
+        "Infinity" => Some(f64::INFINITY),
+        "-Infinity" => Some(f64::NEG_INFINITY),
+        _ => None,
+    }
+}
+
+/// `Date.prototype.toJSON` is overridden globally (`platform_globals/
+/// dates.js`) to `{ timestamp: this.getTime() }`, so a `Date` returned
+/// from a Fallback call already survives the QuickJS boundary as this
+/// exact, structurally-recognizable shape -- an `Object` with exactly
+/// one key, `"timestamp"`, holding a `Number`. Used by `instanceof
+/// Date`/Date-prototype-method dispatch on a `Json`-typed value (see
+/// `crates/thaw-hir/src/lower/expressions/lowering.rs` and `crates/
+/// thaw-hir/src/lower/invocations/calls.rs`).
+#[no_mangle]
+pub extern "C" fn thaw_json_is_date_shape(value: *const Value) -> u8 {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return 0;
+    };
+    let Value::Object(object) = value else {
+        return 0;
+    };
+    u8::from(object.len() == 1 && matches!(object.get("timestamp"), Some(Value::Number(_))))
+}
+
+/// Extracts the millisecond timestamp from the `{"timestamp": N}` shape
+/// `thaw_json_is_date_shape` recognizes. Any other shape (a caller that
+/// didn't check first, or a genuinely malformed value): `NaN`, matching
+/// how this file already degrades other malformed/absent numeric reads.
+#[no_mangle]
+pub extern "C" fn thaw_json_date_timestamp(value: *const Value) -> f64 {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return f64::NAN;
+    };
+    value
+        .get("timestamp")
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::NAN)
 }
 
 /// The same `$__thaw_napi_undefined$`-tagged sentinel object
