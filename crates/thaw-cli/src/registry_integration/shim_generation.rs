@@ -1,3 +1,86 @@
+/// Mirrors `is_error_family_name`'s exact list (thaw-hir, `lower/
+/// module/helpers.rs`) -- duplicated here rather than exposed as a
+/// shared dependency, matching this codebase's own established
+/// practice for this specific short, fixed list (already duplicated a
+/// second time, inline, in `resolve_layout`).
+const ERROR_FAMILY_NAMES: [&str; 7] = [
+    "Error",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+    "ReferenceError",
+    "EvalError",
+    "URIError",
+];
+
+/// Whether `name` (a package class's own bare name) transitively
+/// `extends` a built-in Error-family name, walking same-package base
+/// classes one hop at a time -- the same shape as thaw-bridge's own
+/// `inherited_class_constructors`/`inherited_class_members` walks
+/// (`crates/thaw-bridge/src/bridge/dts/classes.rs`), just checking
+/// Error-family membership instead of collecting inherited members.
+fn class_is_error_family(name: &str, classes: &[thaw_bridge::DtsClass]) -> bool {
+    let mut current = name;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if ERROR_FAMILY_NAMES.contains(&current) {
+            return true;
+        }
+        if !seen.insert(current) {
+            return false;
+        }
+        let Some(class) = classes.iter().find(|class| class.name == current) else {
+            return false;
+        };
+        let Some(base) = class.extends.as_deref() else {
+            return false;
+        };
+        current = base;
+    }
+}
+
+/// A real npm-exported class extending `Error` (real trigger: js-yaml's
+/// own `class YAMLException extends Error {...}`, see `[[project_npm_
+/// interop_gaps_19]]`) has no entry in thaw-hir's `self.interfaces`
+/// under any name -- shim generation never emits a real `class`/
+/// `interface` AST node for a package class, only bare ambient
+/// `declare function __thaw_typed_...` wrappers -- so `error instanceof
+/// YAMLException` (against a caught, string-tagged exception) hits
+/// thaw-hir's ordinary "not a known class" error, even though every
+/// other piece needed to recognize it (`is_error_family_name`, the
+/// `__thaw_class_identity_<chain>` marker, `resolve_layout`'s own
+/// transitive `extends` walk, and `__thaw_error_is_instance`'s fully
+/// dynamic runtime string comparison) already generalizes correctly to
+/// any class name, the moment one exists.
+///
+/// Fixed by emitting a minimal stub -- `class Name extends Base {}`,
+/// a real (non-ambient) declaration, since thaw-hir's own native-class
+/// collection explicitly rejects an ambient `declare class` for this
+/// path (`collect_native_classes`, "cannot use the native class path")
+/// -- for every class in the package whose `extends`
+/// chain resolves to a built-in Error name, one per class in the
+/// chain (so a two-hop chain like `Specific extends Base extends
+/// Error` gets both `Specific` and `Base` declared, since thaw-hir's
+/// own walk needs to find `Base`'s declaration too). An empty body is
+/// the *complete* fix, not a shortcut: a caught exception is
+/// represented internally as a tagged string carrying only `.name`/
+/// `.message`, which `resolve_layout`'s existing Error-base handling
+/// already synthesizes for any class whose base is a built-in Error
+/// name -- that's all a caught value can ever expose regardless of
+/// what extra fields the real class declares, so there is nothing
+/// else to add here.
+fn push_error_family_ambient_declarations(classes: &[thaw_bridge::DtsClass], shim: &mut String) {
+    for class in classes {
+        if !class_is_error_family(&class.name, classes) {
+            continue;
+        }
+        let Some(base) = &class.extends else {
+            continue;
+        };
+        shim.push_str(&format!("class {} extends {} {{}}\n", class.name, base));
+    }
+}
+
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -285,6 +368,7 @@ fn generate_registry_shims(
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
+        push_error_family_ambient_declarations(&pkg.classes, &mut shim);
         let native_lib_available = pkg.native_lib.is_some() || is_native_builtin(&pkg.name);
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
         let overload_rewrite_start = fallback_function_overload_rewrites.len();
