@@ -2184,7 +2184,9 @@ fn reexported_class_or_interface_declarations_inner(
     name: &str,
     visited: &mut std::collections::BTreeSet<(PathBuf, String)>,
 ) -> Result<Vec<String>, String> {
-    use thaw_parser::ast::{Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, Stmt};
+    use thaw_parser::ast::{
+        Decl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, Stmt, TsModuleName,
+    };
     use thaw_parser::common::{SourceMapper, Spanned};
 
     if !visited.insert((path.to_path_buf(), name.to_string())) {
@@ -2294,6 +2296,24 @@ fn reexported_class_or_interface_declarations_inner(
                 }
             }
             Decl::TsInterface(interface) => interface.id.sym == local_name,
+            // A class/interface can be merged with a same-named
+            // `declare namespace X { ... }` block (a common real-world
+            // pattern for attaching static types alongside a class, e.g.
+            // `minipass`'s own `export declare namespace Minipass {
+            // export type Events<...> = ...; ... }` merged with `export
+            // declare class Minipass<...> { ... }`). A dependent
+            // package's own `.d.ts` referencing `Minipass.Events<...>`
+            // (`@isaacs/fs-minipass`'s real `ReadStreamEvents`) needs
+            // this namespace half inlined too, not just the class --
+            // without it, `Minipass.Events`/`.Options`/`.ContiguousData`
+            // etc. are all unresolvable, and the generic `.on(event,
+            // handler)` overload that indexes into `Events[Event]` widens
+            // its handler parameter list to nothing, rejecting any real
+            // callback with an argument at all.
+            Decl::TsModule(module) => match &module.id {
+                TsModuleName::Ident(id) => id.sym.as_ref() == local_name,
+                TsModuleName::Str(_) => false,
+            },
             _ => false,
         };
         if matches {

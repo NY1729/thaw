@@ -1253,6 +1253,82 @@ fn installed_package_inlines_a_default_imported_class_used_as_an_extends_base() 
 }
 
 #[test]
+fn installed_package_inlines_a_cross_file_class_and_namespace_merge() {
+    // A class re-exported by name from a *different* file can be
+    // "merged" with a same-named `declare namespace X { ... }` block in
+    // that same file -- a common real pattern for attaching static
+    // types alongside a class (real example: `minipass`'s own `export
+    // declare class Minipass<...> { ... }` merged with `export declare
+    // namespace Minipass { export interface Events<T> { ...}; export
+    // type Options<T> = ...; ... }`). `@isaacs/fs-minipass`'s own entry
+    // file does `import { Minipass } from 'minipass'; ...
+    // Minipass.Events<...>` -- `reexported_class_or_interface_
+    // declarations_inner` used to only look for a `Decl::Class`/
+    // `Decl::TsInterface` matching the imported name, silently
+    // dropping the sibling namespace half of the merge entirely.
+    // `Minipass.Events`/`.Options`/etc. were then all unresolvable in
+    // the dependent package's own flattened `.d.ts`, which (via a
+    // generic `.on<Event extends keyof Events>(ev: Event, handler:
+    // (...args: Events[Event]) => any)` method) widened every real
+    // callback's inferred parameter list down to nothing, rejecting any
+    // callback that actually took an argument.
+    let scratch = temp_registry("installed-dts-namespace-merge-scratch");
+    let registry = temp_registry("installed-dts-namespace-merge-registry");
+    let package = scratch.join("node_modules/case-kit10");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"case-kit10","version":"1.0.0","types":"./index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.d.ts"),
+        "import { Base } from './base.js';\n\
+         export declare class Derived extends Base<string> {\n\
+         \x20\x20extra(): string;\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("base.d.ts"),
+        "export declare class Base<T> {\n\
+         \x20\x20core(): string;\n\
+         }\n\
+         export declare namespace Base {\n\
+         \x20\x20export interface Events<T> {\n\
+         \x20\x20\x20\x20data: [chunk: T];\n\
+         \x20\x20}\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = function Derived() {\n\
+         \x20\x20this.core = function() { return 'core'; };\n\
+         \x20\x20this.extra = function() { return 'extra'; };\n\
+         };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "case-kit10").unwrap();
+    let declarations = resolve(&registry, "case-kit10").unwrap().dts_source;
+    assert!(
+        declarations.contains("class Derived extends Base"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("class Base") && declarations.contains("core(): string;"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("namespace Base") && declarations.contains("interface Events"),
+        "{declarations}"
+    );
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
+#[test]
 fn installed_package_inlines_a_node_builtin_class_used_as_a_namespace_qualified_extends_base() {
     // The namespace-qualified counterpart to the default-import case
     // above (`installed_package_inlines_a_default_imported_class_used_
