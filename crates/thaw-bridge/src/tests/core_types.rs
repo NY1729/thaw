@@ -427,6 +427,48 @@ fn resolves_generic_type_aliases_and_defaults() {
     );
 }
 
+/// A generic alias referenced *bare* (no explicit type arguments) whose
+/// own type parameter's default is an unresolvable keyword (`any`) used
+/// to abort the whole alias's resolution immediately with the reason
+/// text `` "`any` is not supported" `` -- *before* ever looking at the
+/// alias body at all. That exact reason text is also what
+/// `crates/thaw-cli/src/registry_integration/dynamic_declarations.rs`
+/// matches to mean "this return type is genuinely written as literal
+/// `any`" (-> `HirType::Json`, needed for a real ambient shim like
+/// `declare function join(): any;`) rather than the correct "unresolved,
+/// presumably a live object" fallback (`HirType::JsValue`) every other
+/// `Unsupported` reason gets -- so a factory function returning this
+/// alias used to get wrongly declared as returning plain JSON data
+/// instead of an opaque class-instance handle, breaking every method
+/// call on its result. Real trigger: nodemailer's own `type
+/// Transporter<T = any, D = TransportOptions> = Mail<T, D>;`,
+/// `createTransport(): Transporter`.
+///
+/// Asserts only that the alias no longer fails for *that* reason --
+/// `Mail` being a class (not an interface) still makes the alias
+/// classify as `Unsupported` here (`classify_ts_type`'s `TsTypeRef`
+/// arm doesn't resolve class names at all; that's a separate,
+/// unrelated limitation), just for an honest, class-shaped reason
+/// instead of colliding with the literal-`any` one. The full
+/// return-type-classifies-as-JsValue effect is covered end to end by
+/// `a_factory_functions_generic_type_alias_return_resolves_to_its_real_
+/// class` (thaw-cli).
+#[test]
+fn resolves_a_bare_generic_alias_reference_past_an_unresolvable_default() {
+    let funcs = parse_dts(
+        r#"export declare class Mail {
+                sendMail(opts: { to: string }): string;
+            }
+            export type Transporter<T = any, D = object> = Mail;
+            export declare function createTransport(): Transporter;"#,
+    )
+    .unwrap();
+    let DtsType::Unsupported(reason) = &funcs[0].ret else {
+        panic!("`Mail` is a class, not an interface -- expected Unsupported, got {:?}", funcs[0].ret);
+    };
+    assert_ne!(reason, "`any` is not supported", "{reason}");
+}
+
 #[test]
 fn resolves_generic_aliases_inside_generic_interfaces() {
     let funcs = parse_dts(

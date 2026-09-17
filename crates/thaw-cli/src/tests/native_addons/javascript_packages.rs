@@ -2510,3 +2510,96 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A real, `thaw registry add`-fetched `nodemailer@10.0.10` builds a
+/// transporter and sends a message end to end -- pins down round 17's
+/// npm-compatibility bug hunt (see [[project_npm_interop_gaps_17]]) as
+/// a permanent regression test. `createTransport(...)`'s real declared
+/// return type, `Transporter<SMTPTransport.SentMessageInfo,
+/// SMTPTransport.Options>`, is a *generic* type alias for the real
+/// class doing the work (`Mail`, with `sendMail`) -- exercising, on the
+/// real package, the exact "a bare generic-alias reference's own
+/// unresolvable type-parameter default must not abort resolving the
+/// alias body" fix (`resolve_generic_alias`, thaw-bridge; see
+/// `resolves_a_bare_generic_alias_reference_past_an_unresolvable_
+/// default` and `a_factory_functions_generic_type_alias_return_
+/// resolves_to_its_real_class` for the synthetic, network-free
+/// versions of the same mechanism). Also exercises calling the factory
+/// through a namespace-qualified default import
+/// (`nodemailer.createTransport(...)`, not just a bare named import) --
+/// investigated as a possible second, separate bug during this round,
+/// but it turned out to be entirely a downstream symptom of the same
+/// misclassification: once the generic-alias fix lands, the qualified
+/// call is tracked correctly with no further changes needed.
+///
+/// Uses `jsonTransport: true` (no real network/SMTP needed) and omits
+/// nodemailer's own randomly-generated `messageId` from the asserted
+/// output, matching the fields real Node's own `nodemailer` produces
+/// byte-for-byte otherwise.
+#[test]
+fn registry_add_sends_a_real_nodemailer_message_end_to_end_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-nodemailer-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "nodemailer").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import nodemailer from "nodemailer";
+
+async function main(): Promise<void> {
+    const transporter = nodemailer.createTransport({
+        jsonTransport: true,
+    });
+
+    const info = await transporter.sendMail({
+        from: "sender@example.com",
+        to: "recipient@example.com",
+        subject: "Hello",
+        text: "Hello world",
+        html: "<b>Hello world</b>",
+    });
+
+    console.log(info.envelope.from);
+    console.log(JSON.stringify(info.envelope.to));
+    // `info.message` embeds a randomly-generated messageId (real
+    // nodemailer's own behavior, matched byte-for-byte against real
+    // Node otherwise) -- check the deterministic parts by substring
+    // instead of asserting the whole string.
+    const message: string = info.message;
+    console.log(message.includes("\"address\":\"sender@example.com\""));
+    console.log(message.includes("\"address\":\"recipient@example.com\""));
+    console.log(message.includes("\"subject\":\"Hello\""));
+    console.log(message.includes("\"text\":\"Hello world\""));
+    console.log(message.includes("\"html\":\"<b>Hello world</b>\""));
+}
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["nodemailer".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "sender@example.com\n[\"recipient@example.com\"]\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
