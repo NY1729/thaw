@@ -3015,6 +3015,32 @@ fn byte_buffer_from_and_to_string() {
     );
 }
 
+/// `Buffer.isBuffer` used to unconditionally return the compile-time
+/// literal `false` for *any* operand, regardless of its real type --
+/// it read the operand's type through `infer_expr_type` (which always
+/// erases `HirType::Bytes` to `Array(F64)` for every consumer except
+/// method *dispatch*, per that function's own doc comment), instead of
+/// `infer_expr_type_inner` (the un-erased type every other byte-
+/// specific method already reads the receiver through, `bytes_methods.
+/// rs`/`conversion_methods.rs`). Found auditing adm-zip.
+#[test]
+fn buffer_is_buffer_distinguishes_a_real_buffer_from_anything_else() {
+    let source = r#"
+        function main(): void {
+            const buf: Buffer = Buffer.from("hello");
+            console.log(Buffer.isBuffer(buf));
+            console.log(Buffer.isBuffer("plain string"));
+            console.log(Buffer.isBuffer(42));
+            console.log(Buffer.isBuffer([1, 2, 3]));
+            console.log(Buffer.isBuffer(null));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "buffer_is_buffer"),
+        "true\nfalse\nfalse\nfalse\nfalse\n"
+    );
+}
+
 #[test]
 fn byte_buffer_numeric_accessors() {
     let source = r#"

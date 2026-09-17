@@ -180,6 +180,34 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_json_is_buffer" => {
+                let [value] = args else {
+                    return Err("Buffer.isBuffer expects one operand".to_string());
+                };
+                let value = self.compile_expr(value)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_is_buffer").unwrap(),
+                        &[value.into()],
+                        "json_is_buffer",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_is_buffer returned no value")?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        result,
+                        self.context.i8_type().const_zero(),
+                        "buffer_is_buffer",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_json_keys" => {
                 let result = self
                     .compile_single_arg_call("thaw_json_keys", args, "Object.keys")?
