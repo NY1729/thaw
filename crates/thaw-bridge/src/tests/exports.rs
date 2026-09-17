@@ -689,3 +689,84 @@ fn factory_return_type_resolves_through_a_generic_type_alias_to_its_real_class()
     assert_eq!(returns.get("createTransport"), Some(&"Mail".to_string()));
 }
 
+/// Two same-arity overloads whose sole parameter is a real npm
+/// package's own option-bag interface, differing only by whether a
+/// `file` key is required or forced absent -- real example: `tar`'s
+/// own `TarOptionsWithAliasesAsyncFile` vs `...AsyncNoFile`. Neither
+/// interface classifies natively here (each mixes an unresolvable
+/// field -- `Map`/`unknown[]` aren't supported field types -- with the
+/// discriminating one), so both parameters widen to `Json`; `param_
+/// field_constraints` is what lets thaw-cli's overload dispatch tell
+/// them apart anyway by checking the call site's own object-literal
+/// keys instead of the (unclassifiable) declared type.
+#[test]
+fn param_field_constraints_distinguish_a_required_key_from_an_excluded_one() {
+    let source = r#"
+            export interface WithFile {
+                file: string;
+                weird?: Map<string, number>;
+            }
+            export interface WithoutFile {
+                file?: undefined;
+                weird?: Map<string, number>;
+            }
+            type Run = {
+                (opt: WithFile): number;
+            } & {
+                (opt: WithoutFile): string;
+            };
+            export declare const run: Run;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 2);
+
+    let with_file = &funcs[0].param_field_constraints[0];
+    let with_file = with_file.as_ref().expect("WithFile carries constraints");
+    assert_eq!(with_file.required_alternatives, vec![vec!["file".to_string()]]);
+    assert!(with_file.excluded.is_empty());
+
+    let without_file = &funcs[1].param_field_constraints[0];
+    let without_file = without_file.as_ref().expect("WithoutFile carries constraints");
+    assert!(without_file.required_alternatives.is_empty());
+    assert_eq!(without_file.excluded, vec!["file".to_string()]);
+}
+
+/// The same distinction, reached only through a chain of local type
+/// aliases and an intersection/union (tar's own actual shape --
+/// `TarOptionsWithAliasesFile` is a union of two intersected object
+/// literals, one keyed `file`, the other `f`), confirming `field_
+/// constraints` chases aliases and merges intersection/union members
+/// the same way `resolve_local_callable_fn_types` already does for
+/// callable shapes.
+#[test]
+fn param_field_constraints_chase_aliases_through_intersections_and_unions() {
+    let source = r#"
+            export interface Base {
+                weird?: Map<string, number>;
+            }
+            type WithFile = (Base & { file: string }) | (Base & { f: string });
+            type NoFile = Base & { f?: undefined; file?: undefined };
+            type Run = {
+                (opt: WithFile): number;
+            } & {
+                (opt: NoFile): string;
+            };
+            export declare const run: Run;
+        "#;
+    let funcs = parse_dts(source).unwrap();
+    assert_eq!(funcs.len(), 2);
+
+    let with_file = funcs[0].param_field_constraints[0]
+        .as_ref()
+        .expect("WithFile carries constraints");
+    assert_eq!(
+        with_file.required_alternatives,
+        vec![vec!["file".to_string()], vec!["f".to_string()]]
+    );
+
+    let no_file = funcs[1].param_field_constraints[0]
+        .as_ref()
+        .expect("NoFile carries constraints");
+    assert_eq!(no_file.excluded, vec!["f".to_string(), "file".to_string()]);
+}
+

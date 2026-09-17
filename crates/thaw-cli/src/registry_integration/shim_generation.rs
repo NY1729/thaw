@@ -154,6 +154,7 @@ fn generate_registry_shims(
             functions.push(thaw_bridge::DtsFunction {
                 name: property.clone(),
                 generic: None,
+                param_field_constraints: Vec::new(),
                 params: (0..maximum)
                     .map(|index| {
                         (
@@ -911,6 +912,7 @@ fn generate_registry_shims(
                                 function.required_params,
                                 function.params.len(),
                                 dts_function_param_hir_types(function),
+                                dts_function_param_field_constraints(function),
                                 None,
                             ));
                         }
@@ -928,6 +930,7 @@ fn generate_registry_shims(
                             function.required_params,
                             function.params.len(),
                             dts_function_param_hir_types(function),
+                            dts_function_param_field_constraints(function),
                             function.generic.clone(),
                         ));
                     }
@@ -948,6 +951,9 @@ fn generate_registry_shims(
                             for &arity in arities {
                                 let mut params = dts_function_param_hir_types(function);
                                 params.resize(arity, thaw_hir::HirType::Json);
+                                let mut field_constraints =
+                                    dts_function_param_field_constraints(function);
+                                field_constraints.resize(arity, None);
                                 fallback_function_overload_rewrites.push((
                                     function.name.clone(),
                                     format!(
@@ -957,6 +963,7 @@ fn generate_registry_shims(
                                     arity,
                                     arity,
                                     params,
+                                    field_constraints,
                                     Some(generic.clone()),
                                 ));
                             }
@@ -1038,6 +1045,9 @@ fn generate_registry_shims(
                             }
                         }
                         params.resize(arity, thaw_hir::HirType::Json);
+                        let mut field_constraints =
+                            dts_function_param_field_constraints(function);
+                        field_constraints.resize(arity, None);
                         fallback_function_overload_rewrites.push((
                             name.to_string(),
                             format!(
@@ -1047,6 +1057,7 @@ fn generate_registry_shims(
                             arity,
                             arity,
                             params,
+                            field_constraints,
                             Some(generic.clone()),
                         ));
                     }
@@ -1058,6 +1069,7 @@ fn generate_registry_shims(
                     function.required_params,
                     function.params.len(),
                     dts_function_param_hir_types(function),
+                    dts_function_param_field_constraints(function),
                     function.generic.clone(),
                 ));
             }

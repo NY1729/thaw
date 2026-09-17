@@ -560,6 +560,7 @@ function main(): void {{
 #[test]
 fn adapts_typed_dynamic_callable_results_to_natural_calls() {
     let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: "customAlphabet".into(),
         generic: None,
         params: vec![
@@ -601,6 +602,7 @@ fn adapts_typed_dynamic_callable_results_to_natural_calls() {
 #[test]
 fn widens_callable_union_parameters_at_the_quickjs_boundary() {
     let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: "replace".into(),
         generic: None,
         params: vec![(
@@ -713,6 +715,7 @@ fn quickjs_fallback_reasons_include_operation_package_and_location() {
 #[test]
 fn jit_rejection_reasons_distinguish_signature_from_body() {
     let mut function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: "parse".into(),
         generic: None,
         params: vec![(

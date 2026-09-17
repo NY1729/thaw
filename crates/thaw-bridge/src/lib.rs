@@ -40,6 +40,14 @@ pub struct DtsFunction {
     pub name: String,
     pub generic: Option<DtsGenericFunction>,
     pub params: Vec<(String, DtsType)>,
+    /// Index-aligned with `params`: for a parameter whose declared type
+    /// didn't classify natively, whether the presence/absence of a
+    /// specific object-literal key is still checkable at a Fallback
+    /// overload's own call site (see `FieldConstraints`'s own doc
+    /// comment). `None` for a parameter that classified natively (this
+    /// carries no extra information beyond `params` itself then) or
+    /// whose type carries no checkable field information at all.
+    pub param_field_constraints: Vec<Option<FieldConstraints>>,
     pub required_params: usize,
     pub rest_param: Option<(String, DtsType)>,
     pub ret: DtsType,

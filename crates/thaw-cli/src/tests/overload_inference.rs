@@ -19,6 +19,7 @@ fn selects_fallback_function_overloads_by_arity_range() {
                 0,
                 1,
                 vec![thaw_hir::HirType::F64],
+                vec![],
                 None,
             ),
             (
@@ -27,6 +28,7 @@ fn selects_fallback_function_overloads_by_arity_range() {
                 2,
                 2,
                 vec![thaw_hir::HirType::F64, thaw_hir::HirType::F64],
+                vec![],
                 None,
             ),
         ],
@@ -56,6 +58,7 @@ fn selects_fallback_function_overloads_with_the_same_arity_by_argument_type() {
                 1,
                 1,
                 vec![thaw_hir::HirType::F64],
+                vec![],
                 None,
             ),
             (
@@ -64,6 +67,7 @@ fn selects_fallback_function_overloads_with_the_same_arity_by_argument_type() {
                 1,
                 1,
                 vec![thaw_hir::HirType::Str],
+                vec![],
                 None,
             ),
         ],
@@ -104,6 +108,7 @@ fn selects_fallback_function_overloads_from_the_correct_colliding_package() {
                 1,
                 1,
                 vec![thaw_hir::HirType::Json],
+                vec![],
                 None,
             ),
             (
@@ -112,6 +117,7 @@ fn selects_fallback_function_overloads_from_the_correct_colliding_package() {
                 1,
                 1,
                 vec![thaw_hir::HirType::Json],
+                vec![],
                 None,
             ),
             (
@@ -120,6 +126,7 @@ fn selects_fallback_function_overloads_from_the_correct_colliding_package() {
                 1,
                 1,
                 vec![thaw_hir::HirType::Json],
+                vec![],
                 None,
             ),
             (
@@ -128,6 +135,7 @@ fn selects_fallback_function_overloads_from_the_correct_colliding_package() {
                 1,
                 1,
                 vec![thaw_hir::HirType::Json],
+                vec![],
                 None,
             ),
         ],
@@ -1073,6 +1081,7 @@ fn defers_a_same_arity_tie_between_conflicting_scalar_overloads() {
                 1,
                 1,
                 vec![thaw_hir::HirType::F64],
+                vec![],
                 None,
             ),
             (
@@ -1081,6 +1090,7 @@ fn defers_a_same_arity_tie_between_conflicting_scalar_overloads() {
                 1,
                 1,
                 vec![thaw_hir::HirType::Str],
+                vec![],
                 None,
             ),
         ],
@@ -1111,6 +1121,7 @@ fn rewrites_a_same_arity_tie_between_opaque_overloads() {
                 0,
                 1,
                 vec![thaw_hir::HirType::Json],
+                vec![],
                 None,
             ),
             (
@@ -1119,6 +1130,7 @@ fn rewrites_a_same_arity_tie_between_opaque_overloads() {
                 0,
                 1,
                 vec![thaw_hir::HirType::Json],
+                vec![],
                 None,
             ),
         ],
@@ -1149,6 +1161,7 @@ fn rewrites_a_same_arity_tie_between_a_scalar_and_an_opaque_overload() {
                 1,
                 1,
                 vec![thaw_hir::HirType::F64],
+                vec![],
                 None,
             ),
             (
@@ -1157,6 +1170,7 @@ fn rewrites_a_same_arity_tie_between_a_scalar_and_an_opaque_overload() {
                 1,
                 1,
                 vec![thaw_hir::HirType::Json],
+                vec![],
                 None,
             ),
         ],
@@ -1183,6 +1197,7 @@ fn rewrites_a_sole_arity_match_even_when_the_argument_type_is_unknown() {
                 1,
                 1,
                 vec![thaw_hir::HirType::F64],
+                vec![],
                 None,
             ),
             (
@@ -1191,10 +1206,60 @@ fn rewrites_a_sole_arity_match_even_when_the_argument_type_is_unknown() {
                 2,
                 2,
                 vec![thaw_hir::HirType::F64, thaw_hir::HirType::F64],
+                vec![],
                 None,
             ),
         ],
     )
     .unwrap();
     assert_eq!(rewritten, "__makeId_default(untyped);");
+}
+
+/// Two same-arity overloads whose sole parameter is opaque `Json` (an
+/// unresolvable external interface -- real example: `tar`'s own
+/// `TarOptionsWithAliasesAsyncFile` vs `...AsyncNoFile`) can't be told
+/// apart by ordinary type-based scoring at all, but still carry a
+/// checkable required/excluded object-literal key
+/// (`thaw_bridge::FieldConstraints`) -- confirms the call site's own
+/// literal fields correctly disqualify the wrong candidate instead of
+/// leaving the choice to arbitrary iteration order.
+#[test]
+fn selects_fallback_function_overloads_by_object_literal_field_shape() {
+    let source = r#"run({ file: "a.txt" }); run({});"#;
+    let with_file = thaw_bridge::FieldConstraints {
+        required_alternatives: vec![vec!["file".to_string()]],
+        excluded: Vec::new(),
+    };
+    let without_file = thaw_bridge::FieldConstraints {
+        required_alternatives: Vec::new(),
+        excluded: vec!["file".to_string()],
+    };
+    let rewritten = rewrite_fallback_function_overloads(
+        source,
+        &[
+            (
+                "run".into(),
+                "__run_with_file".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Json],
+                vec![Some(with_file)],
+                None,
+            ),
+            (
+                "run".into(),
+                "__run_without_file".into(),
+                1,
+                1,
+                vec![thaw_hir::HirType::Json],
+                vec![Some(without_file)],
+                None,
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        rewritten,
+        r#"__run_with_file({ file: "a.txt" }); __run_without_file({});"#
+    );
 }
