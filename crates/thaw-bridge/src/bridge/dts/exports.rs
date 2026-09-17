@@ -45,12 +45,22 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
                 )
             })
             .map(|(name, signature)| match signature {
-                CallableConstSignature::Interface(call) => {
-                    lower_dts_call_signature(&name, call, &interfaces, &generic_interfaces)
-                }
-                CallableConstSignature::Direct(function) => {
-                    lower_dts_fn_type(&name, function, &interfaces, &generic_interfaces)
-                }
+                CallableConstSignature::Interface(call) => lower_dts_call_signature(
+                    &name,
+                    call,
+                    &interfaces,
+                    &generic_interfaces,
+                    &local_type_aliases,
+                    &call_signature_interfaces,
+                ),
+                CallableConstSignature::Direct(function) => lower_dts_fn_type(
+                    &name,
+                    function,
+                    &interfaces,
+                    &generic_interfaces,
+                    &local_type_aliases,
+                    &call_signature_interfaces,
+                ),
             }),
     );
     Ok(functions)
@@ -193,19 +203,26 @@ fn all_interface_decls_by_name(module: &Module) -> HashMap<String, &TsInterfaceD
     map
 }
 
-/// Every *non-generic* type alias declared anywhere in `module`, by its
-/// own bare name -- a generic alias's own type parameter would need
-/// substitution to resolve at all, which `resolve_local_callable_fn_types`
-/// below doesn't attempt (mirrors `resolve_interfaces`'s identical
-/// generic/non-generic split for interfaces). Used only to look a type
-/// alias up by name when resolving a `declare const`'s own type, not a
-/// replacement for `resolve_interfaces`'s own classification map.
+/// Every type alias declared anywhere in `module`, by its own bare name --
+/// like `all_interface_decls_by_name` just above, this doesn't split
+/// generic from non-generic aliases: a generic alias's own type parameter
+/// is never substituted here (`resolve_local_callable_fn_types` below
+/// doesn't attempt that), but the call signatures it chases through still
+/// resolve correctly -- any member whose param/return type mentions the
+/// alias's own type parameter simply fails to classify as a native type
+/// and widens to `Unsupported`/`JsValue` downstream, the same graceful
+/// degradation any other unresolvable type already gets. Real example:
+/// tar's own `type TarCommand<AsyncClass, SyncClass extends { sync: true
+/// }> = { (): AsyncClass; ... } & { (opt: TarOptionsWithAliasesAsyncFile):
+/// Promise<void>; ... } & ...;` -- the `Promise<void>`-returning
+/// with-file overloads (the shape real code overwhelmingly calls) fully
+/// classify even though `AsyncClass`/`SyncClass` themselves never do.
+/// Used only to look a type alias up by name when resolving a `declare
+/// const`'s own type, not a replacement for `resolve_interfaces`'s own
+/// classification map.
 fn all_type_alias_decls_by_name(module: &Module) -> HashMap<String, &TsType> {
     let mut map = HashMap::new();
     for alias in module.body.iter().flat_map(extract_type_alias_decls) {
-        if alias.type_params.is_some() {
-            continue;
-        }
         map.entry(alias.id.sym.to_string())
             .or_insert(alias.type_ann.as_ref());
     }
@@ -220,20 +237,38 @@ fn all_type_alias_decls_by_name(module: &Module) -> HashMap<String, &TsType> {
 /// further local aliases each resolving to a direct (possibly its own
 /// separately-generic) function type -- `v1`/`v3`/`v5`/`v6`/`v7`/
 /// `parse`/`stringify`/etc. all use the identical two-alias-intersection
-/// shape. `visited` guards against a self-referential alias cycle. Real
-/// `.d.ts` shapes seen so far never need anything deeper than this (a
-/// plain reference, or an intersection of references/direct function
-/// types) -- a union, mapped type, etc. isn't unwrapped, and just
-/// contributes no call signatures (same as any other unresolvable type).
+/// shape. Also unwraps an inline call-signature-bearing object type
+/// literal (`{ (): T; (opt): T; }`, the *interface-body* shape rather
+/// than the arrow-function shape) as an intersection member -- real
+/// example: tar's own `type TarCommand<...> = { (): AsyncClass; ... } &
+/// { (opt): Promise<void>; ... } & ... & { syncFile: ...; validate?:
+/// ...; };`, an 8-way intersection of exactly this shape (the final
+/// member, with only property signatures and no call signature at all,
+/// naturally contributes nothing). `visited` guards against a self-
+/// referential alias cycle. Real `.d.ts` shapes seen so far never need
+/// anything deeper than this (a plain reference, an intersection of
+/// references/direct function types/inline call-signature literals) --
+/// a union, mapped type, etc. isn't unwrapped, and just contributes no
+/// call signatures (same as any other unresolvable type).
 fn resolve_local_callable_fn_types<'a>(
     ty: &'a TsType,
     aliases: &HashMap<String, &'a TsType>,
     visited: &mut HashSet<String>,
-) -> Vec<&'a TsFnType> {
+) -> Vec<CallableConstSignature<'a>> {
     match ty {
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
-            vec![function]
+            vec![CallableConstSignature::Direct(function)]
         }
+        TsType::TsTypeLit(lit) => lit
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                TsTypeElement::TsCallSignatureDecl(call) => {
+                    Some(CallableConstSignature::Interface(call))
+                }
+                _ => None,
+            })
+            .collect(),
         TsType::TsTypeRef(ty_ref) => {
             let name = match &ty_ref.type_name {
                 TsEntityName::Ident(ident) => ident.sym.to_string(),
@@ -409,20 +444,18 @@ fn extract_const_call_signature_decls<'a>(
                     // const v4: v4;` where `type v4 = v4Buffer &
                     // v4String;` is a *local, unexported* alias, not an
                     // interface at all.
-                    let functions = resolve_local_callable_fn_types(
+                    let signatures = resolve_local_callable_fn_types(
                         annotation.type_ann.as_ref(),
                         local_type_aliases,
                         &mut HashSet::new(),
                     );
-                    if functions.is_empty() {
+                    if signatures.is_empty() {
                         return None;
                     }
                     Some(
-                        functions
+                        signatures
                             .into_iter()
-                            .map(|function| {
-                                (name.clone(), CallableConstSignature::Direct(function))
-                            })
+                            .map(|signature| (name.clone(), signature))
                             .collect::<Vec<_>>(),
                     )
                 }
@@ -448,6 +481,8 @@ fn lower_dts_call_signature(
     call: &TsCallSignatureDecl,
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
+    local_type_aliases: &HashMap<String, &TsType>,
+    raw_interfaces: &HashMap<String, &TsInterfaceDecl>,
 ) -> DtsFunction {
     let name = name.to_string();
     let generic = call.type_params.as_ref().map(|parameters| DtsGenericFunction {
@@ -558,6 +593,7 @@ fn lower_dts_call_signature(
         .take(fixed_param_count)
         .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
         .count();
+    let mut param_field_constraints = Vec::new();
     let params = call
         .params
         .iter()
@@ -568,12 +604,24 @@ fn lower_dts_call_signature(
                 let reason =
                     "unsupported parameter pattern (only simple identifiers are classified yet)"
                         .to_string();
+                param_field_constraints.push(None);
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
             let param_name = binding.id.sym.to_string();
             let ty = match &binding.type_ann {
-                Some(ann) => classify(&ann.type_ann),
-                None => DtsType::Unsupported("missing type annotation".to_string()),
+                Some(ann) => {
+                    param_field_constraints.push(field_constraints(
+                        &ann.type_ann,
+                        raw_interfaces,
+                        local_type_aliases,
+                        &mut HashSet::new(),
+                    ));
+                    classify(&ann.type_ann)
+                }
+                None => {
+                    param_field_constraints.push(None);
+                    DtsType::Unsupported("missing type annotation".to_string())
+                }
             };
             (param_name, ty)
         })
@@ -588,6 +636,7 @@ fn lower_dts_call_signature(
         name,
         generic,
         params,
+        param_field_constraints,
         required_params,
         rest_param,
         ret,
@@ -608,6 +657,8 @@ fn lower_dts_fn_type(
     function: &TsFnType,
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
+    local_type_aliases: &HashMap<String, &TsType>,
+    raw_interfaces: &HashMap<String, &TsInterfaceDecl>,
 ) -> DtsFunction {
     let name = name.to_string();
     let generic = function.type_params.as_ref().map(|parameters| DtsGenericFunction {
@@ -714,6 +765,7 @@ fn lower_dts_fn_type(
         .take(fixed_param_count)
         .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
         .count();
+    let mut param_field_constraints = Vec::new();
     let params = function
         .params
         .iter()
@@ -724,12 +776,24 @@ fn lower_dts_fn_type(
                 let reason =
                     "unsupported parameter pattern (only simple identifiers are classified yet)"
                         .to_string();
+                param_field_constraints.push(None);
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
             let param_name = binding.id.sym.to_string();
             let ty = match &binding.type_ann {
-                Some(ann) => classify(&ann.type_ann),
-                None => DtsType::Unsupported("missing type annotation".to_string()),
+                Some(ann) => {
+                    param_field_constraints.push(field_constraints(
+                        &ann.type_ann,
+                        raw_interfaces,
+                        local_type_aliases,
+                        &mut HashSet::new(),
+                    ));
+                    classify(&ann.type_ann)
+                }
+                None => {
+                    param_field_constraints.push(None);
+                    DtsType::Unsupported("missing type annotation".to_string())
+                }
             };
             (param_name, ty)
         })
@@ -741,6 +805,7 @@ fn lower_dts_fn_type(
         name,
         generic,
         params,
+        param_field_constraints,
         required_params,
         rest_param,
         ret,

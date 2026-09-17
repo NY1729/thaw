@@ -138,7 +138,14 @@ fn constructor_interface_classes(
                 type_ann,
             };
             let name = binding.id.sym.to_string();
-            let function = lower_dts_fn_type(&name, &synthetic_fn_type, interfaces, generic_interfaces);
+            let function = lower_dts_fn_type(
+                &name,
+                &synthetic_fn_type,
+                interfaces,
+                generic_interfaces,
+                &HashMap::new(),
+                &HashMap::new(),
+            );
             Some(DtsClass {
                 name,
                 extends: None,
@@ -200,8 +207,14 @@ fn self_constructible_interface_classes(
                 type_ann,
             };
             let name = interface.id.sym.to_string();
-            let function =
-                lower_dts_fn_type(&name, &synthetic_fn_type, interfaces, generic_interfaces);
+            let function = lower_dts_fn_type(
+                &name,
+                &synthetic_fn_type,
+                interfaces,
+                generic_interfaces,
+                &HashMap::new(),
+                &HashMap::new(),
+            );
             Some(DtsClass {
                 name,
                 extends: None,
@@ -984,6 +997,8 @@ fn lower_dts_class(
                         function,
                         interfaces,
                         generic_interfaces,
+                        &HashMap::new(),
+                        &HashMap::new(),
                     );
                     methods.push(DtsMethod {
                         name: function.name,
