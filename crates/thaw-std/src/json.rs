@@ -416,14 +416,19 @@ pub extern "C" fn thaw_json_stringify_keys_string_space(
 pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut Value {
     let value = unsafe { &*value };
     let key = to_str(key);
-    // `.length` on a JSON array is a built-in, not a data field -- handled
-    // here rather than via a dedicated HIR node/lowering rule, since a
-    // dynamically-typed `Json` value's runtime kind (array vs. object)
-    // isn't known until now. `serde_json::Value::get` only matches string
-    // keys against objects, so without this an array's `.length` would
-    // silently resolve to `Null` (-> `0`) instead of the actual length.
-    let result = match value {
-        Value::Array(items) if key == "length" => Value::Number((items.len() as u64).into()),
+    // `.length` on a JSON array (or a Buffer-shaped object, `{"type":
+    // "Buffer","data":[...]}` -- see `json_array_or_buffer_data`'s own
+    // doc comment for why a real Buffer crossing into a native callback
+    // takes this shape) is a built-in, not a data field -- handled here
+    // rather than via a dedicated HIR node/lowering rule, since a
+    // dynamically-typed `Json` value's runtime kind isn't known until
+    // now. `serde_json::Value::get` only matches string keys against
+    // objects, so without this a Buffer's `.length` would silently
+    // resolve to `Null` (-> `0`)/`undefined` instead of its real byte
+    // count (found via a real `fs.createReadStream(...).on('data', ...)`
+    // callback with an untyped/`any` chunk parameter).
+    let result = match json_array_or_buffer_data(value) {
+        Some(items) if key == "length" => Value::Number((items.len() as u64).into()),
         _ => value
             .get(&key)
             .cloned()
@@ -1542,6 +1547,31 @@ mod tests {
         assert_eq!(
             thaw_json_as_number(thaw_json_get(obj, length_key.as_ptr())),
             42.0
+        );
+    }
+
+    #[test]
+    fn buffer_shaped_object_length_is_the_data_array_length() {
+        // `{"type":"Buffer","data":[...]}` -- the shape `__thaw_json_
+        // binary_replacer` (thaw-quickjs) produces for a real Buffer/
+        // TypedArray crossing into a `Json`-typed native callback
+        // parameter (an untyped/`any` chunk, e.g. `fs.createReadStream(
+        // ...).on('data', chunk => ...)`). `.length` must resolve to the
+        // real byte count, not fall through to the plain key-lookup
+        // default (which would silently read `Null` -> `0`).
+        let value = parse(r#"{"type":"Buffer","data":[1,2,3,4,5]}"#);
+        let length_key = CString::new("length").unwrap();
+        assert_eq!(
+            thaw_json_as_number(thaw_json_get(value, length_key.as_ptr())),
+            5.0
+        );
+
+        // A plain object that merely happens to have a "type"/"data"
+        // pair not shaped like a Buffer keeps the ordinary key lookup.
+        let not_a_buffer = parse(r#"{"type":"Widget","data":[1,2,3],"length":99}"#);
+        assert_eq!(
+            thaw_json_as_number(thaw_json_get(not_a_buffer, length_key.as_ptr())),
+            99.0
         );
     }
 
