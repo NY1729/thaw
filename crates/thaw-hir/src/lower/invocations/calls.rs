@@ -493,6 +493,94 @@ impl<'a> FnLowerer<'a> {
                         return self.lower_static_builtin_call(object, property, call);
                     }
                 }
+                // A `Json`-typed receiver calling a Date-prototype-named
+                // method (real trigger: js-yaml's `load(): unknown`
+                // yielding a real `Date`, classified `Json`, see
+                // `[[project_npm_interop_gaps_19]]`) still survives the
+                // JSON boundary as a structurally-recognizable
+                // `{"timestamp": N}` shape (`Date.prototype.toJSON` is
+                // overridden globally). Rather than reimplementing every
+                // Date method's own logic for a `Json` receiver, extract
+                // the timestamp and promote it to a synthetic *native*
+                // Date object (the same `HirType::Object([("timestamp",
+                // F64)])` shape `new Date()` already produces), then
+                // dispatch through the existing, fully-tested
+                // `lower_native_date_method` completely unmodified --
+                // exactly the "promote to a fully native representation,
+                // then reuse the native path as-is" shape this project
+                // used for round 17's generic-alias-to-class promotion.
+                if matches!(
+                    property.sym.as_ref(),
+                    "getTime"
+                        | "setTime"
+                        | "toISOString"
+                        | "getFullYear"
+                        | "getMonth"
+                        | "getDate"
+                        | "getDay"
+                        | "getHours"
+                        | "getMinutes"
+                        | "getSeconds"
+                        | "getMilliseconds"
+                        | "getUTCFullYear"
+                        | "getUTCMonth"
+                        | "getUTCDate"
+                        | "getUTCDay"
+                        | "getUTCHours"
+                        | "getUTCMinutes"
+                        | "getUTCSeconds"
+                        | "getUTCMilliseconds"
+                        | "setFullYear"
+                        | "setMonth"
+                        | "setDate"
+                        | "setHours"
+                        | "setMinutes"
+                        | "setSeconds"
+                        | "setMilliseconds"
+                        | "setUTCFullYear"
+                        | "setUTCMonth"
+                        | "setUTCDate"
+                        | "setUTCHours"
+                        | "setUTCMinutes"
+                        | "setUTCSeconds"
+                        | "setUTCMilliseconds"
+                ) && matches!(
+                    self.peek_type_without_lowering(&member.obj),
+                    Some(HirType::Json)
+                ) {
+                    let json_receiver = self.lower_expr(&member.obj)?;
+                    let timestamp_name =
+                        format!("__thaw_json_date_timestamp_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(timestamp_name.clone(), HirType::F64);
+                    let extract = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_date_timestamp".to_string())),
+                        vec![json_receiver],
+                    );
+                    let promoted_name = format!("__thaw_promoted_date_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let date_type = date_object_type();
+                    self.scope.insert(promoted_name.clone(), date_type.clone());
+                    let promoted_object = HirExpr::ObjectLit(vec![(
+                        "timestamp".to_string(),
+                        HirExpr::Var(timestamp_name.clone()),
+                    )]);
+                    let promoted_ident =
+                        swc_ecma_ast::Ident::new_no_ctxt(promoted_name.clone().into(), member.span);
+                    let synthetic_member = MemberExpr {
+                        obj: Box::new(Expr::Ident(promoted_ident)),
+                        ..member.clone()
+                    };
+                    let method_call =
+                        self.lower_native_date_method(&synthetic_member, property, call)?;
+                    return self.wrap_call_argument_bindings(
+                        method_call,
+                        &[
+                            (timestamp_name, HirType::F64, extract),
+                            (promoted_name, date_type, promoted_object),
+                        ],
+                    );
+                }
                 // A confirmed `JsValue` receiver (real trigger: a Date-
                 // valued Fallback return, see `[[project_npm_interop_
                 // gaps_19]]`) is never a native thaw value under any

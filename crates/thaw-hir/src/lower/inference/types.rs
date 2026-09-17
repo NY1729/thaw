@@ -1334,6 +1334,8 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Bool);
                     }
                     "__thaw_json_typeof" => return Ok(HirType::Str),
+                    "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
+                    "__thaw_json_date_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_object_is"
                     | "__thaw_json_object_is_number"
                     | "__thaw_json_object_is_string"
