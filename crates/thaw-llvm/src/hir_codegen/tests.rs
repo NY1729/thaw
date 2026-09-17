@@ -131,6 +131,18 @@ fn compile_and_run_output_with_env(
         // `rustc` normally adds `-lm` automatically when it does the
         // final link, but this is a manual `cc` invocation instead.
         .arg("-lm")
+        // Matches thaw-cli's own real build (`quickjs_callback_export_
+        // args`, `build.rs`): thaw-quickjs's `dlsym(RTLD_DEFAULT, ...)`
+        // soft lookup of these thaw-runtime symbols (no hard crate
+        // dependency between the two) needs them kept in the dynamic
+        // symbol table -- without this, a program whose *only* async
+        // suspension point is driven by `thaw_js_run_event_loop` (a
+        // bare, unawaited top-level async call, as opposed to `main()`'s
+        // own tracked completion) never finds `thaw_runtime_poll_one`
+        // and its native continuation queue is never drained.
+        .arg("-Wl,--export-dynamic-symbol=thaw_runtime_poll_one")
+        .arg("-Wl,--export-dynamic-symbol=thaw_promise_state")
+        .arg("-Wl,--export-dynamic-symbol=thaw_promise_mark_handled")
         .arg("-o")
         .arg(&exe_path)
         .status()
