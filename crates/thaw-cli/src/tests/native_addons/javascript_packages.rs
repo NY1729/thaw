@@ -2683,21 +2683,19 @@ run();
 /// anchors/merge keys, and multi-document `loadAll` all match real
 /// Node's own js-yaml output byte for byte.
 ///
-/// Two deeper, general gaps found and deliberately left scoped out,
-/// see `[[project_npm_interop_gaps_19]]`: js-yaml's date resolver
-/// (`load("d: 2020-01-15")`) and `.nan`/`.inf` tags both lose their
-/// real JS identity (a live `Date`, `NaN`, `Infinity`) the moment a
-/// Fallback function declared to return bare `unknown` gets classified
-/// `Json` -- the JSON encode this codebase's own QuickJS boundary uses
-/// for a `Json`-typed value already collapses a `Date` to a plain ISO
-/// string and `NaN`/`Infinity` to `null`, the same lossy conversion
-/// real `JSON.stringify` performs, before any `instanceof`/`Number.
-/// isNaN` check downstream ever sees it. Two general, unrelated fixes
-/// *did* land this round for a *`JsValue`*-typed dynamic value (not
-/// `Json`) reaching the identical checks -- `instanceof Date` and
-/// calling a Date-prototype-named method -- covered by
-/// `instanceof_date_and_date_methods_work_on_a_dynamic_value`
-/// (`crates/thaw-cli/src/tests/registry_fallback/results_and_exports.rs`).
+/// Also covers round 19's own two deeper, deliberately-deferred gaps,
+/// both since closed (see `[[project_npm_interop_gaps_19]]`):
+/// - `load(input): unknown` (classified `Json`) returning a real
+///   `Date` (via `YAML11_SCHEMA`, which re-enables v5's now-opt-in
+///   legacy timestamp parsing -- js-yaml v5's *default* schema no
+///   longer auto-converts a bare timestamp scalar at all) or a real
+///   `NaN`/`Infinity` (`.nan`/`.inf` tags) -- `instanceof Date`, a
+///   Date-prototype method call, and `Number.isNaN`/`isFinite` all now
+///   recognize these values instead of hard-erroring or silently
+///   answering wrong.
+/// - `error instanceof YAMLException` (a real npm-exported `class
+///   YAMLException extends Error {...}`) against a caught YAML parse
+///   error, previously "not a known class".
 #[test]
 fn registry_add_loads_and_dumps_real_yaml_documents_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -2711,7 +2709,7 @@ fn registry_add_loads_and_dumps_real_yaml_documents_when_enabled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         &source,
-        r#"import { load, loadAll, dump } from "js-yaml";
+        r#"import { load, loadAll, dump, YAML11_SCHEMA, YAMLException } from "js-yaml";
 
 function run(): void {
     const anchored = load("base: &base\n  a: 1\n  b: 2\nderived:\n  <<: *base\n  c: 3\n") as any;
@@ -2722,6 +2720,21 @@ function run(): void {
     console.log(JSON.stringify(docs.map((d) => d.x)));
 
     console.log(dump({ z: 1, a: 2, m: 3 }, { sortKeys: true }));
+
+    const withDate = load("d: 2020-01-15\n", { schema: YAML11_SCHEMA }) as any;
+    console.log(withDate.d instanceof Date);
+    console.log(withDate.d.toISOString());
+
+    const special = load("inf: .inf\nninf: -.inf\nnan: .nan\n") as any;
+    console.log(Number.isNaN(special.nan));
+    console.log(Number.isFinite(special.inf));
+
+    try {
+        load("a: [1, 2\n");
+    } catch (error) {
+        console.log(error instanceof YAMLException);
+        console.log(typeof (error as YAMLException).message);
+    }
 }
 run();
 "#,
@@ -2746,7 +2759,8 @@ run();
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "{\"<<\":{\"a\":1,\"b\":2},\"c\":3}\n3\n[1,2,3]\na: 2\nm: 3\nz: 1\n\n"
+        "{\"<<\":{\"a\":1,\"b\":2},\"c\":3}\n3\n[1,2,3]\na: 2\nm: 3\nz: 1\n\n\
+         true\n2020-01-15T00:00:00.000Z\ntrue\nfalse\ntrue\nstring\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
