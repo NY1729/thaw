@@ -829,6 +829,46 @@ fn fs_write_flags_honor_append_and_exclusive_creation() {
 }
 
 #[test]
+fn fs_numeric_open_flags_behave_like_their_string_equivalents() {
+    // Real Node accepts `fs.constants.O_*` bitmask flags anywhere a
+    // string flag ('w'/'a'/'r+'/...) is accepted -- `createWriteStream`,
+    // `openSync`, and `writeFileSync`'s `flag` option included. thaw's
+    // own polyfill only ever compared `flags.charAt(0)` against a
+    // string, so a numeric flags value (`String(577)` -> `"577"`) never
+    // matched 'w'/'a' and fell through to a stray `stat` check instead
+    // of creating the file -- a real, reproducible `tar.extract()`
+    // failure: tar's own `getWriteFlag(size)` returns the numeric
+    // `O_TRUNC|O_CREAT|O_WRONLY` combination (577) rather than the
+    // string `"w"`, so every extracted file's `WriteStream` threw
+    // ENOENT statting a destination that legitimately doesn't exist yet.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_fs_numeric_flags");
+    fs::write(
+            dir.join("index.js"),
+            "var fs = require('node:fs'); module.exports = async function (root) { var c = fs.constants, writeFlags = c.O_TRUNC | c.O_CREAT | c.O_WRONLY, appendFlags = c.O_APPEND | c.O_CREAT | c.O_WRONLY, streamed = root + '/streamed.txt', opened = root + '/opened.txt', appended = root + '/appended.txt'; await new Promise(function(resolve, reject) { var writer = fs.createWriteStream(streamed, { flags: writeFlags }); writer.on('error', reject); writer.on('finish', resolve); writer.end('hello'); }); var fd = fs.openSync(opened, writeFlags); fs.closeSync(fd); fs.writeFileSync(appended, 'one'); fs.writeFileSync(appended, '-two', { flag: appendFlags }); return [fs.readFileSync(streamed, 'utf8'), fs.existsSync(opened), fs.readFileSync(appended, 'utf8')]; };",
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_fs_numeric_flags_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsNumericFlags = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let arguments =
+        CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
+            .unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseFsNumericFlags").unwrap().as_ptr(),
+        arguments.as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["hello",true,"one-two"]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn fs_creation_apis_honor_requested_modes() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_fs_creation_modes");
