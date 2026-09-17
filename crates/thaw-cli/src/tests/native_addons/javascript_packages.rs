@@ -2603,3 +2603,78 @@ async function main(): Promise<void> {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Round 18's npm compat audit. Real yargs's own module graph pulls in
+/// `cliui` -> `string-width`, whose ESM source hits three separate,
+/// general bugs the moment it's actually run through the dynamic
+/// QuickJS-NG bundle path (all fixed the same day, see
+/// `[[project_npm_interop_gaps_18]]`):
+/// 1. `import.meta.resolve(...)` (yargs's own unused `.config()`
+///    "extends" feature) survived the CJS rewrite untouched, and
+///    QuickJS's script-mode parser rejects a literal `import.meta`
+///    outright, even on a path never actually reached.
+/// 2. `yargs/lib/platform-shims/esm.mjs`'s own `const __dirname =
+///    fileURLToPath(dirname(import.meta.url));`/`const require =
+///    createRequire(import.meta.url);` (the standard ESM/CJS
+///    dual-package shim for globals ESM lacks natively) collided with
+///    this bundler's own wrapper function parameters of the identical
+///    name.
+/// 3. `string-width`'s own `new Intl.Segmenter()` crashed "not a
+///    function" -- the feature-detection deciding whether to link
+///    `Intl.Segmenter`'s native backing only scanned the user's own
+///    typed source and the generated shim text, blind to a real
+///    dependency's own bundled (and, past 1KB, compressed) source.
+#[test]
+fn registry_add_parses_real_yargs_command_line_arguments_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-yargs-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "yargs").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import yargs from "yargs";
+
+async function run(): Promise<void> {
+    const argv = await yargs(["greet", "--name", "World", "--verbose"])
+        .command("greet", "greet someone", () => {}, () => {})
+        .option("name", { type: "string", default: "stranger" })
+        .option("verbose", { type: "boolean", default: false })
+        .parse();
+
+    console.log(argv.name);
+    console.log(argv.verbose);
+    console.log(JSON.stringify(argv._));
+}
+
+run();
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["yargs".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "World\ntrue\n[\"greet\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
