@@ -237,6 +237,8 @@ fn node_fs_read_file_sync_without_an_encoding_argument_returns_a_buffer() {
                         const data = readFileSync("{}");
                         console.log(data.length);
                         console.log(data.toString("utf8"));
+                        console.log(Buffer.isBuffer(data));
+                        console.log(data.readUInt8(0));
                     }}
                 "#,
             data_file.display(),
@@ -252,7 +254,71 @@ fn node_fs_read_file_sync_without_an_encoding_argument_returns_a_buffer() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\nhello\n");
+    // An unannotated `readFileSync(path)` result used to lose its real
+    // `Buffer` identity in `scope` the moment it was bound to a variable
+    // with no type annotation -- `.length`/`.toString` still happened to
+    // work either way, but `Buffer.isBuffer` and byte accessors like
+    // `.readUInt8` misdispatched. `104` is `'h'`'s code point, matching
+    // real Node's `Buffer.from("hello").readUInt8(0)`.
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "5\nhello\ntrue\n104\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A real npm package's own `.d.ts` (unlike thaw's hand-authored `node:`
+/// ambient builtins) never classifies a `Buffer` return as
+/// `HirType::Bytes` (`allow_native_bytes_type` is deliberately off for
+/// it -- a third-party `.d.ts`'s own `Buffer` name isn't necessarily
+/// Node's), so such a method's return stays a retained `JsValue`
+/// handle. `Buffer.isBuffer` on that handle used to be a static,
+/// always-`false` literal (only a native `Bytes` receiver or a `Json`
+/// value were ever checked) even when the real runtime value returned
+/// genuinely is a `Buffer` -- found auditing adm-zip's own
+/// `toBuffer(): Buffer`. Fixed by asking the live QuickJS engine
+/// (`__thaw_is_buffer_dynamic_value`, mirroring the existing
+/// `instanceof Date`-on-`JsValue` dynamic check).
+#[test]
+fn buffer_is_buffer_recognizes_a_real_buffer_returned_as_a_retained_js_value() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-buffer-is-buffer-js-value-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("registry");
+    let package = registry.join("buffer-source");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeBuffer(): Buffer;\nexport declare function makeNonBuffer(): Buffer;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { makeBuffer: function () { return Buffer.from('hi'); }, \
+         makeNonBuffer: function () { return { not: 'a buffer' }; } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeBuffer, makeNonBuffer } from "buffer-source";
+                function main(): void {
+                    console.log(Buffer.isBuffer(makeBuffer()));
+                    console.log(Buffer.isBuffer(makeNonBuffer()));
+                }
+            "#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\nfalse\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
