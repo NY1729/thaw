@@ -2,6 +2,7 @@
 fn recognizes_primitive_and_mutual_recursion_for_jit() {
     let source = "function isEven(value) { return value === 0 ? true : !isEven(value - 1); } function punctuate(count, value) { return count <= 0 ? value : punctuate(count - 1, value + '!'); } function ping(value) { return value <= 0 ? 0 : pong(value - 1) + 1; } function pong(value) { return value <= 0 ? 0 : ping(value - 1) + 1; } module.exports = { isEven, punctuate, ping };";
     let function = |name: &str, params, ret| thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: name.into(),
         generic: None,
         params,
@@ -57,6 +58,7 @@ fn recognizes_primitive_and_mutual_recursion_for_jit() {
 #[test]
 fn recognizes_tagged_statement_returns_for_jit() {
     let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: "choose".into(),
         generic: None,
         params: vec![
@@ -134,6 +136,7 @@ fn jit_copies_a_narrowed_mixed_array_union() {
         thaw_hir::HirType::Str,
     ]);
     let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: "slice".into(),
         generic: None,
         params: vec![("value".into(), thaw_bridge::DtsType::Native(union.clone()))],
@@ -621,6 +624,7 @@ fn jit_copies_a_narrowed_mixed_array_union() {
 #[test]
 fn jit_joins_aggregate_only_union_branches() {
     let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: "chooseArray".into(),
         generic: None,
         params: vec![(
@@ -658,6 +662,7 @@ fn jit_tags_fixed_aggregate_union_results() {
         ),
     ] {
         let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
             name: name.into(),
             generic: None,
             params: Vec::new(),

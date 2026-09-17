@@ -1,6 +1,7 @@
 #[test]
 fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
     let function = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: "add".into(),
         generic: None,
         params: vec![
@@ -1243,6 +1244,7 @@ fn recognizes_only_pure_binary_numeric_commonjs_exports_for_jit() {
         Some("expr:b0,boolnot".into())
     );
     let string_length = thaw_bridge::DtsFunction {
+        param_field_constraints: Vec::new(),
         name: "length".into(),
         generic: None,
         params: vec![(

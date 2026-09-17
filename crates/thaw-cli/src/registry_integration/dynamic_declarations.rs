@@ -58,6 +58,18 @@ fn dts_function_param_hir_types(function: &thaw_bridge::DtsFunction) -> Vec<thaw
         .collect()
 }
 
+/// `dts_function_param_hir_types`'s sibling: index-aligned per-
+/// parameter field constraints, for `class_methods.rs`'s overload
+/// dispatch to disqualify a candidate whose param widened to opaque
+/// `Json`/`JsValue` but still carries a checkable required/excluded
+/// object-literal key (see `thaw_bridge::FieldConstraints`'s own doc
+/// comment).
+fn dts_function_param_field_constraints(
+    function: &thaw_bridge::DtsFunction,
+) -> Vec<Option<thaw_bridge::FieldConstraints>> {
+    function.param_field_constraints.clone()
+}
+
 fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
     match ty {
         thaw_hir::HirType::F64 => Some("number".into()),
@@ -925,6 +937,7 @@ fn union_overload_dispatch_declaration(
                 candidate.source.required_params,
                 candidate.source.params.len(),
                 dts_function_param_hir_types(candidate.source),
+                dts_function_param_field_constraints(candidate.source),
                 None,
             )
         })

@@ -41,22 +41,32 @@ enum ClassMethodContext {
     LiteralArgument(String, usize, String),
 }
 /// `(function name, helper symbol, min arity, max arity, parameter
-/// types)` -- a registry Fallback function with more than one `.d.ts`
-/// overload (real example: uuid's `v4`, a `(options?): string` overload
-/// alongside a generic `<TBuf extends Uint8Array = Uint8Array>(options,
-/// buf, offset?): TBuf` one) that "first successful overload wins"
-/// (below) can't fully expose through a single bare-name alias. Each
-/// overload gets its own helper symbol here; `class_methods.rs`'s
+/// types, parameter field constraints, generic info)` -- a registry
+/// Fallback function with more than one `.d.ts` overload (real example:
+/// uuid's `v4`, a `(options?): string` overload alongside a generic
+/// `<TBuf extends Uint8Array = Uint8Array>(options, buf, offset?):
+/// TBuf` one) that "first successful overload wins" (below) can't fully
+/// expose through a single bare-name alias. Each overload gets its own
+/// helper symbol here; `class_methods.rs`'s
 /// `rewrite_external_class_methods_with_static` picks between them at
 /// each real call site by arity and, on a tie, `overload_type_score`
 /// against the call's actual argument types -- the same mechanism
-/// already used for external class method/constructor overloads.
+/// already used for external class method/constructor overloads. The
+/// parameter field constraints (index-aligned with the parameter
+/// types) let that same dispatch additionally disqualify a candidate
+/// whose declared parameter widened to opaque `Json`/`JsValue` (an
+/// unresolvable external interface, real example: tar's own
+/// `TarOptionsWithAliasesAsyncFile` vs `...AsyncNoFile`, distinguished
+/// only by whether a `file` key is required or forced absent) but whose
+/// original type still carries a checkable required/excluded key --
+/// see `thaw_bridge::FieldConstraints`'s own doc comment.
 type FallbackFunctionOverloadRewrite = (
     String,
     String,
     usize,
     usize,
     Vec<thaw_hir::HirType>,
+    Vec<Option<thaw_bridge::FieldConstraints>>,
     Option<thaw_bridge::DtsGenericFunction>,
 );
 /// `(class, property, helper)` for an instance getter.

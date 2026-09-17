@@ -2325,20 +2325,73 @@ fn rewrite_external_class_methods_with_static(
                     let scored_candidates = self
                         .functions
                         .iter()
-                        .filter(|(candidate_name, _, min_arity, max_arity, _, _)| {
+                        .filter(|(candidate_name, _, min_arity, max_arity, _, _, _)| {
                             candidate_name == match_name
                                 && call.args.len() >= *min_arity
                                 && call.args.len() <= *max_arity
                         })
                         .filter_map(|candidate| {
                             let mut score = 0u16;
-                            for (argument, declared) in call.args.iter().zip(candidate.4.iter()) {
+                            for (index, (argument, declared)) in
+                                call.args.iter().zip(candidate.4.iter()).enumerate()
+                            {
                                 if let Some(actual) = source_expr_type(
                                     argument.expr.as_ref(),
                                     &self.value_types,
                                     self.function_types,
                                     self.named_types,
                                 ) {
+                                    // A parameter that widened to opaque
+                                    // `Json`/`JsValue` (an unresolvable
+                                    // external interface -- real example:
+                                    // tar's own `TarOptionsWithAliases
+                                    // AsyncFile` vs `...AsyncNoFile`,
+                                    // distinguished only by whether `file`
+                                    // is required or forced absent) can
+                                    // still carry a checkable required/
+                                    // excluded object-literal key even
+                                    // though ordinary type-based scoring
+                                    // can't tell it apart from a sibling
+                                    // overload's own equally opaque
+                                    // parameter -- checked directly against
+                                    // the call site's own literal fields
+                                    // here, disqualifying this candidate
+                                    // outright rather than leaving the
+                                    // ambiguity to arbitrary iteration
+                                    // order (see `FieldConstraints`'s own
+                                    // doc comment).
+                                    if matches!(
+                                        declared,
+                                        thaw_hir::HirType::Json | thaw_hir::HirType::JsValue
+                                    ) {
+                                        if let (
+                                            Some(Some(constraints)),
+                                            thaw_hir::HirType::Object(fields),
+                                        ) = (candidate.5.get(index), &actual)
+                                        {
+                                            let names = fields
+                                                .iter()
+                                                .map(|(name, _)| name.as_str())
+                                                .collect::<Vec<_>>();
+                                            let excluded_present = constraints
+                                                .excluded
+                                                .iter()
+                                                .any(|key| names.contains(&key.as_str()));
+                                            let required_satisfied = constraints
+                                                .required_alternatives
+                                                .is_empty()
+                                                || constraints.required_alternatives.iter().any(
+                                                    |alternative| {
+                                                        alternative.iter().all(|key| {
+                                                            names.contains(&key.as_str())
+                                                        })
+                                                    },
+                                                );
+                                            if excluded_present || !required_satisfied {
+                                                return None;
+                                            }
+                                        }
+                                    }
                                     score += u16::from(overload_type_score(declared, &actual)?);
                                 }
                             }
@@ -2436,7 +2489,7 @@ fn rewrite_external_class_methods_with_static(
                             })
                             .map(|(_, candidate)| candidate)
                     };
-                    if let Some((_, symbol, _, _, _, generic)) = selected {
+                    if let Some((_, symbol, _, _, _, _, generic)) = selected {
                         let annotated = generic.as_ref().is_some_and(|generic| {
                             annotate_generic_callback_arguments(
                                 call,
@@ -2448,7 +2501,7 @@ fn rewrite_external_class_methods_with_static(
                             )
                         });
                         if !annotated {
-                            for (candidate_name, _, min_arity, max_arity, _, generic) in
+                            for (candidate_name, _, min_arity, max_arity, _, _, generic) in
                                 self.functions.iter()
                             {
                                 if candidate_name != match_name
