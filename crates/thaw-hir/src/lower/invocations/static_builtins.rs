@@ -231,6 +231,25 @@ impl<'a> FnLowerer<'a> {
                                 );
                                 return self.wrap_call_argument_bindings(result, &bindings);
                             }
+                            // A `JsValue` -- a retained QuickJS handle, real
+                            // example: a real npm package's own class method
+                            // declared to return `Buffer` (not one of
+                            // thaw's own hand-authored ambient builtins, so
+                            // `Buffer` never classified as `HirType::Bytes`
+                            // for it -- see `allow_native_bytes_type`'s own
+                            // doc comment). Its *runtime* value can still
+                            // genuinely be a real `Buffer`, so ask the live
+                            // engine the same way `instanceof Date` already
+                            // does for a `JsValue` receiver
+                            // (`dynamic_value_check`), instead of the
+                            // static, always-`false` literal below.
+                            if ty == HirType::JsValue {
+                                let result = self.dynamic_value_check(
+                                    "__thaw_is_buffer_dynamic_value",
+                                    value,
+                                );
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
                             let name = format!("__thaw_is_buffer_{}", self.next_binding);
                             self.next_binding += 1;
                             self.scope.insert(name.clone(), ty.clone());
