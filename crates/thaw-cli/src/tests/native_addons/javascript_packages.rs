@@ -3076,6 +3076,22 @@ run();
 /// `fsWriteMode`). See `fs_numeric_open_flags_behave_like_their_
 /// string_equivalents` (thaw-registry) for the narrower unit-level
 /// regression test.
+///
+/// Also covers round 25's second deferred gap, `gzip: true`, which
+/// crashed with `cannot read property 'close' of undefined`: tar's
+/// `minizlib` dependency never uses the ordinary Transform-stream API on
+/// a `zlib.Gzip` instance -- it reaches into the same private
+/// `._handle`/`._processChunk(chunk, flushFlag)` synchronous contract
+/// real Node's own C++ zlib binding exposes, which thaw's `ZlibTransform`
+/// didn't have at all. Fixed in the same `system/runtime.rs` by wiring
+/// `._handle` (a harmless stub) and `._processChunk` to the same native
+/// incremental-compression bridge (`__thaw_zlib_stream_create`/`_write`/
+/// `_drop`) already used for the Web `CompressionStream` API, plus
+/// adding `zlib.Unzip`/`createUnzip` (real Node's auto-detecting
+/// gzip-or-deflate decompressor, used by tar's extraction side, which
+/// didn't exist here at all). See `zlib_gzip_exposes_the_private_
+/// handle_and_process_chunk_contract_minizlib_needs` (thaw-registry) for
+/// the narrower unit-level regression test.
 #[test]
 fn registry_add_creates_and_extracts_a_real_tar_archive_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -3093,6 +3109,9 @@ fn registry_add_creates_and_extracts_a_real_tar_archive_when_enabled() {
     let archive_path = dir.join("out.tar");
     let extract_dir = dir.join("extracted");
     std::fs::create_dir_all(&extract_dir).unwrap();
+    let gzip_archive_path = dir.join("out.tar.gz");
+    let gzip_extract_dir = dir.join("gzip-extracted");
+    std::fs::create_dir_all(&gzip_extract_dir).unwrap();
     std::fs::write(
         &source,
         format!(
@@ -3105,12 +3124,23 @@ async function run(): Promise<void> {{
     await extract({{ file: "{archive_path}", cwd: "{extract_dir}" }});
     console.log(fs.readdirSync("{extract_dir}"));
     console.log(fs.readFileSync("{extract_dir}/hello.txt", "utf8"));
+
+    // gzip:true -- round 25's second deferred gap (minizlib's private
+    // `._handle`/`._processChunk` contract needed real incremental
+    // compression, not just a whole-buffer Transform)
+    await create({{ file: "{gzip_archive_path}", cwd: "{src_dir}", gzip: true }}, ["hello.txt"]);
+    console.log("gzip archive exists:", fs.existsSync("{gzip_archive_path}"));
+    await extract({{ file: "{gzip_archive_path}", cwd: "{gzip_extract_dir}" }});
+    console.log(fs.readdirSync("{gzip_extract_dir}"));
+    console.log(fs.readFileSync("{gzip_extract_dir}/hello.txt", "utf8"));
 }}
 run();
 "#,
             archive_path = archive_path.display(),
             src_dir = src_dir.display(),
             extract_dir = extract_dir.display(),
+            gzip_archive_path = gzip_archive_path.display(),
+            gzip_extract_dir = gzip_extract_dir.display(),
         ),
     )
     .unwrap();
@@ -3133,7 +3163,8 @@ run();
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "archive exists: true\n[\"hello.txt\"]\nhello world\n"
+        "archive exists: true\n[\"hello.txt\"]\nhello world\n\
+         gzip archive exists: true\n[\"hello.txt\"]\nhello world\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
