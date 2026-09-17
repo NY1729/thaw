@@ -95,7 +95,19 @@ impl<'a> FnLowerer<'a> {
         // void-returning callback types (what lets `async` callbacks pass to
         // `Array.prototype.forEach` etc.).
         let return_compatible = |expected_ret: &HirType, ret: &HirType| {
-            expected_ret == ret || *expected_ret == HirType::Void
+            // An expected `JsValue` return (a `(...) => any` callback
+            // whose declared return type genuinely accepts anything,
+            // including nothing) also accepts a real, concrete callback
+            // that returns void -- otherwise an ordinary `function(x) {
+            // ... }` with no explicit `return` (inferred `Void`) never
+            // satisfied it, even though real Node's `=> any` callback
+            // signatures are routinely written exactly that way. Real
+            // trigger: a generic Events-map method's callback parameter
+            // (`handler: (...args: Events[Event]) => any`, e.g.
+            // `minipass`'s `.on()`), whose classified return type widens
+            // to `JsValue` per `contextual_dynamic_type`'s own existing
+            // "any" handling.
+            expected_ret == ret || *expected_ret == HirType::Void || *expected_ret == HirType::JsValue
         };
         let callable_compatible = match (expected, &actual) {
             (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {

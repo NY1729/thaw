@@ -637,24 +637,58 @@ fn contextual_dynamic_type(
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
             let mut params = Vec::new();
             let mut optional = Vec::new();
+            let mut rest = None;
             for parameter in &function.params {
-                let TsFnParam::Ident(parameter) = parameter else {
-                    continue;
-                };
-                if parameter.id.sym == "this" {
-                    continue;
+                match parameter {
+                    TsFnParam::Ident(parameter) => {
+                        if parameter.id.sym == "this" {
+                            continue;
+                        }
+                        params.push(parameter.type_ann.as_ref().map_or(HirType::JsValue, |annotation| {
+                            contextual_dynamic_type(
+                                &annotation.type_ann,
+                                substitution,
+                                interfaces,
+                                generic,
+                                true,
+                                in_progress,
+                            )
+                        }));
+                        optional.push(parameter.id.optional);
+                    }
+                    // A rest parameter (`...args: Events[Event]`, real
+                    // example: `minipass`'s own generic `on<Event extends
+                    // keyof Events>(ev: Event, handler: (...args: Events[
+                    // Event]) => any)`) used to fall through the `else`
+                    // arm below and get silently dropped -- `params`
+                    // stayed empty, producing a zero-argument `HirType::
+                    // Function` for the whole callback and rejecting any
+                    // real inline literal with an actual parameter
+                    // ("contextual callback accepts at most 0
+                    // parameter(s), got 1"). `Events[Event]` can't
+                    // classify natively here (`Event` is still this
+                    // method's own unresolved type parameter, not yet a
+                    // call-site literal), so this mirrors the same "stay
+                    // dynamic" fallback `classify_ts_type`'s own
+                    // non-generic rest-callback handling already uses
+                    // (`types/classification.rs`).
+                    TsFnParam::Rest(rest_param) => {
+                        rest = Some(Box::new(rest_param.type_ann.as_ref().map_or(
+                            HirType::JsValue,
+                            |annotation| {
+                                contextual_dynamic_type(
+                                    rest_element_type(&annotation.type_ann),
+                                    substitution,
+                                    interfaces,
+                                    generic,
+                                    true,
+                                    in_progress,
+                                )
+                            },
+                        )));
+                    }
+                    _ => continue,
                 }
-                params.push(parameter.type_ann.as_ref().map_or(HirType::JsValue, |annotation| {
-                    contextual_dynamic_type(
-                        &annotation.type_ann,
-                        substitution,
-                        interfaces,
-                        generic,
-                        true,
-                        in_progress,
-                    )
-                }));
-                optional.push(parameter.id.optional);
             }
             let ret = contextual_dynamic_type(
                 &function.type_ann.type_ann,
@@ -664,7 +698,14 @@ fn contextual_dynamic_type(
                 true,
                 in_progress,
             );
-            if optional.iter().any(|optional| *optional) {
+            if let Some(rest) = rest {
+                HirType::CallableFunction(
+                    params,
+                    HirOptionalMask::from_bools(&optional),
+                    Some(rest),
+                    Box::new(ret),
+                )
+            } else if optional.iter().any(|optional| *optional) {
                 let required = optional
                     .iter()
                     .position(|optional| *optional)
@@ -932,7 +973,23 @@ fn lower_dts_class(
                 let mut substitution = HashMap::new();
                 if let Some(parameters) = &method.function.type_params {
                     for parameter in &parameters.params {
-                        substitution.insert(parameter.name.sym.to_string(), HirType::JsValue);
+                        // `Json`, not `JsValue`: this method type parameter
+                        // (real example: `on<Event extends keyof Events>
+                        // (ev: Event, ...)`'s own `Event`) most often ends
+                        // up as a *plain* parameter's own type (`ev:
+                        // Event`), not just nested inside a callback's
+                        // rest-parameter element type. `Json` is this
+                        // codebase's established "matches any call-site
+                        // value, no extra coercion needed" wildcard
+                        // (`overload_type_score`'s `(HirType::Json, _) =>
+                        // Some(0)`, and the many existing Json<->native
+                        // coercions in `thaw-hir`'s own `coerce_to_
+                        // declared`) -- `JsValue` has neither, so a plain
+                        // literal argument (`rs.on("data", ...)`) failed
+                        // both overload matching and, once matched,
+                        // argument coercion ("value has type Json,
+                        // expected JsValue").
+                        substitution.insert(parameter.name.sym.to_string(), HirType::Json);
                     }
                 }
                 for (parameter, (_, classified)) in method.function.params.iter().zip(&mut params) {
@@ -950,7 +1007,38 @@ fn lower_dts_class(
                         false,
                         &mut Vec::new(),
                     );
-                    if hir_type_contains_callback(&contextual) {
+                    // Also re-applies the substituted result when the
+                    // parameter's own declared type is *directly* one of
+                    // this method's own type parameters (`ev: Event`),
+                    // not just when the contextual result happens to look
+                    // like a callback. `Event` isn't a resolvable type on
+                    // its own (it's this method's own type parameter), so
+                    // the first, non-substituted pass leaves it
+                    // `Unsupported`; the substituted pass above correctly
+                    // resolves it to `HirType::Json`, a plain scalar shape
+                    // `hir_type_contains_callback` alone would never
+                    // catch. Deliberately narrow (checks the parameter's
+                    // *own* raw annotation, not merely "was `Unsupported`
+                    // for any reason") -- an earlier, broader attempt
+                    // here (re-applying whenever `classified` was already
+                    // `Unsupported`, regardless of why) regressed real
+                    // Fallback overload-collapsing elsewhere (a later
+                    // pass expects an *unresolved* parameter to still
+                    // read `Unsupported`, to fold it into a wider `Union`
+                    // across sibling overloads -- pre-empting that here
+                    // left it a plain `Native` type instead, missing
+                    // members other real overloads still needed).
+                    let is_bare_generic_reference = matches!(
+                        annotation.type_ann.as_ref(),
+                        TsType::TsTypeRef(reference)
+                            if reference.type_params.is_none()
+                                && matches!(
+                                    &reference.type_name,
+                                    TsEntityName::Ident(id)
+                                        if substitution.contains_key(id.sym.as_str())
+                                )
+                    );
+                    if hir_type_contains_callback(&contextual) || is_bare_generic_reference {
                         *classified = DtsType::Native(contextual);
                     }
                 }
