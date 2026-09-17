@@ -238,9 +238,35 @@ fn resolve_generic_alias(
                 in_progress,
             )
         };
+        // An argument/default that itself fails to classify (real
+        // trigger: nodemailer's own `Transporter<T = any, D =
+        // TransportOptions> = Mail<T, D>`, referenced bare as just
+        // `Transporter` -- `T`'s default is the literal keyword `any`,
+        // which `classify_ts_type` has no case for) used to abort this
+        // *whole alias's* own resolution immediately, before ever
+        // looking at the alias body (`Mail<T, D>`) at all. Worse: since
+        // `DtsType::Unsupported` carries only a free-text reason, `T`'s
+        // own failure text (`` "`any` is not supported" ``) is
+        // textually indistinguishable from a return type genuinely
+        // *written* as literal `: any` -- a reason
+        // `dynamic_declarations.rs`'s callers specifically special-case
+        // as "real JSON data" (`HirType::Json`) rather than the
+        // "unresolvable, presumably a live object" fallback
+        // (`HirType::JsValue`) every other `Unsupported` reason gets.
+        // `createTransport(): Transporter` ended up declared to return
+        // `Json` by sheer coincidence of wording, breaking the
+        // generated adapter's own `receiver: JsValue` parameter the
+        // moment anything called a method on the result.
+        //
+        // Degrade to `HirType::JsValue` for just this one parameter and
+        // keep resolving -- the same "an unresolved type argument
+        // becomes an opaque handle, not a hard failure" convention
+        // `contextual_dynamic_type` (`classes.rs`) already uses -- so
+        // the alias body still gets a chance to resolve to the real
+        // class it names.
         let concrete = match concrete {
             DtsType::Native(concrete) => concrete,
-            unsupported => return unsupported,
+            DtsType::Unsupported(_) => HirType::JsValue,
         };
         if let Some(constraint) = &parameter.constraint {
             let constraint = resolve_ts_type_with_substitution(

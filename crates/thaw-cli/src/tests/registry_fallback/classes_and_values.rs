@@ -82,28 +82,39 @@ function main(): void {
 }
 
 /// A bare (non-`new`) factory function's declared return type names a
-/// real class only through a *type alias* (`type Transporter = Mail;
-/// createTransport(): Transporter;`) rather than the class name
-/// directly or a `declare const x: Name;` value binding -- real example:
-/// nodemailer's own `createTransport(...): Transporter<...>`, `type
-/// Transporter<T = any, D = TransportOptions> = Mail<T, D>`.
-/// `function_return_named_types` (thaw-bridge) recorded the return
-/// type's own bare name verbatim (`"Transporter"`, the alias, not
-/// `"Mail"`, the real class), so `factory_class_returns` never matched
-/// any real class and the returned value's own methods (`sendMail`)
-/// were never reachable ("call to unknown function
-/// `transporter.sendMail`") regardless of whether the method itself had
-/// any problem. Fixed by following a bare (non-substituting) alias
-/// chain down to the first name that isn't itself an alias before
-/// recording it.
+/// real class only through a *generic type alias* (`type
+/// Transporter<T, D> = Mail; createTransport(): Transporter;`) rather
+/// than the class name directly or a `declare const x: Name;` value
+/// binding -- real example: nodemailer's own `createTransport(...):
+/// Transporter<...>`, `type Transporter<T = any, D = TransportOptions>
+/// = Mail<T, D>`. Two separate bugs, found and fixed together:
 ///
-/// Deliberately uses a *non-generic* alias, unlike nodemailer's real
-/// `Transporter<T, D>`: giving the alias its own (here-unused) type
-/// parameters reproduces a second, separate bug -- the resolved
-/// method's own argument then fails marshaling ("value has type Json,
-/// expected JsValue") even once this fix correctly finds the class.
-/// Confirmed while writing this test; not chased further here (out of
-/// scope for what this fix targets), left for a future round.
+/// 1. `function_return_named_types` (thaw-bridge) recorded the return
+///    type's own bare name verbatim (`"Transporter"`, the alias, not
+///    `"Mail"`, the real class), so `factory_class_returns` never
+///    matched any real class and the returned value's own methods
+///    (`sendMail`) were never reachable ("call to unknown function
+///    `transporter.sendMail`") regardless of whether the method itself
+///    had any problem. Fixed by following a bare (non-substituting)
+///    alias chain down to the first name that isn't itself an alias
+///    before recording it.
+/// 2. Resolving `Transporter` *bare* (no explicit type arguments, as
+///    `createTransport`'s own return position does) needs each type
+///    parameter's own default -- `T`'s default is the literal keyword
+///    `any`, which `classify_ts_type` has no case for and reports as
+///    `` Unsupported("`any` is not supported") ``. `resolve_generic_
+///    alias` (thaw-bridge) used to return that failure as the *whole
+///    alias's* own resolution immediately, without ever looking at the
+///    alias body (`Mail`) -- and since that reason text happens to
+///    collide with the one `dynamic_declarations.rs` matches to mean "a
+///    genuine literal `: any` return", `createTransport` got wrongly
+///    declared to return plain JSON data instead of an opaque
+///    class-instance handle, so `transporter` (typed `Json`) failed to
+///    coerce into `sendMail`'s generated `receiver: JsValue` parameter
+///    ("value has type Json, expected JsValue") even once bug 1 above
+///    was fixed and correctly found the class. Fixed by degrading an
+///    unresolvable type parameter to `HirType::JsValue` and continuing
+///    to resolve the rest of the alias, instead of aborting outright.
 #[test]
 fn a_factory_functions_generic_type_alias_return_resolves_to_its_real_class() {
     let dir = std::env::temp_dir().join(format!(
@@ -118,7 +129,7 @@ fn a_factory_functions_generic_type_alias_return_resolves_to_its_real_class() {
         "export declare class Mail {\n\
          \x20\x20\x20\x20sendMail(opts: { to: string; subject: string }): string;\n\
          }\n\
-         export type Transporter = Mail;\n\
+         export type Transporter<T = any, D = object> = Mail;\n\
          export declare function createTransport(): Transporter;\n",
     )
     .unwrap();
