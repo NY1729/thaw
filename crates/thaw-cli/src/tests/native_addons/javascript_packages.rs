@@ -3053,6 +3053,91 @@ run();
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Round 22/25's npm compat audit (`tar`). `tar.extract({file, cwd})`
+/// resolved without error but silently wrote zero files -- traced
+/// (via temporary tracing patched into the *fetched package's own*
+/// bundle, not thaw's source, reverted before committing) all the way
+/// through `@isaacs/fs-minipass`'s `ReadStream` and `minipass`'s
+/// `'data'`/`'end'` delivery (both already correct) into tar's own
+/// `Unpack`, whose per-entry `WriteStream` threw a stray `ENOENT`
+/// statting a destination that legitimately doesn't exist yet. Root
+/// cause, fixed in `crates/thaw-registry/src/registry/builtins/
+/// filesystem.rs`: tar's own `getWriteFlag(size)` returns a *numeric*
+/// `fs.constants.O_TRUNC|O_CREAT|O_WRONLY` flags value (a real, common
+/// Node idiom), but thaw's `fs.WriteStream`/`fs.open`/`fs.writeFileSync`
+/// only ever compared `String(flags).charAt(0)` against `'w'`/`'a'` --
+/// a numeric flags value stringifies to a plain digit string, matching
+/// neither, and fell through to a branch meant for `'r'`/`'r+'` that
+/// did a stray `stat` check instead of creating the file. Fixed with a
+/// shared `flagsValue(flags, fallback)` helper that decodes the
+/// `O_APPEND`/`O_CREAT`/`O_RDWR`/`O_EXCL` bits into the equivalent
+/// string form before anything inspects it, wired into all three call
+/// sites (`WriteStream`'s constructor, `fsOpenHandle`, and
+/// `fsWriteMode`). See `fs_numeric_open_flags_behave_like_their_
+/// string_equivalents` (thaw-registry) for the narrower unit-level
+/// regression test.
+#[test]
+fn registry_add_creates_and_extracts_a_real_tar_archive_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("thaw-cli-auto-js-tar-{}", std::process::id()));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "tar").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("hello.txt"), "hello world").unwrap();
+    let archive_path = dir.join("out.tar");
+    let extract_dir = dir.join("extracted");
+    std::fs::create_dir_all(&extract_dir).unwrap();
+    std::fs::write(
+        &source,
+        format!(
+            r#"import {{ create, extract }} from "tar";
+import * as fs from "node:fs";
+
+async function run(): Promise<void> {{
+    await create({{ file: "{archive_path}", cwd: "{src_dir}" }}, ["hello.txt"]);
+    console.log("archive exists:", fs.existsSync("{archive_path}"));
+    await extract({{ file: "{archive_path}", cwd: "{extract_dir}" }});
+    console.log(fs.readdirSync("{extract_dir}"));
+    console.log(fs.readFileSync("{extract_dir}/hello.txt", "utf8"));
+}}
+run();
+"#,
+            archive_path = archive_path.display(),
+            src_dir = src_dir.display(),
+            extract_dir = extract_dir.display(),
+        ),
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["tar".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "archive exists: true\n[\"hello.txt\"]\nhello world\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Round 24's npm compat audit (`ws`). A real client/server round trip
 /// (echo message, then a full client-initiated close handshake) crashed
 /// twice in a row on the client's own `net.Socket` teardown, both fixed
