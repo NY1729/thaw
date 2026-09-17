@@ -87,6 +87,25 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(element) => self.compile_json_to_native_array(json, element),
             HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
+            // A `Json`-typed value that is genuinely the
+            // `{"__thaw_js_handle_id__": id}` placeholder `JsValueAsJson`
+            // builds for a live handle coerced into a `Json`-declared
+            // slot (real trigger: `const rs: any = new ReadStream(...)`)
+            // recovers that handle here -- the same native reader
+            // `compile_json_value_to_native`'s own `HirType::JsValue` arm
+            // already uses for a `JsValue`-typed native-callback argument,
+            // just reachable from `JsonAsNative`'s own dispatch too now.
+            HirType::JsValue => self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_handle_id").unwrap(),
+                    &[json.into()],
+                    "json_as_js_value",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| "thaw_json_handle_id did not return a value".into()),
             other => Err(format!(
                 "JSON-backed dictionary value cannot be restored as {other:?}"
             )),

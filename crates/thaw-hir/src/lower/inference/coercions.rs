@@ -76,6 +76,28 @@ impl<'a> FnLowerer<'a> {
                 vec![value],
             ));
         }
+        // The symmetric case to the `HirType::JsValue`-into-`Json` branch
+        // above: a value whose own real, live type genuinely is `JsValue`
+        // (e.g. a real npm class instance) can end up statically typed
+        // `Json` instead -- real trigger: `const rs: any = new ReadStream
+        // (...)`, an explicit `: any` annotation, whose declared type
+        // lowers to `HirType::Json` regardless of the initializer's own
+        // real type. Calling a method on it later needs a real `JsValue`
+        // handle again, but `rs`'s stored type says `Json`. `JsValueAsJson`
+        // above always encodes a live handle as exactly the same
+        // `{"__thaw_js_handle_id__": id}` placeholder object
+        // `compile_dynamic_value_placeholder` builds for the opposite
+        // direction -- `thaw_json_handle_id` (thaw-std) is the existing,
+        // already-wired native-side reader for that exact shape (used
+        // today only for a `JsValue`-typed native-callback argument
+        // decoded from real JSON, `compile_json_value_to_native`'s own
+        // `HirType::JsValue` arm) -- reused here via `JsonAsNative`'s own
+        // codegen (`compile_json_to_native`, extended with the identical
+        // one case) to recover the live handle a `Json`-typed value that
+        // is genuinely this placeholder shape was never really without.
+        if *declared == HirType::JsValue && self.infer_expr_type(&value)? == HirType::Json {
+            return Ok(HirExpr::JsonAsNative(Box::new(value), HirType::JsValue));
+        }
         if let (HirType::Object(declared_fields), HirType::Object(actual_fields)) =
             (declared, self.infer_expr_type(&value)?)
         {
