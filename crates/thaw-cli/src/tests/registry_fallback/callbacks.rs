@@ -78,6 +78,84 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A native closure whose `Json`-typed parameter (real `.d.ts` shape:
+/// `(prefix: string, value: any) => any`, e.g. `qs`'s own `filter`
+/// option) is returned unchanged, or nested unchanged inside a returned
+/// object -- real trigger: `qs.stringify(obj, { filter: (prefix, value)
+/// => value })` segfaulted (a real core dump, not a wrong-output bug).
+///
+/// Root cause, in the one shared adapter every native-callback
+/// registration path compiles through
+/// (`compile_value_callback_from_closure`, thaw-llvm): every decoded
+/// `Json` argument (and any retained `JsValue` parameter handle) was
+/// destroyed via `thaw_json_destroy` *immediately* after invoking the
+/// closure, before the closure's own return value was ever read to
+/// build the JSON result. For a `Json`-typed parameter,
+/// `compile_json_value_to_native` passes the decoded pointer straight
+/// through with no extra copy, so a closure returning that same
+/// parameter (directly, or nested inside another value --
+/// `serde_json::Value::clone` is a real recursive clone, so nesting
+/// doesn't protect against this either) made the result-building code
+/// dereference already-freed memory. Fixed by moving the whole cleanup
+/// block (both the `JsValue`-handle release loop and the `Json`-argument
+/// destroy loop) to run *after* `result_json` is fully built instead of
+/// right after the raw call -- `thaw_json_array_push_json` (used to
+/// build `result_json` from the return value) already clones
+/// defensively, so nothing needs the original argument pointers again
+/// once that has happened, safe whether or not the return value aliased
+/// one of them.
+#[test]
+fn a_native_closure_returning_its_own_json_typed_parameter_does_not_use_after_free() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-native-callback-json-alias-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("callback-kit2");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export interface Options {\n\
+         \x20\x20\x20\x20filter?: Array<string | number> | ((prefix: string, value: any) => any) | undefined;\n\
+         }\n\
+         export declare function invoke(value: any, options?: Options): any;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { invoke: function(value, options) { \
+         var filter = options && options.filter; \
+         return typeof filter === 'function' ? filter('key', value) : value; \
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { invoke } from "callback-kit2";
+function main(): void {
+    console.log(invoke("hello", { filter: (prefix: string, value: any) => value }));
+    console.log(JSON.stringify(invoke("world", { filter: (prefix: string, value: any) => ({ wrapped: value }) })));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "exit status: {:?}, stderr: {}",
+        result.status.code(),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "hello\n{\"wrapped\":\"world\"}\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A native closure passed as a dynamic-method-call argument (same shape
 /// as the test above), whose declared return type is `Promise<T>` --
 /// real-world example: drizzle-orm's `sqlite-proxy` driver,
