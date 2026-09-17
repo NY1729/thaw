@@ -41,6 +41,35 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_json_typeof" => {
                 return self.compile_single_arg_call("thaw_json_typeof", args, "JSON typeof")
             }
+            "__thaw_json_is_date_shape" => {
+                let [value] = args else {
+                    return Err("__thaw_json_is_date_shape expects one argument".into());
+                };
+                let value = self.compile_expr(value)?;
+                let function = self.module.get_function("thaw_json_is_date_shape").unwrap();
+                let call = self
+                    .builder
+                    .build_call(function, &[value.into()], "json_is_date_shape_u8")
+                    .map_err(|error| error.to_string())?;
+                let u8_val = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_is_date_shape did not return a value")?
+                    .into_int_value();
+                let zero = self.context.i8_type().const_int(0, false);
+                return self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_is_date_shape")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_json_date_timestamp" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_date_timestamp",
+                    args,
+                    "JSON date timestamp",
+                )
+            }
             "__thaw_json_stringify_number_space" => {
                 let [value, space] = args else {
                     return Err("JSON.stringify expects value and number space".into());

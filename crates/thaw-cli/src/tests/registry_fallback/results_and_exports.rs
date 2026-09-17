@@ -1095,6 +1095,77 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The `Json`-typed (not `JsValue`) sibling of the test above: a real
+/// npm package whose Fallback function is declared to return bare
+/// `unknown` (classified `Json`, matching js-yaml's own `load(input):
+/// unknown` -- see `[[project_npm_interop_gaps_19]]`) can still return
+/// a real `Date`/`NaN`/`Infinity` at runtime. All three survive the
+/// QuickJS boundary in a structurally-recognizable way: a `Date` as
+/// `{"timestamp": N}` (`Date.prototype.toJSON` is overridden globally),
+/// `NaN`/`Infinity`/`-Infinity` as the `$__thaw_non_finite$` sentinel
+/// (`platform_globals/dates.js`'s `__thaw_json_safe_stringify`).
+/// `instanceof Date`, a Date-prototype method call, and `Number.isNaN`/
+/// `isFinite` all now recognize these shapes instead of hard-erroring
+/// (Date) or silently returning the wrong answer (`Number.isNaN`).
+#[test]
+fn instanceof_date_and_number_is_nan_work_on_a_json_valued_unknown_return() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-json-date-nan-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("unknownkit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function load(kind: string): unknown;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = { load: function(kind) {\n\
+         \x20\x20if (kind === 'date') return new Date('2020-01-15T00:00:00.000Z');\n\
+         \x20\x20if (kind === 'nan') return NaN;\n\
+         \x20\x20if (kind === 'inf') return Infinity;\n\
+         \x20\x20if (kind === 'ninf') return -Infinity;\n\
+         \x20\x20return 42;\n\
+         } };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { load } from "unknownkit";
+function main(): void {
+    const d = load("date") as any;
+    console.log(d instanceof Date);
+    console.log(d.toISOString());
+    console.log(Number.isNaN(load("nan")));
+    console.log(Number.isFinite(load("nan")));
+    console.log(Number.isFinite(load("inf")));
+    console.log(Number.isNaN(load("inf")));
+    console.log(Number.isNaN(load("ninf")));
+    console.log(Number.isNaN(load("finite")));
+    console.log(Number.isFinite(load("finite")));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "true\n2020-01-15T00:00:00.000Z\ntrue\nfalse\nfalse\nfalse\nfalse\nfalse\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `value === undefined` (and `!==`, either operand order) for a live
 /// `JsValue` unconditionally returned `false` -- even when the value
 /// genuinely *is* `undefined` -- because `lower_optional_undefined_

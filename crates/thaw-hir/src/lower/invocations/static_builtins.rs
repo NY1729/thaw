@@ -1428,7 +1428,23 @@ impl<'a> FnLowerer<'a> {
                         };
                         let value = value.clone();
                         let ty = self.infer_expr_type(&value)?;
-                        if ty == HirType::F64 {
+                        // `Json` (e.g. js-yaml's `.nan`/`.inf` tags,
+                        // classified `Json` via `load(): unknown`, see
+                        // `[[project_npm_interop_gaps_19]]`) decodes to a
+                        // real `f64` through the same `JsonAsNumber`
+                        // intrinsic `json_narrowings`' typeof-narrowing
+                        // already uses -- `thaw_json_as_number` now
+                        // recognizes the `$__thaw_non_finite$` sentinel
+                        // `__thaw_json_safe_stringify` emits for a real
+                        // `NaN`/`Infinity`, so this reaches the exact same
+                        // native predicate the `F64` arm below already
+                        // calls, rather than needing its own logic.
+                        let value = if ty == HirType::Json {
+                            HirExpr::JsonAsNumber(Box::new(value))
+                        } else {
+                            value
+                        };
+                        if ty == HirType::F64 || ty == HirType::Json {
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var(
                                     match property.sym.as_ref() {
