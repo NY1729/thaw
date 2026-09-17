@@ -1175,3 +1175,81 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The reverse direction of the `JsValueAsJson` mechanism the two tests
+/// above exercise: a variable's own real, live value genuinely is a
+/// `JsValue` (a real compiled class instance, not a Fallback-returned
+/// opaque object), but its *stored* type is `Json` because it was
+/// explicitly annotated `: any` -- real trigger: `const rs: any = new
+/// ReadStream(...)` (`@isaacs/fs-minipass`), found investigating why an
+/// inline callback literal passed to a generic `on()` method wouldn't
+/// compile (see `project_generic_events_map_callback` memory); this is a
+/// separate, more general bug the same isolation testing surfaced --
+/// *any* method call on such a variable failed the same way, not just
+/// generic ones. `: any`'s own declared type lowers to `HirType::Json`
+/// regardless of the initializer's real type (`type_resolution.rs`), so
+/// calling a method on it later needed a real `JsValue` handle again
+/// that `coerce_to_declared` had no path to recover.
+///
+/// Fixed by reusing the exact round trip `JsValueAsJson`'s own encode
+/// side already builds: `coerce_to_declared` (thaw-hir) now also
+/// recognizes `declared: JsValue, actual: Json` and emits `HirExpr::
+/// JsonAsNative(value, JsValue)`; `compile_json_to_native` (thaw-llvm,
+/// the codegen `JsonAsNative` already dispatches to) gained a matching
+/// `HirType::JsValue` arm calling `thaw_json_handle_id` (thaw-std) --
+/// the same native reader a `JsValue`-typed native-callback argument's
+/// own JSON decoding already used, just not reachable from an ordinary
+/// value coercion before.
+#[test]
+fn a_method_can_be_called_on_a_real_class_instance_stored_in_an_any_typed_variable() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-any-typed-class-instance-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("widget-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Widget {\n\
+             constructor(name: string);\n\
+             describe(): string;\n\
+             rename(next: string): string;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Widget(name) { this.name = name; }\n\
+         Widget.prototype.describe = function() { return 'widget:' + this.name; };\n\
+         Widget.prototype.rename = function(next) { this.name = next; return 'renamed:' + next; };\n\
+         module.exports = { Widget: Widget };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Widget } from "widget-kit";
+function main(): void {
+    const w: any = new Widget("gadget");
+    console.log(w.describe());
+    console.log(w.rename("gizmo"));
+    console.log(w.describe());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "widget:gadget\nrenamed:gizmo\nwidget:gizmo\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
