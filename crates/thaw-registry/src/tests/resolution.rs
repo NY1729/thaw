@@ -346,6 +346,61 @@ fn installed_package_inlines_a_class_reexported_through_an_import_equals_barrel(
     let _ = fs::remove_dir_all(registry);
 }
 
+/// A two-level-deep `export * from './decorators'` -> `decorators/
+/// index.d.ts` -> `export * from './expose.decorator'` wildcard chain
+/// -- real example: `@types/class-transformer`'s own layout (`Expose`/
+/// `Exclude`/`Transform`/`Type` each live one file deeper than the
+/// package's own barrel, at `decorators/<name>.decorator.d.ts`). Before
+/// this fix, none of these ever got inlined: `declaration_reexport_
+/// path`'s own candidate-building used `Path::with_extension("d.ts")`,
+/// which *replaces* whatever Rust considers the current "extension"
+/// (everything after the final `.` in a file name) rather than
+/// appending after it -- so resolving `./expose.decorator` produced
+/// `expose.d.ts` (silently wrong, and nonexistent) instead of `expose.
+/// decorator.d.ts`, and the whole wildcard chain resolved to nothing.
+/// General, not class-transformer-specific: any `.d.ts` file name with
+/// an embedded dot before its own suffix (`.interface.d.ts`, `.enum.
+/// d.ts`, `.type.d.ts`, ... all real, common `@types/*` conventions)
+/// hit the same silent miss.
+#[test]
+fn installed_package_inlines_a_two_level_wildcard_reexport_through_a_dotted_file_name() {
+    let scratch = temp_registry("installed-dts-dotted-wildcard-scratch");
+    let registry = temp_registry("installed-dts-dotted-wildcard-registry");
+    let package = scratch.join("node_modules/deco-kit");
+    fs::create_dir_all(package.join("dist/decorators")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"deco-kit","version":"1.0.0","types":"./dist/index.d.ts","main":"./index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/index.d.ts"),
+        "export * from './decorators';\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/decorators/index.d.ts"),
+        "export * from './expose.decorator';\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("dist/decorators/expose.decorator.d.ts"),
+        "export declare function Expose(options?: any): PropertyDecorator & ClassDecorator;\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("index.js"),
+        "module.exports = { Expose: function() { return function() {}; } };\n",
+    )
+    .unwrap();
+
+    add_installed(&registry, &scratch.join("node_modules"), "deco-kit").unwrap();
+    let declarations = resolve(&registry, "deco-kit").unwrap().dts_source;
+    assert!(declarations.contains("declare function Expose"));
+    let _ = fs::remove_dir_all(scratch);
+    let _ = fs::remove_dir_all(registry);
+}
+
 /// A `declare const NAME: import("./sibling.js").SomeType<Args>;` --
 /// real example: `tar`'s own `create.d.ts`, `export declare const
 /// create: import("./make-command.js").TarCommand<Pack, PackSync>;`.
