@@ -55,6 +55,23 @@ fn to_str(ptr: *const c_char) -> String {
         .into_owned()
 }
 
+/// A native string *value* being marshaled into JSON. Thaw's `HirType::Str`
+/// is a bare pointer with no "undefined" representation, and a class
+/// instance field declared without an initializer (`name!: string`) is left
+/// null -- `console.log` already renders that as `(null)`. Marshaling must
+/// therefore emit a JSON `null` for it rather than dereferencing the null
+/// pointer: `CStr::from_ptr(null)` is undefined behavior, and the `strlen`
+/// it runs is a hard segfault. Real trigger: a native class whose `string`
+/// field has no initializer, constructed from JavaScript through a callback
+/// (`new cls()` inside class-transformer's own `plainToInstance`).
+fn string_value(value: *const c_char) -> Value {
+    if value.is_null() {
+        Value::Null
+    } else {
+        Value::String(to_str(value))
+    }
+}
+
 fn leak(value: Value) -> *mut Value {
     Box::into_raw(Box::new(value))
 }
@@ -1096,7 +1113,7 @@ pub unsafe extern "C" fn thaw_json_object_from_number_entries(entries: *const u8
 pub unsafe extern "C" fn thaw_json_object_from_string_entries(entries: *const u8) -> *mut Value {
     object_from_typed_entries(entries, |slot| {
         let value = unsafe { (slot as *const *const c_char).read() };
-        Value::String(to_str(value))
+        string_value(value)
     })
 }
 
@@ -1209,7 +1226,7 @@ pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_string(array: *mut Value, value: *const c_char) {
     if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
-        items.push(Value::String(to_str(value)));
+        items.push(string_value(value));
     }
 }
 
@@ -1337,7 +1354,7 @@ pub extern "C" fn thaw_json_object_set_string(
     key: *const c_char,
     value: *const c_char,
 ) {
-    object_insert(object, key, Value::String(to_str(value)));
+    object_insert(object, key, string_value(value));
 }
 
 #[no_mangle]
