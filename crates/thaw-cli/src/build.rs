@@ -355,6 +355,7 @@ fn build_with_native_mode(
         external_exports,
         external_namespace_aliases,
         external_nested_namespaces,
+        external_export_assignments,
         jit_fallback_reasons,
     ) = generate_registry_shims(
         registry_dir,
@@ -448,6 +449,7 @@ fn build_with_native_mode(
         &external_namespace_aliases,
         &external_nested_namespaces,
         &external_resolutions,
+        &external_export_assignments,
         &transform,
     )?;
     if !shim_source.is_empty() {

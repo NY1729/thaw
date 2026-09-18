@@ -6,6 +6,11 @@
 struct ResolvedPackage {
     name: String,
     commonjs_export_name: Option<String>,
+    /// The identifier of a genuine `export = X;` assignment, if any (see
+    /// `commonjs_export_assignment`). Lets `module_graph` bind a bare
+    /// `import * as X from "pkg"` to that value, matching real
+    /// esModuleInterop semantics.
+    commonjs_export_assignment: Option<String>,
     called_commonjs_namespace_properties: std::collections::HashSet<String>,
     functions: Vec<thaw_bridge::DtsFunction>,
     values: Vec<thaw_bridge::DtsValue>,

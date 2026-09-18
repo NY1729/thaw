@@ -979,10 +979,12 @@ pub fn bundle(
         external_namespace_aliases,
         external_nested_namespaces,
         external_resolutions,
+        &HashMap::new(),
         &|source| Ok(source.to_string()),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn bundle_with_source_transform(
     entry: &Path,
     entry_source: &str,
@@ -990,6 +992,10 @@ pub fn bundle_with_source_transform(
     external_namespace_aliases: &HashMap<String, HashSet<String>>,
     external_nested_namespaces: &HashMap<String, HashMap<String, HashMap<String, String>>>,
     external_resolutions: &HashMap<String, String>,
+    // `package -> the symbol its own `export = X;` assignment names`, so a
+    // bare `import * as X from "pkg"` can bind `X` to that value (real
+    // esModuleInterop: `import * as Koa from "koa"` -> `new Koa()`).
+    external_export_assignments: &HashMap<String, String>,
     transform: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<Module, String> {
     let entry = entry
@@ -1067,13 +1073,25 @@ pub fn bundle_with_source_transform(
                             (default.local.sym.to_string(), "default".to_string())
                         }
                         ImportSpecifier::Namespace(namespace) => {
-                            namespaces.insert(
-                                namespace.local.sym.to_string(),
-                                dependency_exports.clone(),
-                            );
+                            let local = namespace.local.sym.to_string();
+                            // A bare `import * as X from "pkg"` of an
+                            // `export = X` package (real example: koa's own
+                            // `import * as Koa from "koa"; new Koa()`)
+                            // binds `X` to the exported *value itself*,
+                            // matching real esModuleInterop. Binding it as
+                            // a plain namespace object instead left
+                            // `new X()` with nothing to construct. The
+                            // namespace table is kept for member access
+                            // (`X.staticThing`), keyed under both the local
+                            // name and the renamed value symbol.
+                            if let Some(value) = external_export_assignments.get(specifier) {
+                                names.insert(local.clone(), value.clone());
+                                namespaces.insert(value.clone(), dependency_exports.clone());
+                            }
+                            namespaces.insert(local.clone(), dependency_exports.clone());
                             if let Some(nested) = external_nested_namespaces.get(specifier) {
                                 nested_namespaces.insert(
-                                    namespace.local.sym.to_string(),
+                                    local,
                                     resolve_nested_namespaces(nested, dependency_exports),
                                 );
                             }
