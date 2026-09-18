@@ -155,6 +155,30 @@ impl<'a> FnLowerer<'a> {
                         let result = self.interfaces.get(&name).cloned().ok_or_else(|| {
                             format!("class `{name}` has no layout")
                         })?;
+                        // A *decorated* class already has one real, live
+                        // "class token" `JsValue` (see `DECORATOR_CLASS_
+                        // TOKENS`/`lower_class_decorator_tokens`) -- the
+                        // exact object its own decorators received as
+                        // `target`, and the one metadata registrars like
+                        // class-transformer key their registrations by. A
+                        // bare reference must resolve to *that* token, not
+                        // a fresh native-callback wrapper: otherwise real
+                        // `plainToInstance(User, plain)` can't find the
+                        // `@Expose`/`@Type`/`@Transform` metadata it
+                        // recorded against the token (real symptom: every
+                        // transform silently skipped). Falls back to the
+                        // native constructor reference for an undecorated
+                        // class, which has no token.
+                        let token = match &result {
+                            HirType::Object(fields) => fields.first().and_then(|(marker, _)| {
+                                DECORATOR_CLASS_TOKENS
+                                    .with(|tokens| tokens.borrow().get(marker).cloned())
+                            }),
+                            _ => None,
+                        };
+                        if let Some(token) = token {
+                            return Ok(HirExpr::Var(token));
+                        }
                         return Ok(HirExpr::FunctionRef(
                             constructor,
                             signature.params.clone(),
@@ -514,6 +538,22 @@ impl<'a> FnLowerer<'a> {
                     }
                     let value = self.lower_expr(&bin.left)?;
                     let value_type = self.infer_expr_type(&value)?;
+                    // A live `JsValue` left operand against a *decorated*
+                    // local class (real trigger: class-transformer's
+                    // `plainToInstance(User, plain)` result tested with
+                    // `instanceof User`): the value is an opaque live
+                    // object, so the compile-time layout comparison below
+                    // can't decide it. The class has a real "class token"
+                    // `JsValue` (the same object its decorators received),
+                    // so ask the live engine instead.
+                    if value_type == HirType::JsValue {
+                        if let Some(token) = self.decorator_class_token(class.sym.as_ref()) {
+                            return self.dynamic_value_instanceof(
+                                value,
+                                HirExpr::Var(token),
+                            );
+                        }
+                    }
                     if let HirType::Union(elements) = &value_type {
                         let matching = elements
                             .iter()
