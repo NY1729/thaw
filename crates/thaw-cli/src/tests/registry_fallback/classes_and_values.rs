@@ -1343,14 +1343,14 @@ function main(): void {
 
 /// A local class reference passed as an argument to a real ambient npm
 /// function that constructs it internally (`new cls()`, exactly
-/// class-transformer's own `plainToInstance(User, plain)` shape) used to
-/// segfault the moment the newly built instance crossed back to
-/// JavaScript: an uninitialized instance field (`name!: string`) is a null
-/// `Str` pointer, and the JSON marshaling dereferenced it (`CStr::from_ptr
-/// (null)` -> `strlen` -> SIGSEGV). It must now surface as JSON `null`,
-/// matching what `console.log` already prints for the same value.
+/// class-transformer's own `plainToInstance(User, plain)` shape). The class
+/// is *referenced as a value*, so it now resolves to its own stable, live
+/// "class token" (a real JS function) rather than a fresh native-callback
+/// wrapper -- `new token()` therefore yields a plain JS object, and
+/// `user.name` is `undefined`, matching real Node for a class with no
+/// field initializer.
 #[test]
-fn a_class_with_an_uninitialized_string_field_survives_a_native_construction_callback() {
+fn a_class_reference_passed_to_a_package_constructs_through_its_class_token() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-class-as-plain-value-{}",
         std::process::id()
@@ -1390,6 +1390,59 @@ function main(): void {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "object\nnull\n");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "object\nundefined\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A *native* class instance (built by compiled code, never reached
+/// through a class token) whose `string` field has no initializer crosses
+/// to JavaScript as JSON. The field is a null `Str` pointer, and the JSON
+/// marshaling used to dereference it (`CStr::from_ptr(null)` -> `strlen`
+/// -> SIGSEGV). It must surface as JSON `null` instead, matching what
+/// `console.log` already prints for the same value.
+#[test]
+fn a_native_instance_with_an_uninitialized_string_field_crosses_the_json_boundary() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-native-instance-null-string-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("identity-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function identity(value: any): any;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.identity = function(value) { return value; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { identity } from "identity-kit";
+class User { name!: string; }
+function makeUser(): User { return new User(); }
+function main(): void {
+    const user = identity(makeUser());
+    console.log(typeof user);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "object\n");
     let _ = std::fs::remove_dir_all(dir);
 }
