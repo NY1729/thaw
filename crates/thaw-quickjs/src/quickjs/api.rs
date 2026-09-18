@@ -1156,12 +1156,14 @@ pub extern "C" fn thaw_js_register_native_callback(
                     return if result.is_null() {
                         "error:native Promise rejected".to_string()
                     } else {
-                        let error = to_str(result);
-                        let message = error
-                            .strip_prefix('\u{1}')
-                            .and_then(|tagged| tagged.split_once('\u{1}'))
-                            .map_or(error.as_str(), |(_, message)| message);
-                        format!("error:{message}")
+                        // Keep the *full* tagged exception (`\u{1}name\u{1}
+                        // message[\u{5}properties]`), not just the message:
+                        // `__thaw_error_from_tagged` on the JS side rebuilds
+                        // the original name and custom properties from it
+                        // (real trigger: a rejected `ctx.throw(418, ...)`,
+                        // whose `.status`/`.expose` koa's error handler
+                        // needs).
+                        format!("error:{}", to_str(result))
                     };
                 }
                 if result.is_null() {
@@ -1223,11 +1225,7 @@ pub extern "C" fn thaw_js_register_native_callback(
              return globalThis.__thaw_json_binary_replacer.call(this, key, value); \
              }})); \
              if (result.charCodeAt(0) === 2) {{ \
-             var rawError = result.slice(1); \
-             var separator = rawError.charCodeAt(0) === 1 ? rawError.indexOf('\\u0001', 1) : -1; \
-             var error = new Error(separator > 1 ? rawError.slice(separator + 1) : rawError); \
-             if (separator > 1) error.name = rawError.slice(1, separator); \
-             throw error; \
+             throw globalThis.__thaw_error_from_tagged(result.slice(1)); \
              }} \
              if ({void_result} && result.slice(0, 8) !== 'promise:') return undefined; \
              if (result.slice(0, 8) !== 'promise:') return JSON.parse(result, globalThis.__thaw_json_date_reviver); \
@@ -1235,7 +1233,7 @@ pub extern "C" fn thaw_js_register_native_callback(
              function check() {{ \
              var settled = globalThis['{poll_name}'](result); \
              if (!settled) return setTimeout(check, 0); \
-             if (settled.slice(0, 6) === 'error:') return reject(new Error(settled.slice(6))); \
+             if (settled.slice(0, 6) === 'error:') return reject(globalThis.__thaw_error_from_tagged(settled.slice(6))); \
              if ({void_result}) return resolve(undefined); \
              try {{ resolve(JSON.parse(settled, globalThis.__thaw_json_date_reviver)); }} catch (error) {{ reject(error); }} \
              }} \
@@ -1714,73 +1712,126 @@ fn describe_exception(ctx: &Ctx<'_>) -> String {
 
 fn describe_tagged_exception(ctx: &Ctx<'_>) -> String {
     let exc = ctx.catch();
-    if let Some(obj) = exc.as_object() {
+    let properties = error_property_json(ctx, &exc);
+    let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
-            if let Ok(name) = obj.get::<_, String>("name") {
-                if name != "Error" {
-                    return format!("\u{1}{name}\u{1}{message}");
-                }
+            match obj.get::<_, String>("name") {
+                Ok(name) if name != "Error" => format!("\u{1}{name}\u{1}{message}"),
+                _ => message,
             }
-            return message;
+        } else if let Some(value) = exc.as_string() {
+            value.to_string().unwrap_or_default()
+        } else {
+            format!("{exc:?}")
         }
+    } else if let Some(value) = exc.as_string() {
+        value.to_string().unwrap_or_default()
+    } else {
+        format!("{exc:?}")
+    };
+    if let Some(properties) = properties {
+        body.push(ERROR_PROPERTIES_MARKER);
+        body.push_str(&properties);
     }
-    if let Some(value) = exc.as_string() {
-        if let Ok(value) = value.to_string() {
-            return value;
-        }
+    body
+}
+
+/// Marker separating an exception's message from its own extra properties
+/// (a JSON object), appended by `describe_tagged_exception`. `\u{5}` is
+/// unused by `thaw-runtime`'s own tag/cause/code/name-override markers
+/// (`\u{1}`..`\u{4}`). Real trigger: an `http-errors` HTTP error's
+/// `status`/`statusCode`/`expose`/`headers`, which koa's own error handler
+/// reads after the error has crossed native code.
+const ERROR_PROPERTIES_MARKER: char = '\u{5}';
+
+/// The caught value's own extra properties -- everything but `name`,
+/// `message`, and `stack` -- as a JSON object, so they survive the trip
+/// out to native code and back (`__thaw_error_from_tagged`, `runtime.js`).
+/// Uses the realm's own `JSON.stringify`, so a nested value (a `headers`
+/// object) serializes exactly as it would in JS; a non-serializable or
+/// empty property set degrades to `None`.
+fn error_property_json<'js>(ctx: &Ctx<'js>, exc: &Value<'js>) -> Option<String> {
+    let helper: Function = ctx.globals().get("__thaw_error_properties_json").ok()?;
+    let encoded: String = helper.call((exc.clone(),)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&encoded).ok()?;
+    if value.as_object()?.is_empty() {
+        return None;
     }
-    format!("{exc:?}")
+    Some(encoded)
 }
 
 fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> String {
     let exc = ctx.catch();
-    if let Some(obj) = exc.as_object() {
+    let properties = error_property_json(ctx, &exc);
+    let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
             let mut body = format!("`{label}` threw: {message}");
             if let Ok(code) = obj.get::<_, String>("code") {
                 body.push('\u{3}');
                 body.push_str(&code);
             }
-            if let Ok(name) = obj.get::<_, String>("name") {
-                if name != "Error" {
-                    return format!("\u{1}{name}\u{1}{body}");
-                }
+            match obj.get::<_, String>("name") {
+                Ok(name) if name != "Error" => format!("\u{1}{name}\u{1}{body}"),
+                _ => body,
             }
-            return body;
+        } else if let Some(value) = exc.as_string() {
+            format!("`{label}` threw: {}", value.to_string().unwrap_or_default())
+        } else {
+            format!("`{label}` threw: {exc:?}")
         }
+    } else if let Some(value) = exc.as_string() {
+        format!("`{label}` threw: {}", value.to_string().unwrap_or_default())
+    } else {
+        format!("`{label}` threw: {exc:?}")
+    };
+    if let Some(properties) = properties {
+        body.push(ERROR_PROPERTIES_MARKER);
+        body.push_str(&properties);
     }
-    if let Some(value) = exc.as_string() {
-        if let Ok(value) = value.to_string() {
-            return format!("`{label}` threw: {value}");
-        }
-    }
-    format!("`{label}` threw: {exc:?}")
+    body
 }
 
-fn describe_promise_exception(ctx: &Ctx<'_>, label: &str, preserve_error: bool) -> String {
+fn describe_promise_exception<'js>(ctx: &Ctx<'js>, label: &str, preserve_error: bool) -> String {
     let exc = ctx.catch();
-    if let Some(obj) = exc.as_object() {
+    let properties = error_property_json(ctx, &exc);
+    let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
-            if let Ok(name) = obj.get::<_, String>("name") {
-                if preserve_error {
-                    return format!("\u{1}{name}\u{1}{message}");
-                }
-                if name != "Error" {
-                    return format!("\u{1}{name}\u{1}`{label}`'s promise rejected: {message}");
-                }
-            }
-            return format!("`{label}`'s promise rejected: {message}");
-        }
-    }
-    if let Some(value) = exc.as_string() {
-        if let Ok(value) = value.to_string() {
+            let name = obj.get::<_, String>("name").ok();
             if preserve_error {
-                return value;
+                match name {
+                    Some(name) => format!("\u{1}{name}\u{1}{message}"),
+                    None => message,
+                }
+            } else if let Some(name) = name.filter(|name| name != "Error") {
+                format!("\u{1}{name}\u{1}`{label}`'s promise rejected: {message}")
+            } else {
+                format!("`{label}`'s promise rejected: {message}")
             }
-            return format!("`{label}`'s promise rejected: {value}");
+        } else if let Some(value) = exc.as_string() {
+            let value = value.to_string().unwrap_or_default();
+            if preserve_error {
+                value
+            } else {
+                format!("`{label}`'s promise rejected: {value}")
+            }
+        } else {
+            format!("`{label}`'s promise rejected: {exc:?}")
         }
+    } else if let Some(value) = exc.as_string() {
+        let value = value.to_string().unwrap_or_default();
+        if preserve_error {
+            value
+        } else {
+            format!("`{label}`'s promise rejected: {value}")
+        }
+    } else {
+        format!("`{label}`'s promise rejected: {exc:?}")
+    };
+    if let Some(properties) = properties {
+        body.push(ERROR_PROPERTIES_MARKER);
+        body.push_str(&properties);
     }
-    format!("`{label}`'s promise rejected: {exc:?}")
+    body
 }
 
 fn describe_exception_with_stack(ctx: &Ctx<'_>) -> String {
