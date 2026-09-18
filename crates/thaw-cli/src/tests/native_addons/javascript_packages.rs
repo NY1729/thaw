@@ -3448,3 +3448,82 @@ run();
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Round 27's npm compat audit (`lru-cache`): every core operation
+/// (`max`-based eviction, `get`/`set`/`has`/`delete`/`peek`/`clear`/
+/// `pop`, the `dispose` callback, `ttl`) matched real Node byte-for-
+/// byte on the first pass. The one gap: `LRUCache.keys()`/`.values()`/
+/// `.entries()`, each documented `Generator<T, void, unknown>` in the
+/// real `.d.ts`, couldn't be consumed at all -- neither `for (const k of
+/// cache.keys())` nor `Array.from(cache.keys())` compiled. See `a_for_
+/// of_loop_can_iterate_a_jsvalue_returned_generator_and_stops_on_break`/
+/// `array_from_can_eagerly_drain_a_jsvalue_returned_generator` (thaw-
+/// cli's own synthetic-package unit tests, in `tests/registry_fallback/
+/// methods.rs`) for the full root-cause writeup (a general, not
+/// lru-cache-specific, gap: `for...of`/`Array.from` had no case at all
+/// for a `JsValue` following the JS iterator protocol). This is the
+/// same fix, confirmed against the real npm package that found it.
+#[test]
+fn registry_add_iterates_a_real_lru_caches_generator_returning_methods_when_enabled() {
+    if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-auto-js-lru-cache-generators-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    thaw_registry::add(&registry, "lru-cache").unwrap();
+    let source = dir.join("main.ts");
+    let output = dir.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &source,
+        r#"import { LRUCache } from "lru-cache";
+
+function run(): void {
+    const cache = new LRUCache<string, number>({ max: 3 });
+    cache.set("a", 1);
+    cache.set("b", 2);
+    cache.set("c", 3);
+
+    let keysList: string[] = [];
+    for (const k of cache.keys()) {
+        keysList.push(String(k));
+    }
+    console.log(keysList.join(","));
+
+    const values = Array.from(cache.values());
+    let valuesList: string[] = [];
+    for (const v of values) {
+        valuesList.push(String(v));
+    }
+    console.log(values.length, valuesList.join(","));
+}
+run();
+"#,
+    )
+    .unwrap();
+    build(
+        &source,
+        &output,
+        &[],
+        &[],
+        &[],
+        &registry,
+        &["lru-cache".to_string()],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "c,b,a\n3 3,2,1\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

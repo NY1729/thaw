@@ -890,3 +890,230 @@ function main(): void {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `for...of` over a real npm class's `JsValue`-returned method result
+/// (real trigger: `lru-cache`'s `LRUCache.keys()`/`.values()`/
+/// `.entries()`, each documented `Generator<T, void, unknown>` in the
+/// `.d.ts`) used to fail to compile outright: `` `for...of` currently
+/// requires a typed array ``. thaw-bridge's own `.d.ts` classifier
+/// (unlike thaw-hir's `lower_ts_type`, used for interfaces/plain
+/// functions) has no `Generator`/`IterableIterator` case at all, so a
+/// real class method declared this way falls back to the generic
+/// dynamic escape hatch, `HirType::JsValue` -- and `Stmt::ForOf`
+/// (`lower/statements/lowering.rs`) had no case for that at all.
+///
+/// Fixed by `dynamic_iterator_adapter`, the `JsValue` sibling of the
+/// existing `iterator_object_adapter` (used for a *statically*-typed
+/// `{next(): {value, done}}` object): it adapts a live `JsValue`
+/// iterator into thaw's own generator-producer ABI by calling `.next()`/
+/// `.return()`/`.throw()` dynamically (`callDynamicMethod` + `JsonGet`/
+/// `JsonAsBool` instead of static `PropAccess`), so it's picked up by
+/// the exact same already-existing consumption machinery every other
+/// generator shape uses -- including, for free, `.return()` being
+/// called automatically on an early `break` (this test collects two
+/// values then breaks, confirming the loop stops after exactly two
+/// iterations; a real generator's own `finally` block closing correctly
+/// is exercised in the real end-to-end `lru-cache` test instead, since
+/// observing it here would need a native/JS shared-mutable-state trick
+/// this synthetic package's argument marshaling doesn't actually give
+/// -- a constructor argument crosses as a JSON snapshot, not a live
+/// reference).
+#[test]
+fn a_for_of_loop_can_iterate_a_jsvalue_returned_generator_and_stops_on_break() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-for-of-jsvalue-generator-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("generator-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Holder {\n\
+         \x20\x20\x20\x20constructor();\n\
+         \x20\x20\x20\x20items(): Generator<number, void, unknown>;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Holder() {}\n\
+         Holder.prototype.items = function*() {\n\
+         \x20\x20\x20\x20yield 1;\n\
+         \x20\x20\x20\x20yield 2;\n\
+         \x20\x20\x20\x20yield 3;\n\
+         \x20\x20\x20\x20yield 4;\n\
+         };\n\
+         module.exports = { Holder: Holder };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Holder } from "generator-kit";
+function main(): void {
+    const holder = new Holder();
+    let collected: string[] = [];
+    let count = 0;
+    for (const x of holder.items()) {
+        count = count + 1;
+        collected.push(String(x));
+        if (count === 2) break;
+    }
+    console.log(collected.join(","));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "1,2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The identical `JsValue`-returned generator (same shape as the test
+/// above) confirmed to actually invoke a real generator's own `finally`
+/// block -- both on natural exhaustion and on an early `break` -- since
+/// `Stmt::ForOf`'s existing close-on-exit machinery calls the producer
+/// with `control=1` (`.return()`) in both cases. Uses a method
+/// (`wasClosed()`) to read the closed flag back from the *same* live
+/// JS-side object afterward, rather than a constructor-argument
+/// reference (which would cross as a JSON value snapshot, not a live
+/// reference, and so could never observe a JS-side mutation).
+#[test]
+fn a_for_of_loop_over_a_jsvalue_returned_generator_closes_it_on_early_break_and_on_exhaustion() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-for-of-jsvalue-generator-close-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("generator-kit2");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Holder {\n\
+         \x20\x20\x20\x20constructor();\n\
+         \x20\x20\x20\x20items(): Generator<number, void, unknown>;\n\
+         \x20\x20\x20\x20wasClosed(): boolean;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Holder() { this.closed = false; }\n\
+         Holder.prototype.items = function*() {\n\
+         \x20\x20\x20\x20var self = this;\n\
+         \x20\x20\x20\x20try {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20yield 1;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20yield 2;\n\
+         \x20\x20\x20\x20} finally {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20self.closed = true;\n\
+         \x20\x20\x20\x20}\n\
+         };\n\
+         Holder.prototype.wasClosed = function() { return this.closed; };\n\
+         module.exports = { Holder: Holder };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Holder } from "generator-kit2";
+function main(): void {
+    const early = new Holder();
+    for (const x of early.items()) {
+        if (Number(x) === 1) break;
+    }
+    console.log(early.wasClosed());
+
+    const exhausted = new Holder();
+    for (const x of exhausted.items()) {
+        void x;
+    }
+    console.log(exhausted.wasClosed());
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "true\ntrue\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `Array.from` over the identical `JsValue`-returned generator shape --
+/// its own separate handling (`("Array", "from")`, `lower/invocations/
+/// static_builtins.rs`) doesn't delegate to `for...of`'s machinery at
+/// all, and had its own separate `Err` for anything but an array-like
+/// `{length}` object, `Array`, `Str`, `Map`, or `Set`. Fixed by eagerly
+/// draining a `JsValue` iterator into a plain array via a small
+/// self-contained native `while` loop (simpler than routing through
+/// `for...of`'s heavier, resumable generator-producer ABI, which this
+/// eager one-shot drain doesn't need).
+#[test]
+fn array_from_can_eagerly_drain_a_jsvalue_returned_generator() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-array-from-jsvalue-generator-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("generator-kit3");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare class Holder {\n\
+         \x20\x20\x20\x20constructor();\n\
+         \x20\x20\x20\x20items(): Generator<number, void, unknown>;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "function Holder() {}\n\
+         Holder.prototype.items = function*() {\n\
+         \x20\x20\x20\x20yield 10;\n\
+         \x20\x20\x20\x20yield 20;\n\
+         \x20\x20\x20\x20yield 30;\n\
+         };\n\
+         module.exports = { Holder: Holder };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { Holder } from "generator-kit3";
+function main(): void {
+    const holder = new Holder();
+    const items = Array.from(holder.items());
+    console.log(items.length);
+    let joined: string[] = [];
+    for (const item of items) {
+        joined.push(String(item));
+    }
+    console.log(joined.join(","));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n10,20,30\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
