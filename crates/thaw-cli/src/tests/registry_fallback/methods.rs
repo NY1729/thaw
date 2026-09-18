@@ -1117,3 +1117,203 @@ function main(): void {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "3\n10,20,30\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A `Json`-typed value (real trigger: a for-of loop element decoded
+/// from *any* dynamic/`JSON.parse`d array, including -- but not limited
+/// to -- the new `JsValue`-iterator support above) being `.push()`ed
+/// into a *typed* array (`string[]`) used to reject outright: `"array
+/// push/unshift value has type Json, expected Str"`, no automatic
+/// scalar decode, unlike an ordinary `let`/`const` assignment
+/// (`coerce_to_declared` already handles a `Json`-into-scalar slot
+/// there). General, found while writing this round's own `lru-cache`
+/// comparison script (`keysList.push(k)` where `k` came from `for (const
+/// k of cache.keys())`), reproduced independently via a plain
+/// `JSON.parse` array with no `JsValue` involved at all -- confirming
+/// it's unrelated to that feature, a separate, pre-existing gap.
+///
+/// Fixed by replacing the strict `expect_type` check `.push()`/
+/// `.unshift()` used with an actual `coerce_to_declared` call (`lower/
+/// invocations/instance_builtins/array_mutation_methods.rs`) -- which
+/// already falls back to that same strict check for anything it can't
+/// coerce, so a genuinely incompatible push (a `bool` into a
+/// `string[]`, exercised below too) is still rejected exactly as
+/// before.
+#[test]
+fn a_json_value_can_be_pushed_into_a_typed_array_via_automatic_scalar_decode() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-array-push-json-scalar-decode-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let entry = dir.join("main.ts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &entry,
+        r#"function main(): void {
+    const raw: any = JSON.parse('["a","b","c"]');
+    let list: string[] = [];
+    for (const item of raw) {
+        list.push(item);
+    }
+    console.log(list.join(","));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "a,b,c\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A genuinely incompatible `.push()` (a `bool` into a `string[]`) is
+/// still rejected -- `coerce_to_declared` falls back to the same strict
+/// `expect_type` check the fix above replaced whenever it can't coerce,
+/// so this must keep failing to compile, not silently push a bogus
+/// value.
+#[test]
+fn pushing_a_genuinely_incompatible_type_into_a_typed_array_still_fails_to_compile() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-array-push-incompatible-type-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let entry = dir.join("main.ts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &entry,
+        r#"function main(): void {
+    let list: string[] = [];
+    list.push(true);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    let error = build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap_err();
+    assert!(error.contains("Bool"), "{error}");
+    assert!(error.contains("Str"), "{error}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Destructuring a bare `Json` array value (real trigger: `for (const
+/// [k, v] of cache.entries())`, `lru-cache`'s `Generator<[K, V]>`-
+/// returning `entries()` -- but reproduced here, and root-caused,
+/// independently of that feature via a plain `JSON.parse`d array of
+/// pairs) used to fail: `"array pattern requires a fixed-length tuple,
+/// got Json"` -- only a statically-known `HirType::Tuple` destructured;
+/// a `Json` value (unknown length/shape at compile time) couldn't, even
+/// when it's genuinely a fixed-size pair at runtime.
+///
+/// Fixed by a new `HirType::Json` case in both `lower_binding_pattern`
+/// (`destructuring.rs`, a `let`/`const`/for-of declaration) and
+/// `lower_assignment_pattern` (`assignments/lowering.rs`, a bare
+/// assignment): each position reads out via `JsonIndex`
+/// (`thaw_json_index`) and stays `Json`-typed itself, so a nested
+/// pattern can keep destructuring further. A rest element has no
+/// matching "slice a Json array" primitive, so it's rejected with a
+/// clear, narrow error instead of silently doing the wrong thing.
+#[test]
+fn a_json_array_value_can_be_destructured_by_fixed_position() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-json-array-destructure-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let entry = dir.join("main.ts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &entry,
+        r#"function main(): void {
+    const raw: any = JSON.parse('[["a",1],["b",2]]');
+    let entries: string[] = [];
+    for (const [k, v] of raw) {
+        entries.push(`${String(k)}:${String(v)}`);
+    }
+    console.log(entries.join(","));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "a:1,b:2\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `Array.prototype.join` had no `HirType::Json` element case at all
+/// (`"array join does not support element type Json"`, `lower/
+/// invocations/instance_builtins/array_mutation_methods.rs`) -- only
+/// `F64`/`Str`/`Bool`/`Object`. An `Array(Json)` (exactly what a for-of
+/// loop over any dynamic/`JsValue` iterator produces, including this
+/// round's own new `Array.from(jsValueIterator)`) couldn't be
+/// `.join()`'d directly, the literal first error the real `lru-cache`
+/// motivating repro (`Array.from(cache.keys()).join(",")`) hit.
+///
+/// Fixed by building the join directly out of existing HIR nodes
+/// instead of adding a new native intrinsic: a `while` loop reading
+/// each element via `TypedIndex`, converting it the same way a template
+/// literal already does (`coerce_primitive_to_string`, which already
+/// handles `Json` via `JsonAsString` -- real JS `String()` semantics,
+/// not just "this JSON value happens to already be a string"), and
+/// concatenating via the same `__thaw_string_concat` a template
+/// literal's own lowering already uses. Exercises both the explicit-
+/// separator and default-separator (bare `.join()`) forms, and a
+/// non-string element type (numbers) to confirm real `String()`
+/// coercion, not a string-only special case.
+#[test]
+fn array_join_supports_a_generic_json_element_type() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-array-join-json-element-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let entry = dir.join("main.ts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &entry,
+        r#"function main(): void {
+    const strings: any = JSON.parse('["a","b","c"]');
+    let stringArr: any[] = [];
+    for (const item of strings) {
+        stringArr.push(item);
+    }
+    console.log(stringArr.join(","));
+    console.log(stringArr.join());
+
+    const numbers: any = JSON.parse('[1,2,3]');
+    let numArr: any[] = [];
+    for (const n of numbers) {
+        numArr.push(n);
+    }
+    console.log(numArr.join("-"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "a,b,c\na,b,c\n1-2-3\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -240,6 +240,40 @@ impl<'a> FnLowerer<'a> {
                     }
                     return Ok(());
                 }
+                // A bare `Json` array value (real trigger: a for-of loop
+                // element decoded from a dynamic `JsValue` iterator, e.g.
+                // `lru-cache`'s `Generator<[K, V]>`-returning `entries()`)
+                // has no statically-known length, unlike `HirType::Array`/
+                // `HirType::Tuple` above -- but a *fixed-position* pattern
+                // (`const [k, v] = entry;`) doesn't need one, only `.0`/
+                // `.1`/... read out via `JsonIndex` (`thaw_json_index`),
+                // each position staying `Json`-typed itself so a nested
+                // pattern can keep destructuring further. A rest element
+                // has no matching "slice a Json array" primitive to build
+                // it from, so it's rejected with a clear, narrow error
+                // instead of silently doing the wrong thing.
+                if *ty == HirType::Json {
+                    for (index, element_pattern) in pattern.elems.iter().enumerate() {
+                        let Some(element_pattern) = element_pattern else {
+                            continue;
+                        };
+                        if matches!(element_pattern, Pat::Rest(_)) {
+                            return Err(
+                                "a rest element cannot destructure a dynamic Json array".into(),
+                            );
+                        }
+                        self.lower_binding_pattern(
+                            element_pattern,
+                            HirExpr::JsonIndex(
+                                Box::new(value.clone()),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            &HirType::Json,
+                            statements,
+                        )?;
+                    }
+                    return Ok(());
+                }
                 let HirType::Tuple(elements) = ty else {
                     return Err(format!(
                         "array pattern requires a fixed-length tuple, got {ty:?}"
