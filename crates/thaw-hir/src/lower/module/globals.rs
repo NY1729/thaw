@@ -9,6 +9,7 @@ fn lower_top_level_initializers(
     enum_values: &EnumValues,
     enum_reverse_values: &EnumReverseValues,
     call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
+    value_referenced_classes: &HashSet<Symbol>,
 ) -> Result<Vec<HirInitStep>, String> {
     let mut lowerer = FnLowerer::new(
         signatures,
@@ -126,7 +127,9 @@ fn lower_top_level_initializers(
                     };
                     steps.push(HirInitStep::StoreGlobal(symbol, init));
                 }
-                if class_has_decorators(&declaration.class) {
+                if class_has_decorators(&declaration.class)
+                    || value_referenced_classes.contains(class_name)
+                {
                     let token_symbol = class_decorator_token_symbol(class_name);
                     // `lower_class_decorator_tokens` also emits this same
                     // class token as a `crate::HirGlobal` (needed so
@@ -138,40 +141,49 @@ fn lower_top_level_initializers(
                     // `emit_top_level_init`), the same as an ordinary
                     // top-level `const`/static field. Skipping this would
                     // leave the token's storage permanently zero (an
-                    // invalid `JsValue` handle) the moment any decorator
-                    // below reads it.
+                    // invalid `JsValue` handle) the moment anything reads
+                    // it.
                     steps.push(HirInitStep::StoreGlobal(
                         token_symbol.clone(),
                         class_decorator_token_init(&mut lowerer)?,
                     ));
-                    for member in &declaration.class.body {
-                        let (decorators, key) = match member {
-                            ClassMember::ClassProp(property) => {
-                                (&property.decorators, class_property_name(&property.key)?)
+                    // Only a *decorated* class actually has decorators to
+                    // invoke; a merely value-referenced one just needs the
+                    // token above.
+                    if class_has_decorators(&declaration.class) {
+                        for member in &declaration.class.body {
+                            let (decorators, key) = match member {
+                                ClassMember::ClassProp(property) => {
+                                    (&property.decorators, class_property_name(&property.key)?)
+                                }
+                                ClassMember::Method(method)
+                                    if method.kind == MethodKind::Method =>
+                                {
+                                    (
+                                        &method.function.decorators,
+                                        class_property_name(&method.key)?,
+                                    )
+                                }
+                                _ => continue,
+                            };
+                            for decorator in decorators {
+                                let call = lower_member_decorator_call(
+                                    &mut lowerer,
+                                    decorator,
+                                    &token_symbol,
+                                    &key,
+                                )?;
+                                steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
                             }
-                            ClassMember::Method(method) if method.kind == MethodKind::Method => (
-                                &method.function.decorators,
-                                class_property_name(&method.key)?,
-                            ),
-                            _ => continue,
-                        };
-                        for decorator in decorators {
-                            let call = lower_member_decorator_call(
+                        }
+                        for decorator in &declaration.class.decorators {
+                            let call = lower_class_decorator_call(
                                 &mut lowerer,
                                 decorator,
                                 &token_symbol,
-                                &key,
                             )?;
                             steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
                         }
-                    }
-                    for decorator in &declaration.class.decorators {
-                        let call = lower_class_decorator_call(
-                            &mut lowerer,
-                            decorator,
-                            &token_symbol,
-                        )?;
-                        steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
                     }
                 }
                 lowerer.super_initializer = saved_super;
@@ -393,6 +405,7 @@ fn lower_class_decorator_tokens(
     generic_interfaces: &GenericInterfaces,
     enum_values: &EnumValues,
     enum_reverse_values: &EnumReverseValues,
+    value_referenced_classes: &HashSet<Symbol>,
 ) -> Result<Vec<crate::HirGlobal>, String> {
     let mut lowerer = FnLowerer::new(
         signatures,
@@ -405,10 +418,12 @@ fn lower_class_decorator_tokens(
     );
     let mut globals = Vec::new();
     for declaration in declarations {
-        if !class_has_decorators(&declaration.class) {
+        let class_name = declaration.ident.sym.as_ref();
+        if !class_has_decorators(&declaration.class)
+            && !value_referenced_classes.contains(class_name)
+        {
             continue;
         }
-        let class_name = declaration.ident.sym.as_ref();
         globals.push(crate::HirGlobal {
             name: class_decorator_token_symbol(class_name),
             ty: HirType::JsValue,
